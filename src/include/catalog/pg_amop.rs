@@ -806,13 +806,13 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         oid = oid.saturating_add(1);
     }
     for (family, type_oid) in [
+        (HASH_ARRAY_FAMILY_OID, ANYARRAYOID),
         (HASH_BOOL_FAMILY_OID, BOOL_TYPE_OID),
         (HASH_INTEGER_FAMILY_OID, INT2_TYPE_OID),
         (HASH_INTEGER_FAMILY_OID, INT4_TYPE_OID),
         (HASH_INTEGER_FAMILY_OID, INT8_TYPE_OID),
         (HASH_OID_FAMILY_OID, OID_TYPE_OID),
         (HASH_ENUM_FAMILY_OID, ANYENUMOID),
-        (HASH_ARRAY_FAMILY_OID, ANYARRAYOID),
         (HASH_RECORD_FAMILY_OID, RECORD_TYPE_OID),
         (HASH_CHAR_FAMILY_OID, INTERNAL_CHAR_TYPE_OID),
         (HASH_TEXT_FAMILY_OID, NAME_TYPE_OID),

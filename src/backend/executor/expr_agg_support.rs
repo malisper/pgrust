@@ -13,12 +13,14 @@ use super::sqlfunc::{
 use super::{ExecError, ExecutorContext};
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    INT8_TYPE_OID, PG_LANGUAGE_SQL_OID, builtin_aggregate_function_for_proc_oid,
-    builtin_hypothetical_aggregate_function_for_proc_oid,
+    BPCHAR_HASH_OPCLASS_OID, INT8_TYPE_OID, PG_LANGUAGE_SQL_OID,
+    builtin_aggregate_function_for_proc_oid, builtin_hypothetical_aggregate_function_for_proc_oid,
     builtin_ordered_set_aggregate_function_for_proc_oid, builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayValue, NumericValue, Value};
-use crate::include::nodes::primnodes::{AggAccum, BuiltinScalarFunction, expr_sql_type_hint};
+use crate::include::nodes::primnodes::{
+    AggAccum, BuiltinScalarFunction, HashFunctionKind, expr_sql_type_hint,
+};
 use crate::pl::plpgsql::{
     execute_user_defined_scalar_function_values,
     execute_user_defined_scalar_function_values_with_arg_types,
@@ -313,6 +315,12 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
             _ => malformed_aggregate_support_call("boolor_statefunc"),
         },
+        BuiltinScalarFunction::HashValue(kind) => {
+            execute_builtin_hash_value_call(kind, false, arg_values)
+        }
+        BuiltinScalarFunction::HashValueExtended(kind) => {
+            execute_builtin_hash_value_call(kind, true, arg_values)
+        }
         other => Err(ExecError::DetailedError {
             message: format!(
                 "builtin function {:?} is not supported by aggregate value execution",
@@ -322,6 +330,67 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             hint: None,
             sqlstate: "0A000",
         }),
+    }
+}
+
+fn execute_builtin_hash_value_call(
+    kind: HashFunctionKind,
+    extended: bool,
+    arg_values: &[Value],
+) -> Result<Value, ExecError> {
+    let opclass = (kind == HashFunctionKind::BpChar).then_some(BPCHAR_HASH_OPCLASS_OID);
+    if extended {
+        let [value, seed] = arg_values else {
+            return malformed_aggregate_support_call("hash_extended");
+        };
+        if matches!(value, Value::Null) || matches!(seed, Value::Null) {
+            return Ok(Value::Null);
+        }
+        let seed = match seed {
+            Value::Int16(seed) => i64::from(*seed),
+            Value::Int32(seed) => i64::from(*seed),
+            Value::Int64(seed) => *seed,
+            _ => {
+                return Err(ExecError::TypeMismatch {
+                    op: "hash_extended",
+                    left: value.clone(),
+                    right: seed.clone(),
+                });
+            }
+        };
+        let hash = crate::backend::access::hash::hash_value_extended(value, opclass, seed as u64)
+            .map_err(|message| hash_function_error(message, true))?
+            .unwrap_or(0);
+        return Ok(Value::Int64(hash as i64));
+    }
+
+    let [value] = arg_values else {
+        return malformed_aggregate_support_call("hash");
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let hash = crate::backend::access::hash::hash_value_extended(value, opclass, 0)
+        .map_err(|message| hash_function_error(message, false))?
+        .unwrap_or(0);
+    Ok(Value::Int32(hash as u32 as i32))
+}
+
+fn hash_function_error(message: String, extended: bool) -> ExecError {
+    let message = if extended {
+        message.replacen(
+            "could not identify a hash function",
+            "could not identify an extended hash function",
+            1,
+        )
+    } else {
+        message
+    };
+    ExecError::DetailedError {
+        message,
+        detail: None,
+        hint: None,
+        sqlstate: "42883",
     }
 }
 

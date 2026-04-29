@@ -334,7 +334,7 @@ fn sql_function_inlining_error(
             let position = row.prosrc.find(op).map(|index| index + 1);
             Some((
                 ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator {
-                    op: op.to_string(),
+                    op,
                     left_type,
                     right_type,
                 }),

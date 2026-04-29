@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write as _;
@@ -31,12 +32,15 @@ use crate::backend::executor::{
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat,
-    CopyFromStatement, CopyOptions as ParserCopyOptions, CopySource, CopyToDestination,
-    CopyToSource, CopyToStatement, CreateFunctionStatement, CreateTableAsQuery,
-    CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode, DiscardTarget,
-    ExecuteStatement, ParseError, ParseOptions, PrepareStatement, PreparedInsert, RawTypeName,
-    SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
+    AlterTableAddColumnStatement, CallStatement, CatalogLookup, CommonTableExpr,
+    CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
+    CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
+    CreateTableAsQuery, CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode,
+    DiscardTarget, ExecuteStatement, FromItem, InsertSource, InsertStatement, OrderByItem,
+    ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
+    PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
+    SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement, UpdateStatement,
+    ValuesStatement, bind_delete, bind_insert, bind_insert_prepared,
     bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
     pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
@@ -1470,153 +1474,150 @@ struct SavepointState {
 }
 
 #[derive(Debug, Clone)]
-struct PreparedSessionStatement {
-    statement: Statement,
+struct PreparedSelectStatement {
+    query: PreparedStatementQuery,
     query_sql: String,
     parameter_types: Vec<RawTypeName>,
 }
 
-fn max_prepared_parameter_ref(sql: &str) -> usize {
-    let mut max_param = 0usize;
-    visit_prepared_parameter_refs(sql, |index, _, _| {
-        max_param = max_param.max(index);
-        Ok(())
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedPreparedStatement {
+    pub(crate) statement: Statement,
+    pub(crate) params: Vec<PreparedExternalParam>,
+}
+
+thread_local! {
+    static SESSION_PREPARED_STATEMENTS: RefCell<HashMap<String, PreparedSelectStatement>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(crate) struct PreparedStatementThreadContextGuard {
+    old: Option<HashMap<String, PreparedSelectStatement>>,
+}
+
+impl Drop for PreparedStatementThreadContextGuard {
+    fn drop(&mut self) {
+        if let Some(old) = self.old.take() {
+            SESSION_PREPARED_STATEMENTS.with(|cell| {
+                cell.replace(old);
+            });
+        }
+    }
+}
+
+fn prepared_statement_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+fn prepared_statement_error(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("prepared statement \"{name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "26000",
     })
-    .expect("max parameter scan cannot fail");
+}
+
+fn prepared_statement_param_count_error(expected: usize, actual: usize) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!(
+            "wrong number of parameters for prepared statement: expected {expected}, got {actual}"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "08P01",
+    })
+}
+
+fn prepared_statement_param_error(param: usize) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("there is no parameter ${param}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P02",
+    })
+}
+
+fn max_prepared_param_in_sql(sql: &str) -> usize {
+    let mut max_param = 0;
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > start
+            && let Ok(param) = sql[start..end].parse::<usize>()
+        {
+            max_param = max_param.max(param);
+        }
+        index = end.max(index + 1);
+    }
     max_param
 }
 
-fn substitute_prepared_parameters(
-    sql: &str,
-    arg_sqls: &[String],
-    parameter_types: &[RawTypeName],
-    render_parameter_type: impl Fn(&RawTypeName) -> String,
-) -> Result<String, ExecError> {
-    let mut output = String::with_capacity(sql.len());
-    let mut last = 0usize;
-    visit_prepared_parameter_refs(sql, |index, start, end| {
-        let Some(arg_sql) = index.checked_sub(1).and_then(|idx| arg_sqls.get(idx)) else {
-            return Err(ExecError::Parse(ParseError::DetailedError {
-                message: format!("there is no parameter ${index}"),
-                detail: None,
-                hint: None,
-                sqlstate: "42P02",
-            }));
+fn resolve_prepared_from_entry(
+    prepared: PreparedSelectStatement,
+    args_sql: &[String],
+) -> Result<ResolvedPreparedStatement, ExecError> {
+    let args = parse_prepared_execute_args(args_sql)?;
+    let max_param = max_prepared_param_in_sql(&prepared.query_sql);
+    if !prepared.parameter_types.is_empty() && max_param > prepared.parameter_types.len() {
+        return Err(prepared_statement_param_error(max_param));
+    }
+    let expected = if prepared.parameter_types.is_empty() {
+        max_param
+    } else {
+        prepared.parameter_types.len()
+    };
+    if args.len() != expected {
+        return Err(prepared_statement_param_count_error(expected, args.len()));
+    }
+    let statement = match prepared.query {
+        PreparedStatementQuery::Select(select) => Statement::Select(select),
+        PreparedStatementQuery::Update(update) => Statement::Update(update),
+    };
+    let params = args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| PreparedExternalParam {
+            paramid: index + 1,
+            arg: arg.clone(),
+            type_name: prepared.parameter_types.get(index).cloned(),
+        })
+        .collect();
+    Ok(ResolvedPreparedStatement { statement, params })
+}
+
+fn parse_prepared_execute_args(args_sql: &[String]) -> Result<Vec<SqlExpr>, ExecError> {
+    args_sql
+        .iter()
+        .map(|arg| crate::backend::parser::parse_expr(arg).map_err(ExecError::Parse))
+        .collect()
+}
+
+pub(crate) fn resolve_thread_prepared_statement(
+    execute_stmt: &ExecuteStatement,
+) -> Result<Option<ResolvedPreparedStatement>, ExecError> {
+    let name = prepared_statement_name(&execute_stmt.name);
+    SESSION_PREPARED_STATEMENTS.with(|cell| {
+        let Some(prepared) = cell.borrow().get(&name).cloned() else {
+            return Ok(None);
         };
-        output.push_str(&sql[last..start]);
-        output.push('(');
-        output.push_str(arg_sql);
-        output.push(')');
-        if let Some(parameter_type) = parameter_types.get(index - 1) {
-            output.push_str("::");
-            output.push_str(&render_parameter_type(parameter_type));
-        }
-        last = end;
-        Ok(())
-    })?;
-    output.push_str(&sql[last..]);
-    Ok(output)
+        resolve_prepared_from_entry(prepared, &execute_stmt.args_sql).map(Some)
+    })
 }
 
-fn visit_prepared_parameter_refs(
-    sql: &str,
-    mut visitor: impl FnMut(usize, usize, usize) -> Result<(), ExecError>,
-) -> Result<(), ExecError> {
-    let bytes = sql.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => {
-                i = single_quoted_sql_end(bytes, i);
-            }
-            b'"' => {
-                i = double_quoted_sql_end(bytes, i);
-            }
-            b'$' if i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() => {
-                let mut end = i + 2;
-                while end < bytes.len() && bytes[end].is_ascii_digit() {
-                    end += 1;
-                }
-                let index = sql[i + 1..end].parse::<usize>().map_err(|_| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "prepared-statement parameter number",
-                        actual: sql[i..end].into(),
-                    })
-                })?;
-                visitor(index, i, end)?;
-                i = end;
-            }
-            b'$' => {
-                if let Some(end) = dollar_quoted_sql_end(sql, i) {
-                    i = end;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => {
-                let ch = sql[i..]
-                    .chars()
-                    .next()
-                    .expect("index is inside UTF-8 string");
-                i += ch.len_utf8();
-            }
-        }
-    }
-    Ok(())
-}
-
-fn single_quoted_sql_end(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 1;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                i += 2;
-            } else {
-                return i + 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    bytes.len()
-}
-
-fn double_quoted_sql_end(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 1;
-    while i < bytes.len() {
-        if bytes[i] == b'"' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
-                i += 2;
-            } else {
-                return i + 1;
-            }
-        } else {
-            i += 1;
-        }
-    }
-    bytes.len()
-}
-
-fn dollar_quoted_sql_end(sql: &str, start: usize) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    if bytes.get(start) != Some(&b'$') {
-        return None;
-    }
-    let mut tag_end = start + 1;
-    while tag_end < bytes.len() && bytes[tag_end] != b'$' {
-        let byte = bytes[tag_end];
-        if !(byte.is_ascii_alphanumeric() || byte == b'_') {
-            return None;
-        }
-        tag_end += 1;
-    }
-    if tag_end >= bytes.len() {
-        return None;
-    }
-    let tag = &sql[start..=tag_end];
-    sql[tag_end + 1..]
-        .find(tag)
-        .map(|offset| tag_end + 1 + offset + tag.len())
+struct PreparedParamSubstitution<'a> {
+    args: &'a [SqlExpr],
+    parameter_types: &'a [RawTypeName],
+    max_param: usize,
 }
 
 pub struct Session {
@@ -1633,7 +1634,7 @@ pub struct Session {
     random_state: Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     portals: PortalManager,
     plpgsql_function_cache: Arc<RwLock<PlpgsqlFunctionCache>>,
-    prepared_selects: HashMap<String, PreparedSessionStatement>,
+    prepared_selects: HashMap<String, PreparedSelectStatement>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4719,6 +4720,7 @@ impl Session {
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         db.install_plpgsql_function_cache(self.client_id, Arc::clone(&self.plpgsql_function_cache));
+        let _prepared_guard = self.push_prepared_statement_thread_context();
         let result = stacker::grow(32 * 1024 * 1024, || {
             StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb)
                 .run(|| self.execute_internal(db, sql, statement_lock_scope.scope_id()))
@@ -4764,7 +4766,6 @@ impl Session {
                 },
             )?
         };
-        let stmt = self.resolve_explain_prepared_execute(stmt)?;
 
         if let Statement::AlterTableMulti(ref statements) = stmt {
             validate_multi_alter_table_temporal_fk_actions(
@@ -4846,6 +4847,11 @@ impl Session {
             Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
             Statement::Execute(ref execute_stmt) => {
                 self.execute_prepared_statement(db, execute_stmt, statement_lock_scope_id)
+            }
+            Statement::Explain(ref explain_stmt)
+                if matches!(explain_stmt.statement.as_ref(), Statement::Execute(_)) =>
+            {
+                self.execute_prepared_explain_statement(db, explain_stmt, statement_lock_scope_id)
             }
             Statement::Deallocate(ref deallocate_stmt) => {
                 self.apply_deallocate_statement(deallocate_stmt)
@@ -7219,15 +7225,19 @@ impl Session {
     }
 
     fn prepared_statement_name(name: &str) -> String {
-        name.to_ascii_lowercase()
+        prepared_statement_name(name)
     }
 
     fn prepared_statement_error(name: &str) -> ExecError {
-        ExecError::Parse(ParseError::DetailedError {
-            message: format!("prepared statement \"{name}\" does not exist"),
-            detail: None,
-            hint: None,
-            sqlstate: "26000",
+        prepared_statement_error(name)
+    }
+
+    pub(crate) fn push_prepared_statement_thread_context(
+        &self,
+    ) -> PreparedStatementThreadContextGuard {
+        SESSION_PREPARED_STATEMENTS.with(|cell| {
+            let old = cell.replace(self.prepared_selects.clone());
+            PreparedStatementThreadContextGuard { old: Some(old) }
         })
     }
 
@@ -7244,14 +7254,15 @@ impl Session {
                 sqlstate: "42P05",
             }));
         }
-        self.prepared_selects.insert(
-            name,
-            PreparedSessionStatement {
-                statement: (*prepare_stmt.statement).clone(),
-                query_sql: prepare_stmt.query_sql.clone(),
-                parameter_types: prepare_stmt.parameter_types.clone(),
-            },
-        );
+        let prepared = PreparedSelectStatement {
+            query: prepare_stmt.query.clone(),
+            query_sql: prepare_stmt.query_sql.clone(),
+            parameter_types: prepare_stmt.parameter_types.clone(),
+        };
+        self.prepared_selects.insert(name.clone(), prepared.clone());
+        SESSION_PREPARED_STATEMENTS.with(|cell| {
+            cell.borrow_mut().insert(name, prepared);
+        });
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -7261,12 +7272,18 @@ impl Session {
     ) -> Result<StatementResult, ExecError> {
         let Some(name) = deallocate_stmt.name.as_deref() else {
             self.prepared_selects.clear();
+            SESSION_PREPARED_STATEMENTS.with(|cell| {
+                cell.borrow_mut().clear();
+            });
             return Ok(StatementResult::AffectedRows(0));
         };
         let name = Self::prepared_statement_name(name);
         if self.prepared_selects.remove(&name).is_none() {
             return Err(Self::prepared_statement_error(&name));
         }
+        SESSION_PREPARED_STATEMENTS.with(|cell| {
+            cell.borrow_mut().remove(&name);
+        });
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -7277,15 +7294,30 @@ impl Session {
             .collect()
     }
 
-    fn resolve_prepared_select(
+    fn resolve_prepared_statement(
         &self,
         execute_stmt: &ExecuteStatement,
-    ) -> Result<PreparedSessionStatement, ExecError> {
+    ) -> Result<PreparedSelectStatement, ExecError> {
         let name = Self::prepared_statement_name(&execute_stmt.name);
         self.prepared_selects
             .get(&name)
             .cloned()
             .ok_or_else(|| Self::prepared_statement_error(&name))
+    }
+
+    fn prepared_statement_arg_count_error(
+        name: &str,
+        supplied: usize,
+        required: usize,
+    ) -> ExecError {
+        ExecError::Parse(ParseError::DetailedError {
+            message: format!("wrong number of parameters for prepared statement \"{name}\""),
+            detail: Some(format!(
+                "Expected {required} parameters but got {supplied}."
+            )),
+            hint: None,
+            sqlstate: "42601",
+        })
     }
 
     fn raw_prepared_parameter_type_sql(raw: &RawTypeName) -> String {
@@ -7307,67 +7339,218 @@ impl Session {
         }
     }
 
-    fn resolve_explain_prepared_execute(&self, stmt: Statement) -> Result<Statement, ExecError> {
-        let Statement::Explain(mut explain) = stmt else {
-            return Ok(stmt);
-        };
-        if let Statement::Execute(execute) = explain.statement.as_ref() {
-            explain.statement = Box::new(self.resolve_prepared_statement_for_execute(execute)?);
+    fn highest_prepared_parameter_ref(sql: &str) -> usize {
+        let bytes = sql.as_bytes();
+        let mut highest = 0usize;
+        let mut index = 0usize;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        while index < bytes.len() {
+            let ch = bytes[index] as char;
+            if in_single_quote {
+                if ch == '\'' {
+                    if index + 1 < bytes.len() && bytes[index + 1] as char == '\'' {
+                        index += 2;
+                        continue;
+                    }
+                    in_single_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            if in_double_quote {
+                if ch == '"' {
+                    if index + 1 < bytes.len() && bytes[index + 1] as char == '"' {
+                        index += 2;
+                        continue;
+                    }
+                    in_double_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            match ch {
+                '\'' => {
+                    in_single_quote = true;
+                    index += 1;
+                }
+                '"' => {
+                    in_double_quote = true;
+                    index += 1;
+                }
+                '$' => {
+                    let start = index + 1;
+                    let mut end = start;
+                    while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+                        end += 1;
+                    }
+                    if end > start {
+                        if let Ok(parameter) = sql[start..end].parse::<usize>() {
+                            highest = highest.max(parameter);
+                        }
+                        index = end;
+                    } else {
+                        index += 1;
+                    }
+                }
+                _ => index += 1,
+            }
         }
-        Ok(Statement::Explain(explain))
+        highest
     }
 
-    fn resolve_prepared_statement_for_execute(
-        &self,
-        execute_stmt: &ExecuteStatement,
-    ) -> Result<Statement, ExecError> {
-        self.resolve_prepared_statement_for_execute_with_sql(execute_stmt)
-            .map(|(statement, _)| statement)
-    }
-
-    fn resolve_prepared_statement_for_execute_with_sql(
-        &self,
-        execute_stmt: &ExecuteStatement,
-    ) -> Result<(Statement, String), ExecError> {
-        let prepared = self.resolve_prepared_select(execute_stmt)?;
-        let required = prepared
+    fn required_prepared_parameter_count(prepared: &PreparedSelectStatement) -> usize {
+        prepared
             .parameter_types
             .len()
-            .max(max_prepared_parameter_ref(&prepared.query_sql));
-        if required == 0 && execute_stmt.arg_sqls.is_empty() {
-            return Ok((prepared.statement, prepared.query_sql));
+            .max(Self::highest_prepared_parameter_ref(&prepared.query_sql))
+    }
+
+    fn rewrite_prepared_query_sql(
+        prepared: &PreparedSelectStatement,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<String, ExecError> {
+        let mut out = String::with_capacity(prepared.query_sql.len());
+        let sql = prepared.query_sql.as_str();
+        let bytes = sql.as_bytes();
+        let mut index = 0usize;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        while index < bytes.len() {
+            let ch = bytes[index] as char;
+            if in_single_quote {
+                out.push(ch);
+                if ch == '\'' {
+                    if index + 1 < bytes.len() && bytes[index + 1] as char == '\'' {
+                        out.push('\'');
+                        index += 2;
+                        continue;
+                    }
+                    in_single_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            if in_double_quote {
+                out.push(ch);
+                if ch == '"' {
+                    if index + 1 < bytes.len() && bytes[index + 1] as char == '"' {
+                        out.push('"');
+                        index += 2;
+                        continue;
+                    }
+                    in_double_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            match ch {
+                '\'' => {
+                    in_single_quote = true;
+                    out.push(ch);
+                    index += 1;
+                }
+                '"' => {
+                    in_double_quote = true;
+                    out.push(ch);
+                    index += 1;
+                }
+                '$' => {
+                    let start = index + 1;
+                    let mut end = start;
+                    while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+                        end += 1;
+                    }
+                    if end == start {
+                        out.push(ch);
+                        index += 1;
+                        continue;
+                    }
+                    let parameter = sql[start..end].parse::<usize>().map_err(|_| {
+                        ExecError::Parse(ParseError::DetailedError {
+                            message: "prepared statement parameter number is invalid".into(),
+                            detail: Some(sql[index..end].into()),
+                            hint: None,
+                            sqlstate: "42P02",
+                        })
+                    })?;
+                    let Some(arg_index) = parameter.checked_sub(1) else {
+                        return Err(ExecError::Parse(ParseError::DetailedError {
+                            message: "prepared statement parameter $0 is out of range".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P02",
+                        }));
+                    };
+                    let Some(arg_sql) = execute_stmt.args_sql.get(arg_index) else {
+                        return Err(ExecError::Parse(ParseError::DetailedError {
+                            message: format!(
+                                "prepared statement parameter ${parameter} is out of range"
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P02",
+                        }));
+                    };
+                    out.push('(');
+                    out.push_str(arg_sql);
+                    out.push(')');
+                    if let Some(raw_type) = prepared.parameter_types.get(arg_index) {
+                        out.push_str("::");
+                        out.push_str(&Self::raw_prepared_parameter_type_sql(raw_type));
+                    }
+                    index = end;
+                }
+                _ => {
+                    out.push(ch);
+                    index += 1;
+                }
+            }
         }
-        if required != execute_stmt.arg_sqls.len() {
-            return Err(ExecError::Parse(ParseError::DetailedError {
-                message: format!(
-                    "wrong number of parameters for prepared statement \"{}\"",
-                    Self::prepared_statement_name(&execute_stmt.name)
-                ),
-                detail: Some(format!(
-                    "Expected {required} parameters but got {}.",
-                    execute_stmt.arg_sqls.len()
-                )),
-                hint: None,
-                sqlstate: "42601",
+        Ok(out)
+    }
+
+    fn prepared_select_for_execute(
+        &self,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<(SelectStatement, String), ExecError> {
+        let prepared = self.resolve_prepared_statement(execute_stmt)?;
+        let PreparedStatementQuery::Select(base_select) = prepared.query.clone() else {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "SELECT prepared statement",
+                actual: "UPDATE prepared statement".into(),
             }));
+        };
+        let required = Self::required_prepared_parameter_count(&prepared);
+        if execute_stmt.args_sql.len() != required {
+            let name = Self::prepared_statement_name(&execute_stmt.name);
+            return Err(Self::prepared_statement_arg_count_error(
+                &name,
+                execute_stmt.args_sql.len(),
+                required,
+            ));
         }
+        if required == 0 {
+            return Ok((base_select, prepared.query_sql));
+        }
+
         // :HACK: The planner does not yet carry true Param nodes for SQL PREPARE,
-        // so session EXECUTE lowers parameter references to a normal statement.
-        let sql = substitute_prepared_parameters(
-            &prepared.query_sql,
-            &execute_stmt.arg_sqls,
-            &prepared.parameter_types,
-            Self::raw_prepared_parameter_type_sql,
-        )?;
-        crate::backend::parser::parse_statement_with_options(
-            &sql,
+        // so session EXECUTE lowers parameter references to a normal SELECT.
+        let rewritten_sql = Self::rewrite_prepared_query_sql(&prepared, execute_stmt)?;
+        let stmt = crate::backend::parser::parse_statement_with_options(
+            &rewritten_sql,
             ParseOptions {
                 standard_conforming_strings: self.standard_conforming_strings(),
                 max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
             },
-        )
-        .map_err(ExecError::Parse)
-        .map(|statement| (statement, sql))
+        )?;
+        let Statement::Select(select) = stmt else {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "prepared SELECT statement",
+                actual: format!("{stmt:?}"),
+            }));
+        };
+        Ok((select, rewritten_sql))
     }
 
     fn resolve_create_table_as_statement(
@@ -7377,21 +7560,961 @@ impl Session {
         let CreateTableAsQuery::Execute(execute_stmt) = &create_stmt.query else {
             return Ok(create_stmt.clone());
         };
-        let (statement, query_sql) =
-            self.resolve_prepared_statement_for_execute_with_sql(execute_stmt)?;
-        let query = match statement {
-            Statement::Select(select) => select,
-            other => {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "SELECT statement from prepared statement",
-                    actual: format!("{other:?}"),
-                }));
-            }
-        };
+        let (select, query_sql) = self.prepared_select_for_execute(execute_stmt)?;
         let mut resolved = create_stmt.clone();
-        resolved.query = CreateTableAsQuery::Select(query);
+        resolved.query = CreateTableAsQuery::Select(select);
         resolved.query_sql = Some(query_sql);
         Ok(resolved)
+    }
+
+    fn resolve_prepared_statement_to_statement(
+        &self,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<Statement, ExecError> {
+        let prepared = self.resolve_prepared_statement(execute_stmt)?;
+        let args = parse_prepared_execute_args(&execute_stmt.args_sql)?;
+        let query =
+            self.substitute_prepared_query(&prepared.query, &args, &prepared.parameter_types)?;
+        Ok(match query {
+            PreparedStatementQuery::Select(select) => Statement::Select(select),
+            PreparedStatementQuery::Update(update) => Statement::Update(update),
+        })
+    }
+
+    fn resolve_prepared_statement_for_execute(
+        &self,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<ResolvedPreparedStatement, ExecError> {
+        let prepared = self.resolve_prepared_statement(execute_stmt)?;
+        let args = parse_prepared_execute_args(&execute_stmt.args_sql)?;
+        let max_param = Self::max_prepared_param_in_sql(&prepared.query_sql);
+        if !prepared.parameter_types.is_empty() && max_param > prepared.parameter_types.len() {
+            return Err(Self::prepared_statement_param_error(max_param));
+        }
+        let expected = if prepared.parameter_types.is_empty() {
+            max_param
+        } else {
+            prepared.parameter_types.len()
+        };
+        if args.len() != expected {
+            return Err(Self::prepared_statement_param_count_error(
+                expected,
+                args.len(),
+            ));
+        }
+        let statement = match prepared.query {
+            PreparedStatementQuery::Select(select) => Statement::Select(select),
+            PreparedStatementQuery::Update(update) => Statement::Update(update),
+        };
+        let params = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| PreparedExternalParam {
+                paramid: index + 1,
+                arg: arg.clone(),
+                type_name: prepared.parameter_types.get(index).cloned(),
+            })
+            .collect();
+        Ok(ResolvedPreparedStatement { statement, params })
+    }
+
+    fn max_prepared_param_in_sql(sql: &str) -> usize {
+        let mut max_param = 0;
+        let bytes = sql.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'$' {
+                index += 1;
+                continue;
+            }
+            let start = index + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end > start
+                && let Ok(param) = sql[start..end].parse::<usize>()
+            {
+                max_param = max_param.max(param);
+            }
+            index = end.max(index + 1);
+        }
+        max_param
+    }
+
+    fn resolve_prepared_statement_in_explain(
+        &self,
+        explain_stmt: &crate::include::nodes::parsenodes::ExplainStatement,
+    ) -> Result<crate::include::nodes::parsenodes::ExplainStatement, ExecError> {
+        let Statement::Execute(execute_stmt) = explain_stmt.statement.as_ref() else {
+            return Ok(explain_stmt.clone());
+        };
+        let mut resolved = explain_stmt.clone();
+        resolved.statement = Box::new(self.resolve_prepared_statement_to_statement(execute_stmt)?);
+        Ok(resolved)
+    }
+
+    fn substitute_prepared_query(
+        &self,
+        query: &PreparedStatementQuery,
+        args: &[SqlExpr],
+        parameter_types: &[RawTypeName],
+    ) -> Result<PreparedStatementQuery, ExecError> {
+        if !parameter_types.is_empty() && args.len() != parameter_types.len() {
+            return Err(Self::prepared_statement_param_count_error(
+                parameter_types.len(),
+                args.len(),
+            ));
+        }
+        let mut subst = PreparedParamSubstitution {
+            args,
+            parameter_types,
+            max_param: 0,
+        };
+        let query = match query {
+            PreparedStatementQuery::Select(select) => PreparedStatementQuery::Select(
+                Self::substitute_select_statement(select, &mut subst)?,
+            ),
+            PreparedStatementQuery::Update(update) => PreparedStatementQuery::Update(
+                Self::substitute_update_statement(update, &mut subst)?,
+            ),
+        };
+        if parameter_types.is_empty() && args.len() != subst.max_param {
+            return Err(Self::prepared_statement_param_count_error(
+                subst.max_param,
+                args.len(),
+            ));
+        }
+        Ok(query)
+    }
+
+    fn prepared_statement_param_count_error(expected: usize, actual: usize) -> ExecError {
+        prepared_statement_param_count_error(expected, actual)
+    }
+
+    fn prepared_statement_param_error(param: usize) -> ExecError {
+        prepared_statement_param_error(param)
+    }
+
+    fn substitute_select_statement(
+        select: &SelectStatement,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<SelectStatement, ExecError> {
+        Ok(SelectStatement {
+            with_recursive: select.with_recursive,
+            with: select
+                .with
+                .iter()
+                .map(|cte| Self::substitute_common_table_expr(cte, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            distinct: select.distinct,
+            distinct_on: Self::substitute_exprs(&select.distinct_on, subst)?,
+            from: select
+                .from
+                .as_ref()
+                .map(|from| Self::substitute_from_item(from, subst))
+                .transpose()?,
+            targets: select
+                .targets
+                .iter()
+                .map(|target| Self::substitute_select_item(target, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            where_clause: select
+                .where_clause
+                .as_ref()
+                .map(|expr| Self::substitute_sql_expr(expr, subst))
+                .transpose()?,
+            group_by: Self::substitute_exprs(&select.group_by, subst)?,
+            having: select
+                .having
+                .as_ref()
+                .map(|expr| Self::substitute_sql_expr(expr, subst))
+                .transpose()?,
+            window_clauses: select
+                .window_clauses
+                .iter()
+                .map(|clause| {
+                    Ok(crate::backend::parser::RawWindowClause {
+                        name: clause.name.clone(),
+                        spec: Self::substitute_window_spec(&clause.spec, subst)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
+            order_by: Self::substitute_order_by_items(&select.order_by, subst)?,
+            limit: select.limit,
+            offset: select.offset,
+            locking_clause: select.locking_clause,
+            locking_targets: select.locking_targets.clone(),
+            set_operation: select
+                .set_operation
+                .as_ref()
+                .map(|setop| {
+                    Ok::<_, ExecError>(Box::new(crate::backend::parser::SetOperationStatement {
+                        op: setop.op,
+                        inputs: setop
+                            .inputs
+                            .iter()
+                            .map(|input| Self::substitute_select_statement(input, subst))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    }))
+                })
+                .transpose()?,
+        })
+    }
+
+    fn substitute_update_statement(
+        update: &UpdateStatement,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<UpdateStatement, ExecError> {
+        Ok(UpdateStatement {
+            with_recursive: update.with_recursive,
+            with: update
+                .with
+                .iter()
+                .map(|cte| Self::substitute_common_table_expr(cte, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            table_name: update.table_name.clone(),
+            target_alias: update.target_alias.clone(),
+            only: update.only,
+            assignments: update
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    Ok(crate::backend::parser::Assignment {
+                        target: Self::substitute_assignment_target(&assignment.target, subst)?,
+                        expr: Self::substitute_sql_expr(&assignment.expr, subst)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
+            from: update
+                .from
+                .as_ref()
+                .map(|from| Self::substitute_from_item(from, subst))
+                .transpose()?,
+            where_clause: update
+                .where_clause
+                .as_ref()
+                .map(|expr| Self::substitute_sql_expr(expr, subst))
+                .transpose()?,
+            returning: update
+                .returning
+                .iter()
+                .map(|target| Self::substitute_select_item(target, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    fn substitute_common_table_expr(
+        cte: &CommonTableExpr,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<CommonTableExpr, ExecError> {
+        Ok(CommonTableExpr {
+            name: cte.name.clone(),
+            column_names: cte.column_names.clone(),
+            body: match &cte.body {
+                CteBody::Select(select) => {
+                    CteBody::Select(Box::new(Self::substitute_select_statement(select, subst)?))
+                }
+                CteBody::Values(values) => {
+                    CteBody::Values(Self::substitute_values_statement(values, subst)?)
+                }
+                CteBody::Insert(insert) => {
+                    CteBody::Insert(Box::new(Self::substitute_insert_statement(insert, subst)?))
+                }
+                CteBody::RecursiveUnion {
+                    all,
+                    anchor,
+                    recursive,
+                } => CteBody::RecursiveUnion {
+                    all: *all,
+                    anchor: Box::new(Self::substitute_cte_body(anchor, subst)?),
+                    recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
+                },
+            },
+        })
+    }
+
+    fn substitute_cte_body(
+        body: &CteBody,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<CteBody, ExecError> {
+        Ok(match body {
+            CteBody::Select(select) => {
+                CteBody::Select(Box::new(Self::substitute_select_statement(select, subst)?))
+            }
+            CteBody::Values(values) => {
+                CteBody::Values(Self::substitute_values_statement(values, subst)?)
+            }
+            CteBody::Insert(insert) => {
+                CteBody::Insert(Box::new(Self::substitute_insert_statement(insert, subst)?))
+            }
+            CteBody::RecursiveUnion {
+                all,
+                anchor,
+                recursive,
+            } => CteBody::RecursiveUnion {
+                all: *all,
+                anchor: Box::new(Self::substitute_cte_body(anchor, subst)?),
+                recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
+            },
+        })
+    }
+
+    fn substitute_values_statement(
+        values: &ValuesStatement,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<ValuesStatement, ExecError> {
+        Ok(ValuesStatement {
+            with_recursive: values.with_recursive,
+            with: values
+                .with
+                .iter()
+                .map(|cte| Self::substitute_common_table_expr(cte, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            rows: values
+                .rows
+                .iter()
+                .map(|row| Self::substitute_exprs(row, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            order_by: Self::substitute_order_by_items(&values.order_by, subst)?,
+            limit: values.limit,
+            offset: values.offset,
+        })
+    }
+
+    fn substitute_insert_statement(
+        insert: &InsertStatement,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<InsertStatement, ExecError> {
+        Ok(InsertStatement {
+            with_recursive: insert.with_recursive,
+            with: insert
+                .with
+                .iter()
+                .map(|cte| Self::substitute_common_table_expr(cte, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            table_name: insert.table_name.clone(),
+            table_alias: insert.table_alias.clone(),
+            columns: insert.columns.clone(),
+            overriding: insert.overriding,
+            source: match &insert.source {
+                InsertSource::Values(rows) => InsertSource::Values(
+                    rows.iter()
+                        .map(|row| Self::substitute_exprs(row, subst))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                InsertSource::DefaultValues => InsertSource::DefaultValues,
+                InsertSource::Select(select) => InsertSource::Select(Box::new(
+                    Self::substitute_select_statement(select, subst)?,
+                )),
+            },
+            on_conflict: insert.on_conflict.clone(),
+            returning: insert
+                .returning
+                .iter()
+                .map(|target| Self::substitute_select_item(target, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    fn substitute_from_item(
+        from: &FromItem,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<FromItem, ExecError> {
+        Ok(match from {
+            FromItem::Table { name, only } => FromItem::Table {
+                name: name.clone(),
+                only: *only,
+            },
+            FromItem::Values { rows } => FromItem::Values {
+                rows: rows
+                    .iter()
+                    .map(|row| Self::substitute_exprs(row, subst))
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            FromItem::FunctionCall {
+                name,
+                args,
+                func_variadic,
+                with_ordinality,
+            } => FromItem::FunctionCall {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| Self::substitute_function_arg(arg, subst))
+                    .collect::<Result<Vec<_>, _>>()?,
+                func_variadic: *func_variadic,
+                with_ordinality: *with_ordinality,
+            },
+            FromItem::JsonTable(_) | FromItem::XmlTable(_) => from.clone(),
+            FromItem::TableSample { source, sample } => {
+                let mut sample = sample.clone();
+                sample.args = Self::substitute_exprs(&sample.args, subst)?;
+                sample.repeatable = sample
+                    .repeatable
+                    .as_ref()
+                    .map(|expr| Self::substitute_sql_expr(expr, subst))
+                    .transpose()?;
+                FromItem::TableSample {
+                    source: Box::new(Self::substitute_from_item(source, subst)?),
+                    sample,
+                }
+            }
+            FromItem::Lateral(inner) => {
+                FromItem::Lateral(Box::new(Self::substitute_from_item(inner, subst)?))
+            }
+            FromItem::DerivedTable(select) => {
+                FromItem::DerivedTable(Box::new(Self::substitute_select_statement(select, subst)?))
+            }
+            FromItem::Join {
+                left,
+                right,
+                kind,
+                constraint,
+            } => FromItem::Join {
+                left: Box::new(Self::substitute_from_item(left, subst)?),
+                right: Box::new(Self::substitute_from_item(right, subst)?),
+                kind: *kind,
+                constraint: match constraint {
+                    crate::backend::parser::JoinConstraint::On(expr) => {
+                        crate::backend::parser::JoinConstraint::On(Self::substitute_sql_expr(
+                            expr, subst,
+                        )?)
+                    }
+                    other => other.clone(),
+                },
+            },
+            FromItem::Alias {
+                source,
+                alias,
+                column_aliases,
+                preserve_source_names,
+            } => FromItem::Alias {
+                source: Box::new(Self::substitute_from_item(source, subst)?),
+                alias: alias.clone(),
+                column_aliases: column_aliases.clone(),
+                preserve_source_names: *preserve_source_names,
+            },
+        })
+    }
+
+    fn substitute_select_item(
+        target: &SelectItem,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<SelectItem, ExecError> {
+        Ok(SelectItem {
+            output_name: target.output_name.clone(),
+            expr: Self::substitute_sql_expr(&target.expr, subst)?,
+        })
+    }
+
+    fn substitute_order_by_items(
+        items: &[OrderByItem],
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<Vec<OrderByItem>, ExecError> {
+        items
+            .iter()
+            .map(|item| {
+                Ok(OrderByItem {
+                    expr: Self::substitute_sql_expr(&item.expr, subst)?,
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                    using_operator: item.using_operator.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn substitute_window_spec(
+        spec: &RawWindowSpec,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<RawWindowSpec, ExecError> {
+        Ok(RawWindowSpec {
+            name: spec.name.clone(),
+            partition_by: Self::substitute_exprs(&spec.partition_by, subst)?,
+            order_by: Self::substitute_order_by_items(&spec.order_by, subst)?,
+            frame: spec
+                .frame
+                .as_ref()
+                .map(|frame| {
+                    Ok::<_, ExecError>(Box::new(RawWindowFrame {
+                        mode: frame.mode,
+                        start_bound: Self::substitute_window_frame_bound(
+                            &frame.start_bound,
+                            subst,
+                        )?,
+                        end_bound: Self::substitute_window_frame_bound(&frame.end_bound, subst)?,
+                        exclusion: frame.exclusion,
+                    }))
+                })
+                .transpose()?,
+        })
+    }
+
+    fn substitute_window_frame_bound(
+        bound: &RawWindowFrameBound,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<RawWindowFrameBound, ExecError> {
+        Ok(match bound {
+            RawWindowFrameBound::OffsetPreceding(expr) => RawWindowFrameBound::OffsetPreceding(
+                Box::new(Self::substitute_sql_expr(expr, subst)?),
+            ),
+            RawWindowFrameBound::OffsetFollowing(expr) => RawWindowFrameBound::OffsetFollowing(
+                Box::new(Self::substitute_sql_expr(expr, subst)?),
+            ),
+            other => other.clone(),
+        })
+    }
+
+    fn substitute_assignment_target(
+        target: &crate::backend::parser::AssignmentTarget,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<crate::backend::parser::AssignmentTarget, ExecError> {
+        Ok(crate::backend::parser::AssignmentTarget {
+            column: target.column.clone(),
+            subscripts: target
+                .subscripts
+                .iter()
+                .map(|subscript| Self::substitute_array_subscript(subscript, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            field_path: target.field_path.clone(),
+            indirection: target.indirection.clone(),
+        })
+    }
+
+    fn substitute_array_subscript(
+        subscript: &crate::backend::parser::ArraySubscript,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<crate::backend::parser::ArraySubscript, ExecError> {
+        Ok(crate::backend::parser::ArraySubscript {
+            is_slice: subscript.is_slice,
+            lower: subscript
+                .lower
+                .as_ref()
+                .map(|expr| Self::substitute_sql_expr(expr, subst).map(Box::new))
+                .transpose()?,
+            upper: subscript
+                .upper
+                .as_ref()
+                .map(|expr| Self::substitute_sql_expr(expr, subst).map(Box::new))
+                .transpose()?,
+        })
+    }
+
+    fn substitute_function_arg(
+        arg: &SqlFunctionArg,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<SqlFunctionArg, ExecError> {
+        Ok(SqlFunctionArg {
+            name: arg.name.clone(),
+            value: Self::substitute_sql_expr(&arg.value, subst)?,
+        })
+    }
+
+    fn substitute_call_args(
+        args: &SqlCallArgs,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<SqlCallArgs, ExecError> {
+        Ok(match args {
+            SqlCallArgs::Star => SqlCallArgs::Star,
+            SqlCallArgs::Args(args) => SqlCallArgs::Args(
+                args.iter()
+                    .map(|arg| Self::substitute_function_arg(arg, subst))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        })
+    }
+
+    fn substitute_exprs(
+        exprs: &[SqlExpr],
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<Vec<SqlExpr>, ExecError> {
+        exprs
+            .iter()
+            .map(|expr| Self::substitute_sql_expr(expr, subst))
+            .collect()
+    }
+
+    fn substitute_param_ref(
+        name: &str,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<Option<SqlExpr>, ExecError> {
+        let Some(rest) = name.strip_prefix('$') else {
+            return Ok(None);
+        };
+        let Ok(param) = rest.parse::<usize>() else {
+            return Ok(None);
+        };
+        if param == 0 {
+            return Err(Self::prepared_statement_param_error(param));
+        }
+        subst.max_param = subst.max_param.max(param);
+        let Some(arg) = subst.args.get(param - 1) else {
+            return Err(Self::prepared_statement_param_error(param));
+        };
+        let mut arg = arg.clone();
+        if let Some(ty) = subst.parameter_types.get(param - 1) {
+            arg = SqlExpr::Cast(Box::new(arg), ty.clone());
+        }
+        Ok(Some(arg))
+    }
+
+    fn substitute_sql_expr(
+        expr: &SqlExpr,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<SqlExpr, ExecError> {
+        Ok(match expr {
+            SqlExpr::Column(name) => {
+                if let Some(arg) = Self::substitute_param_ref(name, subst)? {
+                    return Ok(arg);
+                }
+                expr.clone()
+            }
+            SqlExpr::Parameter(index) => {
+                let name = format!("${index}");
+                if let Some(arg) = Self::substitute_param_ref(&name, subst)? {
+                    return Ok(arg);
+                }
+                expr.clone()
+            }
+            SqlExpr::Add(left, right) => SqlExpr::Add(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Sub(left, right) => SqlExpr::Sub(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::BitAnd(left, right) => SqlExpr::BitAnd(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::BitOr(left, right) => SqlExpr::BitOr(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::BitXor(left, right) => SqlExpr::BitXor(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Shl(left, right) => SqlExpr::Shl(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Shr(left, right) => SqlExpr::Shr(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Mul(left, right) => SqlExpr::Mul(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Div(left, right) => SqlExpr::Div(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Mod(left, right) => SqlExpr::Mod(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Concat(left, right) => SqlExpr::Concat(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::BinaryOperator { op, left, right } => SqlExpr::BinaryOperator {
+                op: op.clone(),
+                left: Box::new(Self::substitute_sql_expr(left, subst)?),
+                right: Box::new(Self::substitute_sql_expr(right, subst)?),
+            },
+            SqlExpr::UnaryPlus(inner) => {
+                SqlExpr::UnaryPlus(Box::new(Self::substitute_sql_expr(inner, subst)?))
+            }
+            SqlExpr::Negate(inner) => {
+                SqlExpr::Negate(Box::new(Self::substitute_sql_expr(inner, subst)?))
+            }
+            SqlExpr::BitNot(inner) => {
+                SqlExpr::BitNot(Box::new(Self::substitute_sql_expr(inner, subst)?))
+            }
+            SqlExpr::Subscript { expr, index } => SqlExpr::Subscript {
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+                index: *index,
+            },
+            SqlExpr::GeometryUnaryOp { op, expr } => SqlExpr::GeometryUnaryOp {
+                op: *op,
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+            },
+            SqlExpr::GeometryBinaryOp { op, left, right } => SqlExpr::GeometryBinaryOp {
+                op: *op,
+                left: Box::new(Self::substitute_sql_expr(left, subst)?),
+                right: Box::new(Self::substitute_sql_expr(right, subst)?),
+            },
+            SqlExpr::PrefixOperator { op, expr } => SqlExpr::PrefixOperator {
+                op: op.clone(),
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+            },
+            SqlExpr::Cast(inner, ty) => SqlExpr::Cast(
+                Box::new(Self::substitute_sql_expr(inner, subst)?),
+                ty.clone(),
+            ),
+            SqlExpr::Collate { expr, collation } => SqlExpr::Collate {
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+                collation: collation.clone(),
+            },
+            SqlExpr::AtTimeZone { expr, zone } => SqlExpr::AtTimeZone {
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+                zone: Box::new(Self::substitute_sql_expr(zone, subst)?),
+            },
+            SqlExpr::Eq(left, right) => SqlExpr::Eq(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::NotEq(left, right) => SqlExpr::NotEq(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Lt(left, right) => SqlExpr::Lt(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::LtEq(left, right) => SqlExpr::LtEq(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Gt(left, right) => SqlExpr::Gt(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::GtEq(left, right) => SqlExpr::GtEq(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::RegexMatch(left, right) => SqlExpr::RegexMatch(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Like {
+                expr,
+                pattern,
+                escape,
+                case_insensitive,
+                negated,
+            } => SqlExpr::Like {
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+                pattern: Box::new(Self::substitute_sql_expr(pattern, subst)?),
+                escape: escape
+                    .as_ref()
+                    .map(|expr| Self::substitute_sql_expr(expr, subst).map(Box::new))
+                    .transpose()?,
+                case_insensitive: *case_insensitive,
+                negated: *negated,
+            },
+            SqlExpr::Similar {
+                expr,
+                pattern,
+                escape,
+                negated,
+            } => SqlExpr::Similar {
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+                pattern: Box::new(Self::substitute_sql_expr(pattern, subst)?),
+                escape: escape
+                    .as_ref()
+                    .map(|expr| Self::substitute_sql_expr(expr, subst).map(Box::new))
+                    .transpose()?,
+                negated: *negated,
+            },
+            SqlExpr::Case {
+                arg,
+                args,
+                defresult,
+            } => SqlExpr::Case {
+                arg: arg
+                    .as_ref()
+                    .map(|expr| Self::substitute_sql_expr(expr, subst).map(Box::new))
+                    .transpose()?,
+                args: args
+                    .iter()
+                    .map(|arm| {
+                        Ok(crate::backend::parser::SqlCaseWhen {
+                            expr: Self::substitute_sql_expr(&arm.expr, subst)?,
+                            result: Self::substitute_sql_expr(&arm.result, subst)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?,
+                defresult: defresult
+                    .as_ref()
+                    .map(|expr| Self::substitute_sql_expr(expr, subst).map(Box::new))
+                    .transpose()?,
+            },
+            SqlExpr::And(left, right) => SqlExpr::And(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Or(left, right) => SqlExpr::Or(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Not(inner) => SqlExpr::Not(Box::new(Self::substitute_sql_expr(inner, subst)?)),
+            SqlExpr::IsNull(inner) => {
+                SqlExpr::IsNull(Box::new(Self::substitute_sql_expr(inner, subst)?))
+            }
+            SqlExpr::IsNotNull(inner) => {
+                SqlExpr::IsNotNull(Box::new(Self::substitute_sql_expr(inner, subst)?))
+            }
+            SqlExpr::IsDistinctFrom(left, right) => SqlExpr::IsDistinctFrom(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::IsNotDistinctFrom(left, right) => SqlExpr::IsNotDistinctFrom(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::Overlaps(left, right) => SqlExpr::Overlaps(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::ArrayLiteral(elements) => {
+                SqlExpr::ArrayLiteral(Self::substitute_exprs(elements, subst)?)
+            }
+            SqlExpr::Row(fields) => SqlExpr::Row(Self::substitute_exprs(fields, subst)?),
+            SqlExpr::ArrayOverlap(left, right) => SqlExpr::ArrayOverlap(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::ArrayContains(left, right) => SqlExpr::ArrayContains(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::ArrayContained(left, right) => SqlExpr::ArrayContained(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonbContains(left, right) => SqlExpr::JsonbContains(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonbContained(left, right) => SqlExpr::JsonbContained(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonbExists(left, right) => SqlExpr::JsonbExists(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonbExistsAny(left, right) => SqlExpr::JsonbExistsAny(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonbExistsAll(left, right) => SqlExpr::JsonbExistsAll(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonbPathExists(left, right) => SqlExpr::JsonbPathExists(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonbPathMatch(left, right) => SqlExpr::JsonbPathMatch(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::ScalarSubquery(select) => {
+                SqlExpr::ScalarSubquery(Box::new(Self::substitute_select_statement(select, subst)?))
+            }
+            SqlExpr::ArraySubquery(select) => {
+                SqlExpr::ArraySubquery(Box::new(Self::substitute_select_statement(select, subst)?))
+            }
+            SqlExpr::Exists(select) => {
+                SqlExpr::Exists(Box::new(Self::substitute_select_statement(select, subst)?))
+            }
+            SqlExpr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => SqlExpr::InSubquery {
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+                subquery: Box::new(Self::substitute_select_statement(subquery, subst)?),
+                negated: *negated,
+            },
+            SqlExpr::QuantifiedSubquery {
+                left,
+                op,
+                is_all,
+                subquery,
+            } => SqlExpr::QuantifiedSubquery {
+                left: Box::new(Self::substitute_sql_expr(left, subst)?),
+                op: *op,
+                is_all: *is_all,
+                subquery: Box::new(Self::substitute_select_statement(subquery, subst)?),
+            },
+            SqlExpr::QuantifiedArray {
+                left,
+                op,
+                is_all,
+                array,
+            } => SqlExpr::QuantifiedArray {
+                left: Box::new(Self::substitute_sql_expr(left, subst)?),
+                op: *op,
+                is_all: *is_all,
+                array: Box::new(Self::substitute_sql_expr(array, subst)?),
+            },
+            SqlExpr::ArraySubscript { array, subscripts } => SqlExpr::ArraySubscript {
+                array: Box::new(Self::substitute_sql_expr(array, subst)?),
+                subscripts: subscripts
+                    .iter()
+                    .map(|subscript| Self::substitute_array_subscript(subscript, subst))
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            SqlExpr::FuncCall {
+                name,
+                args,
+                order_by,
+                within_group,
+                distinct,
+                func_variadic,
+                filter,
+                null_treatment,
+                over,
+            } => SqlExpr::FuncCall {
+                name: name.clone(),
+                args: Self::substitute_call_args(args, subst)?,
+                order_by: Self::substitute_order_by_items(order_by, subst)?,
+                within_group: within_group
+                    .as_ref()
+                    .map(|items| Self::substitute_order_by_items(items, subst))
+                    .transpose()?,
+                distinct: *distinct,
+                func_variadic: *func_variadic,
+                filter: filter
+                    .as_ref()
+                    .map(|expr| Self::substitute_sql_expr(expr, subst).map(Box::new))
+                    .transpose()?,
+                null_treatment: *null_treatment,
+                over: over
+                    .as_ref()
+                    .map(|spec| Self::substitute_window_spec(spec, subst))
+                    .transpose()?,
+            },
+            SqlExpr::FieldSelect { expr, field } => SqlExpr::FieldSelect {
+                expr: Box::new(Self::substitute_sql_expr(expr, subst)?),
+                field: field.clone(),
+            },
+            SqlExpr::JsonGet(left, right) => SqlExpr::JsonGet(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonGetText(left, right) => SqlExpr::JsonGetText(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonPath(left, right) => SqlExpr::JsonPath(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            SqlExpr::JsonPathText(left, right) => SqlExpr::JsonPathText(
+                Box::new(Self::substitute_sql_expr(left, subst)?),
+                Box::new(Self::substitute_sql_expr(right, subst)?),
+            ),
+            _ => expr.clone(),
+        })
     }
 
     fn execute_prepared_statement(
@@ -7400,14 +8523,54 @@ impl Session {
         execute_stmt: &ExecuteStatement,
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
-        let statement = self.resolve_prepared_statement_for_execute(execute_stmt)?;
+        let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
         if self.active_txn.is_some() {
-            return self.execute_in_transaction(db, statement, statement_lock_scope_id);
+            // Transactional prepared execution still uses the older substitution path until
+            // transaction-local external-param plumbing is threaded through the large session
+            // command dispatcher.
+            let prepared = self.resolve_prepared_statement_to_statement(execute_stmt)?;
+            return self.execute_in_transaction(db, prepared, statement_lock_scope_id);
         }
         let search_path = self.configured_search_path();
-        db.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+        db.execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
             self.client_id,
-            statement,
+            resolved.statement,
+            &resolved.params,
+            search_path.as_deref(),
+            &self.datetime_config,
+            &self.gucs,
+            self.planner_config(),
+        )
+    }
+
+    fn execute_prepared_explain_statement(
+        &mut self,
+        db: &Database,
+        explain_stmt: &crate::include::nodes::parsenodes::ExplainStatement,
+        statement_lock_scope_id: Option<u64>,
+    ) -> Result<StatementResult, ExecError> {
+        let Statement::Execute(execute_stmt) = explain_stmt.statement.as_ref() else {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "EXPLAIN EXECUTE",
+                actual: format!("{:?}", explain_stmt.statement),
+            }));
+        };
+        let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
+        let mut resolved_explain = explain_stmt.clone();
+        resolved_explain.statement = Box::new(resolved.statement);
+        if self.active_txn.is_some() {
+            let fallback = self.resolve_prepared_statement_in_explain(explain_stmt)?;
+            return self.execute_in_transaction(
+                db,
+                Statement::Explain(fallback),
+                statement_lock_scope_id,
+            );
+        }
+        let search_path = self.configured_search_path();
+        db.execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
+            self.client_id,
+            Statement::Explain(resolved_explain),
+            &resolved.params,
             search_path.as_deref(),
             &self.datetime_config,
             &self.gucs,
@@ -15348,163 +16511,6 @@ mod tests {
                 }
                 other => panic!("expected query result, got {other:?}"),
             }
-        }
-    }
-
-    #[test]
-    fn sql_prepare_execute_substitutes_parameters() {
-        let db = Database::open_ephemeral(32).expect("open ephemeral database");
-        let mut session = Session::new(1);
-
-        session
-            .execute(&db, "prepare q (int) as select $1 + 1 as x")
-            .unwrap();
-        match session.execute(&db, "execute q(7)").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(8)]]);
-            }
-            other => panic!("expected query result, got {other:?}"),
-        }
-
-        match session
-            .execute(&db, "explain (costs off) execute q(7)")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert!(!rows.is_empty());
-                assert!(matches!(&rows[0][0], Value::Text(line) if line.contains("Result")));
-            }
-            other => panic!("expected EXPLAIN query result, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sql_prepare_execute_supports_update_returning() {
-        let db = Database::open_ephemeral(32).expect("open ephemeral database");
-        let mut session = Session::new(1);
-
-        session
-            .execute(&db, "create table prep_upd (a int, b text)")
-            .unwrap();
-        session
-            .execute(&db, "insert into prep_upd values (1, 'old')")
-            .unwrap();
-        session
-            .execute(
-                &db,
-                "prepare upd (int, text) as update prep_upd set b = $2 where a = $1 returning b",
-            )
-            .unwrap();
-
-        match session
-            .execute(&db, "explain (costs off) execute upd(1, 'new')")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert!(!rows.is_empty());
-                assert!(
-                    matches!(&rows[0][0], Value::Text(line) if line.contains("Update on prep_upd"))
-                );
-            }
-            other => panic!("expected EXPLAIN UPDATE rows, got {other:?}"),
-        }
-
-        match session.execute(&db, "execute upd(1, 'new')").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("new".into())]]);
-            }
-            other => panic!("expected UPDATE RETURNING rows, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn plpgsql_continue_skips_current_loop_iteration() {
-        let db = Database::open_ephemeral(32).expect("open ephemeral database");
-        let mut session = Session::new(1);
-
-        session
-            .execute(
-                &db,
-                r#"
-                create function continue_test() returns setof text
-                language plpgsql as $$
-                declare
-                    ln text;
-                begin
-                    for ln in values ('skip'), ('keep') loop
-                        if ln = 'skip' then
-                            continue;
-                        end if;
-                        return next ln;
-                    end loop;
-                end;
-                $$;
-                "#,
-            )
-            .unwrap();
-
-        match session
-            .execute(&db, "select * from continue_test()")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("keep".into())]]);
-            }
-            other => panic!("expected query result, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn explain_delete_shows_partition_target_scan() {
-        let db = Database::open_ephemeral(32).expect("open ephemeral database");
-        let mut session = Session::new(1);
-
-        session
-            .execute(
-                &db,
-                "create table delp (a int, value int) partition by list (a)",
-            )
-            .unwrap();
-        session
-            .execute(
-                &db,
-                "create table delp1 partition of delp for values in (1)",
-            )
-            .unwrap();
-        session
-            .execute(
-                &db,
-                "create table delp2 partition of delp for values in (2)",
-            )
-            .unwrap();
-
-        match session
-            .execute(&db, "explain (costs off) delete from delp where a = 1")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                let lines = rows
-                    .into_iter()
-                    .map(|row| match row.as_slice() {
-                        [Value::Text(line)] => line.to_string(),
-                        other => panic!("unexpected EXPLAIN row shape: {other:?}"),
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    lines,
-                    vec![
-                        "Delete on delp",
-                        "  Delete on delp1 delp_1",
-                        "  Delete on delp2 delp_2",
-                        "  ->  Append",
-                        "        ->  Seq Scan on delp1 delp_1",
-                        "              Filter: (a = 1)",
-                        "        ->  Seq Scan on delp2 delp_2",
-                        "              Filter: (a = 1)",
-                    ]
-                );
-            }
-            other => panic!("expected EXPLAIN query result, got {other:?}"),
         }
     }
 

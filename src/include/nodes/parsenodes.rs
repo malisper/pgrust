@@ -51,7 +51,7 @@ pub enum ParseError {
     },
     WindowingError(String),
     UndefinedOperator {
-        op: String,
+        op: &'static str,
         left_type: String,
         right_type: String,
     },
@@ -2309,16 +2309,27 @@ pub enum TableAsObjectType {
 pub struct PrepareStatement {
     pub name: String,
     pub parameter_types: Vec<RawTypeName>,
-    pub statement: Box<Statement>,
+    pub query: PreparedStatementQuery,
     pub query_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedStatementQuery {
+    Select(SelectStatement),
+    Update(UpdateStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteStatement {
     pub name: String,
     pub args_sql: Vec<String>,
-    pub args: Vec<SqlExpr>,
-    pub arg_sqls: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedExternalParam {
+    pub paramid: usize,
+    pub arg: SqlExpr,
+    pub type_name: Option<RawTypeName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4856,14 +4867,14 @@ pub enum SubqueryComparisonOp {
     Gt,
     GtEq,
     Match,
+    RegexMatch,
+    NotRegexMatch,
     Like,
     NotLike,
     ILike,
     NotILike,
     Similar,
     NotSimilar,
-    RegexMatch,
-    NotRegexMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

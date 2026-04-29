@@ -4637,7 +4637,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
 #[test]
 fn explain_expr_matches_postgres_filter_formatting() {
     use crate::backend::parser::{SqlType, SqlTypeKind};
-    use crate::include::nodes::primnodes::{OpExprKind, ScalarFunctionImpl};
+    use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind, ScalarFunctionImpl};
 
     let int4 = SqlType::new(SqlTypeKind::Int4);
     let text = SqlType::new(SqlTypeKind::Text);
@@ -4698,6 +4698,37 @@ fn explain_expr_matches_postgres_filter_formatting() {
     assert_eq!(
         render_explain_expr(&like, &["a".into(), "b".into()]),
         "(b ~~ '%2f%'::text)"
+    );
+
+    let ts = SqlType::new(SqlTypeKind::Timestamp);
+    let localtimestamp = Expr::binary_op(
+        OpExprKind::Lt,
+        bool_ty,
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(0),
+            varlevelsup: 0,
+            vartype: ts,
+        }),
+        Expr::LocalTimestamp { precision: None },
+    );
+    assert_eq!(
+        render_explain_expr(&localtimestamp, &["a".into()]),
+        "(a < LOCALTIMESTAMP)"
+    );
+
+    let to_char = Expr::builtin_func(
+        BuiltinScalarFunction::ToChar,
+        Some(text),
+        false,
+        vec![
+            Expr::Const(Value::Int32(125)),
+            Expr::Const(Value::Text("999".into())),
+        ],
+    );
+    assert_eq!(
+        render_explain_expr(&to_char, &[]),
+        "to_char(125, '999'::text)"
     );
 }
 

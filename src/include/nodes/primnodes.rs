@@ -2201,6 +2201,7 @@ pub const fn is_executor_special_varno(varno: usize) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {
     Exec,
+    External,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

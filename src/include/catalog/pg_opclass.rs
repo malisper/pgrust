@@ -4,6 +4,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::*;
 
 pub const ARRAY_BTREE_OPCLASS_OID: u32 = 76012;
+pub const ARRAY_HASH_OPCLASS_OID: u32 = 76235;
 pub const BOOL_BTREE_OPCLASS_OID: u32 = 424;
 pub const INT2_BTREE_OPCLASS_OID: u32 = 1979;
 pub const INT4_BTREE_OPCLASS_OID: u32 = 1978;
@@ -115,7 +116,6 @@ pub const ENUM_HASH_OPCLASS_OID: u32 = 76220;
 pub const MULTIRANGE_HASH_OPCLASS_OID: u32 = 76221;
 pub const RANGE_HASH_OPCLASS_OID: u32 = 76222;
 pub const JSONB_HASH_OPCLASS_OID: u32 = 76223;
-pub const ARRAY_HASH_OPCLASS_OID: u32 = 76224;
 pub const RECORD_HASH_OPCLASS_OID: u32 = 76225;
 pub const MACADDR_HASH_OPCLASS_OID: u32 = 76232;
 pub const MACADDR8_HASH_OPCLASS_OID: u32 = 76233;
@@ -165,17 +165,6 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             opcnamespace: PG_CATALOG_NAMESPACE_OID,
             opcowner: BOOTSTRAP_SUPERUSER_OID,
             opcfamily: BTREE_ARRAY_FAMILY_OID,
-            opcintype: ANYARRAYOID,
-            opcdefault: true,
-            opckeytype: 0,
-        },
-        PgOpclassRow {
-            oid: ARRAY_HASH_OPCLASS_OID,
-            opcmethod: HASH_AM_OID,
-            opcname: "array_ops".into(),
-            opcnamespace: PG_CATALOG_NAMESPACE_OID,
-            opcowner: BOOTSTRAP_SUPERUSER_OID,
-            opcfamily: HASH_ARRAY_FAMILY_OID,
             opcintype: ANYARRAYOID,
             opcdefault: true,
             opckeytype: 0,
@@ -780,6 +769,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BOX_TYPE_OID,
         ),
         hash_row(
+            ARRAY_HASH_OPCLASS_OID,
+            "array_ops",
+            HASH_ARRAY_FAMILY_OID,
+            ANYARRAYOID,
+        ),
+        hash_row(
             BOOL_HASH_OPCLASS_OID,
             "bool_ops",
             HASH_BOOL_FAMILY_OID,
@@ -1149,6 +1144,7 @@ pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
 
 pub fn default_hash_opclass_oid(type_oid: u32) -> Option<u32> {
     Some(match type_oid {
+        ANYARRAYOID => ARRAY_HASH_OPCLASS_OID,
         BOOL_TYPE_OID => BOOL_HASH_OPCLASS_OID,
         INT2_TYPE_OID => INT2_HASH_OPCLASS_OID,
         INT4_TYPE_OID => INT4_HASH_OPCLASS_OID,
@@ -1170,7 +1166,6 @@ pub fn default_hash_opclass_oid(type_oid: u32) -> Option<u32> {
         TIMETZ_TYPE_OID => TIMETZ_HASH_OPCLASS_OID,
         BYTEA_TYPE_OID => BYTEA_HASH_OPCLASS_OID,
         UUID_TYPE_OID => UUID_HASH_OPCLASS_OID,
-        ANYARRAYOID => ARRAY_HASH_OPCLASS_OID,
         RECORD_TYPE_OID => RECORD_HASH_OPCLASS_OID,
         INT4RANGE_TYPE_OID | INT8RANGE_TYPE_OID | NUMRANGE_TYPE_OID | DATERANGE_TYPE_OID
         | TSRANGE_TYPE_OID | TSTZRANGE_TYPE_OID => RANGE_HASH_OPCLASS_OID,

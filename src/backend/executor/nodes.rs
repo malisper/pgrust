@@ -23,6 +23,7 @@ use crate::backend::executor::value_io::{decode_value_with_toast, missing_column
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::libpq::pqformat::format_float8_text;
+use crate::backend::optimizer::partition_prune::partition_may_satisfy_filter_with_runtime_values;
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
@@ -57,7 +58,7 @@ use crate::include::nodes::execnodes::{
     WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{
-    AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument,
+    AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
@@ -1134,7 +1135,6 @@ impl PlanNode for ResultState {
             None
         };
         begin_node(&mut self.stats, ctx)?;
-        begin_node(&mut self.stats, ctx)?;
         if self.emitted {
             finish_eof(&mut self.stats, start, ctx);
             Ok(None)
@@ -1183,14 +1183,99 @@ impl PlanNode for AppendState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        ensure_append_runtime_pruned(
+            &mut self.active_children,
+            &mut self.visible_children,
+            &mut self.subplans_removed,
+            self.partition_prune.as_ref(),
+            ctx,
+        )?;
+        self.exec_proc_node_after_pruning(ctx)
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+    fn node_label(&self) -> String {
+        "Append".into()
+    }
+    fn explain_one_time_false_input(&self) -> bool {
+        self.children.is_empty()
+    }
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        if self.subplans_removed > 0 {
+            lines.push(format!(
+                "{}Subplans Removed: {}",
+                explain_detail_prefix(indent),
+                self.subplans_removed
+            ));
+        }
+    }
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let explain_children = if analyze {
+            &self.visible_children
+        } else {
+            &self.active_children
+        };
+        for child_index in append_explain_child_indexes(self.children.len(), explain_children) {
+            if let Some(child) = self.children.get(child_index) {
+                format_explain_lines_with_costs(
+                    child.as_ref(),
+                    indent + 1,
+                    analyze,
+                    show_costs,
+                    timing,
+                    lines,
+                );
+            }
+        }
+    }
+}
+
+impl AppendState {
+    fn exec_proc_node_after_pruning<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         let start = if ctx.timed {
             Some(Instant::now())
         } else {
             None
         };
         begin_node(&mut self.stats, ctx)?;
-        while self.current_child < self.children.len() {
-            if let Some(slot) = self.children[self.current_child].exec_proc_node(ctx)? {
+        while let Some(child_index) = append_child_index(
+            self.children.len(),
+            self.active_children.as_deref(),
+            self.current_child,
+        ) {
+            if let Some(slot) = self.children[child_index].exec_proc_node(ctx)? {
                 let child_bindings = ctx.system_bindings.clone();
                 let mut values = slot.values()?.to_vec();
                 Value::materialize_all(&mut values);
@@ -1218,45 +1303,192 @@ impl PlanNode for AppendState {
         finish_eof(&mut self.stats, start, ctx);
         Ok(None)
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        Some(&mut self.slot)
+}
+
+fn append_child_index(
+    child_count: usize,
+    active_children: Option<&[usize]>,
+    current_child: usize,
+) -> Option<usize> {
+    match active_children {
+        Some(active_children) => active_children.get(current_child).copied(),
+        None if current_child < child_count => Some(current_child),
+        None => None,
     }
-    fn current_system_bindings(&self) -> &[SystemVarBinding] {
-        &self.current_bindings
+}
+
+fn append_explain_child_indexes(
+    child_count: usize,
+    active_children: &Option<Vec<usize>>,
+) -> Vec<usize> {
+    active_children
+        .clone()
+        .unwrap_or_else(|| (0..child_count).collect())
+}
+
+fn ensure_append_runtime_pruned(
+    active_children: &mut Option<Vec<usize>>,
+    visible_children: &mut Option<Vec<usize>>,
+    subplans_removed: &mut usize,
+    partition_prune: Option<&PartitionPrunePlan>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if active_children.is_some() {
+        return Ok(());
     }
-    fn column_names(&self) -> &[String] {
-        &self.column_names
-    }
-    fn node_stats(&self) -> &NodeExecStats {
-        &self.stats
-    }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
-        &mut self.stats
-    }
-    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
-        self.plan_info
-    }
-    fn node_label(&self) -> String {
-        "Append".into()
-    }
-    fn explain_children(
-        &self,
-        indent: usize,
-        analyze: bool,
-        show_costs: bool,
-        timing: bool,
-        lines: &mut Vec<String>,
-    ) {
-        for child in &self.children {
-            format_explain_lines_with_costs(
-                child.as_ref(),
-                indent + 1,
-                analyze,
-                show_costs,
-                timing,
-                lines,
-            );
+    let Some(partition_prune) = partition_prune else {
+        return Ok(());
+    };
+    let (startup_visible, startup_removed) =
+        runtime_pruned_startup_child_indexes(partition_prune, ctx);
+    let child_count = partition_prune
+        .child_domains
+        .len()
+        .max(partition_prune.child_bounds.len());
+    let mut active = Vec::new();
+    for index in 0..child_count {
+        if partition_prune_child_may_satisfy(
+            partition_prune,
+            index,
+            RuntimePruneMode::Execution,
+            ctx,
+        ) {
+            active.push(index);
         }
+    }
+    *subplans_removed += startup_removed;
+    *visible_children = Some(startup_visible);
+    *active_children = Some(active);
+    Ok(())
+}
+
+pub(crate) fn runtime_pruned_startup_child_indexes(
+    partition_prune: &PartitionPrunePlan,
+    ctx: &mut ExecutorContext,
+) -> (Vec<usize>, usize) {
+    let child_count = partition_prune
+        .child_domains
+        .len()
+        .max(partition_prune.child_bounds.len());
+    let startup_visible = (0..child_count)
+        .filter(|index| {
+            partition_prune_child_may_satisfy(
+                partition_prune,
+                *index,
+                RuntimePruneMode::Startup,
+                ctx,
+            )
+        })
+        .collect::<Vec<_>>();
+    let removed = child_count.saturating_sub(startup_visible.len());
+    (startup_visible, removed)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimePruneMode {
+    Startup,
+    Execution,
+}
+
+fn partition_prune_child_may_satisfy(
+    partition_prune: &PartitionPrunePlan,
+    child_index: usize,
+    mode: RuntimePruneMode,
+    ctx: &mut ExecutorContext,
+) -> bool {
+    let fallback_domain;
+    let domains = partition_prune
+        .child_domains
+        .get(child_index)
+        .filter(|domains| !domains.is_empty());
+    let domains = match domains {
+        Some(domains) => domains.as_slice(),
+        None => {
+            fallback_domain = [
+                crate::include::nodes::plannodes::PartitionPruneChildDomain {
+                    spec: partition_prune.spec.clone(),
+                    sibling_bounds: partition_prune.sibling_bounds.clone(),
+                    bound: partition_prune
+                        .child_bounds
+                        .get(child_index)
+                        .cloned()
+                        .flatten(),
+                },
+            ];
+            &fallback_domain
+        }
+    };
+    domains.iter().all(|domain| {
+        let mut eval_slot = TupleSlot::empty(0);
+        let catalog = ctx.catalog.clone();
+        partition_may_satisfy_filter_with_runtime_values(
+            &domain.spec,
+            domain.bound.as_ref(),
+            &domain.sibling_bounds,
+            &partition_prune.filter,
+            catalog.as_deref(),
+            |expr| {
+                if mode == RuntimePruneMode::Startup && !startup_prune_expr_is_evaluable(expr) {
+                    return None;
+                }
+                eval_expr(expr, &mut eval_slot, ctx).ok()
+            },
+        )
+    })
+}
+
+fn startup_prune_expr_is_evaluable(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(_) | Expr::Var(_) => true,
+        Expr::Param(param) => param.paramkind == ParamKind::External,
+        Expr::SubPlan(_) | Expr::SubLink(_) => false,
+        Expr::Op(op) => op.args.iter().all(startup_prune_expr_is_evaluable),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().all(startup_prune_expr_is_evaluable),
+        Expr::Func(func) => func.args.iter().all(startup_prune_expr_is_evaluable),
+        Expr::Cast(expr, _) => startup_prune_expr_is_evaluable(expr),
+        Expr::Collate { expr, .. } => startup_prune_expr_is_evaluable(expr),
+        Expr::IsNull(expr) | Expr::IsNotNull(expr) => startup_prune_expr_is_evaluable(expr),
+        Expr::ScalarArrayOp(scalar) => {
+            startup_prune_expr_is_evaluable(&scalar.left)
+                && startup_prune_expr_is_evaluable(&scalar.right)
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            startup_prune_expr_is_evaluable(left) && startup_prune_expr_is_evaluable(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().all(startup_prune_expr_is_evaluable),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .all(|(_, expr)| startup_prune_expr_is_evaluable(expr)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_none_or(|expr| startup_prune_expr_is_evaluable(expr))
+                && case_expr.args.iter().all(|when| {
+                    startup_prune_expr_is_evaluable(&when.expr)
+                        && startup_prune_expr_is_evaluable(&when.result)
+                })
+                && startup_prune_expr_is_evaluable(&case_expr.defresult)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            startup_prune_expr_is_evaluable(expr)
+                && startup_prune_expr_is_evaluable(pattern)
+                && escape
+                    .as_ref()
+                    .is_none_or(|expr| startup_prune_expr_is_evaluable(expr))
+        }
+        _ => false,
     }
 }
 
@@ -1265,6 +1497,13 @@ impl PlanNode for MergeAppendState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        ensure_append_runtime_pruned(
+            &mut self.active_children,
+            &mut self.visible_children,
+            &mut self.subplans_removed,
+            self.partition_prune.as_ref(),
+            ctx,
+        )?;
         let start = if ctx.timed {
             Some(Instant::now())
         } else {
@@ -1273,10 +1512,14 @@ impl PlanNode for MergeAppendState {
         begin_node(&mut self.stats, ctx)?;
         if self.rows.is_none() {
             let mut rows = Vec::new();
-            for child in &mut self.children {
-                while child.exec_proc_node(ctx)?.is_some() {
-                    ctx.check_for_interrupts()?;
-                    rows.push(child.materialize_current_row()?);
+            for child_index in
+                append_explain_child_indexes(self.children.len(), &self.active_children)
+            {
+                if let Some(child) = self.children.get_mut(child_index) {
+                    while child.exec_proc_node(ctx)?.is_some() {
+                        ctx.check_for_interrupts()?;
+                        rows.push(child.materialize_current_row()?);
+                    }
                 }
             }
 
@@ -1379,6 +1622,12 @@ impl PlanNode for MergeAppendState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
+        if self.subplans_removed > 0 {
+            lines.push(format!(
+                "{prefix}Subplans Removed: {}",
+                self.subplans_removed
+            ));
+        }
         let sort_keys = self
             .items
             .iter()
@@ -1396,15 +1645,22 @@ impl PlanNode for MergeAppendState {
         timing: bool,
         lines: &mut Vec<String>,
     ) {
-        for child in &self.children {
-            format_explain_lines_with_costs(
-                child.as_ref(),
-                indent + 1,
-                analyze,
-                show_costs,
-                timing,
-                lines,
-            );
+        let explain_children = if analyze {
+            &self.visible_children
+        } else {
+            &self.active_children
+        };
+        for child_index in append_explain_child_indexes(self.children.len(), explain_children) {
+            if let Some(child) = self.children.get(child_index) {
+                format_explain_lines_with_costs(
+                    child.as_ref(),
+                    indent + 1,
+                    analyze,
+                    show_costs,
+                    timing,
+                    lines,
+                );
+            }
         }
     }
 }
@@ -3402,6 +3658,9 @@ fn render_explain_expr_inner_with_qualifier(
         Expr::Param(param) if param.paramkind == ParamKind::Exec => {
             format!("${}", param.paramid)
         }
+        Expr::Param(param) if param.paramkind == ParamKind::External => {
+            format!("${}", param.paramid)
+        }
         Expr::Const(value) => render_explain_const(value),
         Expr::Cast(inner, ty) => render_explain_cast(inner, *ty, qualifier, column_names),
         Expr::Collate {
@@ -3610,6 +3869,18 @@ fn render_explain_expr_inner_with_qualifier(
         Expr::CurrentCatalog => "CURRENT_CATALOG".into(),
         Expr::CurrentSchema => "CURRENT_SCHEMA".into(),
         Expr::CurrentDate => "CURRENT_DATE".into(),
+        Expr::CurrentTime { precision } => {
+            render_explain_sql_datetime_keyword("CURRENT_TIME", *precision)
+        }
+        Expr::CurrentTimestamp { precision } => {
+            render_explain_sql_datetime_keyword("CURRENT_TIMESTAMP", *precision)
+        }
+        Expr::LocalTime { precision } => {
+            render_explain_sql_datetime_keyword("LOCALTIME", *precision)
+        }
+        Expr::LocalTimestamp { precision } => {
+            render_explain_sql_datetime_keyword("LOCALTIMESTAMP", *precision)
+        }
         Expr::CurrentUser => "CURRENT_USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
@@ -3639,6 +3910,13 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
         }),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_sql_datetime_keyword(keyword: &str, precision: Option<i32>) -> String {
+    match precision {
+        Some(precision) => format!("{keyword}({precision})"),
+        None => keyword.into(),
     }
 }
 
@@ -4560,6 +4838,7 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::Abs => "abs".into(),
         BuiltinScalarFunction::ToChar => "to_char".into(),
         BuiltinScalarFunction::Substring => "substr".into(),
+        BuiltinScalarFunction::ToChar => "to_char".into(),
         BuiltinScalarFunction::Left => "\"left\"".into(),
         BuiltinScalarFunction::Right => "\"right\"".into(),
         other => format!("{other:?}"),
@@ -5371,7 +5650,7 @@ fn render_explain_join_cast(
     format!("({inner})::{}", render_explain_sql_type_name(ty))
 }
 
-fn render_explain_literal(value: &Value) -> String {
+pub(crate) fn render_explain_literal(value: &Value) -> String {
     match value {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
@@ -5626,10 +5905,11 @@ impl PlanNode for FilterState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        if matches!(self.predicate, Expr::Const(Value::Bool(false))) {
-            return "Result".into();
+        if filter_state_is_one_time_false_result(self) {
+            "Result".into()
+        } else {
+            "Filter".into()
         }
-        "Filter".into()
     }
     fn explain_details(
         &self,
@@ -5639,14 +5919,14 @@ impl PlanNode for FilterState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
-        if matches!(self.predicate, Expr::Const(Value::Bool(false))) {
+        if filter_state_is_one_time_false_result(self) {
             lines.push(format!("{prefix}One-Time Filter: false"));
-            return;
+        } else {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(&self.predicate, self.column_names())
+            ));
         }
-        lines.push(format!(
-            "{prefix}Filter: {}",
-            render_explain_expr(&self.predicate, self.column_names())
-        ));
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
@@ -5662,7 +5942,7 @@ impl PlanNode for FilterState {
         timing: bool,
         lines: &mut Vec<String>,
     ) {
-        if matches!(self.predicate, Expr::Const(Value::Bool(false))) {
+        if filter_state_is_one_time_false_result(self) {
             return;
         }
         format_explain_lines_with_costs(
@@ -5674,6 +5954,11 @@ impl PlanNode for FilterState {
             lines,
         );
     }
+}
+
+fn filter_state_is_one_time_false_result(state: &FilterState) -> bool {
+    matches!(state.predicate, Expr::Const(Value::Bool(false)))
+        && state.input.explain_one_time_false_input()
 }
 
 impl PlanNode for MaterializeState {

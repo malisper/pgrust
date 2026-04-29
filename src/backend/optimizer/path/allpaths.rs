@@ -10,7 +10,7 @@ use crate::backend::executor::compare_order_values;
 use crate::backend::parser::{
     BoundIndexRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp,
-    partition_value_to_value,
+    deserialize_partition_bound, partition_value_to_value,
 };
 use crate::include::catalog::BTREE_AM_OID;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
@@ -22,7 +22,9 @@ use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerIndexExprCacheEntry, PlannerInfo,
     PlannerSubroot, RelOptInfo, RelOptKind, RestrictInfo, SpecialJoinInfo,
 };
-use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, SetOpStrategy};
+use crate::include::nodes::plannodes::{
+    AggregateStrategy, PartitionPruneChildDomain, PartitionPrunePlan, PlanEstimate, SetOpStrategy,
+};
 use crate::include::nodes::primnodes::{
     BoolExprType, Expr, JoinType, OpExprKind, OrderByEntry, QueryColumn, RelationDesc,
     SortGroupClause, ToastRelationRef, Var, attrno_index, expr_contains_set_returning,
@@ -37,8 +39,7 @@ use super::super::inherit::{
 use super::super::joininfo;
 use super::super::partition_cache;
 use super::super::partition_prune::{
-    partition_may_satisfy_filter, relation_may_satisfy_own_partition_bound,
-    relation_parent_pruning_context,
+    partition_may_satisfy_filter_for_relation, relation_may_satisfy_own_partition_bound,
 };
 use super::super::partitionwise;
 use super::super::pathnodes::{
@@ -271,6 +272,63 @@ fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
     )
 }
 
+fn scalar_array_null_filter(expr: &Expr) -> bool {
+    match expr {
+        Expr::ScalarArrayOp(saop) => expr_is_null_array(&saop.right),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            bool_expr.args.iter().any(scalar_array_null_filter)
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => scalar_array_null_filter(inner),
+        _ => false,
+    }
+}
+
+fn expr_is_null_array(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(Value::Null) => true,
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_is_null_array(inner),
+        _ => false,
+    }
+}
+
+fn add_one_time_false_path(
+    rel: &mut RelOptInfo,
+    source_id: usize,
+    desc: RelationDesc,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) {
+    let pathtarget = rel.reltarget.clone();
+    rel.add_path(optimize_path_with_config(
+        Path::Filter {
+            plan_info: PlanEstimate::default(),
+            pathtarget: pathtarget.clone(),
+            input: Box::new(Path::Append {
+                plan_info: PlanEstimate::default(),
+                pathtarget: pathtarget.clone(),
+                pathkeys: Vec::new(),
+                relids: vec![source_id],
+                source_id,
+                desc,
+                child_roots: Vec::new(),
+                partition_prune: None,
+                children: Vec::new(),
+            }),
+            predicate: Expr::Const(Value::Bool(false)),
+        },
+        catalog,
+        config,
+    ));
+    bestpath::set_cheapest(rel);
+}
+
+fn is_append_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
+    root.simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .is_some_and(|rel| matches!(rel.reloptkind, RelOptKind::OtherMemberRel))
+}
+
 fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
     let mut equalities = Vec::<(Expr, Value)>::new();
     for clause in rel
@@ -308,19 +366,6 @@ fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value)> {
     }
 }
 
-fn global_const_false_where_qual(root: &PlannerInfo) -> Option<Expr> {
-    let where_qual = root.parse.where_qual.as_ref()?;
-    if !expr_relids(where_qual).is_empty() {
-        return None;
-    }
-    match where_qual {
-        Expr::Const(Value::Bool(false)) | Expr::Const(Value::Null) => {
-            Some(Expr::Const(Value::Bool(false)))
-        }
-        _ => None,
-    }
-}
-
 fn const_false_relation_path(rtindex: usize, desc: &RelationDesc) -> Path {
     let pathtarget = slot_output_target(rtindex, &desc.columns, |column| column.sql_type);
     Path::Filter {
@@ -335,6 +380,7 @@ fn const_false_relation_path(rtindex: usize, desc: &RelationDesc) -> Path {
             source_id: rtindex,
             desc: desc.clone(),
             child_roots: Vec::new(),
+            partition_prune: None,
             children: Vec::new(),
         }),
     }
@@ -365,6 +411,47 @@ fn partition_bound_for_rtindex(
         .into_iter()
         .find(|child| child.row.inhrelid == child_oid)
         .and_then(|child| child.bound)
+}
+
+fn relation_own_partition_bound(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Option<PartitionBoundSpec> {
+    catalog
+        .relation_by_oid(relation_oid)?
+        .relpartbound
+        .as_deref()
+        .and_then(|text| deserialize_partition_bound(text).ok())
+}
+
+fn append_partition_prune_plan(
+    spec: Option<crate::backend::parser::LoweredPartitionSpec>,
+    sibling_bounds: &[PartitionBoundSpec],
+    filter: Option<&Expr>,
+    child_bounds: &[Option<PartitionBoundSpec>],
+) -> Option<PartitionPrunePlan> {
+    let spec = spec?;
+    let filter = filter?.clone();
+    if child_bounds.is_empty() {
+        return None;
+    }
+    Some(PartitionPrunePlan {
+        child_domains: child_bounds
+            .iter()
+            .map(|bound| {
+                vec![PartitionPruneChildDomain {
+                    spec: spec.clone(),
+                    sibling_bounds: sibling_bounds.to_vec(),
+                    bound: bound.clone(),
+                }]
+            })
+            .collect(),
+        spec,
+        sibling_bounds: sibling_bounds.to_vec(),
+        filter,
+        child_bounds: child_bounds.to_vec(),
+        subplans_removed: 0,
+    })
 }
 
 fn serialized_partition_value_cmp(
@@ -1947,6 +2034,7 @@ fn set_op_append_path(
         source_id,
         desc,
         child_roots,
+        partition_prune: None,
         children,
     }
 }
@@ -1963,6 +2051,7 @@ fn set_op_merge_append_path(
         source_id,
         desc,
         items: set_op_order_items(source_id, output_columns),
+        partition_prune: None,
         children: children
             .into_iter()
             .map(|child| ensure_set_op_sorted_path(source_id, output_columns, child))
@@ -2904,12 +2993,17 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             .simple_rel_array
             .get(rtindex)
             .and_then(Option::as_ref)
-            .and_then(base_filter_expr)
-            .or_else(|| {
-                (relkind == 'p')
-                    .then(|| global_const_false_where_qual(root))
-                    .flatten()
-            });
+            .and_then(base_filter_expr);
+        if relkind != 'p' && filter.as_ref().is_some_and(scalar_array_null_filter) {
+            if let Some(rel) = root
+                .simple_rel_array
+                .get_mut(rtindex)
+                .and_then(Option::as_mut)
+            {
+                add_one_time_false_path(rel, rtindex, rte.desc.clone(), catalog, root.config);
+            }
+            return;
+        }
         let required_index_only_attrs = collect_required_index_only_attrs_for_root(
             root,
             rtindex,
@@ -2920,6 +3014,8 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             || relation_may_satisfy_own_partition_bound(catalog, relation_oid, filter.as_ref());
         let mut children = Vec::new();
         let mut ordered_children = Vec::new();
+        let mut child_prune_bounds = Vec::new();
+        let mut ordered_child_prune_bounds = Vec::new();
         let mut ordered_child_bounds = Vec::new();
         let mut ordered_ok = query_order_items.is_some();
         let partition_spec = (relkind == 'p')
@@ -2930,12 +3026,15 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         } else {
             Vec::new()
         };
+        let ancestor_bound = if relkind == 'p' {
+            relation_own_partition_bound(catalog, relation_oid)
+        } else {
+            None
+        };
         let sibling_bounds = partition_child_bounds
             .iter()
             .filter_map(|child| child.bound.clone())
             .collect::<Vec<_>>();
-        let parent_context_for_child_pruning =
-            relation_parent_pruning_context(catalog, relation_oid);
         if relkind != 'p' {
             children.push(normalize_rte_path(
                 rtindex,
@@ -2994,18 +3093,25 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         None
                     }
                 });
-            if relkind == 'p'
-                && let Some(child_oid) = child_relation_oid
-                && !partition_may_satisfy_filter(
-                    partition_spec.as_ref(),
+            let child_bound = if relkind == 'p' {
+                child_relation_oid.and_then(|child_oid| {
                     partition_child_bounds
                         .iter()
                         .find(|child| child.row.inhrelid == child_oid)
-                        .and_then(|child| child.bound.as_ref()),
+                        .and_then(|child| child.bound.clone())
+                })
+            } else {
+                None
+            };
+            if relkind == 'p'
+                && !partition_may_satisfy_filter_for_relation(
+                    partition_spec.as_ref(),
+                    child_bound.as_ref(),
                     &sibling_bounds,
-                    parent_context_for_child_pruning.as_ref(),
+                    ancestor_bound.as_ref(),
                     filter.as_ref(),
-                    Some(catalog),
+                    catalog,
+                    relation_oid,
                 )
             {
                 continue;
@@ -3030,6 +3136,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 PathTarget::new(translated_vars),
                 catalog,
             ));
+            child_prune_bounds.push(child_bound.clone());
             if ordered_ok {
                 let translated_pathkeys =
                     translate_append_pathkeys_for_child(root, child_rtindex, &query_pathkeys);
@@ -3075,6 +3182,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         PathTarget::new(translated_vars),
                         catalog,
                     ));
+                    ordered_child_prune_bounds.push(child_bound.clone());
                 } else {
                     ordered_ok = false;
                 }
@@ -3082,6 +3190,12 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         }
         let append_target =
             slot_output_target(rtindex, &rte.desc.columns, |column| column.sql_type);
+        let partition_prune = append_partition_prune_plan(
+            partition_spec.clone(),
+            &sibling_bounds,
+            filter.as_ref(),
+            &child_prune_bounds,
+        );
         let append = if children.is_empty() {
             optimize_path_with_config(
                 Path::Filter {
@@ -3096,6 +3210,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         source_id: rtindex,
                         desc: rte.desc.clone(),
                         child_roots: Vec::new(),
+                        partition_prune,
                         children: Vec::new(),
                     }),
                 },
@@ -3112,6 +3227,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     source_id: rtindex,
                     desc: rte.desc.clone(),
                     child_roots: Vec::new(),
+                    partition_prune,
                     children,
                 },
                 catalog,
@@ -3120,6 +3236,12 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         };
         let ordered_path = if ordered_ok {
             query_order_items.map(|items| {
+                let partition_prune = append_partition_prune_plan(
+                    partition_spec.clone(),
+                    &sibling_bounds,
+                    filter.as_ref(),
+                    &ordered_child_prune_bounds,
+                );
                 if relkind == 'p'
                     && let Some(proof) = ordered_partition_append_proof(
                         root,
@@ -3144,6 +3266,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                             source_id: rtindex,
                             desc: rte.desc.clone(),
                             child_roots: Vec::new(),
+                            partition_prune,
                             children: ordered_append_children,
                         },
                         catalog,
@@ -3159,6 +3282,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                             source_id: rtindex,
                             desc: rte.desc.clone(),
                             items,
+                            partition_prune,
                             children: ordered_children,
                         },
                         catalog,
@@ -3189,6 +3313,18 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         .get(rtindex)
         .and_then(Option::as_ref)
         .and_then(base_filter_expr);
+    if !is_append_child_rel(root, rtindex)
+        && base_filter.as_ref().is_some_and(scalar_array_null_filter)
+    {
+        if let Some(rel) = root
+            .simple_rel_array
+            .get_mut(rtindex)
+            .and_then(Option::as_mut)
+        {
+            add_one_time_false_path(rel, rtindex, rte.desc.clone(), catalog, root.config);
+        }
+        return;
+    }
     let required_index_only_attrs = collect_required_index_only_attrs_for_root(
         root,
         rtindex,
@@ -4346,16 +4482,6 @@ fn path_dominates(left: &Path, right: &Path) -> bool {
     {
         return true;
     }
-    if bestpath::preferred_scalar_aggregate_outer_cross_join(right)
-        && !bestpath::preferred_scalar_aggregate_outer_cross_join(left)
-    {
-        return false;
-    }
-    if bestpath::preferred_scalar_aggregate_outer_cross_join(left)
-        && !bestpath::preferred_scalar_aggregate_outer_cross_join(right)
-    {
-        return true;
-    }
     if bestpath::non_nested_join_nearly_as_cheap(right, left) {
         return false;
     }
@@ -4394,11 +4520,6 @@ fn path_tie_breaker_prefers(
     ) && left_relids != right_relids
     {
         return left_relids > right_relids;
-    }
-    if bestpath::preferred_scalar_aggregate_outer_cross_join(left)
-        && !bestpath::preferred_scalar_aggregate_outer_cross_join(right)
-    {
-        return true;
     }
     left_pathkeys.len() > right_pathkeys.len()
 }
@@ -4539,6 +4660,7 @@ fn collect_partitionwise_join_candidate_path(
                 source_id,
                 desc,
                 items: pathkeys_to_order_items(&root.query_pathkeys),
+                partition_prune: None,
                 children,
             }
         } else {
@@ -4550,6 +4672,7 @@ fn collect_partitionwise_join_candidate_path(
                 source_id,
                 desc,
                 child_roots: Vec::new(),
+                partition_prune: None,
                 children,
             }
         },
@@ -4784,6 +4907,7 @@ fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
             source_id,
             desc,
             child_roots,
+            partition_prune,
             children,
         } => Path::Append {
             plan_info: PlanEstimate::new(
@@ -4798,6 +4922,7 @@ fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
             source_id,
             desc,
             child_roots,
+            partition_prune,
             children,
         },
         Path::MergeAppend {
@@ -4806,6 +4931,7 @@ fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         } => Path::MergeAppend {
             plan_info: PlanEstimate::new(
@@ -4818,6 +4944,7 @@ fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         },
         other => other,

@@ -77,6 +77,7 @@ pub const BRIN_TEXT_BLOOM_FAMILY_OID: u32 = 4573;
 pub const BRIN_NETWORK_INCLUSION_FAMILY_OID: u32 = 4102;
 pub const BRIN_RANGE_INCLUSION_FAMILY_OID: u32 = 4103;
 pub const BRIN_BOX_INCLUSION_FAMILY_OID: u32 = 4104;
+pub const HASH_ARRAY_FAMILY_OID: u32 = 627;
 pub const HASH_BPCHAR_FAMILY_OID: u32 = 427;
 pub const HASH_CHAR_FAMILY_OID: u32 = 431;
 pub const HASH_DATE_FAMILY_OID: u32 = 435;
@@ -97,7 +98,6 @@ pub const HASH_UUID_FAMILY_OID: u32 = 2969;
 pub const HASH_RANGE_FAMILY_OID: u32 = 2224;
 pub const HASH_MULTIRANGE_FAMILY_OID: u32 = 4225;
 pub const HASH_JSONB_FAMILY_OID: u32 = 4034;
-pub const HASH_ARRAY_FAMILY_OID: u32 = 627;
 pub const HASH_RECORD_FAMILY_OID: u32 = 6194;
 pub const HASH_MACADDR_FAMILY_OID: u32 = 76230;
 pub const HASH_MACADDR8_FAMILY_OID: u32 = 76231;
@@ -438,6 +438,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         brin_row(BRIN_NETWORK_INCLUSION_FAMILY_OID, "network_inclusion_ops"),
         brin_row(BRIN_RANGE_INCLUSION_FAMILY_OID, "range_inclusion_ops"),
         brin_row(BRIN_BOX_INCLUSION_FAMILY_OID, "box_inclusion_ops"),
+        hash_row(HASH_ARRAY_FAMILY_OID, "array_ops"),
         hash_row(HASH_BPCHAR_FAMILY_OID, "bpchar_ops"),
         hash_row(HASH_CHAR_FAMILY_OID, "char_ops"),
         hash_row(HASH_DATE_FAMILY_OID, "date_ops"),
@@ -447,7 +448,6 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_NUMERIC_FAMILY_OID, "numeric_ops"),
         hash_row(HASH_OID_FAMILY_OID, "oid_ops"),
         hash_row(HASH_ENUM_FAMILY_OID, "enum_ops"),
-        hash_row(HASH_ARRAY_FAMILY_OID, "array_ops"),
         hash_row(HASH_RECORD_FAMILY_OID, "record_ops"),
         hash_row(HASH_TEXT_FAMILY_OID, "text_ops"),
         hash_row(HASH_TIME_FAMILY_OID, "time_ops"),

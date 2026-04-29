@@ -553,6 +553,7 @@ fn prefer_partitionwise_aggregate_path_cost(path: Path, existing_paths: &[Path])
             source_id,
             desc,
             child_roots,
+            partition_prune,
             children,
         } => Path::Append {
             plan_info: PlanEstimate::new(
@@ -567,6 +568,7 @@ fn prefer_partitionwise_aggregate_path_cost(path: Path, existing_paths: &[Path])
             source_id,
             desc,
             child_roots,
+            partition_prune,
             children,
         },
         Path::Aggregate {
@@ -1147,6 +1149,7 @@ fn nested_partitionwise_aggregate_path(
         source_id,
         desc,
         child_roots,
+        partition_prune,
         children,
     } = input
     else {
@@ -1219,6 +1222,7 @@ fn nested_partitionwise_aggregate_path(
         source_id,
         desc,
         child_roots,
+        partition_prune,
         children,
     };
     let input = prepare_aggregate_input_for_strategy(
@@ -1323,6 +1327,7 @@ fn full_partitionwise_aggregate_path(
             source_id,
             desc,
             items: pathkeys_to_order_items(&group_pathkeys),
+            partition_prune: None,
             children,
         }
     } else {
@@ -1334,6 +1339,7 @@ fn full_partitionwise_aggregate_path(
             source_id,
             desc,
             child_roots: Vec::new(),
+            partition_prune: None,
             children,
         }
     };
@@ -1400,6 +1406,7 @@ fn partial_partitionwise_aggregate_path(
             source_id: partial_source_id,
             desc: partial_desc,
             items: pathkeys_to_order_items(&partial_group_pathkeys),
+            partition_prune: None,
             children,
         }
     } else {
@@ -1411,6 +1418,7 @@ fn partial_partitionwise_aggregate_path(
             source_id: partial_source_id,
             desc: partial_desc,
             child_roots: Vec::new(),
+            partition_prune: None,
             children,
         }
     };

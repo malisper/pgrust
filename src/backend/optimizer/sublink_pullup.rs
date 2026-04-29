@@ -218,6 +218,8 @@ fn subquery_comparison_op_expr_kind(op: SubqueryComparisonOp) -> Option<OpExprKi
         SubqueryComparisonOp::Gt => OpExprKind::Gt,
         SubqueryComparisonOp::GtEq => OpExprKind::GtEq,
         SubqueryComparisonOp::Match
+        | SubqueryComparisonOp::RegexMatch
+        | SubqueryComparisonOp::NotRegexMatch
         | SubqueryComparisonOp::Like
         | SubqueryComparisonOp::NotLike
         | SubqueryComparisonOp::ILike

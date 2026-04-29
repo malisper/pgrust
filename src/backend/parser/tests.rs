@@ -6445,11 +6445,11 @@ fn parse_expression_entrypoint_reuses_sql_expression_grammar() {
     let expr = parse_expr("a <% b").unwrap();
     assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "<%"));
 
-    let expr = parse_expr("a <<< b").unwrap();
-    assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "<<<"));
-
     let expr = parse_expr("a === b").unwrap();
     assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "==="));
+
+    let expr = parse_expr("a <<< b").unwrap();
+    assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "<<<"));
 }
 
 #[test]
@@ -9037,7 +9037,7 @@ fn float_mod_is_rejected_at_bind_time() {
         &catalog(),
     )
     .unwrap_err();
-    assert!(matches!(err, ParseError::UndefinedOperator { op, .. } if op == "%"));
+    assert!(matches!(err, ParseError::UndefinedOperator { op: "%", .. }));
 }
 
 #[test]
@@ -9059,7 +9059,7 @@ fn build_plan_rejects_missing_catalog_comparison_operator() {
         &catalog(),
     )
     .unwrap_err();
-    assert!(matches!(err, ParseError::UndefinedOperator { op, .. } if op == "="));
+    assert!(matches!(err, ParseError::UndefinedOperator { op: "=", .. }));
 }
 
 #[test]
@@ -9293,10 +9293,10 @@ fn build_plan_handles_in_list_nulls_and_not_in_operator() {
     assert!(matches!(
         err,
         ParseError::UndefinedOperator {
-            op,
+            op: "=",
             left_type,
             right_type,
-        } if op == "=" && left_type == "point" && right_type == "box"
+        } if left_type == "point" && right_type == "box"
     ));
 }
 
@@ -9495,10 +9495,10 @@ fn analyze_date_time_arithmetic_uses_postgres_result_types() {
     assert!(matches!(
         err,
         ParseError::UndefinedOperator {
-            op,
+            op: "-",
             left_type,
             right_type,
-        } if op == "-" && left_type == "date" && right_type == "time with time zone"
+        } if left_type == "date" && right_type == "time with time zone"
     ));
 }
 
@@ -10766,7 +10766,7 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("prepare q as select * from cmdata").unwrap(), Statement::Prepare(PrepareStatement { name, .. }) if name == "q")
     );
     assert!(
-        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute(ExecuteStatement { name, args_sql, .. }), .. }) if name == "q" && args_sql.is_empty())
+        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute(ExecuteStatement { name, args_sql }), .. }) if name == "q" && args_sql.is_empty())
     );
     assert!(
         matches!(parse_statement("deallocate prepare q").unwrap(), Statement::Deallocate(DeallocateStatement { name: Some(name) }) if name == "q")
@@ -11061,6 +11061,23 @@ fn parse_merge_returning_clause() {
         other => panic!("expected merge statement, got {other:?}"),
     };
     assert_eq!(stmt.returning.len(), 4);
+}
+
+#[test]
+fn parse_merge_joined_source() {
+    let stmt = parse_statement(
+        "merge into target t \
+         using (select stable_one() as pid) as q join source s on q.pid = s.sid \
+         on t.tid = s.sid \
+         when matched then delete returning t.tid",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert!(matches!(stmt.source, FromItem::Join { .. }));
+    assert_eq!(stmt.returning.len(), 1);
 }
 
 #[test]
@@ -15828,28 +15845,37 @@ fn build_plan_allows_using_merged_primary_key_for_grouped_functional_dependency(
 
 #[test]
 fn parse_prepare_and_execute_statements() {
-    let stmt = parse_statement("prepare foo as select id from people group by id").unwrap();
+    let stmt = parse_statement(
+        "prepare foo (int, text) as select id from people where id = $1 group by id",
+    )
+    .unwrap();
     match stmt {
         Statement::Prepare(PrepareStatement {
-            name, statement, ..
+            name,
+            parameter_types,
+            query,
+            ..
         }) => {
             assert_eq!(name, "foo");
-            let Statement::Select(query) = statement.as_ref() else {
-                panic!("expected prepared SELECT, got {statement:?}");
+            assert_eq!(parameter_types.len(), 2);
+            let PreparedStatementQuery::Select(query) = query else {
+                panic!("expected SELECT prepared query, got {query:?}");
             };
             assert_eq!(query.group_by.len(), 1);
+            assert!(matches!(
+                query.where_clause,
+                Some(SqlExpr::Eq(_, ref right)) if matches!(right.as_ref(), SqlExpr::Parameter(1))
+            ));
         }
         other => panic!("expected PREPARE statement, got {other:?}"),
     }
 
-    let stmt = parse_statement("execute foo").unwrap();
+    let stmt = parse_statement("execute foo(1, 'x')").unwrap();
     assert_eq!(
         stmt,
         Statement::Execute(ExecuteStatement {
             name: "foo".into(),
-            args_sql: Vec::new(),
-            args: Vec::new(),
-            arg_sqls: Vec::new(),
+            args_sql: vec!["1".into(), "'x'".into()],
         })
     );
 
@@ -15858,7 +15884,7 @@ fn parse_prepare_and_execute_statements() {
         Statement::Prepare(PrepareStatement {
             name,
             parameter_types,
-            statement,
+            query,
             ..
         }) => {
             assert_eq!(name, "foo");
@@ -15866,8 +15892,8 @@ fn parse_prepare_and_execute_statements() {
                 parameter_types,
                 vec![RawTypeName::builtin(SqlTypeKind::Bool)]
             );
-            let Statement::Select(query) = statement.as_ref() else {
-                panic!("expected prepared SELECT, got {statement:?}");
+            let PreparedStatementQuery::Select(query) = query else {
+                panic!("expected SELECT prepared query, got {query:?}");
             };
             assert_eq!(query.targets.len(), 1);
         }
@@ -15875,31 +15901,24 @@ fn parse_prepare_and_execute_statements() {
     }
 
     let stmt = parse_statement("execute foo(true)").unwrap();
-    match stmt {
+    assert_eq!(
+        stmt,
         Statement::Execute(ExecuteStatement {
-            name,
-            args_sql,
-            args,
-            arg_sqls,
-        }) => {
-            assert_eq!(name, "foo");
-            assert_eq!(args_sql, vec!["true"]);
-            assert_eq!(arg_sqls, vec!["true"]);
-            assert_eq!(args.len(), 1);
-        }
-        other => panic!("expected EXECUTE statement, got {other:?}"),
-    }
+            name: "foo".into(),
+            args_sql: vec!["true".into()],
+        })
+    );
 
     let stmt = parse_statement("prepare foo (xml, text) as select $1").unwrap();
     match stmt {
         Statement::Prepare(PrepareStatement {
             parameter_types,
-            statement,
+            query,
             ..
         }) => {
             assert_eq!(parameter_types.len(), 2);
-            let Statement::Select(query) = statement.as_ref() else {
-                panic!("expected prepared SELECT, got {statement:?}");
+            let PreparedStatementQuery::Select(query) = query else {
+                panic!("expected SELECT prepared query, got {query:?}");
             };
             assert!(matches!(query.targets[0].expr, SqlExpr::Parameter(1)));
         }
@@ -15914,53 +15933,12 @@ fn parse_prepare_and_execute_statements() {
         other => panic!("expected EXECUTE statement, got {other:?}"),
     }
 
-    let stmt = parse_statement("prepare q (int, text) as select $1, $2").unwrap();
-    match stmt {
-        Statement::Prepare(PrepareStatement {
-            name, statement, ..
-        }) => {
-            assert_eq!(name, "q");
-            let Statement::Select(query) = statement.as_ref() else {
-                panic!("expected prepared SELECT, got {statement:?}");
-            };
-            assert!(matches!(query.targets[0].expr, SqlExpr::Parameter(1)));
-            assert!(matches!(query.targets[1].expr, SqlExpr::Parameter(2)));
-        }
-        other => panic!("expected PREPARE statement with params, got {other:?}"),
-    }
-
-    let stmt =
-        parse_statement("prepare uq (int) as update people set id = $1 returning id").unwrap();
-    match stmt {
-        Statement::Prepare(PrepareStatement {
-            name, statement, ..
-        }) => {
-            assert_eq!(name, "uq");
-            assert!(matches!(statement.as_ref(), Statement::Update(_)));
-        }
-        other => panic!("expected PREPARE UPDATE statement, got {other:?}"),
-    }
-
-    let stmt = parse_statement("execute q(1 + 2, 'x')").unwrap();
-    match stmt {
-        Statement::Execute(ExecuteStatement { name, arg_sqls, .. }) => {
-            assert_eq!(name, "q");
-            assert_eq!(arg_sqls, vec!["1 + 2".to_string(), "'x'".to_string()]);
-        }
-        other => panic!("expected EXECUTE statement with args, got {other:?}"),
-    }
-
-    let stmt = parse_statement("explain (costs off) execute q(1)").unwrap();
-    match stmt {
-        Statement::Explain(explain) => match explain.statement.as_ref() {
-            Statement::Execute(ExecuteStatement { name, arg_sqls, .. }) => {
-                assert_eq!(name, "q");
-                assert_eq!(arg_sqls.as_slice(), ["1"]);
-            }
-            other => panic!("expected EXECUTE under EXPLAIN, got {other:?}"),
-        },
-        other => panic!("expected EXPLAIN statement, got {other:?}"),
-    }
+    let stmt = parse_statement("explain execute foo(1)").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Explain(ExplainStatement { statement, .. })
+            if matches!(statement.as_ref(), Statement::Execute(ExecuteStatement { name, args_sql }) if name == "foo" && args_sql.len() == 1)
+    ));
 }
 
 #[test]

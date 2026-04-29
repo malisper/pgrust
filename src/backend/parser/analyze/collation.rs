@@ -24,6 +24,9 @@ pub(crate) fn consumer_for_subquery_comparison_op(
         | SubqueryComparisonOp::GtEq => CollationConsumer::StringComparison,
         SubqueryComparisonOp::Like | SubqueryComparisonOp::NotLike => CollationConsumer::Like,
         SubqueryComparisonOp::ILike | SubqueryComparisonOp::NotILike => CollationConsumer::ILike,
+        SubqueryComparisonOp::RegexMatch | SubqueryComparisonOp::NotRegexMatch => {
+            CollationConsumer::StringComparison
+        }
         SubqueryComparisonOp::Similar | SubqueryComparisonOp::NotSimilar => {
             CollationConsumer::Similar
         }

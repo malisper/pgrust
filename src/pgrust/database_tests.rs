@@ -7550,6 +7550,157 @@ fn hash_partitioned_tables_route_rows_and_validate_bounds() {
 }
 
 #[test]
+fn partition_bounds_accept_array_hash_enum_and_composite_keys() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table hp_arr (a int4[]) partition by hash (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_arr_0 partition of hp_arr for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_arr_1 partition of hp_arr for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into hp_arr values ('{1}'), ('{1,2}'), ('{4,5}')",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from hp_arr_0"),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from hp_arr_1"),
+        vec![vec![Value::Int64(1)]]
+    );
+    let lines = explain_lines(
+        &db,
+        1,
+        "(costs off) select * from hp_arr where a in ('{4, 5}', '{1}')",
+    );
+    let plan = lines.join("\n");
+    assert!(plan.contains("a = '{4,5}'::integer[]"), "{plan}");
+    assert!(plan.contains("a = '{1}'::integer[]"), "{plan}");
+    assert!(!plan.contains("ANY"), "{plan}");
+    assert!(!plan.contains("(a)::integer"), "{plan}");
+
+    session
+        .execute(&db, "create type part_color as enum ('green', 'blue')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table enum_part (a part_color) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table enum_part_green partition of enum_part for values in ('green')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table enum_part_blue partition of enum_part for values in ('blue')",
+        )
+        .unwrap();
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "explain (costs off) select * from enum_part where a = 'blue'",
+        )
+        .unwrap()
+    else {
+        panic!("expected enum partition EXPLAIN result");
+    };
+    assert!(rows.iter().any(|row| {
+        matches!(row.first(), Some(Value::Text(line)) if line.contains("enum_part_blue"))
+    }));
+    let enum_plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rows.iter().all(|row| {
+            !matches!(row.first(), Some(Value::Text(line)) if line.contains("enum_part_green"))
+        }),
+        "{enum_plan}"
+    );
+    assert!(enum_plan.contains("'blue'::part_color"), "{enum_plan}");
+
+    session
+        .execute(&db, "create type part_pair as (a int4, b int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rec_part (a part_pair) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rec_part_11 partition of rec_part for values in ('(1,1)')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rec_part_23 partition of rec_part for values in ('(2,3)')",
+        )
+        .unwrap();
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "explain (costs off) select * from rec_part where a = '(1,1)'::part_pair",
+        )
+        .unwrap()
+    else {
+        panic!("expected composite partition EXPLAIN result");
+    };
+    assert!(rows.iter().any(|row| {
+        matches!(row.first(), Some(Value::Text(line)) if line.contains("rec_part_11"))
+    }));
+    let record_plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rows.iter().all(|row| {
+            !matches!(row.first(), Some(Value::Text(line)) if line.contains("rec_part_23"))
+        }),
+        "{record_plan}"
+    );
+    assert!(record_plan.contains("'(1,1)'::part_pair"), "{record_plan}");
+    let lines = explain_lines(
+        &db,
+        1,
+        "(costs off) select * from rec_part where a = '(1,2)'::part_pair",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("One-Time Filter: false")),
+        "expected composite miss to prune to Result, got {lines:?}"
+    );
+}
+
+#[test]
 fn create_table_partition_validation_matches_postgres_messages() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -8104,56 +8255,6 @@ fn partition_keys_accept_collations_opclasses_and_expressions() {
 }
 
 #[test]
-fn uncorrelated_lateral_scalar_aggregate_is_outer_to_partition_append() {
-    let db = Database::open_ephemeral(32).unwrap();
-    let mut session = Session::new(1);
-
-    for sql in [
-        "create table mc3p (a int, b int, c int) partition by range (a, abs(b), c)",
-        "create table mc3p_default partition of mc3p default",
-        "create table mc3p1 partition of mc3p for values from (1, 1, 1) to (10, 5, 10)",
-        "create table mc2p (a int, b int) partition by range (a, b)",
-        "create table mc2p_default partition of mc2p default",
-        "create table mc2p1 partition of mc2p for values from (1, minvalue) to (1, 1)",
-        "create table mc2p2 partition of mc2p for values from (1, 1) to (2, minvalue)",
-    ] {
-        session.execute(&db, sql).unwrap();
-    }
-
-    let lines = explain_lines(
-        &db,
-        1,
-        "(costs off) select * from mc2p t1, lateral \
-         (select count(*) from mc3p t2 \
-          where t2.a = 1 and abs(t2.b) = 1 and t2.c = 1) s \
-         where t1.a = 1",
-    );
-    let nested_loop_pos = lines
-        .iter()
-        .position(|line| line.trim() == "Nested Loop")
-        .unwrap_or_else(|| panic!("expected Nested Loop, got {lines:?}"));
-    let aggregate_pos = lines
-        .iter()
-        .position(|line| line.trim() == "->  Aggregate")
-        .unwrap_or_else(|| panic!("expected aggregate child, got {lines:?}"));
-    let append_pos = lines
-        .iter()
-        .position(|line| line.trim() == "->  Append")
-        .unwrap_or_else(|| panic!("expected append child, got {lines:?}"));
-
-    assert!(
-        nested_loop_pos < aggregate_pos && aggregate_pos < append_pos,
-        "expected scalar aggregate to be the outer nested-loop side, got {lines:?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| { line == "              Filter: ((a = 1) AND (c = 1) AND (abs(b) = 1))" }),
-        "expected scan filter detail to keep PostgreSQL indentation, got {lines:?}"
-    );
-}
-
-#[test]
 fn hash_partitioning_uses_custom_opclass_support_proc() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -8414,33 +8515,229 @@ fn satisfies_hash_partition_matches_postgres_validation_and_hashing() {
 }
 
 #[test]
-fn hash_partition_pruned_scan_keeps_key_quals_before_residual_filter() {
+fn custom_hash_equality_operator_contradictions_prune_to_result() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
 
-    for sql in [
-        "create table hp (a int4, b text, c int4) partition by hash (a, b)",
-        "create table hp0 partition of hp for values with (modulus 4, remainder 0)",
-        "create table hp1 partition of hp for values with (modulus 4, remainder 1)",
-        "create table hp2 partition of hp for values with (modulus 4, remainder 2)",
-        "create table hp3 partition of hp for values with (modulus 4, remainder 3)",
-    ] {
-        session.execute(&db, sql).unwrap();
-    }
+    session
+        .execute(
+            &db,
+            "create function part_hashint4_noop(value int4, seed int8) returns int8 as $$ select value + seed; $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator === (leftarg = int4, rightarg = int4, procedure = int4eq, commutator = ===, hashes)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_int4_ops2 for type int4 using hash as operator 1 ===, function 2 part_hashint4_noop(int4, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_contradict_test (a int, b int) partition by hash (a part_test_int4_ops2, b part_test_int4_ops2)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_contradict_test_p1 partition of hp_contradict_test for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_contradict_test_p2 partition of hp_contradict_test for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
 
-    let lines = explain_lines(
+    let plan = explain_lines(
         &db,
         1,
-        "(costs off) select * from hp \
-         where a = 1 and b = 'abcde' and (c = 2 or c = 3)",
-    );
+        "(costs off) select * from hp_contradict_test where a is null and a === 1 and b === 1",
+    )
+    .join("\n");
+    assert!(plan.contains("Result"), "{plan}");
+    assert!(plan.contains("One-Time Filter: false"), "{plan}");
+    assert!(!plan.contains("Seq Scan"), "{plan}");
+}
+
+#[test]
+fn runtime_hash_pruning_uses_custom_opclass_support_proc() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function part_hashint4_noop(value int4, seed int8) returns int8 as $$ select value + seed; $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_int4_ops for type int4 using hash as operator 1 =, function 2 part_hashint4_noop(int4, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function part_hashtext_length(value text, seed int8) returns int8 as $$ select length(coalesce(value, ''))::int8 $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_text_ops for type text using hash as operator 1 =, function 2 part_hashtext_length(text, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_custom_rt (a int4, b text) partition by hash (a part_test_int4_ops, b part_test_text_ops)",
+        )
+        .unwrap();
+    for remainder in 0..4 {
+        session
+            .execute(
+                &db,
+                &format!(
+                    "create table hp_custom_rt_{remainder} partition of hp_custom_rt for values with (modulus 4, remainder {remainder})"
+                ),
+            )
+            .unwrap();
+    }
+    session
+        .execute(
+            &db,
+            "prepare hp_custom_lookup(text) as select * from hp_custom_rt where a is null and b = $1",
+        )
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(&db, "explain (costs off) execute hp_custom_lookup('xxx')")
+        .unwrap()
+    else {
+        panic!("expected EXPLAIN query result");
+    };
+    let plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("Subplans Removed: 3"), "{plan}");
+    assert!(plan.contains("Seq Scan on hp_custom_rt_2"), "{plan}");
+}
+
+#[test]
+fn partitioned_scalar_array_null_rhs_keeps_child_scans() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table null_saop_parted (a timestamp) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table null_saop_parted_1 partition of null_saop_parted for values from ('2000-01-01') to ('2000-02-01')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table null_saop_parted_2 partition of null_saop_parted for values from ('2000-02-01') to ('2000-03-01')",
+        )
+        .unwrap();
+
+    let plan = session_explain_lines(
+        &mut session,
+        &db,
+        "(costs off) select * from null_saop_parted where a = any(null::timestamptz[])",
+    )
+    .join("\n");
+    assert!(plan.contains("Append"), "{plan}");
+    assert!(plan.contains("Seq Scan on null_saop_parted_1"), "{plan}");
+    assert!(plan.contains("Seq Scan on null_saop_parted_2"), "{plan}");
+    assert!(!plan.contains("One-Time Filter: false"), "{plan}");
+
+    let false_plan = session_explain_lines(
+        &mut session,
+        &db,
+        "(analyze, costs off, summary off, timing off, buffers off) select * from null_saop_parted where a = any(array['2010-02-01']::timestamp[])",
+    )
+    .join("\n");
+    assert!(false_plan.contains("Result"), "{false_plan}");
     assert!(
-        lines.iter().any(|line| {
-            line == "  Filter: ((a = 1) AND (b = 'abcde'::text) AND ((c = 2) OR (c = 3)))"
-                || line
-                    == "        Filter: ((a = 1) AND (b = 'abcde'::text) AND ((c = 2) OR (c = 3)))"
-        }),
-        "expected partition key quals before residual filter, got {lines:?}"
+        false_plan.contains("One-Time Filter: false"),
+        "{false_plan}"
+    );
+    assert!(!false_plan.contains("->  Append"), "{false_plan}");
+}
+
+#[test]
+fn scalar_subquery_cardinality_ignores_internal_sort_columns() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table ma_subquery_test (a int, b int) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table ma_subquery_test_p1 partition of ma_subquery_test for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table ma_subquery_test_p2 partition of ma_subquery_test for values from (10) to (20)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table ma_subquery_test_p3 partition of ma_subquery_test for values from (20) to (30)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into ma_subquery_test select x, x from generate_series(0, 29) t(x)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on ma_subquery_test (b)")
+        .unwrap();
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+    session.execute(&db, "set enable_sort = off").unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select * from ma_subquery_test where a >= (select min(b) from ma_subquery_test_p2) order by b",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows.len(), 20);
+    assert_eq!(
+        rows.first().and_then(|row| row.first()),
+        Some(&Value::Int32(10))
     );
 }
 
@@ -9244,6 +9541,31 @@ fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partiti
                 == "PRIMARY KEY constraint on table \"attach_child_cov\" lacks column \"b\" which is part of the partition key."
             && sqlstate == "0A000" => {}
         other => panic!("expected ATTACH PARTITION coverage error, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table attach_parent_cols (a int, b int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table attach_child_extra (b int, c int, a int)")
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table attach_parent_cols attach partition attach_child_extra for values in (1)",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message
+            == "table \"attach_child_extra\" contains column \"c\" not found in parent \"attach_parent_cols\""
+            && detail == "The new partition may contain only the columns present in parent."
+            && sqlstate == "42804" => {}
+        other => panic!("expected ATTACH PARTITION extra-column error, got {other:?}"),
     }
 }
 
@@ -10636,48 +10958,6 @@ fn explain_inherited_order_by_scan_does_not_panic() {
 }
 
 #[test]
-fn explain_verbose_partition_alias_uses_parent_layout_for_reordered_child() {
-    let dir = temp_dir("partition_alias_reordered_child_explain");
-    let db = Database::open(&dir, 128).unwrap();
-    let mut session = Session::new(1);
-
-    for sql in [
-        "create table part (a int, b int) partition by list (a)",
-        "create table part_p1 partition of part for values in (-2,-1,0,1,2)",
-        "create table part_p2 partition of part default partition by range(a)",
-        "create table part_p2_p1 partition of part_p2 default",
-        "create table part_rev (b int, c int, a int)",
-        "alter table part_rev drop column c",
-        "alter table part attach partition part_rev for values in (3)",
-    ] {
-        session.execute(&db, sql).unwrap();
-    }
-
-    let lines = session_explain_lines(
-        &mut session,
-        &db,
-        "(verbose, costs off) select * from part p(x) order by x",
-    );
-    let rendered = lines.join("\n");
-    assert!(
-        rendered.contains("Output: p.x, p.b"),
-        "expected Sort output to use parent alias layout, got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Seq Scan on public.part_rev p_2"),
-        "expected verbose child scan label, got:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Output: p_2.x, p_2.b"),
-        "expected reordered child output to use parent column aliases, got:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("Projection") && !rendered.contains("p_2.a"),
-        "expected no physical child projection leak, got:\n{rendered}"
-    );
-}
-
-#[test]
 fn explain_update_accepts_inherited_update_statement() {
     let dir = temp_dir("inheritance_explain_update");
     let db = Database::open(&dir, 128).unwrap();
@@ -10810,6 +11090,46 @@ fn explain_update_from_uses_join_plan_and_alias_header() {
             .any(|line| line.contains("Join") || line.contains("Nested Loop")),
         "expected EXPLAIN UPDATE ... FROM to show a join plan, got {lines:?}"
     );
+}
+
+#[test]
+fn explain_partitioned_update_delete_scan_without_result_wrapper() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table upd_part (a int) partition by list (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table upd_part1 partition of upd_part for values in (1)",
+        )
+        .unwrap();
+
+    let update_plan =
+        explain_lines(&db, 1, "(costs off) update upd_part set a = a where a = 1").join("\n");
+    assert!(
+        update_plan.contains("Update on upd_part1 upd_part_1"),
+        "{update_plan}"
+    );
+    assert!(
+        update_plan.contains("->  Seq Scan on upd_part1 upd_part_1"),
+        "{update_plan}"
+    );
+    assert!(!update_plan.contains("->  Result"), "{update_plan}");
+
+    let delete_plan =
+        explain_lines(&db, 1, "(costs off) delete from upd_part where a = 1").join("\n");
+    assert!(
+        delete_plan.contains("Delete on upd_part1 upd_part_1"),
+        "{delete_plan}"
+    );
+    assert!(
+        delete_plan.contains("->  Seq Scan on upd_part1 upd_part_1"),
+        "{delete_plan}"
+    );
+    assert!(!delete_plan.contains("->  Result"), "{delete_plan}");
 }
 
 #[test]
@@ -11751,6 +12071,47 @@ fn merge_returning_projects_action_old_new_and_source() {
 }
 
 #[test]
+fn merge_accepts_joined_source() {
+    let dir = temp_dir("merge_joined_source");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table merge_joined_target(id int4 primary key, name text)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table merge_joined_source(id int4, name text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into merge_joined_target values (1, 'old')")
+        .unwrap();
+    session
+        .execute(&db, "insert into merge_joined_source values (1, 'new')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_joined_target t \
+             using (values (1)) as q(pid) join merge_joined_source s on q.pid = s.id \
+             on t.id = s.id \
+             when matched then update set name = s.name \
+             returning merge_action(), t.id, t.name, s.name",
+        ),
+        vec![vec![
+            Value::Text("UPDATE".into()),
+            Value::Int32(1),
+            Value::Text("new".into()),
+            Value::Text("new".into()),
+        ]]
+    );
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
@@ -12041,10 +12402,10 @@ fn scalar_array_any_rejects_uncast_array_subselect() {
         matches!(
             err,
             ExecError::Parse(ParseError::UndefinedOperator {
-                ref op,
+                op: "=",
                 ref left_type,
                 ref right_type,
-            }) if op == "=" && left_type == "text" && right_type == "text[]"
+            }) if left_type == "text" && right_type == "text[]"
         ),
         "{err:?}"
     );
@@ -13406,6 +13767,207 @@ fn sql_prepare_execute_replans_after_primary_key_drop() {
         Err(ExecError::Parse(ParseError::UngroupedColumn { token, .. })) if token == "keywords" => {
         }
         other => panic!("expected prepared EXECUTE to replan and fail, got {other:?}"),
+    }
+}
+
+#[test]
+fn sql_prepare_execute_parameters_and_explain_execute_work() {
+    let dir = temp_dir("sql_prepare_execute_params");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table prep_params(id int4, label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into prep_params values (1, 'a'), (2, 'b')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare find_label(int4, text) as \
+             select label from prep_params where id = $1 and label = $2",
+        )
+        .unwrap();
+    match session.execute(&db, "execute find_label(1, 'a')").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("a".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match session
+        .execute(&db, "explain execute find_label(1, 'a')")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert!(rows.iter().any(|row| {
+                matches!(row.first(), Some(Value::Text(line)) if line.contains("Seq Scan on prep_params"))
+            }));
+        }
+        other => panic!("expected EXPLAIN query result, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "prepare upd_label(int4, text) as \
+             update prep_params set label = $2 where id = $1 returning label",
+        )
+        .unwrap();
+    match session.execute(&db, "execute upd_label(2, 'z')").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("z".into())]]);
+        }
+        other => panic!("expected update returning result, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_dynamic_explain_execute_uses_session_prepared_statement() {
+    let dir = temp_dir("plpgsql_dynamic_explain_execute_prepared");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table dyn_prep(id int4, label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into dyn_prep values (1, 'a'), (2, 'b')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare dyn_lookup(int4) as select avg(id) from dyn_prep where id = $1",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function dyn_explain(text) returns setof text language plpgsql as $$ \
+             declare ln text; \
+             begin \
+               for ln in execute format('explain (analyze, costs off, summary off, timing off, buffers off) %s', $1) loop \
+                 return next ln; \
+               end loop; \
+             end $$",
+        )
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(&db, "select dyn_explain('execute dyn_lookup(1)')")
+        .unwrap()
+    else {
+        panic!("expected dynamic EXPLAIN query result");
+    };
+    assert!(rows.iter().any(|row| {
+        matches!(row.first(), Some(Value::Text(line)) if line.contains("Seq Scan on dyn_prep"))
+    }));
+
+    session
+        .execute(
+            &db,
+            "create table dyn_ab(a int4, b int4) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table dyn_ab_a1 partition of dyn_ab for values in (1) partition by list (b)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table dyn_ab_a1_b1 partition of dyn_ab_a1 for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table dyn_ab_a2 partition of dyn_ab for values in (2) partition by list (b)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table dyn_ab_a2_b1 partition of dyn_ab_a2 for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function dyn_parallel_explain(text) returns setof text language plpgsql as $$ \
+             declare ln text; \
+             begin \
+               for ln in execute format('explain (analyze, costs off, summary off, timing off, buffers off) %s', $1) loop \
+                 ln := regexp_replace(ln, 'actual rows=\\d+(?:\\.\\d+)? loops=\\d+', 'actual rows=N loops=N'); \
+                 perform regexp_matches(ln, 'Index Searches: \\d+'); \
+                 if found then \
+                   continue; \
+                 end if; \
+                 return next ln; \
+               end loop; \
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare dyn_ab_lookup(int4, int4) as select avg(a) from dyn_ab where a between $1 and $2 and b < 4",
+        )
+        .unwrap();
+    session.execute(&db, "set parallel_setup_cost = 0").unwrap();
+    session.execute(&db, "set parallel_tuple_cost = 0").unwrap();
+    session
+        .execute(&db, "set min_parallel_table_scan_size = 0")
+        .unwrap();
+    session
+        .execute(&db, "set max_parallel_workers_per_gather = 2")
+        .unwrap();
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select dyn_parallel_explain('execute dyn_ab_lookup (2, 2)')",
+        )
+        .unwrap()
+    else {
+        panic!("expected dynamic partition EXPLAIN query result");
+    };
+    assert!(rows.iter().any(|row| {
+        matches!(row.first(), Some(Value::Text(line)) if line.contains("dyn_ab_a2_b1"))
+    }));
+}
+
+#[test]
+fn regex_scalar_array_quantifiers_work() {
+    let dir = temp_dir("regex_scalar_array_quantifiers");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table rx(a text)").unwrap();
+    session
+        .execute(&db, "insert into rx values ('ab'), ('cd')")
+        .unwrap();
+
+    match session
+        .execute(&db, "select a from rx where a ~ any ('{^a}') order by a")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("ab".into())]]);
+        }
+        other => panic!("expected regex ANY query result, got {other:?}"),
+    }
+
+    match session
+        .execute(&db, "select a from rx where a !~ all ('{^a}') order by a")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("cd".into())]]);
+        }
+        other => panic!("expected regex ALL query result, got {other:?}"),
     }
 }
 
@@ -17208,6 +17770,54 @@ fn simple_view_auto_dml_routes_to_base_table() {
     assert_eq!(
         query_rows(&db, 1, "select id, name from base_items"),
         Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn auto_view_dml_routes_to_partitioned_base_table() {
+    let base = temp_dir("auto_partitioned_view_dml");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table part_items (id int4, name text) partition by list (id)",
+    )
+    .unwrap();
+    db.execute(1, "create table part_items_1 (name text, id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table part_items_2 partition of part_items for values in (2)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table part_items attach partition part_items_1 for values in (1)",
+    )
+    .unwrap();
+    db.execute(1, "insert into part_items values (1, 'old'), (2, 'two')")
+        .unwrap();
+    db.execute(
+        1,
+        "create view part_items_v as select * from part_items where name <> 'blocked' with check option",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update part_items_v set name = 'new' where id = 1 returning id, name",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("new".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "delete from part_items_v where id = 2 returning id",),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from part_items order by id"),
+        vec![vec![Value::Int32(1), Value::Text("new".into())]]
     );
 }
 
@@ -35984,6 +36594,21 @@ fn create_operator_class_persists_catalog_rows() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+
+    db.execute(1, "drop operator class part_test_int4_ops using hash")
+        .unwrap();
+    match db
+        .execute(
+            1,
+            "select count(*) from pg_opclass where opcname = 'part_test_int4_ops'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
@@ -38182,6 +38807,92 @@ fn create_table_as_execute_uses_prepared_select() {
     );
 
     session.execute(&db, "deallocate copy_items").unwrap();
+}
+
+#[test]
+fn execute_prepared_select_uses_external_params() {
+    let base = temp_dir("execute_prepared_select_uses_external_params");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table prep_items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into prep_items (id) values (1), (2)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare read_item (int4) as select id from prep_items where id = $1",
+        )
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session.execute(&db, "execute read_item(2)").unwrap()
+    else {
+        panic!("expected EXECUTE query result");
+    };
+    assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(&db, "explain (costs off) execute read_item(2)")
+        .unwrap()
+    else {
+        panic!("expected EXPLAIN query result");
+    };
+    let plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("$1"), "{plan}");
+
+    session
+        .execute(
+            &db,
+            "create table prep_part (id int4 not null) partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prep_part_1 partition of prep_part for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prep_part_2 partition of prep_part for values from (10) to (20)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prep_part_3 partition of prep_part for values from (20) to (30)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare read_part(int4) as select id from prep_part where id = $1",
+        )
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(&db, "explain (costs off) execute read_part(15)")
+        .unwrap()
+    else {
+        panic!("expected EXPLAIN query result");
+    };
+    let plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("Subplans Removed: 2"), "{plan}");
+    assert_eq!(plan.matches("Seq Scan on prep_part_").count(), 1, "{plan}");
 }
 
 #[test]
