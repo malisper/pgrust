@@ -1,5 +1,5 @@
 use crate::backend::executor::eval_expr;
-use crate::backend::executor::value_io::format_failing_row_detail;
+use crate::backend::executor::value_io::format_failing_row_detail_for_columns;
 use crate::backend::parser::BoundRelationConstraints;
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::include::nodes::datum::Value;
@@ -31,7 +31,11 @@ pub(crate) fn enforce_relation_constraints(
                 relation: relation_name.to_string(),
                 column: column.name.clone(),
                 constraint: constraint_name,
-                detail: Some(format_failing_row_detail(values, &ctx.datetime_config)),
+                detail: Some(format_failing_row_detail_for_columns(
+                    values,
+                    &desc.columns,
+                    &ctx.datetime_config,
+                )),
             });
         }
     }
@@ -52,7 +56,11 @@ pub(crate) fn enforce_relation_constraints(
                 return Err(ExecError::CheckViolation {
                     relation: relation_name.to_string(),
                     constraint: check.constraint_name.clone(),
-                    detail: Some(format_failing_row_detail(values, &ctx.datetime_config)),
+                    detail: Some(format_failing_row_detail_for_columns(
+                        values,
+                        &desc.columns,
+                        &ctx.datetime_config,
+                    )),
                 });
             }
             _ => {
@@ -74,7 +82,7 @@ pub(crate) fn enforce_relation_constraints(
 
 pub(crate) fn enforce_row_security_write_checks(
     relation_name: &str,
-    _desc: &RelationDesc,
+    desc: &RelationDesc,
     checks: &[RlsWriteCheck],
     values: &[Value],
     ctx: &mut ExecutorContext,
@@ -93,7 +101,11 @@ pub(crate) fn enforce_row_security_write_checks(
                 {
                     return Err(ExecError::DetailedError {
                         message: format!("new row violates check option for view \"{view_name}\""),
-                        detail: Some(format_failing_row_detail(values, &ctx.datetime_config)),
+                        detail: Some(format_failing_row_detail_for_columns(
+                            values,
+                            &desc.columns,
+                            &ctx.datetime_config,
+                        )),
                         hint: None,
                         sqlstate: "44000",
                     });

@@ -144,6 +144,34 @@ fn relation_name_for_error(catalog: &dyn CatalogLookup, relation_oid: u32) -> St
         .unwrap_or_else(|| relation_oid.to_string())
 }
 
+fn reject_partition_key_type_change(
+    relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
+    column_index: usize,
+) -> Result<(), ExecError> {
+    if relation.relkind != 'p' {
+        return Ok(());
+    }
+    let spec =
+        crate::backend::parser::relation_partition_spec(relation).map_err(ExecError::Parse)?;
+    if spec
+        .key_exprs
+        .iter()
+        .any(|expr| crate::backend::parser::expr_references_column(expr, column_index))
+    {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot alter column \"{}\" because it is part of the partition key of relation \"{}\"",
+                relation.desc.columns[column_index].name, relation_name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    Ok(())
+}
+
 fn reject_inherited_type_change_conflicts(
     catalog: &dyn CatalogLookup,
     target_relation_oids: &BTreeSet<u32>,
@@ -234,6 +262,31 @@ fn timezone_is_utc_for_alter_column_type(time_zone: &str) -> bool {
     )
 }
 
+fn reject_direct_inherited_column_type_change(
+    catalog: &dyn CatalogLookup,
+    target_relation_oids: &BTreeSet<u32>,
+    relation: &crate::backend::parser::BoundRelation,
+    column_index: usize,
+) -> Result<(), ExecError> {
+    let column = &relation.desc.columns[column_index];
+    if column.attinhcount <= 0 {
+        return Ok(());
+    }
+    let recursing_from_parent = catalog
+        .inheritance_parents(relation.relation_oid)
+        .into_iter()
+        .any(|parent| target_relation_oids.contains(&parent.inhparent));
+    if recursing_from_parent {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("cannot alter inherited column \"{}\"", column.name),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    })
+}
+
 fn collect_alter_column_type_targets(
     db: &Database,
     catalog: &dyn CatalogLookup,
@@ -274,11 +327,35 @@ fn collect_alter_column_type_targets(
             target_relation.relation_oid,
             "ALTER TABLE ALTER COLUMN TYPE on relation without dependent views",
         )?;
+        if let Some(column_index) =
+            target_relation
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    (!column.dropped && column.name.eq_ignore_ascii_case(&alter_stmt.column_name))
+                        .then_some(index)
+                })
+        {
+            reject_direct_inherited_column_type_change(
+                catalog,
+                &target_relation_oids,
+                &target_relation,
+                column_index,
+            )?;
+            reject_partition_key_type_change(
+                &target_relation,
+                &relation_name_for_error(catalog, target_relation.relation_oid),
+                column_index,
+            )?;
+        }
         let plan = validate_alter_table_alter_column_type(
             catalog,
             &target_relation.desc,
             &alter_stmt.column_name,
             &alter_stmt.ty,
+            alter_stmt.collation.as_deref(),
             alter_stmt.using_expr.as_ref(),
         )?;
         reject_column_type_change_with_rule_dependencies(
@@ -341,7 +418,7 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            crate::pgrust::database::relation_lock_tag(&relation),
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -361,7 +438,10 @@ impl Database {
             );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(
+            crate::pgrust::database::relation_lock_tag(&relation),
+            client_id,
+        );
         result
     }
 

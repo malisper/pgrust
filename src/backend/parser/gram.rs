@@ -23276,6 +23276,7 @@ fn build_alter_table_alter_column_type(
     let mut table_name = None;
     let mut column_name = None;
     let mut ty = None;
+    let mut collation = None;
     let mut using_expr = None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -23292,6 +23293,13 @@ fn build_alter_table_alter_column_type(
                 for inner in part.into_inner() {
                     match inner.as_rule() {
                         Rule::type_name => ty = Some(build_type_name(inner)),
+                        Rule::collate_suffix => {
+                            collation = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::collation_name)
+                                .map(build_collation_name)
+                                .transpose()?;
+                        }
                         Rule::alter_table_using_clause => {
                             let expr = inner
                                 .into_inner()
@@ -23312,6 +23320,7 @@ fn build_alter_table_alter_column_type(
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         ty: ty.ok_or(ParseError::UnexpectedEof)?,
+        collation,
         using_expr,
     })
 }
