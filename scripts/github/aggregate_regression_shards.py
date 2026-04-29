@@ -37,6 +37,43 @@ def shard_index_from_dir(path: Path) -> int | None:
         return None
 
 
+def collect_memory_peaks(shard_dir: Path, shard_index: int) -> list[dict]:
+    """Read a shard's per-test memory_peaks.jsonl, return enriched records.
+
+    Returns [] when the file is missing, malformed, or when peak_rss_kb is 0
+    (no signal). Each surviving record carries shard_index for downstream UI.
+    """
+    peaks_path = shard_dir / "memory_peaks.jsonl"
+    if not peaks_path.exists():
+        return []
+    records = []
+    for line in peaks_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        try:
+            peak_kb = int(record.get("peak_rss_kb", 0))
+        except (TypeError, ValueError):
+            continue
+        if peak_kb <= 0:
+            continue
+        records.append(
+            {
+                "test": str(record.get("test", "?")),
+                "shard": shard_index,
+                "worker": record.get("worker"),
+                "peak_rss_kb": peak_kb,
+                "peak_rss_mb": round(peak_kb / 1024, 1),
+                "duration_sec": int(record.get("duration_sec", 0) or 0),
+            }
+        )
+    return records
+
+
 def main() -> int:
     if len(sys.argv) != 4:
         print(
@@ -83,7 +120,9 @@ def main() -> int:
             "mismatched": 0,
             "match_rate_pct": 0.0,
         },
+        "memory_peaks": [],
     }
+    all_memory_peaks: list[dict] = []
 
     for shard_index in range(expected_shards):
         shard_dir = shard_dirs.get(shard_index)
@@ -122,6 +161,8 @@ def main() -> int:
         for subdir in ("output", "diff", "status", "fixtures"):
             copy_files(shard_dir / subdir, output_dir / subdir, shard_index)
 
+        all_memory_peaks.extend(collect_memory_peaks(shard_dir, shard_index))
+
     statuses = [detail["status"] for detail in aggregate["shards"]["details"]]
     if not shard_dirs:
         aggregate["status"] = "missing"
@@ -136,6 +177,19 @@ def main() -> int:
     aggregate["queries"]["match_rate_pct"] = rate_pct(
         aggregate["queries"]["matched"], aggregate["queries"]["total"]
     )
+
+    # Top per-test memory peaks. Sort by peak desc; cap at 10 records so the
+    # summary stays small. Tests appearing multiple times across shards keep
+    # only their highest peak (deduplicated by test name + worker tuple isn't
+    # what we want — same test can run on different shards under retries, and
+    # we want the worst-case the suite ever saw).
+    by_test: dict[str, dict] = {}
+    for rec in all_memory_peaks:
+        key = rec["test"]
+        if key not in by_test or rec["peak_rss_kb"] > by_test[key]["peak_rss_kb"]:
+            by_test[key] = rec
+    top_peaks = sorted(by_test.values(), key=lambda r: -r["peak_rss_kb"])[:10]
+    aggregate["memory_peaks"] = top_peaks
 
     (output_dir / "summary.json").write_text(json.dumps(aggregate, indent=2) + "\n")
     (output_dir / "exit_code.txt").write_text("0\n" if shard_dirs else "1\n")
