@@ -44219,13 +44219,13 @@ fn drop_view_cascade_removes_policies_that_reference_views() {
     session
         .execute(
             &db,
-            "create policy r1 on rec1 using (exists (select 1 from rec1v))",
+            "create policy r1 on rec1 using (exists (select 1 from rec2v))",
         )
         .unwrap();
     session
         .execute(
             &db,
-            "create policy r2 on rec2 using (exists (select 1 from rec2v))",
+            "create policy r2 on rec2 using (exists (select 1 from rec1v))",
         )
         .unwrap();
 

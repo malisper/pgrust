@@ -533,3 +533,20 @@ SQL function/GUC follow-up bucket:
 - Remaining in this area: the final `DROP SCHEMA` cascade count still differs
   because earlier recursive-policy views are not created, not because of the
   SQL-function/set_config block.
+
+Policy cascade notice-order bucket:
+- DROP TABLE/VIEW dependency planning now preserves the statement order of
+  explicit relation targets while still deduping repeated target OIDs.
+- Cascaded policy drops are normalized by policy OID before notice emission and
+  catalog deletion, matching PostgreSQL's policy-order reporting for the
+  `DROP VIEW rec1v, rec2v CASCADE` cross-reference case.
+- Tightened `drop_view_cascade_removes_policies_that_reference_views` so the
+  policies reference the opposite views, matching the rowsecurity regression
+  scenario that previously reported `r2` before `r1`.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  drop_view_cascade_removes_policies_that_reference_views` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `721/774` matched, `53` mismatches, `1031` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

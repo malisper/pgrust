@@ -1303,6 +1303,35 @@ fn plan_drop_table_relation(
     plan.relation_drop_order.push(relation_oid);
 }
 
+fn sort_policy_cascade_notices(ctx: &DropTableDependencyContext<'_>, plan: &mut DropTablePlan) {
+    if plan.policy_drops.len() < 2 {
+        return;
+    }
+
+    plan.policy_drops.sort_by_key(|policy| policy.policy_oid);
+    let mut sorted_policy_notices = plan
+        .policy_drops
+        .iter()
+        .map(|policy| {
+            let relation_display_name =
+                drop_table_display_relation_name(ctx.catalog, policy.relation_oid, ctx.search_path);
+            format!(
+                "drop cascades to policy {} on table {relation_display_name}",
+                policy.policy_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
+
+    for notice in &mut plan.notices {
+        if notice.starts_with("drop cascades to policy ")
+            && let Some(sorted_notice) = sorted_policy_notices.next()
+        {
+            *notice = sorted_notice;
+        }
+    }
+}
+
 impl Database {
     pub(crate) fn execute_drop_aggregate_stmt_with_search_path(
         &self,
@@ -2127,6 +2156,7 @@ impl Database {
         let mut rels = Vec::new();
         let mut dropped = 0usize;
         let mut explicit_relation_oids = BTreeSet::new();
+        let mut explicit_relation_order = Vec::new();
 
         for relation_name in &drop_stmt.table_names {
             let relation = match catalog.lookup_any_relation(relation_name) {
@@ -2166,7 +2196,9 @@ impl Database {
             };
 
             ensure_relation_owner(self, client_id, &relation, relation_name)?;
-            explicit_relation_oids.insert(relation.relation_oid);
+            if explicit_relation_oids.insert(relation.relation_oid) {
+                explicit_relation_order.push(relation.relation_oid);
+            }
             rels.push(relation.rel);
             dropped += 1;
         }
@@ -2201,7 +2233,7 @@ impl Database {
                 search_path: &search_path,
             };
             let mut plan = DropTablePlan::default();
-            for &relation_oid in &explicit_relation_oids {
+            for &relation_oid in &explicit_relation_order {
                 plan_drop_table_relation(
                     &dependency_ctx,
                     relation_oid,
@@ -2210,6 +2242,7 @@ impl Database {
                     &mut plan,
                 );
             }
+            sort_policy_cascade_notices(&dependency_ctx, &mut plan);
 
             if !drop_stmt.cascade && !plan.blocker_details.is_empty() {
                 let (_, source_name) = plan.blocker_source.unwrap_or(('r', "table".to_string()));
@@ -3188,6 +3221,7 @@ impl Database {
             .map_err(map_catalog_error)?;
         let mut rels = Vec::new();
         let mut explicit_relation_oids = BTreeSet::new();
+        let mut explicit_relation_order = Vec::new();
         let mut dropped = 0usize;
 
         for relation_name in relation_names {
@@ -3210,7 +3244,9 @@ impl Database {
                 }
             };
             ensure_relation_owner(self, client_id, &relation, relation_name)?;
-            explicit_relation_oids.insert(relation.relation_oid);
+            if explicit_relation_oids.insert(relation.relation_oid) {
+                explicit_relation_order.push(relation.relation_oid);
+            }
             rels.push(relation.rel);
             dropped += 1;
         }
@@ -3247,7 +3283,7 @@ impl Database {
             };
             let mut plan = DropTablePlan::default();
             let behavior = DropBehavior::from_cascade(cascade);
-            for &relation_oid in &explicit_relation_oids {
+            for &relation_oid in &explicit_relation_order {
                 plan_drop_table_relation(
                     &dependency_ctx,
                     relation_oid,
@@ -3256,6 +3292,7 @@ impl Database {
                     &mut plan,
                 );
             }
+            sort_policy_cascade_notices(&dependency_ctx, &mut plan);
 
             if !cascade && !plan.blocker_details.is_empty() {
                 let (_, source_name) = plan
