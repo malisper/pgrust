@@ -18653,33 +18653,11 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
 fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
     match pair.as_rule() {
         Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
-            Ok(CteBody::Select(Box::new(build_select(pair)?)))
+            Ok(select_statement_as_cte_body(build_select(pair)?))
         }
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
         Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
         Rule::update_stmt => Ok(CteBody::Update(Box::new(build_update(pair)?))),
-        Rule::recursive_union_cte_body => {
-            let all = contains_union_all(pair.as_str());
-            let mut inner = pair.into_inner();
-            let anchor = build_cte_body(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-            let mut recursive = None;
-            for part in inner {
-                match part.as_rule() {
-                    Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
-                        recursive = Some(build_select(part)?)
-                    }
-                    Rule::parenthesized_set_operation_term => {
-                        recursive = Some(build_set_operation_term(part)?)
-                    }
-                    _ => {}
-                }
-            }
-            Ok(CteBody::RecursiveUnion {
-                all,
-                anchor: Box::new(anchor),
-                recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
-            })
-        }
         _ => Err(ParseError::UnexpectedToken {
             expected: "SELECT, VALUES, or INSERT CTE body",
             actual: pair.as_str().into(),
@@ -18687,15 +18665,78 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
     }
 }
 
-fn contains_union_all(sql: &str) -> bool {
-    let mut prev_union = false;
-    for token in sql.split_whitespace() {
-        if prev_union && token.eq_ignore_ascii_case("all") {
-            return true;
-        }
-        prev_union = token.eq_ignore_ascii_case("union");
+fn select_statement_as_cte_body(stmt: SelectStatement) -> CteBody {
+    if let Some((all, anchor, recursive)) = split_leftmost_union(stmt.clone()) {
+        return CteBody::RecursiveUnion {
+            all,
+            anchor: Box::new(select_term_as_cte_body(anchor)),
+            recursive: Box::new(recursive),
+        };
     }
-    false
+    CteBody::Select(Box::new(stmt))
+}
+
+fn split_leftmost_union(stmt: SelectStatement) -> Option<(bool, SelectStatement, SelectStatement)> {
+    let set_operation = stmt.set_operation?;
+    if set_operation.inputs.len() != 2 {
+        return None;
+    }
+    let mut inputs = set_operation.inputs;
+    let left = inputs.remove(0);
+    let right = inputs.remove(0);
+
+    if left.set_operation.is_some() {
+        let (all, anchor, recursive_tail) = split_leftmost_union(left)?;
+        let recursive = select_statement_for_set_operation(set_operation.op, recursive_tail, right);
+        return Some((all, anchor, recursive));
+    }
+
+    match set_operation.op {
+        SetOperator::Union { all } => Some((all, left, right)),
+        SetOperator::Intersect { .. } | SetOperator::Except { .. } => None,
+    }
+}
+
+fn select_term_as_cte_body(stmt: SelectStatement) -> CteBody {
+    if let Some(values) = wrapped_values_statement(&stmt) {
+        CteBody::Values(values)
+    } else {
+        CteBody::Select(Box::new(stmt))
+    }
+}
+
+fn wrapped_values_statement(stmt: &SelectStatement) -> Option<ValuesStatement> {
+    let Some(FromItem::Values { rows }) = &stmt.from else {
+        return None;
+    };
+    if stmt.distinct
+        || !stmt.distinct_on.is_empty()
+        || stmt.targets.len() != 1
+        || !matches!(
+            stmt.targets.first(),
+            Some(SelectItem {
+                output_name,
+                expr: SqlExpr::Column(name),
+            }) if output_name == "*" && name == "*"
+        )
+        || stmt.where_clause.is_some()
+        || !stmt.group_by.is_empty()
+        || stmt.having.is_some()
+        || !stmt.window_clauses.is_empty()
+        || stmt.locking_clause.is_some()
+        || !stmt.locking_targets.is_empty()
+        || stmt.set_operation.is_some()
+    {
+        return None;
+    }
+    Some(ValuesStatement {
+        with_recursive: stmt.with_recursive,
+        with: stmt.with.clone(),
+        rows: rows.clone(),
+        order_by: stmt.order_by.clone(),
+        limit: stmt.limit,
+        offset: stmt.offset,
+    })
 }
 
 fn build_group_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {

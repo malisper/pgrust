@@ -16967,6 +16967,35 @@ fn recursive_cte_allows_non_recursive_union_ctes_inside_recursive_term() {
 }
 
 #[test]
+fn parse_nested_cte_shadowing_regression_without_backtracking_timeout() {
+    let stmt = parse_select(
+        "with w2(c2) as (
+            with w3(c3) as (
+                with w4(c4) as (
+                    with w5(c5) as (
+                        with recursive w6(c6) as (
+                            with w6(c6) as (
+                                with w8(c8) as (select 1)
+                                select * from w8
+                            )
+                            select * from w6
+                        )
+                        select * from w6
+                    )
+                    select * from w5
+                )
+                select * from w4
+            )
+            select * from w3
+        )
+        select * from w2",
+    )
+    .unwrap();
+    assert_eq!(stmt.with.len(), 1);
+    assert!(matches!(stmt.with[0].body, CteBody::Select(_)));
+}
+
+#[test]
 fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() {
     let stmt = parse_select(
         "with recursive outermost(x) as (
