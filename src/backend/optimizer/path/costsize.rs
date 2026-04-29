@@ -9001,7 +9001,7 @@ fn qual_strategy(
     {
         return None;
     }
-    let argument_type_oid = index_argument_type_oid(&qual.argument);
+    let argument_type_oid = index_argument_type_oid_for_qual(qual);
     match qual.lookup {
         super::super::IndexStrategyLookup::Operator { oid, kind } => {
             if index.index_meta.am_oid == SPGIST_AM_OID
@@ -9023,7 +9023,7 @@ fn qual_strategy(
                         && builtin_btree_strategy_type_compatible(
                             index,
                             index_pos,
-                            index_argument_sql_type(&qual.argument),
+                            index_argument_sql_type_for_qual(qual),
                         ))
                     .then(|| btree_builtin_strategy(kind))
                     .flatten()
@@ -9053,6 +9053,24 @@ fn qual_strategy(
             (index.index_meta.am_oid == BTREE_AM_OID && exact).then_some(3)
         }
     }
+}
+
+fn index_argument_type_oid_for_qual(qual: &IndexableQual) -> Option<u32> {
+    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.expr)
+        && saop.use_or
+    {
+        return Some(sql_type_oid(expr_sql_type(&saop.right).element_type()));
+    }
+    index_argument_type_oid(&qual.argument)
+}
+
+fn index_argument_sql_type_for_qual(qual: &IndexableQual) -> Option<SqlType> {
+    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.expr)
+        && saop.use_or
+    {
+        return Some(expr_sql_type(&saop.right).element_type());
+    }
+    index_argument_sql_type(&qual.argument)
 }
 
 fn build_btree_index_keys(

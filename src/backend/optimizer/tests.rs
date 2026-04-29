@@ -4396,7 +4396,7 @@ fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
 
     let catalog = catalog_with_indexed_items();
     let planned = planned_stmt_for_sql_with_catalog_and_config(
-        "select count(*) from items o join lateral (select i.id from items i where i.id = o.id or i.id = o.id + 1 or i.id = o.id + 2) i on true where o.id < 10",
+        "select count(*) from items o join items i on i.id = o.id or i.id = o.id + 1 or i.id = o.id + 2 where o.id < 10",
         &catalog,
         PlannerConfig {
             enable_seqscan: false,
@@ -4414,19 +4414,27 @@ fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
         }),
         _ => false,
     });
-    let has_parameterized_memoize = plan_contains(&planned.plan_tree, |plan| {
-        matches!(
-            plan,
-            Plan::Memoize {
-                key_paramids,
-                dependent_paramids,
-                ..
-            } if !key_paramids.is_empty() && !dependent_paramids.is_empty()
-        )
-    });
     assert!(
-        has_runtime_index || has_parameterized_memoize,
-        "expected OR join clause to use a runtime index scan or memoized parameterized path: {planned:#?}"
+        has_runtime_index,
+        "expected OR join clause to use a runtime scalar-array index scan: {planned:#?}"
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
+fn planner_uses_index_for_scalar_array_const_qual() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from items where id = any(array[1,2,3])",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index") && line.contains("items_id_idx")),
+        "expected scalar-array predicate to use items_id_idx, got {lines:?}"
     );
     validate_planned_stmt_for_tests(&planned);
 }
