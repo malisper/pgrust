@@ -9503,7 +9503,7 @@ fn create_table_inherits_notices_column_check_constraint_merge() {
              from pg_constraint \
              where conrelid = 'child_merge_notice'::regclass and conname = 'con1'",
         ),
-        vec![vec![Value::Bool(false), Value::Int32(1)]]
+        vec![vec![Value::Bool(true), Value::Int32(1)]]
     );
 }
 
@@ -10590,9 +10590,7 @@ fn check_constraints_allow_tableoid_and_reject_other_system_columns() {
             relation,
             constraint,
             detail,
-        }) if relation == "sys_col_check_tbl"
-            && constraint == "sys_col_check_tbl_is_capital_check" =>
-        {
+        }) if relation == "sys_col_check_tbl" && constraint == "sys_col_check_tbl_check" => {
             assert_eq!(
                 detail.as_deref(),
                 Some("Failing row contains (Olympia, Washington, t, 100).")

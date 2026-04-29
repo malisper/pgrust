@@ -2000,7 +2000,7 @@ impl Database {
                     &catalog,
                 )
                 .map_err(ExecError::Parse)?;
-                if !action.not_valid {
+                if action.enforced && !action.not_valid {
                     validate_check_rows(
                         self,
                         &relation,
@@ -2052,7 +2052,8 @@ impl Database {
                         action.constraint_name
                     ));
                     let conenforced = existing.conenforced || action.enforced;
-                    let convalidated = conenforced && (existing.convalidated || action.enforced);
+                    let convalidated = conenforced
+                        && (existing.convalidated || (action.enforced && !action.not_valid));
                     let effect = self
                         .catalog
                         .write()
@@ -2913,7 +2914,7 @@ impl Database {
                 &catalog,
             )
             .map_err(ExecError::Parse)?;
-            if !action.not_valid {
+            if action.enforced && !action.not_valid {
                 validate_check_rows(
                     self,
                     &child_relation,
@@ -2991,7 +2992,8 @@ impl Database {
                     action.constraint_name
                 ));
                 let conenforced = existing.conenforced || action.enforced;
-                let convalidated = conenforced && (existing.convalidated || action.enforced);
+                let convalidated = conenforced
+                    && (existing.convalidated || (action.enforced && !action.not_valid));
                 let effect = self
                     .catalog
                     .write()
@@ -3632,7 +3634,7 @@ impl Database {
                         ),
                         detail: None,
                         hint: None,
-                        sqlstate: "0A000",
+                        sqlstate: "42P16",
                     });
                 }
                 if row.contype == CONSTRAINT_FOREIGN {
@@ -3697,22 +3699,22 @@ impl Database {
                         ),
                         detail: None,
                         hint: None,
-                        sqlstate: "0A000",
+                        sqlstate: "42P16",
                     });
                 }
                 let attnum = *attnums_from_constraint(&row)?
                     .first()
                     .expect("not null attnum");
-                if let Some(primary) = primary_constraint_for_attnum(&rows, attnum) {
+                let column_index = column_index_for_attnum(&relation, attnum)?;
+                if primary_constraint_for_attnum(&rows, attnum).is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "droppable NOT NULL constraint",
                         actual: format!(
-                            "column is required by PRIMARY KEY constraint \"{}\"",
-                            primary.conname
+                            "column \"{}\" is in a primary key",
+                            relation.desc.columns[column_index].name
                         ),
                     }));
                 }
-                let column_index = column_index_for_attnum(&relation, attnum)?;
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3755,7 +3757,7 @@ impl Database {
                         ),
                         detail: None,
                         hint: None,
-                        sqlstate: "0A000",
+                        sqlstate: "42P16",
                     });
                 }
                 reject_constraint_with_dependent_rule(
@@ -4193,8 +4195,8 @@ impl Database {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "droppable NOT NULL column",
                 actual: format!(
-                    "column is required by PRIMARY KEY constraint \"{}\"",
-                    primary.conname
+                    "column \"{}\" is in a primary key",
+                    relation.desc.columns[column_index].name
                 ),
             }));
         }
@@ -4218,7 +4220,7 @@ impl Database {
                 ),
                 detail: None,
                 hint: None,
-                sqlstate: "0A000",
+                sqlstate: "42P16",
             });
         }
         let ctx = CatalogWriteContext {

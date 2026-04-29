@@ -374,11 +374,7 @@ fn collect_alter_column_type_targets(
             &alter_stmt.column_name,
             &alter_stmt.ty,
             alter_stmt.collation.as_deref(),
-            if *relation_oid == relation.relation_oid {
-                alter_stmt.using_expr.as_ref()
-            } else {
-                None
-            },
+            alter_stmt.using_expr.as_ref(),
         )?;
         reject_column_type_change_with_rule_dependencies(
             db,
