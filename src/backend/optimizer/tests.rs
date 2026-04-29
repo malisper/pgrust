@@ -3996,6 +3996,34 @@ fn explain_names_materialized_cte_scan_and_producer() {
 }
 
 #[test]
+fn explain_indents_scan_filter_details_under_append_children() {
+    let catalog = catalog_with_inherited_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select id from items where id > 0 for share",
+        &catalog,
+        PlannerConfig {
+            enable_indexscan: false,
+            enable_bitmapscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("              Filter:")),
+        "expected deeply indented child scan filter, got {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("          Filter:")),
+        "child scan filter was indented too shallowly: {lines:?}"
+    );
+}
+
+#[test]
 fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     let catalog = catalog_with_inherited_indexed_items();
     let planned =

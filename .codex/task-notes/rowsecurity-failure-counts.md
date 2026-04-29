@@ -734,3 +734,17 @@ CTE EXPLAIN naming bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `736/774` matched, `38` mismatches, `758` diff lines, `37` hunks. New diff
   copied to `/tmp/diffs/rowsecurity.diff`.
+
+Nested EXPLAIN filter indentation bucket:
+- Executor fallback EXPLAIN detail indentation now matches the command-layer
+  formatter, so scan filters below nested nodes like `LockRows -> Append` use
+  PostgreSQL-compatible spacing and table width.
+- Added focused coverage for inherited `FOR SHARE` scans whose child filters
+  must be indented under append children.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  explain_indents_scan_filter_details_under_append_children` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `736/774` matched, `38` mismatches, `743` diff lines, `37` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.

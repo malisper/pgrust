@@ -4567,7 +4567,7 @@ fn explain_detail_prefix(indent: usize) -> String {
     if indent == 0 {
         "  ".into()
     } else {
-        format!("{}        ", "  ".repeat(indent - 1))
+        " ".repeat(2 + indent * 6)
     }
 }
 
