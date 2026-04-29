@@ -2352,7 +2352,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Normalize | BuiltinScalarFunction::IsNormalized => {
                 args.len() == 2
             }
-            BuiltinScalarFunction::PgEncodingToChar => args.len() == 1,
+            BuiltinScalarFunction::PgCharToEncoding | BuiltinScalarFunction::PgEncodingToChar => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
             BuiltinScalarFunction::PgRustDomainCheckUpperLessThan => args.len() == 3,
@@ -3679,6 +3681,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("unicode_normalize_func", BuiltinScalarFunction::Normalize),
         ("is_normalized", BuiltinScalarFunction::IsNormalized),
         ("unicode_is_normalized", BuiltinScalarFunction::IsNormalized),
+        (
+            "pg_char_to_encoding",
+            BuiltinScalarFunction::PgCharToEncoding,
+        ),
         (
             "pg_encoding_to_char",
             BuiltinScalarFunction::PgEncodingToChar,
@@ -5621,6 +5627,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::UnicodeAssigned
             | BuiltinScalarFunction::Normalize
             | BuiltinScalarFunction::IsNormalized
+            | BuiltinScalarFunction::PgCharToEncoding
             | BuiltinScalarFunction::PgEncodingToChar
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler

@@ -22563,6 +22563,17 @@ fn getdatabaseencoding_and_jsonpath_unicode_work() {
             other => panic!("expected query result, got {:?}", other),
         }
 
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select pg_char_to_encoding('UTF8'), pg_char_to_encoding('utf-8'), pg_char_to_encoding('bogus')",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(6), Value::Int32(6), Value::Int32(-1)]],
+    );
+
     let err = run_sql(
         &base,
         &txns,
