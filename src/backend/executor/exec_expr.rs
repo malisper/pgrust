@@ -4054,7 +4054,11 @@ fn format_index_backed_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let all_columns = index_display_names_for_heap(&relation.desc, &index.index_meta)?;
+    let all_columns = index_display_names_for_heap(
+        &relation.desc,
+        &index.index_meta,
+        IndexExpressionDisplay::IndexDefinition,
+    )?;
     let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
     let mut columns = all_columns
         .iter()
@@ -4095,7 +4099,11 @@ fn format_exclusion_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let all_columns = index_display_names_for_heap(&relation.desc, &index.index_meta)?;
+    let all_columns = index_display_names_for_heap(
+        &relation.desc,
+        &index.index_meta,
+        IndexExpressionDisplay::ConstraintDefinition,
+    )?;
     let operators = row
         .conexclop
         .as_ref()?
@@ -4583,9 +4591,25 @@ fn index_column_names_for_heap(desc: &RelationDesc, attnums: &[i16]) -> Option<V
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum IndexExpressionDisplay {
+    IndexDefinition,
+    ConstraintDefinition,
+}
+
+fn parenthesized_constraint_expression(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
 fn index_display_names_for_heap(
     desc: &RelationDesc,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    expression_display: IndexExpressionDisplay,
 ) -> Option<Vec<String>> {
     let expression_sqls = index_meta
         .indexprs
@@ -4605,7 +4629,17 @@ fn index_display_names_for_heap(
             }
             let rendered = expression_sqls
                 .get(expression_index)
-                .map(|expr| parenthesized_index_expression(&normalize_index_expression_sql(expr)))
+                .map(|expr| {
+                    let normalized = normalize_index_expression_sql(expr);
+                    match expression_display {
+                        IndexExpressionDisplay::IndexDefinition => {
+                            parenthesized_index_expression(&normalized)
+                        }
+                        IndexExpressionDisplay::ConstraintDefinition => {
+                            parenthesized_constraint_expression(&normalized)
+                        }
+                    }
+                })
                 .unwrap_or_else(|| format!("expr{}", expression_index + 1));
             expression_index += 1;
             Some(rendered)
