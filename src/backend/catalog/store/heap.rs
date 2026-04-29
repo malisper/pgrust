@@ -4486,6 +4486,7 @@ impl CatalogStore {
             ev_action,
             dependencies,
             owner_dependency,
+            None,
             ctx,
         )
     }
@@ -4500,6 +4501,7 @@ impl CatalogStore {
         ev_action: String,
         dependencies: RuleDependencies,
         owner_dependency: RuleOwnerDependency,
+        stored_view_query: Option<crate::include::nodes::parsenodes::Query>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let rule_name = rule_name.into();
@@ -4598,6 +4600,9 @@ impl CatalogStore {
             BootstrapCatalogKind::PgRewrite,
         ];
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+        if let Some(query) = stored_view_query {
+            crate::backend::rewrite::register_stored_view_query(rewrite_row.oid, query);
+        }
         self.control = control;
 
         let mut effect = CatalogMutationEffect::default();

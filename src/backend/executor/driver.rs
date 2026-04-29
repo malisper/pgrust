@@ -31,6 +31,47 @@ fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
     )))
 }
 
+fn restrict_nonsystem_view_enabled(ctx: &ExecutorContext) -> bool {
+    ctx.gucs
+        .get("restrict_nonsystem_relation_kind")
+        .map(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().trim_matches('\'').eq_ignore_ascii_case("view"))
+        })
+        .unwrap_or(false)
+}
+
+fn reject_restricted_views_in_planned_stmt(
+    planned_stmt: &PlannedStmt,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    if !restrict_nonsystem_view_enabled(ctx) {
+        return Ok(());
+    }
+    for requirement in &planned_stmt.relation_privileges {
+        if requirement.relkind != 'v' {
+            continue;
+        }
+        let Some(row) = catalog.class_row_by_oid(requirement.relation_oid) else {
+            continue;
+        };
+        if row.relnamespace != crate::include::catalog::PG_CATALOG_NAMESPACE_OID {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "access to non-system view \"{}\" is restricted",
+                    row.relname
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+    }
+    Ok(())
+}
+
 pub fn execute_planned_stmt(
     planned_stmt: PlannedStmt,
     ctx: &mut ExecutorContext,
@@ -759,7 +800,11 @@ pub fn execute_readonly_statement_with_config(
                     sqlstate: "25006",
                 });
             }
-            let planned = pg_plan_query_with_config(&stmt, catalog, planner_config)?;
+            let planned = crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
+                restrict_nonsystem_view_enabled(ctx),
+                || pg_plan_query_with_config(&stmt, catalog, planner_config),
+            )?;
+            reject_restricted_views_in_planned_stmt(&planned, catalog, ctx)?;
             check_planned_stmt_select_privileges(&planned, ctx)?;
             execute_planned_stmt(planned, ctx)
         }

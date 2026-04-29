@@ -28,8 +28,39 @@ use crate::include::nodes::primnodes::{
     WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
     user_attrno,
 };
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 const RETURN_RULE_NAME: &str = "_RETURN";
+
+static STORED_VIEW_QUERIES: OnceLock<RwLock<HashMap<u32, Query>>> = OnceLock::new();
+
+fn stored_view_queries() -> &'static RwLock<HashMap<u32, Query>> {
+    STORED_VIEW_QUERIES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub(crate) fn register_stored_view_query(rewrite_oid: u32, query: Query) {
+    if let Ok(mut queries) = stored_view_queries().write() {
+        queries.insert(rewrite_oid, query);
+    }
+}
+
+fn stored_view_query(rewrite_oid: u32) -> Option<Query> {
+    stored_view_queries()
+        .read()
+        .ok()
+        .and_then(|queries| queries.get(&rewrite_oid).cloned())
+}
+
+pub(crate) fn stored_view_query_for_rule(rewrite_oid: u32) -> Option<Query> {
+    stored_view_query(rewrite_oid)
+}
+
+pub(crate) fn has_stored_view_query(rewrite_oid: u32) -> bool {
+    stored_view_queries()
+        .read()
+        .is_ok_and(|queries| queries.contains_key(&rewrite_oid))
+}
 
 #[derive(Clone)]
 struct ViewDeparseContext<'a> {
@@ -101,15 +132,15 @@ fn view_display_name(relation_oid: u32, alias: Option<&str>) -> String {
         .unwrap_or_else(|| format!("view {relation_oid}"))
 }
 
-fn return_rule_sql(
+fn return_rule_row(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
     display_name: &str,
-) -> Result<String, ParseError> {
+) -> Result<crate::include::catalog::PgRewriteRow, ParseError> {
     let mut rows = catalog.rewrite_rows_for_relation(relation_oid);
     rows.retain(|row| row.rulename == RETURN_RULE_NAME);
     match rows.as_slice() {
-        [row] => Ok(row.ev_action.clone()),
+        [row] => Ok(row.clone()),
         [] => Err(ParseError::UnexpectedToken {
             expected: "view _RETURN rule",
             actual: format!("missing rewrite rule for view {display_name}"),
@@ -635,12 +666,21 @@ pub(crate) fn load_view_return_query(
     catalog: &dyn CatalogLookup,
     expanded_views: &[u32],
 ) -> Result<Query, ParseError> {
-    let select = load_view_return_select(relation_oid, alias, catalog, expanded_views)?;
+    let display_name = view_display_name(relation_oid, alias);
+    if expanded_views.contains(&relation_oid) {
+        return Err(ParseError::RecursiveView(display_name));
+    }
+    let rule = return_rule_row(catalog, relation_oid, &display_name)?;
+    if let Some(mut query) = stored_view_query(rule.oid) {
+        refresh_query_relation_descriptors(&mut query, catalog);
+        validate_view_shape(&mut query, relation_desc, &display_name, catalog)?;
+        return Ok(query);
+    }
+    let select = load_view_return_select_from_rule(rule, alias, catalog, expanded_views)?;
     let mut next_views = expanded_views.to_vec();
     next_views.push(relation_oid);
     let (mut query, _) =
         analyze_select_query_with_outer(&select, catalog, &[], None, None, &[], &next_views)?;
-    let display_name = view_display_name(relation_oid, alias);
     validate_view_shape(&mut query, relation_desc, &display_name, catalog)?;
     Ok(query)
 }
@@ -655,7 +695,21 @@ pub(crate) fn load_view_return_select(
     if expanded_views.contains(&relation_oid) {
         return Err(ParseError::RecursiveView(display_name));
     }
-    let sql = return_rule_sql(catalog, relation_oid, &display_name)?;
+    let rule = return_rule_row(catalog, relation_oid, &display_name)?;
+    load_view_return_select_from_rule(rule, alias, catalog, expanded_views)
+}
+
+fn load_view_return_select_from_rule(
+    rule: crate::include::catalog::PgRewriteRow,
+    alias: Option<&str>,
+    _catalog: &dyn CatalogLookup,
+    expanded_views: &[u32],
+) -> Result<SelectStatement, ParseError> {
+    let display_name = view_display_name(rule.ev_class, alias);
+    if expanded_views.contains(&rule.ev_class) {
+        return Err(ParseError::RecursiveView(display_name));
+    }
+    let sql = rule.ev_action;
     let (sql, _) = split_stored_view_definition_sql(&sql);
     // :HACK: PostgreSQL stores analyzed rule query trees in `pg_rewrite`.
     // pgrust still stores SQL text and reparses it here until the catalog
@@ -752,7 +806,7 @@ fn render_plain_query(ctx: &ViewDeparseContext<'_>, output_names: Option<&[Strin
             ctx.query
                 .sort_clause
                 .iter()
-                .map(|sort| render_expr(&sort.expr, ctx))
+                .map(|sort| render_sort_group_clause(sort, ctx))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -802,6 +856,21 @@ fn render_target_entry(
             .and_then(|value| value.strip_suffix(')'))
     {
         rendered = format!("({inner} AT LOCAL)");
+    }
+    if target_name == "?column?" {
+        return rendered;
+    }
+    if !target.sql_type.is_array
+        && matches!(target.sql_type.kind, SqlTypeKind::Text)
+        && matches!(
+            target.expr,
+            Expr::Const(Value::Text(_))
+                | Expr::Const(Value::TextRef(_, _))
+                | Expr::Const(Value::Null)
+        )
+        && !rendered.contains("::")
+    {
+        rendered.push_str("::text");
     }
     let natural_output_matches = !join_using_cast
         && matches!(&target.expr, Expr::Var(_) | Expr::FieldSelect { .. })
@@ -1785,13 +1854,29 @@ fn render_set_operation_query(
             &ctx.query
                 .sort_clause
                 .iter()
-                .map(|sort| render_expr(&sort.expr, ctx))
+                .map(|sort| render_sort_group_clause(sort, ctx))
                 .collect::<Vec<_>>()
                 .join(", "),
         );
     }
     sql.push(';');
     sql
+}
+
+fn render_sort_group_clause(
+    sort: &crate::include::nodes::primnodes::SortGroupClause,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    let mut rendered = render_expr(&sort.expr, ctx);
+    if sort.descending {
+        rendered.push_str(" DESC");
+    }
+    match sort.nulls_first {
+        Some(true) => rendered.push_str(" NULLS FIRST"),
+        Some(false) => rendered.push_str(" NULLS LAST"),
+        None => {}
+    }
+    rendered
 }
 
 fn render_set_operator(op: SetOperator) -> &'static str {

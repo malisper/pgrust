@@ -441,6 +441,49 @@ fn apply_create_view_column_names_to_query(query: &mut Query, column_names: &[St
     }
 }
 
+fn create_view_relation_desc_from_query(query: &Query) -> crate::backend::executor::RelationDesc {
+    crate::backend::executor::RelationDesc {
+        columns: query
+            .target_list
+            .iter()
+            .filter(|target| !target.resjunk)
+            .map(|target| {
+                let mut desc = column_desc(target.name.clone(), target.sql_type, true);
+                desc.collation_oid = view_expr_collation_oid(&target.expr, query, target.sql_type);
+                desc
+            })
+            .collect(),
+    }
+}
+
+fn view_expr_collation_oid(expr: &Expr, query: &Query, sql_type: SqlType) -> u32 {
+    if !is_collatable_type(sql_type) {
+        return 0;
+    }
+    match expr {
+        Expr::Collate { collation_oid, .. } => *collation_oid,
+        Expr::Var(var) if var.varno > 0 => query
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .and_then(|rte| attrno_index(var.varattno).and_then(|idx| rte.desc.columns.get(idx)))
+            .map(|column| column.collation_oid)
+            .filter(|oid| *oid != 0)
+            .unwrap_or_else(|| {
+                crate::backend::catalog::catalog::default_column_collation_oid(sql_type)
+            }),
+        Expr::Cast(inner, _) => view_expr_collation_oid(inner, query, sql_type),
+        Expr::Coalesce(left, right) => {
+            let left_collation = view_expr_collation_oid(left, query, sql_type);
+            if left_collation != 0 {
+                left_collation
+            } else {
+                view_expr_collation_oid(right, query, sql_type)
+            }
+        }
+        _ => crate::backend::catalog::catalog::default_column_collation_oid(sql_type),
+    }
+}
+
 fn collect_rule_dependencies_from_query(
     query: &Query,
     catalog: &dyn CatalogLookup,
@@ -454,11 +497,7 @@ fn collect_rule_dependencies_from_query(
             RangeTblEntryKind::Relation { relation_oid, .. } => {
                 deps.relation_oids.push(*relation_oid);
             }
-            RangeTblEntryKind::Join { joinaliasvars, .. } => {
-                for expr in joinaliasvars {
-                    collect_expr_rule_dependencies(expr, query, catalog, deps);
-                }
-            }
+            RangeTblEntryKind::Join { .. } => {}
             RangeTblEntryKind::Values { rows, .. } => {
                 for expr in rows.iter().flatten() {
                     collect_expr_rule_dependencies(expr, query, catalog, deps);
@@ -748,7 +787,12 @@ fn collect_var_rule_dependency(
                 return;
             }
             if let Some(relation_oid) = set_returning_return_relation_oid(call, catalog, deps) {
-                collect_attnum_dependency(relation_oid, var.varattno, &rte.desc, deps);
+                collect_set_returning_relation_attnum_dependency(
+                    relation_oid,
+                    var.varattno,
+                    catalog,
+                    deps,
+                );
             }
         }
         RangeTblEntryKind::Join { joinaliasvars, .. } => {
@@ -828,8 +872,12 @@ fn collect_rows_from_item_attnum_dependencies(
             {
                 match target_index {
                     Some(index) => {
-                        let attno = index.saturating_add(1) as i32;
-                        collect_attnum_dependency(relation_oid, attno, &relation.desc, deps);
+                        if let Some(physical_index) =
+                            relation.desc.visible_column_indexes().get(index)
+                        {
+                            let attno = physical_index.saturating_add(1) as i32;
+                            collect_attnum_dependency(relation_oid, attno, &relation.desc, deps);
+                        }
                     }
                     None => collect_attnum_dependency(relation_oid, 0, &relation.desc, deps),
                 }
@@ -873,6 +921,31 @@ fn collect_attnum_dependency(
         && let Ok(attnum) = i16::try_from(varattno)
     {
         deps.column_refs.push((relation_oid, attnum));
+    }
+}
+
+fn collect_set_returning_relation_attnum_dependency(
+    relation_oid: u32,
+    varattno: i32,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    let Some(relation) = catalog
+        .relation_by_oid(relation_oid)
+        .or_else(|| catalog.lookup_relation_by_oid(relation_oid))
+    else {
+        return;
+    };
+    if varattno == 0 {
+        collect_attnum_dependency(relation_oid, 0, &relation.desc, deps);
+        return;
+    }
+    let Some(visible_index) = attrno_index(varattno) else {
+        return;
+    };
+    if let Some(physical_index) = relation.desc.visible_column_indexes().get(visible_index) {
+        let attno = physical_index.saturating_add(1) as i32;
+        collect_attnum_dependency(relation_oid, attno, &relation.desc, deps);
     }
 }
 
@@ -5326,13 +5399,7 @@ impl Database {
             render_view_query_sql(&stored_query, &catalog)
         };
         let canonical_query_sql = append_view_check_option(canonical_sql, create_stmt.check_option);
-        let mut desc = crate::backend::executor::RelationDesc {
-            columns: stored_query
-                .columns()
-                .into_iter()
-                .map(|column| column_desc(column.name, column.sql_type, true))
-                .collect(),
-        };
+        let mut desc = create_view_relation_desc_from_query(&stored_query);
         apply_create_view_column_names(&mut desc, &create_stmt.column_names)?;
         let reloptions = create_view_reloptions(&create_stmt.options)?;
         let mut referenced_relation_oids = std::collections::BTreeSet::new();
@@ -5515,6 +5582,7 @@ impl Database {
             canonical_query_sql,
             rule_dependencies,
             crate::backend::catalog::store::RuleOwnerDependency::Internal,
+            Some(stored_query.clone()),
             &rule_ctx,
         );
         let rule_effect = match rule_result {

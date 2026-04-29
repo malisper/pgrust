@@ -36,6 +36,19 @@ fn format_stored_rule_definition_inner(
     relation_name: &str,
     catalog: Option<&dyn CatalogLookup>,
 ) -> String {
+    if rule.rulename == "_RETURN"
+        && rule.ev_type == '1'
+        && rule.ev_qual.is_empty()
+        && rule.is_instead
+        && let Some(catalog) = catalog
+        && let Some(relation) = catalog.lookup_relation_by_oid(rule.ev_class)
+        && let Ok(action) =
+            super::views::format_view_definition(rule.ev_class, &relation.desc, catalog)
+    {
+        return format!(
+            "CREATE RULE \"_RETURN\" AS\n    ON SELECT TO {relation_name} DO INSTEAD  {action}"
+        );
+    }
     let mut definition = format!(
         "CREATE RULE {} AS ON {} TO {}",
         rule.rulename,

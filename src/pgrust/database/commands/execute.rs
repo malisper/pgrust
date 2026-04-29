@@ -208,6 +208,65 @@ fn reject_restricted_views_in_select(
     Ok(())
 }
 
+fn reject_restricted_bound_view_refs_in_select(
+    select: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    let mut relation_oids = std::collections::BTreeSet::new();
+    let mut visible_ctes = Vec::new();
+    collect_direct_relation_oids_from_select(
+        select,
+        catalog,
+        &mut visible_ctes,
+        &mut relation_oids,
+    );
+    for relation_oid in relation_oids {
+        let Some(row) = catalog.class_row_by_oid(relation_oid) else {
+            continue;
+        };
+        if row.relkind == 'v'
+            && row.relnamespace != crate::include::catalog::PG_CATALOG_NAMESPACE_OID
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "access to non-system view \"{}\" is restricted",
+                    row.relname
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn reject_restricted_views_in_planned_stmt(
+    planned_stmt: &crate::include::nodes::plannodes::PlannedStmt,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for requirement in &planned_stmt.relation_privileges {
+        if requirement.relkind != 'v' {
+            continue;
+        }
+        let Some(row) = catalog.class_row_by_oid(requirement.relation_oid) else {
+            continue;
+        };
+        if row.relnamespace != crate::include::catalog::PG_CATALOG_NAMESPACE_OID {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "access to non-system view \"{}\" is restricted",
+                    row.relname
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn reject_restricted_views_in_cte_body(
     body: &CteBody,
     catalog: &dyn CatalogLookup,
@@ -2013,10 +2072,15 @@ impl Database {
                     match &stmt {
                         Statement::Select(select) => {
                             reject_restricted_views_in_select(select, &visible_catalog)?;
+                            reject_restricted_bound_view_refs_in_select(select, &visible_catalog)?;
                         }
                         Statement::Explain(explain) => {
                             if let Statement::Select(select) = explain.statement.as_ref() {
                                 reject_restricted_views_in_select(select, &visible_catalog)?;
+                                reject_restricted_bound_view_refs_in_select(
+                                    select,
+                                    &visible_catalog,
+                                )?;
                             }
                         }
                         _ => {}
@@ -2030,10 +2094,13 @@ impl Database {
                         match &stmt {
                             Statement::Select(select) => {
                                 let planned_stmt =
-                                    crate::backend::parser::pg_plan_query_with_config(
+                                    crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
+                                        restrict_nonsystem_view_enabled(gucs),
+                                        || crate::backend::parser::pg_plan_query_with_config(
                                         select,
                                         &visible_catalog,
                                         planner_config,
+                                        ),
                                     )?;
                                 collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
                                 planned_select_for_update = select.locking_clause.is_some();
@@ -2043,10 +2110,13 @@ impl Database {
                             Statement::Explain(explain) => {
                                 if let Statement::Select(select) = explain.statement.as_ref() {
                                     let planned_stmt =
-                                        crate::backend::parser::pg_plan_query_with_config(
+                                        crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
+                                            restrict_nonsystem_view_enabled(gucs),
+                                            || crate::backend::parser::pg_plan_query_with_config(
                                             select,
                                             &visible_catalog,
                                             planner_config,
+                                            ),
                                         )?;
                                     collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
                                 }
@@ -2139,6 +2209,12 @@ impl Database {
                 install_prepared_external_params(&external_bindings, &mut ctx)?;
                 let result = with_external_param_types(&external_types, || match planned_select {
                     Some(planned_stmt) => {
+                        if restrict_nonsystem_view_enabled(gucs) {
+                            reject_restricted_views_in_planned_stmt(
+                                &planned_stmt,
+                                &visible_catalog,
+                            )?;
+                        }
                         if planned_select_for_update {
                             check_planned_stmt_select_for_update_privileges(&planned_stmt, &ctx)?;
                         } else {
