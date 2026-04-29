@@ -49527,6 +49527,30 @@ fn plpgsql_declared_cursor_arg_errors_include_argument_context() {
 }
 
 #[test]
+fn plpgsql_return_cast_errors_include_cast_context() {
+    let dir = temp_dir("plpgsql_return_cast_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type return_cast_pair as (x int4, y text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function return_cast_context() returns int4 language plpgsql as $$
+         begin
+           return (1, 'hello')::return_cast_pair;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select return_cast_context()").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function return_cast_context() while casting return value to function's return type"
+    ));
+}
+
+#[test]
 fn plpgsql_return_expr_with_out_parameter_is_compile_error() {
     let dir = temp_dir("plpgsql_return_expr_out_param");
     let db = Database::open(&dir, 64).unwrap();

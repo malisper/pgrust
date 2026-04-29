@@ -2601,7 +2601,8 @@ fn exec_function_return(
                 Some(expr) => cast_function_scalar_return_value(
                     eval_function_expr(expr, &state.values, ctx)?,
                     *ty,
-                )?,
+                )
+                .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?,
                 None if ty.kind == SqlTypeKind::Void => Value::Null,
                 None => cast_function_scalar_return_value(
                     state.values[output_slot.ok_or_else(|| {
@@ -2613,7 +2614,8 @@ fn exec_function_return(
                     })?]
                     .clone(),
                     *ty,
-                )?,
+                )
+                .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?,
             });
             Ok(FunctionControl::Return)
         }
@@ -2681,7 +2683,8 @@ fn exec_function_return_next(
                 })?]
                 .clone(),
             };
-            let value = cast_function_scalar_return_value(value, *ty)?;
+            let value = cast_function_scalar_return_value(value, *ty)
+                .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?;
             state.rows.push(TupleSlot::virtual_row(vec![value]));
             Ok(())
         }
@@ -6837,6 +6840,16 @@ fn with_plpgsql_function_context(err: ExecError, compiled: &CompiledFunction) ->
     ExecError::WithContext {
         source: Box::new(err),
         context: format!("PL/pgSQL function {}", compiled_context_name(compiled)),
+    }
+}
+
+fn with_plpgsql_return_cast_context(err: ExecError, compiled: &CompiledFunction) -> ExecError {
+    ExecError::WithContext {
+        source: Box::new(err),
+        context: format!(
+            "PL/pgSQL function {} while casting return value to function's return type",
+            compiled_context_name(compiled)
+        ),
     }
 }
 
