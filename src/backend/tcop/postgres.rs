@@ -20,10 +20,11 @@ use crate::backend::libpq::pqformat::{
     send_bind_complete, send_close_complete, send_command_complete, send_copy_data, send_copy_done,
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
     send_error_with_hint, send_error_with_internal_fields, send_no_data, send_notice,
-    send_notice_with_hint, send_notice_with_severity, send_notification_response,
-    send_parameter_description, send_parameter_status, send_parse_complete, send_portal_suspended,
-    send_query_result, send_ready_for_query, send_row_description,
-    send_row_description_with_formats, send_typed_data_row, validate_binary_result_formats,
+    send_notice_with_fields, send_notice_with_hint, send_notice_with_severity,
+    send_notification_response, send_parameter_description, send_parameter_status,
+    send_parse_complete, send_portal_suspended, send_query_result, send_ready_for_query,
+    send_row_description, send_row_description_with_formats, send_typed_data_row,
+    validate_binary_result_formats,
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
@@ -71,7 +72,9 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Regex(err) => err.sqlstate,
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::XmlInput { sqlstate, .. } => sqlstate,
-        ExecError::DetailedError { sqlstate, .. } => sqlstate,
+        ExecError::DetailedError { sqlstate, .. } | ExecError::DiagnosticError { sqlstate, .. } => {
+            sqlstate
+        }
         ExecError::InvalidStorageValue { column, details }
             if column == "jsonpath" && is_jsonpath_parse_error(details) =>
         {
@@ -216,7 +219,9 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::Regex(err) => err.detail.as_deref(),
         ExecError::JsonInput { detail, .. } => detail.as_deref(),
         ExecError::XmlInput { detail, .. } => detail.as_deref(),
-        ExecError::DetailedError { detail, .. } => detail.as_deref(),
+        ExecError::DetailedError { detail, .. } | ExecError::DiagnosticError { detail, .. } => {
+            detail.as_deref()
+        }
         ExecError::UniqueViolation { detail, .. } => detail.as_deref(),
         ExecError::NotNullViolation { detail, .. } => detail.as_deref(),
         ExecError::CheckViolation { detail, .. } => detail.as_deref(),
@@ -2177,6 +2182,21 @@ fn select_function_call_name(sql: &str) -> Option<String> {
 }
 
 fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> {
+    if let Some(position) = plpgsql_shadowed_variable_position(sql, message, 1) {
+        return Some(position);
+    }
+    if let Some(position) = plpgsql_get_diagnostics_target_error_position(sql, message) {
+        return Some(position);
+    }
+    if let Some(position) = plpgsql_return_validation_error_position(sql, message) {
+        return Some(position);
+    }
+    if let Some(position) = plpgsql_cursor_arg_error_position(sql, message) {
+        return Some(position);
+    }
+    if let Some(position) = plpgsql_cursor_for_loop_error_position(sql, message) {
+        return Some(position);
+    }
     match message {
         "invalid attribute in procedure definition" => {
             find_case_insensitive_token_position(sql, "WINDOW")
@@ -2251,6 +2271,269 @@ fn find_nth_identifier_position(sql: &str, ident: &str, nth: usize) -> Option<us
         }
     }
     None
+}
+
+fn plpgsql_cursor_for_loop_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message != "cursor FOR loop must use a bound cursor variable" {
+        return None;
+    }
+    let lower = sql.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find("for") {
+        let for_start = from + offset;
+        if !identifier_boundaries(sql.as_bytes(), for_start, "for".len()) {
+            from = for_start + "for".len();
+            continue;
+        }
+        let Some(loop_offset) = lower[for_start..].find("loop") else {
+            return None;
+        };
+        let loop_start = for_start + loop_offset;
+        let segment = &lower[for_start..loop_start];
+        if let Some(in_offset) = find_identifier_in_segment(segment, "in") {
+            let target_start =
+                skip_ascii_whitespace(sql, for_start + in_offset + "in".len(), loop_start);
+            return Some(target_start + 1);
+        }
+        from = for_start + "for".len();
+    }
+    None
+}
+
+fn plpgsql_shadowed_variable_position(
+    sql: &str,
+    message: &str,
+    occurrence: usize,
+) -> Option<usize> {
+    let name = message
+        .strip_prefix("variable \"")?
+        .split_once("\" shadows a previously defined variable")?
+        .0;
+    let body_start = sql.find("$$").map(|index| index + "$$".len()).unwrap_or(0);
+    let pre_body_has_name = find_identifier_in_segment(&sql[..body_start], name).is_some();
+    let body_occurrence = occurrence + usize::from(!pre_body_has_name);
+    find_nth_identifier_token_position(&sql[body_start..], name, body_occurrence)
+        .map(|position| body_start + position)
+}
+
+fn find_nth_identifier_token_position(
+    segment: &str,
+    token: &str,
+    occurrence: usize,
+) -> Option<usize> {
+    if occurrence == 0 {
+        return None;
+    }
+    let mut from = 0usize;
+    let mut seen = 0usize;
+    while let Some(offset) = find_identifier_in_segment(&segment[from..], token) {
+        seen += 1;
+        if seen == occurrence {
+            return Some(from + offset + 1);
+        }
+        from += offset + token.len();
+    }
+    None
+}
+
+fn plpgsql_get_diagnostics_target_error_position(sql: &str, message: &str) -> Option<usize> {
+    let target = message
+        .strip_prefix('"')?
+        .split_once("\" is not a scalar variable")?
+        .0;
+    let lower = sql.to_ascii_lowercase();
+    for phrase in ["get diagnostics", "get stacked diagnostics"] {
+        let mut from = 0usize;
+        while let Some(offset) = lower[from..].find(phrase) {
+            let start = from + offset + phrase.len();
+            let end = sql[start..]
+                .find('=')
+                .map(|offset| start + offset)
+                .or_else(|| sql[start..].find(';').map(|offset| start + offset))
+                .unwrap_or(sql.len());
+            if let Some(target_offset) = find_identifier_in_segment(&sql[start..end], target) {
+                return Some(start + target_offset + 1);
+            }
+            from = start;
+        }
+    }
+    None
+}
+
+fn plpgsql_return_validation_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "RETURN cannot have a parameter in function with OUT parameters"
+        | "RETURN cannot have a parameter in function returning void" => {
+            find_plpgsql_return_expression_position(sql)
+        }
+        "missing expression at or near \";\"" => find_plpgsql_return_semicolon_position(sql),
+        _ => None,
+    }
+}
+
+fn find_plpgsql_return_expression_position(sql: &str) -> Option<usize> {
+    let start = find_identifier_in_segment(sql, "return")?;
+    let expr_start = skip_ascii_whitespace(sql, start + "return".len(), sql.len());
+    (sql.as_bytes().get(expr_start) != Some(&b';')).then_some(expr_start + 1)
+}
+
+fn find_plpgsql_return_semicolon_position(sql: &str) -> Option<usize> {
+    let start = find_identifier_in_segment(sql, "return")?;
+    let expr_start = skip_ascii_whitespace(sql, start + "return".len(), sql.len());
+    if sql.as_bytes().get(expr_start) == Some(&b';') {
+        return Some(expr_start + 1);
+    }
+    sql[expr_start..]
+        .find(';')
+        .map(|offset| expr_start + offset + 1)
+}
+
+fn plpgsql_cursor_arg_error_position(sql: &str, message: &str) -> Option<usize> {
+    if let Some((param_name, cursor_name)) = duplicate_cursor_arg_error_parts(message) {
+        return find_duplicate_cursor_arg_position(sql, cursor_name, param_name);
+    }
+    if let Some(cursor_name) = message
+        .strip_prefix("not enough arguments for cursor \"")
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return find_plpgsql_cursor_call_arg_list(sql, cursor_name).map(|(_, close)| close + 1);
+    }
+    None
+}
+
+fn duplicate_cursor_arg_error_parts(message: &str) -> Option<(&str, &str)> {
+    let rest = message.strip_prefix("value for parameter \"")?;
+    let (param_name, rest) = rest.split_once("\" of cursor \"")?;
+    let cursor_name = rest.strip_suffix("\" specified more than once")?;
+    Some((param_name, cursor_name))
+}
+
+fn find_duplicate_cursor_arg_position(
+    sql: &str,
+    cursor_name: &str,
+    param_name: &str,
+) -> Option<usize> {
+    let (args_start, args_end) = find_plpgsql_cursor_call_arg_list(sql, cursor_name)?;
+    if let Some(position) =
+        find_repeated_named_cursor_arg_position(sql, args_start, args_end, param_name)
+    {
+        return Some(position);
+    }
+    let ordinal = find_declared_cursor_param_ordinal(sql, cursor_name, param_name)?;
+    find_top_level_item_start(sql, args_start, args_end, ordinal)
+}
+
+fn find_repeated_named_cursor_arg_position(
+    sql: &str,
+    args_start: usize,
+    args_end: usize,
+    param_name: &str,
+) -> Option<usize> {
+    let args = &sql[args_start..args_end];
+    let mut from = 0usize;
+    let mut seen = false;
+    while let Some(offset) = find_identifier_in_segment(&args[from..], param_name) {
+        let absolute = from + offset;
+        let after_name = skip_ascii_whitespace(args, absolute + param_name.len(), args.len());
+        let is_named_arg =
+            args[after_name..].starts_with(":=") || args[after_name..].starts_with("=>");
+        if is_named_arg {
+            if seen {
+                return Some(args_start + absolute + 1);
+            }
+            seen = true;
+        }
+        from = absolute + param_name.len();
+    }
+    None
+}
+
+fn find_plpgsql_cursor_call_arg_list(sql: &str, cursor_name: &str) -> Option<(usize, usize)> {
+    let lower = sql.to_ascii_lowercase();
+    let cursor_lower = cursor_name.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find("open") {
+        let open_start = from + offset;
+        if !identifier_boundaries(sql.as_bytes(), open_start, "open".len()) {
+            from = open_start + "open".len();
+            continue;
+        }
+        let name_start = skip_ascii_whitespace(sql, open_start + "open".len(), sql.len());
+        if !lower[name_start..].starts_with(&cursor_lower)
+            || !identifier_boundaries(sql.as_bytes(), name_start, cursor_name.len())
+        {
+            from = open_start + "open".len();
+            continue;
+        }
+        let paren_start = skip_ascii_whitespace(sql, name_start + cursor_name.len(), sql.len());
+        if sql.as_bytes().get(paren_start) == Some(&b'(') {
+            let paren_end = find_matching_delimiter(sql, paren_start, b'(', b')')?;
+            return Some((paren_start + 1, paren_end));
+        }
+        from = open_start + "open".len();
+    }
+    None
+}
+
+fn find_declared_cursor_param_ordinal(
+    sql: &str,
+    cursor_name: &str,
+    param_name: &str,
+) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let cursor_lower = cursor_name.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find(&cursor_lower) {
+        let name_start = from + offset;
+        if !identifier_boundaries(sql.as_bytes(), name_start, cursor_name.len()) {
+            from = name_start + cursor_name.len();
+            continue;
+        }
+        let cursor_keyword = skip_ascii_whitespace(sql, name_start + cursor_name.len(), sql.len());
+        if !lower[cursor_keyword..].starts_with("cursor")
+            || !identifier_boundaries(sql.as_bytes(), cursor_keyword, "cursor".len())
+        {
+            from = name_start + cursor_name.len();
+            continue;
+        }
+        let paren_start = skip_ascii_whitespace(sql, cursor_keyword + "cursor".len(), sql.len());
+        if sql.as_bytes().get(paren_start) != Some(&b'(') {
+            from = name_start + cursor_name.len();
+            continue;
+        }
+        let paren_end = find_matching_delimiter(sql, paren_start, b'(', b')')?;
+        let mut ordinal = 1usize;
+        let mut item_start = paren_start + 1;
+        for comma in top_level_commas(sql, paren_start + 1, paren_end)
+            .into_iter()
+            .chain(std::iter::once(paren_end))
+        {
+            let item = sql[item_start..comma].trim_start();
+            if starts_with_identifier(item, param_name) {
+                return Some(ordinal);
+            }
+            ordinal += 1;
+            item_start = comma + 1;
+        }
+        from = name_start + cursor_name.len();
+    }
+    None
+}
+
+fn identifier_boundaries(bytes: &[u8], start: usize, len: usize) -> bool {
+    let before = start.checked_sub(1).and_then(|index| bytes.get(index));
+    let after = bytes.get(start + len);
+    !before.is_some_and(|byte| is_sql_identifier_byte(*byte))
+        && !after.is_some_and(|byte| is_sql_identifier_byte(*byte))
+}
+
+fn starts_with_identifier(segment: &str, token: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    lower.starts_with(&token.to_ascii_lowercase())
+        && segment
+            .as_bytes()
+            .get(token.len())
+            .is_none_or(|byte| !is_sql_identifier_byte(*byte))
 }
 
 fn is_identifier_byte(byte: u8) -> bool {
@@ -2560,7 +2843,10 @@ fn find_sql_identifier_token_position(sql: &str, token: &str) -> Option<usize> {
     None
 }
 
-fn infer_backend_notice_position(sql: &str, message: &str) -> Option<usize> {
+fn infer_backend_notice_position(sql: &str, message: &str, occurrence: usize) -> Option<usize> {
+    if let Some(position) = plpgsql_shadowed_variable_position(sql, message, occurrence) {
+        return Some(position);
+    }
     if let Some(ty) = message
         .strip_prefix("argument type ")
         .and_then(|rest| rest.strip_suffix(" is only a shell"))
@@ -4212,6 +4498,7 @@ fn handle_portal_statement(
                             None,
                             None,
                             Some(&enum_labels),
+                            None,
                         )?;
                     }
                 }
@@ -4339,6 +4626,7 @@ fn try_handle_pg_cursors_query(
         None,
         None,
         None,
+        None,
     )?;
     Ok(true)
 }
@@ -4414,6 +4702,7 @@ fn try_handle_pg_prepared_statements_query(
         None,
         None,
         None,
+        None,
     )?;
     Ok(true)
 }
@@ -4466,6 +4755,7 @@ fn try_handle_pg_listening_channels_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -4538,6 +4828,7 @@ fn try_handle_current_schemas_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -4765,6 +5056,7 @@ fn execute_query_statement(
             let role_names = role_name_map(&catalog);
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
+            let proc_signatures = proc_signature_map(&catalog);
             let namespace_names = namespace_name_map(&catalog);
             let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
@@ -4786,6 +5078,7 @@ fn execute_query_statement(
                 Some(&proc_names),
                 Some(&namespace_names),
                 Some(&enum_labels),
+                Some(&proc_signatures),
             )?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -4868,6 +5161,7 @@ fn try_handle_nonstandard_backslash_select(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -5014,6 +5308,7 @@ fn execute_streaming_select_statement(
             let role_names = role_name_map(&catalog);
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
+            let proc_signatures = proc_signature_map(&catalog);
             let namespace_names = namespace_name_map(&catalog);
             let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
@@ -5047,6 +5342,7 @@ fn execute_streaming_select_statement(
                                     Some(&proc_names),
                                     Some(&namespace_names),
                                     Some(&enum_labels),
+                                    Some(&proc_signatures),
                                 )?;
                                 row_count += 1;
                             }
@@ -5238,6 +5534,19 @@ fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
         .collect()
 }
 
+fn proc_signature_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .proc_rows()
+        .into_iter()
+        .map(|row| {
+            (
+                row.oid,
+                crate::backend::executor::expr_reg::function_signature_text(&row, catalog),
+            )
+        })
+        .collect()
+}
+
 fn relation_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
         .class_rows()
@@ -5275,6 +5584,7 @@ fn try_handle_psql_describe_query(
     let role_names = role_name_map(&catalog);
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
+    let proc_signatures = proc_signature_map(&catalog);
     let namespace_names = namespace_name_map(&catalog);
     let enum_labels = enum_label_map(&catalog);
     send_query_result(
@@ -5292,6 +5602,7 @@ fn try_handle_psql_describe_query(
         Some(&proc_names),
         Some(&namespace_names),
         Some(&enum_labels),
+        Some(&proc_signatures),
     )?;
     Ok(true)
 }
@@ -6249,6 +6560,7 @@ fn try_handle_statistics_catalog_query(
     let role_names = role_name_map(&catalog);
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
+    let proc_signatures = proc_signature_map(&catalog);
     let namespace_names = namespace_name_map(&catalog);
     let enum_labels = enum_label_map(&catalog);
     send_query_result(
@@ -6266,6 +6578,7 @@ fn try_handle_statistics_catalog_query(
         Some(&proc_names),
         Some(&namespace_names),
         Some(&enum_labels),
+        Some(&proc_signatures),
     )?;
     Ok(true)
 }
@@ -9342,6 +9655,7 @@ fn handle_execute(
                 let role_names = role_name_map(&catalog);
                 let relation_names = relation_name_map(&catalog);
                 let proc_names = proc_name_map(&catalog);
+                let proc_signatures = proc_signature_map(&catalog);
                 let namespace_names = namespace_name_map(&catalog);
                 let enum_labels = enum_label_map(&catalog);
                 let mut row_buf = Vec::new();
@@ -9362,6 +9676,7 @@ fn handle_execute(
                         Some(&proc_names),
                         Some(&namespace_names),
                         Some(&enum_labels),
+                        Some(&proc_signatures),
                     )?;
                 }
                 if result.completed {
@@ -9448,14 +9763,22 @@ fn handle_close(
 
 fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> io::Result<()> {
     for notice in notices {
-        let (severity, sqlstate) = match notice.level {
-            RaiseLevel::Info => ("INFO", "00000"),
+        let severity = match notice.level {
+            RaiseLevel::Info => "INFO",
             RaiseLevel::Log => continue,
-            RaiseLevel::Notice => ("NOTICE", "00000"),
-            RaiseLevel::Warning => ("WARNING", "01000"),
+            RaiseLevel::Notice => "NOTICE",
+            RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => continue,
         };
-        send_notice_with_severity(stream, severity, sqlstate, &notice.message, None, None)?;
+        send_notice_with_fields(
+            stream,
+            severity,
+            &notice.sqlstate,
+            &notice.message,
+            notice.detail.as_deref(),
+            notice.hint.as_deref(),
+            None,
+        )?;
     }
     Ok(())
 }
@@ -9465,10 +9788,15 @@ fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
 }
 
 fn send_queued_notices_with_sql(stream: &mut impl Write, sql: Option<&str>) -> io::Result<()> {
+    let mut notice_occurrences = HashMap::new();
     for notice in take_backend_notices() {
-        let position = notice
-            .position
-            .or_else(|| sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message)));
+        let occurrence = notice_occurrences
+            .entry(notice.message.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        let position = notice.position.or_else(|| {
+            sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message, *occurrence))
+        });
         if notice.hint.is_some() {
             send_notice_with_hint(
                 stream,
@@ -14884,6 +15212,121 @@ ORDER BY 1, 2;";
         assert_eq!(
             first_error_response_position(&output),
             sql.find("f2[2]").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_plpgsql_return_validation_errors() {
+        let err = |message: &str| {
+            ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            })
+        };
+
+        let out_param_sql = "create function f1(in i int, out j int) as $$\nbegin\n  return i+1;\nend$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                out_param_sql,
+                &err("RETURN cannot have a parameter in function with OUT parameters"),
+            ),
+            out_param_sql.rfind("i+1").map(|index| index + 1)
+        );
+
+        let missing_expr_sql = "create function missing_return_expr() returns int as $$\nbegin\n    return ;\nend;$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                missing_expr_sql,
+                &err("missing expression at or near \";\""),
+            ),
+            missing_expr_sql
+                .find("return ;")
+                .map(|index| index + "return ".len() + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_plpgsql_cursor_arg_validation_errors() {
+        let err = |message: &str| {
+            ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            })
+        };
+
+        let positional_dup_sql = "create function namedparmcursor_test3() returns void as $$\ndeclare\n  c1 cursor (param1 int, param2 int) for select 1;\nbegin\n    open c1(param2 := 20, 21);\nend\n$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                positional_dup_sql,
+                &err("value for parameter \"param2\" of cursor \"c1\" specified more than once"),
+            ),
+            positional_dup_sql.find("21);").map(|index| index + 1)
+        );
+
+        let named_dup_sql = "create function namedparmcursor_test5() returns void as $$\ndeclare\n  c1 cursor (p1 int, p2 int) for select 1;\nbegin\n  open c1 (p2 := 77, p2 := 42);\nend\n$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                named_dup_sql,
+                &err("value for parameter \"p2\" of cursor \"c1\" specified more than once"),
+            ),
+            named_dup_sql.rfind("p2 := 42").map(|index| index + 1)
+        );
+
+        let not_enough_sql = "create function namedparmcursor_test6() returns void as $$\ndeclare\n  c1 cursor (p1 int, p2 int) for select 1;\nbegin\n  open c1 (p2 := 77);\nend\n$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                not_enough_sql,
+                &err("not enough arguments for cursor \"c1\""),
+            ),
+            not_enough_sql.find(");\nend").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_unbound_plpgsql_cursor_for_loop() {
+        let sql = "create function cursor_loop_bad() returns void as $$\ndeclare\n  c refcursor;\n  r record;\nbegin\n  for r in c loop\n  end loop;\nend;\n$$ language plpgsql;";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "cursor FOR loop must use a bound cursor variable".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("c loop").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_plpgsql_shadowed_variables() {
+        let sql = "create or replace function shadowtest(in1 int)\n  returns int as $$\ndeclare\nin1 int;\nbegin\n  declare\n    in1 int;\n  begin\n  end;\n  return 1;\nend\n$$ language plpgsql;";
+        let message = "variable \"in1\" shadows a previously defined variable";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: message.into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42712",
+        });
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("\nin1 int;").map(|index| index + 2)
+        );
+        assert_eq!(
+            infer_backend_notice_position(sql, message, 2),
+            sql.rfind("in1 int;").map(|index| index + 1)
+        );
+
+        let local_sql = "create or replace function shadowtest()\n  returns void as $$\ndeclare\nf1 int;\nbegin\n  declare\n    f1 int;\n  begin\n  end;\nend\n$$ language plpgsql;";
+        let local_message = "variable \"f1\" shadows a previously defined variable";
+        assert_eq!(
+            infer_backend_notice_position(local_sql, local_message, 1),
+            local_sql.rfind("f1 int;").map(|index| index + 1)
         );
     }
 

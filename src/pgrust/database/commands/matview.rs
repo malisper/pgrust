@@ -552,6 +552,7 @@ impl Database {
             database: Some(self.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
+            pending_portals: Vec::new(),
             catalog,
             scalar_function_cache: std::collections::HashMap::new(),
             srf_rows_cache: std::collections::HashMap::new(),

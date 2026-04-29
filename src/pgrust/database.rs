@@ -803,6 +803,12 @@ impl Database {
             .remove(&client_id);
     }
 
+    pub(crate) fn invalidate_plpgsql_function_cache(&self, client_id: ClientId) {
+        if let Some(cache) = self.session_plpgsql_function_caches.read().get(&client_id) {
+            cache.write().clear();
+        }
+    }
+
     pub(crate) fn clear_temp_backend_id(&self, client_id: ClientId) {
         self.session_temp_backend_ids.write().remove(&client_id);
     }
@@ -1222,7 +1228,7 @@ impl Database {
         self.domains
             .read()
             .values()
-            .find(|domain| domain.oid == domain_oid)
+            .find(|domain| domain.oid == domain_oid || domain.array_oid == domain_oid)
             .map(|domain| crate::backend::parser::DomainLookup {
                 oid: domain.oid,
                 name: domain.name.clone(),
@@ -1255,19 +1261,17 @@ impl Database {
         self.domains
             .read()
             .values()
-            .map(|domain| {
-                (
-                    domain.oid,
-                    crate::backend::parser::DomainLookup {
-                        oid: domain.oid,
-                        name: domain.name.clone(),
-                        sql_type: domain.sql_type,
-                        default: domain.default.clone(),
-                        check: domain.check.clone(),
-                        not_null: domain.not_null,
-                        constraints: domain_constraint_lookup_rows(domain),
-                    },
-                )
+            .flat_map(|domain| {
+                let lookup = crate::backend::parser::DomainLookup {
+                    oid: domain.oid,
+                    name: domain.name.clone(),
+                    sql_type: domain.sql_type,
+                    default: domain.default.clone(),
+                    check: domain.check.clone(),
+                    not_null: domain.not_null,
+                    constraints: domain_constraint_lookup_rows(domain),
+                };
+                [(domain.oid, lookup.clone()), (domain.array_oid, lookup)]
             })
             .collect()
     }

@@ -753,6 +753,7 @@ pub(crate) fn execute_bound_update_with_rules(
                         target_tableoid_index: target.desc.columns.len() + 1,
                         required_privileges: Vec::new(),
                         subplans: Vec::new(),
+                        current_of: None,
                     },
                     ctx,
                 )?
@@ -932,6 +933,7 @@ pub(crate) fn execute_bound_delete_with_rules(
                     target_tableoid_index: target.desc.columns.len() + 1,
                     required_privileges: Vec::new(),
                     subplans: Vec::new(),
+                    current_of: None,
                 },
                 ctx,
             )? {

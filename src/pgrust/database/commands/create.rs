@@ -27,7 +27,7 @@ use crate::include::catalog::{
     ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID,
     PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
     PG_LANGUAGE_SQL_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID,
-    VOID_TYPE_OID,
+    TRIGGER_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -45,7 +45,7 @@ use crate::pgrust::database::{
     default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
     resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
-use crate::pl::plpgsql::validate_create_function_body;
+use crate::pl::plpgsql::validate_create_function_body_with_options;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CreatedOwnedSequence {
@@ -1571,6 +1571,24 @@ fn notice_name_for_type(raw: &RawTypeName, sql_type: SqlType) -> String {
     raw_named_shell_type_name(raw)
         .map(str::to_string)
         .unwrap_or_else(|| format!("{sql_type:?}"))
+}
+
+fn percent_type_signature_notice(raw: &RawTypeName, sql_type: SqlType) -> Option<String> {
+    let RawTypeName::Named {
+        name,
+        array_bounds: 0,
+    } = raw
+    else {
+        return None;
+    };
+    let lower = name.to_ascii_lowercase();
+    let prefix = lower.strip_suffix("%type")?;
+    let original_prefix = &name[..prefix.len()];
+    original_prefix.trim().rsplit_once('.')?;
+    Some(format!(
+        "type reference {original_prefix}%TYPE converted to {}",
+        format_sql_type_name(sql_type)
+    ))
 }
 
 fn split_proc_name(name: &str) -> (Option<&str>, &str) {
@@ -3227,6 +3245,21 @@ impl Database {
         create_stmt: &CreateFunctionStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_create_function_stmt_with_search_path_and_gucs(
+            client_id,
+            create_stmt,
+            configured_search_path,
+            None,
+        )
+    }
+
+    pub(crate) fn execute_create_function_stmt_with_search_path_and_gucs(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateFunctionStatement,
+        configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
+    ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -3236,6 +3269,7 @@ impl Database {
             xid,
             0,
             configured_search_path,
+            gucs,
             &mut catalog_effects,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
@@ -3250,6 +3284,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         self.execute_create_function_stmt_in_transaction_with_kind(
@@ -3258,6 +3293,7 @@ impl Database {
             xid,
             cid,
             configured_search_path,
+            gucs,
             catalog_effects,
             'f',
             "function",
@@ -3334,6 +3370,7 @@ impl Database {
             xid,
             cid,
             configured_search_path,
+            None,
             catalog_effects,
             'p',
             "procedure",
@@ -3347,6 +3384,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         proc_kind: char,
         object_kind: &'static str,
@@ -3394,10 +3432,16 @@ impl Database {
         let mut all_arg_modes = Vec::new();
         let mut all_arg_names = Vec::new();
         let mut output_args = Vec::new();
+        let mut plpgsql_arg_types = Vec::new();
+        let mut percent_type_notices = std::collections::BTreeSet::new();
         let mut provariadic = 0;
 
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
+            if let Some(notice) = percent_type_signature_notice(&arg.ty, sql_type) {
+                percent_type_notices.insert(notice);
+            }
+            plpgsql_arg_types.push((arg.name.clone().unwrap_or_default(), sql_type));
             if matches!(sql_type.kind, SqlTypeKind::Shell) {
                 push_backend_notice(
                     "NOTICE",
@@ -3483,6 +3527,9 @@ impl Database {
                     }
                     Err(err) => return Err(ExecError::Parse(err)),
                 };
+                if let Some(notice) = percent_type_signature_notice(ty, sql_type) {
+                    percent_type_notices.insert(notice);
+                }
                 proretset = *setof;
                 prorettype = create_function_type_oid(&catalog, sql_type, format!("{sql_type:?}"))?;
                 if !output_args.is_empty() {
@@ -3527,6 +3574,9 @@ impl Database {
                 for column in columns {
                     let sql_type =
                         resolve_raw_type_name(&column.ty, &catalog).map_err(ExecError::Parse)?;
+                    if let Some(notice) = percent_type_signature_notice(&column.ty, sql_type) {
+                        percent_type_notices.insert(notice);
+                    }
                     if matches!(sql_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
                         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                             "record and composite RETURNS TABLE columns are not supported yet"
@@ -3644,8 +3694,26 @@ impl Database {
             }
         }
         if language_row.oid == PG_LANGUAGE_PLPGSQL_OID {
-            validate_create_function_body(&create_stmt.body, !output_args.is_empty())
-                .map_err(ExecError::Parse)?;
+            let has_plpgsql_output_args = proargmodes
+                .as_deref()
+                .is_some_and(|modes| modes.iter().any(|mode| matches!(*mode, b'o' | b'b' | b't')));
+            let validation_notices = validate_create_function_body_with_options(
+                &create_stmt.body,
+                has_plpgsql_output_args,
+                prorettype == VOID_TYPE_OID,
+                proretset,
+                matches!(prorettype, TRIGGER_TYPE_OID | EVENT_TRIGGER_TYPE_OID),
+                proargnames.as_deref().unwrap_or(&[]),
+                &plpgsql_arg_types,
+                gucs,
+            )
+            .map_err(ExecError::Parse)?;
+            for notice in validation_notices {
+                push_backend_notice(notice.severity, notice.sqlstate, notice.message, None, None);
+            }
+        }
+        for notice in percent_type_notices {
+            push_notice(notice);
         }
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)
@@ -5453,6 +5521,7 @@ impl Database {
             database: Some(self.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
+            pending_portals: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
             srf_rows_cache: std::collections::HashMap::new(),
@@ -5649,6 +5718,7 @@ impl Database {
             database: Some(self.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
+            pending_portals: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(
                 insert_catalog.clone(),
             )),

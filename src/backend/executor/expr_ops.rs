@@ -242,6 +242,7 @@ pub(crate) fn compare_values(
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
         (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(l == r)),
         (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(l == r)),
+        (Value::Tid(l), Value::Tid(r)) => Ok(Value::Bool(l == r)),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(l == r)),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(l == r)),

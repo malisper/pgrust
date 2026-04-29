@@ -46,6 +46,8 @@ pub fn apply_backend_cache_invalidation(
         return;
     }
 
+    db.invalidate_plpgsql_function_cache(client_id);
+
     let mut states = db.backend_cache_states.write();
     let Some(state) = states.get_mut(&client_id) else {
         return;

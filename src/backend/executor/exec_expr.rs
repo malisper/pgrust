@@ -2433,7 +2433,7 @@ fn eval_text_to_regclass_function(
             })?;
     let relation = catalog
         .lookup_any_relation(text)
-        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(text.to_string())))?;
+        .ok_or_else(|| expr_reg::regclass_lookup_error(text, Some(catalog)))?;
     Ok(Value::Int64(i64::from(relation.relation_oid)))
 }
 
@@ -7883,12 +7883,16 @@ pub fn eval_expr(
                     sqlstate: "XX000",
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
-                Ok(lookup_system_binding(&ctx.system_bindings, var.varno)
-                    .or_else(|| slot.table_oid.map(|table_oid| Value::Int64(i64::from(table_oid))))
+                Ok(slot
+                    .table_oid
+                    .map(|table_oid| Value::Int64(i64::from(table_oid)))
+                    .or_else(|| lookup_system_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
-                Ok(lookup_ctid_binding(&ctx.system_bindings, var.varno)
-                    .or_else(|| slot.tid().map(ctid_value))
+                Ok(slot
+                    .tid()
+                    .map(ctid_value)
+                    .or_else(|| lookup_ctid_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {

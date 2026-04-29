@@ -3224,6 +3224,17 @@ pub(crate) fn collect_matching_rows_heap(
     predicate: Option<&Expr>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    collect_matching_rows_heap_with_table_oid(rel, desc, toast, None, predicate, ctx)
+}
+
+pub(crate) fn collect_matching_rows_heap_with_table_oid(
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    desc: &RelationDesc,
+    toast: Option<ToastRelationRef>,
+    table_oid: Option<u32>,
+    predicate: Option<&Expr>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
     // :HACK: DELETE still materializes candidate rows before deleting them.
     // Per-row timeout polling makes PostgreSQL's btree regression delete tests
     // time out in dev builds; restore finer-grained checks when DELETE can use
@@ -3274,7 +3285,8 @@ pub(crate) fn collect_matching_rows_heap(
         drop(pin);
 
         for (tid, values) in page_rows {
-            let mut slot = TupleSlot::virtual_row(values.clone());
+            let mut slot =
+                TupleSlot::virtual_row_with_metadata(values.clone(), Some(tid), table_oid);
             if let Some(q) = &qual {
                 if !q(&mut slot, ctx)? {
                     continue;
@@ -3822,6 +3834,7 @@ pub(crate) fn collect_matching_rows_index(
     toast: Option<ToastRelationRef>,
     index: &BoundIndexRelation,
     keys: &[crate::include::access::scankey::ScanKeyData],
+    table_oid: Option<u32>,
     predicate: Option<&Expr>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
@@ -3880,6 +3893,7 @@ pub(crate) fn collect_matching_rows_index(
         };
         let mut slot =
             TupleSlot::from_heap_tuple(Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple);
+        slot.table_oid = table_oid;
         slot.toast = slot_toast_context(toast, ctx);
         if let Some(q) = &qual {
             if !q(&mut slot, ctx)? {
@@ -4030,6 +4044,7 @@ fn collect_referencing_rows(
             constraint.child_toast,
             index,
             &build_equality_scan_keys(key_values),
+            None,
             None,
             ctx,
         )
@@ -7783,7 +7798,7 @@ fn domain_not_null_violation(domain_name: &str) -> ExecError {
     }
 }
 
-fn enforce_domain_constraint_for_value(
+pub(crate) fn enforce_domain_constraint_for_value(
     value: &Value,
     ty: SqlType,
     ctx: &mut ExecutorContext,
@@ -9921,10 +9936,11 @@ pub fn execute_update_with_waiter(
                 .as_ref()
                 .map(|p| compile_predicate_with_decoder(p, &decoder));
             let target_rows = match &target.row_source {
-                BoundModifyRowSource::Heap => collect_matching_rows_heap(
+                BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                     target.rel,
                     &target.desc,
                     target.toast,
+                    Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
                 )?,
@@ -9934,6 +9950,7 @@ pub fn execute_update_with_waiter(
                     target.toast,
                     index,
                     keys,
+                    Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
                 )?,
@@ -10988,10 +11005,11 @@ pub fn execute_delete_with_waiter(
                 .as_ref()
                 .map(|p| compile_predicate_with_decoder(p, &decoder));
             let targets = match &target.row_source {
-                BoundModifyRowSource::Heap => collect_matching_rows_heap(
+                BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                     target.rel,
                     &target.desc,
                     target.toast,
+                    Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
                 )?,
@@ -11001,6 +11019,7 @@ pub fn execute_delete_with_waiter(
                     target.toast,
                     index,
                     keys,
+                    Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
                 )?,
@@ -11205,10 +11224,11 @@ pub(crate) fn materialize_update_row_events(
     let mut events = Vec::new();
     for target in &stmt.targets {
         let target_rows = match &target.row_source {
-            BoundModifyRowSource::Heap => collect_matching_rows_heap(
+            BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                 target.rel,
                 &target.desc,
                 target.toast,
+                Some(target.relation_oid),
                 target.predicate.as_ref(),
                 ctx,
             )?,
@@ -11218,6 +11238,7 @@ pub(crate) fn materialize_update_row_events(
                 target.toast,
                 index,
                 keys,
+                Some(target.relation_oid),
                 target.predicate.as_ref(),
                 ctx,
             )?,
@@ -11547,10 +11568,11 @@ pub(crate) fn materialize_delete_row_events(
     let mut events = Vec::new();
     for target in &stmt.targets {
         let rows = match &target.row_source {
-            BoundModifyRowSource::Heap => collect_matching_rows_heap(
+            BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                 target.rel,
                 &target.desc,
                 target.toast,
+                Some(target.relation_oid),
                 target.predicate.as_ref(),
                 ctx,
             )?,
@@ -11560,6 +11582,7 @@ pub(crate) fn materialize_delete_row_events(
                 target.toast,
                 index,
                 keys,
+                Some(target.relation_oid),
                 target.predicate.as_ref(),
                 ctx,
             )?,

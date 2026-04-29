@@ -14,13 +14,23 @@ pub struct VarDecl {
     pub type_name: String,
     pub ty: SqlType,
     pub default_expr: Option<String>,
+    pub constant: bool,
     pub strict: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorDecl {
     pub name: String,
+    pub scrollable: bool,
+    pub params: Vec<CursorParamDecl>,
     pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorParamDecl {
+    pub name: String,
+    pub type_name: String,
+    pub ty: SqlType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,16 +62,36 @@ pub enum RaiseLevel {
     Exception,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReturnQueryKind {
-    Select,
-    Values,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RaiseCondition {
+    SqlState(String),
+    ConditionName(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaiseUsingOption {
+    pub name: String,
+    pub expr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignTarget {
     Name(String),
-    Field { relation: String, field: String },
+    Parameter(usize),
+    Field {
+        relation: String,
+        field: String,
+    },
+    Indirect {
+        base: Box<AssignTarget>,
+        indirection: Vec<AssignIndirection>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignIndirection {
+    Field(String),
+    Subscript(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +107,42 @@ pub enum ForQuerySource {
         sql_expr: String,
         using_exprs: Vec<String>,
     },
+    Cursor {
+        name: String,
+        args: Vec<CursorArg>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorArg {
+    Positional(String),
+    Named { name: String, expr: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenCursorSource {
+    Declared {
+        args: Vec<CursorArg>,
+    },
+    Static(String),
+    Dynamic {
+        sql_expr: String,
+        using_exprs: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorDirection {
+    Next,
+    Prior,
+    First,
+    Last,
+    Forward(i64),
+    Backward(i64),
+    ForwardAll,
+    BackwardAll,
+    Absolute(i64),
+    Relative(i64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +160,10 @@ pub enum ExceptionCondition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
+    WithLine {
+        line: usize,
+        stmt: Box<Stmt>,
+    },
     Block(Block),
     Assign {
         target: AssignTarget,
@@ -108,6 +178,12 @@ pub enum Stmt {
         condition: String,
         body: Vec<Stmt>,
     },
+    Loop {
+        body: Vec<Stmt>,
+    },
+    Exit {
+        condition: Option<String>,
+    },
     ForInt {
         var_name: String,
         start_expr: String,
@@ -119,15 +195,18 @@ pub enum Stmt {
         source: ForQuerySource,
         body: Vec<Stmt>,
     },
-    ExitWhen {
-        condition: Option<String>,
+    ForEach {
+        target: ForTarget,
+        slice: usize,
+        array_expr: String,
+        body: Vec<Stmt>,
     },
     Raise {
         level: RaiseLevel,
-        sqlstate: Option<String>,
-        message: String,
+        condition: Option<RaiseCondition>,
+        message: Option<String>,
         params: Vec<String>,
-        line: usize,
+        using_options: Vec<RaiseUsingOption>,
     },
     Assert {
         condition: String,
@@ -141,8 +220,7 @@ pub enum Stmt {
         expr: Option<String>,
     },
     ReturnQuery {
-        sql: String,
-        kind: ReturnQueryKind,
+        source: ForQuerySource,
     },
     Perform {
         sql: String,
@@ -150,6 +228,7 @@ pub enum Stmt {
     },
     DynamicExecute {
         sql_expr: String,
+        strict: bool,
         into_targets: Vec<AssignTarget>,
         using_exprs: Vec<String>,
         line: usize,
@@ -160,11 +239,16 @@ pub enum Stmt {
     },
     OpenCursor {
         name: String,
-        sql: Option<String>,
+        source: OpenCursorSource,
     },
     FetchCursor {
         name: String,
+        direction: CursorDirection,
         targets: Vec<AssignTarget>,
+    },
+    MoveCursor {
+        name: String,
+        direction: CursorDirection,
     },
     CloseCursor {
         name: String,

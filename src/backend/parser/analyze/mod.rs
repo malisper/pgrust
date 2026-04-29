@@ -3210,6 +3210,12 @@ pub(crate) fn resolve_raw_type_name(
             }
         }
         RawTypeName::Named { name, array_bounds } => {
+            if let Some(mut ty) = resolve_percent_type_name(name, catalog)? {
+                for _ in 0..*array_bounds {
+                    ty = SqlType::array_of(ty);
+                }
+                return Ok(ty);
+            }
             let (base_name, typmod_args) = split_named_type_typmod(name);
             let mut ty = if let Some(alias) = builtin_named_type_alias(base_name) {
                 alias
@@ -3228,6 +3234,50 @@ pub(crate) fn resolve_raw_type_name(
             Ok(ty)
         }
     }
+}
+
+fn resolve_percent_type_name(
+    name: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<SqlType>, ParseError> {
+    let trimmed = name.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if let Some(prefix) = lowered.strip_suffix("%type") {
+        let original_prefix = &trimmed[..prefix.len()];
+        let Some((relation_name, column_name)) = original_prefix.trim().rsplit_once('.') else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "%TYPE reference in relation.column form",
+                actual: name.into(),
+            });
+        };
+        let relation = catalog
+            .lookup_any_relation(relation_name.trim())
+            .ok_or_else(|| ParseError::UnsupportedType(relation_name.trim().into()))?;
+        let column = relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name.trim()))
+            .ok_or_else(|| ParseError::UnknownColumn(original_prefix.trim().into()))?;
+        return Ok(Some(column.sql_type));
+    }
+    if let Some(prefix) = lowered.strip_suffix("%rowtype") {
+        let relation_name = &trimmed[..prefix.len()];
+        let relation = catalog
+            .lookup_any_relation(relation_name.trim())
+            .ok_or_else(|| ParseError::UnsupportedType(relation_name.trim().into()))?;
+        return Ok(Some(relation_row_type(&relation, catalog)));
+    }
+    Ok(None)
+}
+
+fn relation_row_type(relation: &BoundRelation, catalog: &dyn CatalogLookup) -> SqlType {
+    catalog
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typrelid == relation.relation_oid)
+        .map(|row| SqlType::named_composite(row.oid, relation.relation_oid))
+        .unwrap_or_else(|| SqlType::record(RECORD_TYPE_OID))
 }
 
 pub(crate) fn split_named_type_typmod(name: &str) -> (&str, Option<Vec<i32>>) {
@@ -5327,8 +5377,12 @@ fn build_values_plan_with_outer(
     let [query] = pg_rewrite_query(query, catalog)?
         .try_into()
         .expect("values rewrite should return a single query");
-    Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner_with_config(query, catalog, config))??)
+    let query = if config.fold_constants {
+        crate::backend::optimizer::fold_query_constants(query)?
+    } else {
+        query
+    };
+    planner_with_config(query, catalog, config)
 }
 
 fn bind_select_query_with_outer(
@@ -6474,6 +6528,10 @@ fn build_plan_with_outer(
     let [query] = pg_rewrite_query(query, catalog)?
         .try_into()
         .expect("select rewrite should return a single query");
-    Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner_with_config(query, catalog, config))??)
+    let query = if config.fold_constants {
+        crate::backend::optimizer::fold_query_constants(query)?
+    } else {
+        query
+    };
+    planner_with_config(query, catalog, config)
 }

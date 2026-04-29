@@ -65,7 +65,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::Regex(err) => err.message.clone(),
         ExecError::JsonInput { message, .. } => message.clone(),
         ExecError::XmlInput { message, .. } => message.clone(),
-        ExecError::DetailedError { message, .. } => message.clone(),
+        ExecError::DetailedError { message, .. } | ExecError::DiagnosticError { message, .. } => {
+            message.clone()
+        }
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),
         ExecError::CardinalityViolation { message, .. } => message.clone(),
@@ -194,7 +196,9 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
         {
             Some("For a single \"%\" use \"%%\".".into())
         }
-        ExecError::DetailedError { hint, .. } => hint.clone(),
+        ExecError::DetailedError { hint, .. } | ExecError::DiagnosticError { hint, .. } => {
+            hint.clone()
+        }
         ExecError::CardinalityViolation { hint, .. } => hint.clone(),
         _ => None,
     }
@@ -400,6 +404,7 @@ pub(crate) fn send_query_result(
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
+    proc_signatures: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
@@ -416,6 +421,7 @@ pub(crate) fn send_query_result(
             proc_names,
             namespace_names,
             enum_labels,
+            proc_signatures,
         )?;
     }
     send_command_complete(stream, tag)
@@ -848,6 +854,7 @@ fn format_typed_oid_text(
     role_names: Option<&HashMap<u32, String>>,
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
+    proc_signatures: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
 ) -> Option<String> {
     match kind? {
@@ -859,7 +866,11 @@ fn format_typed_oid_text(
                 .unwrap_or_else(|| format_proc_oid_text(oid, proc_names, true)),
         ),
         SqlTypeKind::RegProcedure => Some(
-            crate::backend::executor::expr_reg::format_regprocedure_oid_optional(oid, None)
+            proc_signatures
+                .and_then(|names| names.get(&oid).cloned())
+                .or_else(|| {
+                    crate::backend::executor::expr_reg::format_regprocedure_oid_optional(oid, None)
+                })
                 .or_else(|| format_proc_oid_text_optional(oid, proc_names))
                 .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
         ),
@@ -917,6 +928,7 @@ pub(crate) fn send_typed_data_row(
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
+    proc_signatures: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
@@ -962,6 +974,7 @@ pub(crate) fn send_typed_data_row(
                         role_names,
                         relation_names,
                         proc_names,
+                        proc_signatures,
                         namespace_names,
                     )
                 {
@@ -1037,6 +1050,7 @@ pub(crate) fn send_typed_data_row(
                         role_names,
                         relation_names,
                         proc_names,
+                        proc_signatures,
                         namespace_names,
                     )
                 {
@@ -1382,6 +1396,7 @@ pub(crate) fn format_text_data_value(
         relation_names,
         proc_names,
         namespace_names,
+        None,
         None,
     )
     .map_err(|err| ExecError::DetailedError {
@@ -1922,7 +1937,7 @@ pub(crate) fn send_notice(
     detail: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_notice_with_severity(w, "NOTICE", "00000", message, detail, position)
+    send_notice_with_fields(w, "NOTICE", "00000", message, detail, None, position)
 }
 
 pub(crate) fn send_notice_with_severity(
@@ -1931,6 +1946,18 @@ pub(crate) fn send_notice_with_severity(
     sqlstate: &str,
     message: &str,
     detail: Option<&str>,
+    position: Option<usize>,
+) -> io::Result<()> {
+    send_notice_with_fields(w, severity, sqlstate, message, detail, None, position)
+}
+
+pub(crate) fn send_notice_with_fields(
+    w: &mut impl Write,
+    severity: &str,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
     let mut body = Vec::new();
@@ -1949,6 +1976,11 @@ pub(crate) fn send_notice_with_severity(
     if let Some(detail) = detail {
         body.push(b'D');
         body.extend_from_slice(detail.as_bytes());
+        body.push(0);
+    }
+    if let Some(hint) = hint {
+        body.push(b'H');
+        body.extend_from_slice(hint.as_bytes());
         body.push(0);
     }
     if let Some(position) = position {
@@ -2639,6 +2671,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -2653,7 +2686,9 @@ mod tests {
         let mut out = Vec::new();
         let mut row_buf = Vec::new();
         let mut proc_names = HashMap::new();
+        let mut proc_signatures = HashMap::new();
         proc_names.insert(6403, "pg_rust_test_fdw_handler".to_string());
+        proc_signatures.insert(6403, "pg_rust_test_fdw_handler(internal)".to_string());
 
         send_typed_data_row(
             &mut out,
@@ -2671,12 +2706,13 @@ mod tests {
             Some(&proc_names),
             None,
             None,
+            Some(&proc_signatures),
         )
         .unwrap();
 
         assert!(
-            out.windows("pg_rust_test_fdw_handler".len())
-                .any(|window| window == b"pg_rust_test_fdw_handler")
+            out.windows("pg_rust_test_fdw_handler(internal)".len())
+                .any(|window| window == b"pg_rust_test_fdw_handler(internal)")
         );
     }
 
@@ -2696,6 +2732,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,
@@ -2727,6 +2764,7 @@ mod tests {
             FloatFormatOptions::default(),
             None,
             Some(&relation_names),
+            None,
             None,
             None,
             None,
@@ -2762,6 +2800,7 @@ mod tests {
             None,
             Some(&namespace_names),
             None,
+            None,
         )
         .unwrap();
 
@@ -2790,6 +2829,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,
@@ -2827,6 +2867,7 @@ mod tests {
             None,
             None,
             Some(&enum_labels),
+            None,
         )
         .unwrap();
 
@@ -2883,6 +2924,7 @@ mod tests {
             &[1, 1],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,

@@ -2768,6 +2768,7 @@ impl Session {
                 .get("max_parallel_workers_per_gather")
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(2),
+            fold_constants: true,
         }
     }
 
@@ -3163,6 +3164,7 @@ impl Session {
             database: Some(db.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
+            pending_portals: Vec::new(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -4386,6 +4388,7 @@ impl Session {
         let temp_effects = mem::take(&mut ctx.temp_effects);
         catalog_effects.extend(mem::take(&mut ctx.pending_catalog_effects));
         let pending_table_locks = mem::take(&mut ctx.pending_table_locks);
+        let pending_portals = mem::take(&mut ctx.pending_portals);
         if let Some(txn) = self.active_txn.as_mut() {
             txn.catalog_effects.extend(catalog_effects);
             txn.temp_effects.extend(temp_effects);
@@ -4406,6 +4409,11 @@ impl Session {
         if !succeeded {
             ctx.pending_async_notifications.clear();
             return;
+        }
+        if self.active_txn.is_some() {
+            for portal in pending_portals {
+                self.portals.put(portal);
+            }
         }
         let Some(txn) = self.active_txn.as_mut() else {
             ctx.pending_async_notifications.clear();
@@ -4997,10 +5005,11 @@ impl Session {
                 } else {
                     self.validate_create_function_config(create_stmt)?;
                     let search_path = self.configured_search_path();
-                    db.execute_create_function_stmt_with_search_path(
+                    db.execute_create_function_stmt_with_search_path_and_gucs(
                         self.client_id,
                         create_stmt,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                     )
                 }
             }
@@ -7899,6 +7908,7 @@ impl Session {
                 .as_ref()
                 .map(|expr| Self::substitute_sql_expr(expr, subst))
                 .transpose()?,
+            current_of: update.current_of.clone(),
             returning: update
                 .returning
                 .iter()
@@ -12285,6 +12295,7 @@ impl Session {
                         xid,
                         cid,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                     )
                 }

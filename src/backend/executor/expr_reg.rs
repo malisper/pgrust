@@ -276,15 +276,26 @@ pub(crate) fn resolve_regclass_oid(
     if let Some(oid) = parse_numeric_oid(input)? {
         return Ok(oid);
     }
-    effective_catalog(catalog)
+    let lookup = effective_catalog(catalog);
+    lookup
         .lookup_any_relation(input.trim())
         .map(|entry| entry.relation_oid)
-        .ok_or_else(|| {
-            detailed_error(
-                format!("relation \"{}\" does not exist", input.trim()),
-                "42P01",
-            )
-        })
+        .ok_or_else(|| regclass_lookup_error(input, Some(lookup)))
+}
+
+pub(crate) fn regclass_lookup_error(input: &str, catalog: Option<&dyn CatalogLookup>) -> ExecError {
+    let trimmed = input.trim();
+    if let Some(catalog) = catalog
+        && let Ok(parts) = parse_sql_name_parts(trimmed)
+        && let [schema, _name] = parts.as_slice()
+        && !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname == *schema)
+    {
+        return detailed_error(format!("schema \"{schema}\" does not exist"), "3F000");
+    }
+    detailed_error(format!("relation \"{trimmed}\" does not exist"), "42P01")
 }
 
 pub(crate) fn resolve_regtype_oid(

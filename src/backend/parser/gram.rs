@@ -4247,7 +4247,14 @@ pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
 
 pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
     let sql = strip_sql_comments_preserving_layout(sql);
-    let lowered = sql.trim().to_ascii_lowercase();
+    let trimmed = sql.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.ends_with("%type") || lowered.ends_with("%rowtype") {
+        return Ok(RawTypeName::Named {
+            name: trimmed.to_string(),
+            array_bounds: 0,
+        });
+    }
     match lowered.as_str() {
         "int2vector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int2Vector))),
         "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),
@@ -14331,13 +14338,18 @@ fn consume_keywords<'a>(input: &'a str, keywords: &[&str]) -> Option<&'a str> {
 
 fn keyword_at_boundary(input: &str, start: usize, keyword: &str) -> bool {
     let end = start.saturating_add(keyword.len());
+    let ident_char = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
     input
-        .get(start..end)
-        .is_some_and(|slice| slice.eq_ignore_ascii_case(keyword))
+        .get(..start)
+        .and_then(|slice| slice.chars().next_back())
+        .is_none_or(|ch| !ident_char(ch))
+        && input
+            .get(start..end)
+            .is_some_and(|slice| slice.eq_ignore_ascii_case(keyword))
         && input
             .get(end..)
             .and_then(|slice| slice.chars().next())
-            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .is_none_or(|ch| !ident_char(ch))
 }
 
 fn consume_keyword<'a>(input: &'a str, keyword: &str) -> &'a str {
@@ -21815,6 +21827,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut assignments = Vec::new();
     let mut from = None;
     let mut where_clause = None;
+    let mut current_of = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -21831,7 +21844,10 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
             }
             Rule::from_item => from = Some(build_from_item(part)?),
             Rule::assignment_item => assignments.extend(build_assignment_item(part)?),
-            Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::update_where_clause => match build_update_where_clause(part)? {
+                UpdateWhereClause::Expr(expr) => where_clause = Some(expr),
+                UpdateWhereClause::CurrentOf(cursor_name) => current_of = Some(cursor_name),
+            },
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
@@ -21845,6 +21861,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         assignments,
         from,
         where_clause,
+        current_of,
         returning,
     })
 }
@@ -21881,6 +21898,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut only = false;
     let mut using = None;
     let mut where_clause = None;
+    let mut current_of = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -21892,7 +21910,10 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::from_item => using = Some(build_from_item(part)?),
-            Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::update_where_clause => match build_update_where_clause(part)? {
+                UpdateWhereClause::Expr(expr) => where_clause = Some(expr),
+                UpdateWhereClause::CurrentOf(cursor_name) => current_of = Some(cursor_name),
+            },
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
@@ -21904,8 +21925,32 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         only,
         using,
         where_clause,
+        current_of,
         returning,
     })
+}
+
+enum UpdateWhereClause {
+    Expr(SqlExpr),
+    CurrentOf(String),
+}
+
+fn build_update_where_clause(pair: Pair<'_, Rule>) -> Result<UpdateWhereClause, ParseError> {
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => return build_expr(part).map(UpdateWhereClause::Expr),
+            Rule::current_of_clause => {
+                let cursor_name = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .map(build_identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                return Ok(UpdateWhereClause::CurrentOf(cursor_name));
+            }
+            _ => {}
+        }
+    }
+    Err(ParseError::UnexpectedEof)
 }
 
 fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
@@ -22054,7 +22099,8 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             SqlExpr::ArraySubscript { .. }
             | SqlExpr::Column(_)
             | SqlExpr::FieldSelect { .. }
-            | SqlExpr::FuncCall { .. } => select_item_name(inner, index),
+            | SqlExpr::FuncCall { .. }
+            | SqlExpr::Row(_) => select_item_name(inner, index),
             SqlExpr::Cast(grand_inner, _) if matches!(grand_inner.as_ref(), SqlExpr::Column(_)) => {
                 select_item_name(inner, index)
             }

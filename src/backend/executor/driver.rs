@@ -13,7 +13,7 @@ use crate::backend::parser::{
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pgrust::database::queue_pending_notification;
-use crate::pl::plpgsql::execute_do;
+use crate::pl::plpgsql::execute_do_with_context;
 
 fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
     if stmt.feature == "ALTER TABLE form" {
@@ -153,7 +153,7 @@ fn execute_statement_with_source(
     ctx.snapshot = ctx.txns.read().snapshot_for_command(xid, cid)?;
     let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
     let result = (|| match stmt {
-        Statement::Do(stmt) => execute_do(&stmt),
+        Statement::Do(stmt) => execute_do_with_context(&stmt, catalog, ctx),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx, PlannerConfig::default()),
         Statement::Select(stmt) => {
             let requires_update = stmt.locking_clause.is_some();
@@ -741,7 +741,7 @@ pub fn execute_readonly_statement_with_config(
     planner_config: PlannerConfig,
 ) -> Result<StatementResult, ExecError> {
     match stmt {
-        Statement::Do(stmt) => execute_do(&stmt),
+        Statement::Do(stmt) => execute_do_with_context(&stmt, catalog, ctx),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx, planner_config),
         Statement::Select(stmt) => {
             if let Some(locking_clause) = stmt.locking_clause {
