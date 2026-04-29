@@ -198,6 +198,7 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
                 .map(|mut row| {
                     if expand_single_record
                         && row.len() == 1
+                        && matches!(row.first(), Some(Value::Record(_)))
                         && let Some(Value::Record(record)) = row.pop()
                     {
                         row = record.fields;

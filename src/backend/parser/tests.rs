@@ -8194,6 +8194,26 @@ fn parse_table_sample_system_repeatable() {
 }
 
 #[test]
+fn parse_table_sample_without_alias() {
+    let stmt =
+        parse_select("select id from people tablesample bernoulli (50) repeatable (0)").unwrap();
+    assert_eq!(
+        stmt.from,
+        Some(FromItem::TableSample {
+            source: Box::new(FromItem::Table {
+                name: "people".into(),
+                only: false,
+            }),
+            sample: RawTableSampleClause {
+                method: "bernoulli".into(),
+                args: vec![SqlExpr::IntegerLiteral("50".into())],
+                repeatable: Some(SqlExpr::IntegerLiteral("0".into())),
+            },
+        })
+    );
+}
+
+#[test]
 fn parse_select_alias_overrides_qualified_column_name() {
     let stmt = parse_select("select p.name as w from people p").unwrap();
     assert_eq!(stmt.targets[0].output_name, "w");

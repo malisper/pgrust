@@ -10592,7 +10592,10 @@ fn tid_and_xid_text_casts_accept_pg_input() {
         )
         .unwrap(),
         vec![vec![
-            Value::Text("(4294967295,65535)".into()),
+            Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                block_number: 4_294_967_295,
+                offset_number: 65_535,
+            }),
             Value::Int64(4_294_967_295),
         ]],
     );

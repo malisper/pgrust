@@ -2078,8 +2078,14 @@ fn eval_tablesample_bernoulli(values: &[Value]) -> Result<Value, ExecError> {
             sqlstate: "2202H",
         });
     }
-    let Some((block, offset)) = ctid.as_text().and_then(parse_ctid_text) else {
-        return Err(malformed_expr_error("TABLESAMPLE BERNOULLI ctid"));
+    let (block, offset) = match ctid {
+        Value::Tid(tid) => (tid.block_number, u32::from(tid.offset_number)),
+        other => {
+            let Some((block, offset)) = other.as_text().and_then(parse_ctid_text) else {
+                return Err(malformed_expr_error("TABLESAMPLE BERNOULLI ctid"));
+            };
+            (block, offset)
+        }
     };
     let cutoff = ((u64::from(u32::MAX) + 1) as f64 * *percent / 100.0).round() as u64;
     let seed = hashfloat8_for_tablesample(*repeatable);

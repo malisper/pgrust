@@ -4883,10 +4883,6 @@ impl Session {
                 return result;
             }
         }
-        if self.active_txn.is_none() {
-            stmt = self.resolve_prepared_explain_statement(db, stmt)?;
-        }
-
         if self.active_txn.is_none()
             && !matches!(stmt, Statement::ReindexIndex(_))
             && let Some(tag) = Self::event_trigger_command_tag(&stmt)

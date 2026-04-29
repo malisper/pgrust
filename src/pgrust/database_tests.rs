@@ -26386,7 +26386,7 @@ fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
         .iter()
         .enumerate()
         .skip(filtered_child_pos + 1)
-        .find(|(_, line)| line.trim_start().starts_with("->  CTE Scan  (cost="))
+        .find(|(_, line)| line.starts_with("  ->  CTE Scan"))
         .map(|(idx, _)| idx)
         .unwrap_or_else(|| panic!("expected unfiltered cte scan in explain output, got {lines:?}"));
     let pushed_filter_pos = lines
@@ -45325,7 +45325,13 @@ fn policy_expressions_can_reference_ctid() {
             &db,
             "select ctid, a from ctid_policy_items order by a",
         ),
-        vec![vec![Value::Text("(0,1)".into()), Value::Int32(10)]]
+        vec![vec![
+            Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                block_number: 0,
+                offset_number: 1,
+            }),
+            Value::Int32(10),
+        ]]
     );
 }
 
@@ -45372,7 +45378,10 @@ fn update_rls_write_check_uses_invalid_new_ctid() {
             "select ctid, a, b from ctid_update_items"
         ),
         vec![vec![
-            Value::Text("(0,2)".into()),
+            Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                block_number: 0,
+                offset_number: 2,
+            }),
             Value::Int32(1),
             Value::Text("Manzana".into())
         ]]

@@ -943,31 +943,29 @@ fn explain_delete_lines(
             )
         ));
     }
-    let child_targets = bound
-        .targets
-        .iter()
-        .filter(|target| {
-            target.relation_name != stmt.table_name && delete_target_can_match(target, catalog)
-        })
-        .collect::<Vec<_>>();
-    for (index, target) in child_targets.iter().enumerate() {
-        push_explain_line(
-            &format!(
-                "  Delete on {} {}_{}",
-                target.relation_name,
-                stmt.table_name.trim_matches('"'),
-                index + 1
-            ),
-            crate::include::nodes::plannodes::PlanEstimate::default(),
-            show_costs,
-            &mut lines,
-        );
-    }
     let live_targets = bound
         .targets
         .iter()
         .filter(|target| delete_target_can_match(target, catalog))
         .collect::<Vec<_>>();
+    let labeled_targets = if live_targets.len() > 1 {
+        live_targets.clone()
+    } else {
+        live_targets
+            .iter()
+            .copied()
+            .filter(|target| target.relation_name != stmt.table_name)
+            .collect::<Vec<_>>()
+    };
+    for (index, target) in labeled_targets.iter().enumerate() {
+        let alias = delete_explain_target_alias(stmt, index);
+        push_explain_line(
+            &format!("  Delete on {} {alias}", target.relation_name),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+    }
     let has_subplans = !bound.subplans.is_empty();
     if has_subplans {
         let lateral_subquery_alias = delete_explain_lateral_subquery_alias(stmt);
@@ -1213,11 +1211,14 @@ fn push_delete_target_scan_lines(
             lines,
         );
         for (index, target) in targets.iter().enumerate() {
-            let alias = target
-                .relation_name
-                .ne(&stmt.table_name)
-                .then(|| format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1));
-            push_delete_single_target_scan(target, alias.as_deref(), show_costs, indent + 6, lines);
+            let alias = delete_explain_target_alias(stmt, index);
+            push_delete_single_target_scan(
+                target,
+                Some(alias.as_str()),
+                show_costs,
+                indent + 6,
+                lines,
+            );
         }
     } else {
         let alias = targets[0]
@@ -1226,6 +1227,10 @@ fn push_delete_target_scan_lines(
             .then(|| format!("{}_1", stmt.table_name.trim_matches('"')));
         push_delete_single_target_scan(targets[0], alias.as_deref(), show_costs, indent, lines);
     }
+}
+
+fn delete_explain_target_alias(stmt: &DeleteStatement, index: usize) -> String {
+    format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1)
 }
 
 fn push_delete_single_target_scan(

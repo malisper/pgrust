@@ -1293,12 +1293,12 @@ fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<State
     if query_sql.is_empty() {
         return Err(ParseError::UnexpectedEof);
     }
-    let parse_sql = substitute_prepared_parameter_refs(&query_sql, |_| "NULL".into())?;
-    let query = match parse_statement_with_options_inner(parse_sql, options)? {
-        Statement::Select(select) => select,
+    let query = match parse_statement_with_options_inner(query_sql.clone(), options)? {
+        Statement::Select(select) => PreparedStatementQuery::Select(select),
+        Statement::Update(update) => PreparedStatementQuery::Update(update),
         other => {
             return Err(ParseError::UnexpectedToken {
-                expected: "SELECT",
+                expected: "SELECT or UPDATE",
                 actual: format!("{other:?}"),
             });
         }
@@ -1306,7 +1306,7 @@ fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<State
     Ok(Statement::Prepare(PrepareStatement {
         name,
         parameter_types,
-        query: PreparedStatementQuery::Select(query),
+        query,
         query_sql,
     }))
 }
