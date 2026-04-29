@@ -4846,6 +4846,7 @@ pub struct UpdateStatement {
     pub assignments: Vec<Assignment>,
     pub from: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
+    pub current_of: Option<String>,
     pub returning: Vec<SelectItem>,
 }
 
@@ -4857,6 +4858,7 @@ pub struct DeleteStatement {
     pub only: bool,
     pub using: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
+    pub current_of: Option<String>,
     pub returning: Vec<SelectItem>,
 }
 

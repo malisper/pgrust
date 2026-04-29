@@ -11,10 +11,10 @@ use crate::backend::parser::{
     AliasColumnSpec, ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection,
     BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
     CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement, CteBody,
-    DeleteStatement, FromItem, InsertSource, InsertStatement, OnConflictClause, OnConflictTarget,
-    OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr,
-    SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType,
-    SqlTypeKind, Statement, UpdateStatement, ValuesStatement, XmlTableColumn,
+    DeleteStatement, FromItem, InsertSource, InsertStatement, OnConflictAction, OnConflictClause,
+    OnConflictTarget, OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
+    RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr,
+    SqlType, SqlTypeKind, Statement, UpdateStatement, ValuesStatement, XmlTableColumn,
     bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
@@ -478,6 +478,7 @@ struct CompileEnv {
     labeled_scopes: Vec<LabeledScope>,
     local_ctes: Vec<BoundCte>,
     declared_cursors: HashMap<String, DeclaredCursor>,
+    open_cursor_shapes: HashMap<usize, Vec<QueryColumn>>,
     parameter_slots: Vec<ScopeVar>,
     positional_parameter_names: Vec<String>,
     exception_sqlstate: Option<ScopeVar>,
@@ -1632,10 +1633,12 @@ fn compile_stmt(
             targets,
         } => {
             let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
-            let targets = targets
+            let cursor_shape = env.open_cursor_shapes.get(&slot).cloned();
+            let mut targets = targets
                 .iter()
                 .map(|target| compile_select_into_target(target, env))
                 .collect::<Result<Vec<_>, _>>()?;
+            apply_cursor_shape_to_fetch_targets(&mut targets, cursor_shape.as_deref(), env);
             CompiledStmt::FetchCursor {
                 slot,
                 direction: *direction,
@@ -2659,7 +2662,12 @@ fn compile_open_cursor_stmt(
         .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
     let slot = var.slot;
     let constant = var.constant;
-    let (source, scrollable, _) = compile_cursor_open_source(name, source, catalog, env)?;
+    let (source, scrollable, shape_plan) = compile_cursor_open_source(name, source, catalog, env)?;
+    if let Some(plan) = shape_plan {
+        env.open_cursor_shapes.insert(slot, plan.columns());
+    } else {
+        env.open_cursor_shapes.remove(&slot);
+    }
     Ok(CompiledStmt::OpenCursor {
         slot,
         name: name.to_string(),
@@ -2714,7 +2722,7 @@ fn compile_exec_sql_stmt(
     }
 
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
-    let stmt = parse_statement(&rewritten_sql)?;
+    let stmt = normalize_plpgsql_sql_statement(parse_statement(&rewritten_sql)?, env);
     let outer_scope = outer_scope_for_sql(env);
     match stmt {
         Statement::Select(stmt) => Ok(CompiledStmt::Perform {
@@ -3711,6 +3719,28 @@ fn compile_for_query_target(
     Ok(CompiledForQueryTarget { targets })
 }
 
+fn apply_cursor_shape_to_fetch_targets(
+    targets: &mut [CompiledSelectIntoTarget],
+    columns: Option<&[QueryColumn]>,
+    env: &mut CompileEnv,
+) {
+    let ([target], Some(columns)) = (targets, columns) else {
+        return;
+    };
+    if target.ty.kind != SqlTypeKind::Record {
+        return;
+    }
+    let descriptor = assign_anonymous_record_descriptor(
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    );
+    let ty = descriptor.sql_type();
+    env.update_slot_type(target.slot, ty);
+    target.ty = ty;
+}
+
 fn compile_exec_returning_into_stmt(
     sql: &str,
     target_refs: &[AssignTarget],
@@ -4306,6 +4336,89 @@ fn find_top_level_token(input: &str, token: &str) -> Option<usize> {
     }
 
     None
+}
+
+fn normalize_plpgsql_sql_statement(stmt: Statement, env: &CompileEnv) -> Statement {
+    match stmt {
+        Statement::Update(mut stmt) => {
+            for assignment in &mut stmt.assignments {
+                assignment.expr = normalize_plpgsql_expr(assignment.expr.clone(), env);
+                normalize_assignment_target_subscripts(&mut assignment.target, env);
+            }
+            if let Some(where_clause) = stmt.where_clause.take() {
+                stmt.where_clause = Some(normalize_plpgsql_expr(where_clause, env));
+            }
+            for item in &mut stmt.returning {
+                item.expr = normalize_plpgsql_expr(item.expr.clone(), env);
+            }
+            Statement::Update(stmt)
+        }
+        Statement::Delete(mut stmt) => {
+            if let Some(where_clause) = stmt.where_clause.take() {
+                stmt.where_clause = Some(normalize_plpgsql_expr(where_clause, env));
+            }
+            for item in &mut stmt.returning {
+                item.expr = normalize_plpgsql_expr(item.expr.clone(), env);
+            }
+            Statement::Delete(stmt)
+        }
+        Statement::Insert(mut stmt) => {
+            normalize_insert_source(&mut stmt.source, env);
+            if let Some(clause) = &mut stmt.on_conflict
+                && matches!(clause.action, OnConflictAction::Update)
+            {
+                for assignment in &mut clause.assignments {
+                    assignment.expr = normalize_plpgsql_expr(assignment.expr.clone(), env);
+                    normalize_assignment_target_subscripts(&mut assignment.target, env);
+                }
+                if let Some(predicate) = clause.where_clause.take() {
+                    clause.where_clause = Some(normalize_plpgsql_expr(predicate, env));
+                }
+            }
+            for item in &mut stmt.returning {
+                item.expr = normalize_plpgsql_expr(item.expr.clone(), env);
+            }
+            Statement::Insert(stmt)
+        }
+        other => other,
+    }
+}
+
+fn normalize_assignment_target_subscripts(target: &mut AssignmentTarget, env: &CompileEnv) {
+    for subscript in &mut target.subscripts {
+        if let Some(lower) = subscript.lower.take() {
+            subscript.lower = Some(Box::new(normalize_plpgsql_expr(*lower, env)));
+        }
+        if let Some(upper) = subscript.upper.take() {
+            subscript.upper = Some(Box::new(normalize_plpgsql_expr(*upper, env)));
+        }
+    }
+    for indirection in &mut target.indirection {
+        if let AssignmentTargetIndirection::Subscript(subscript) = indirection {
+            if let Some(lower) = subscript.lower.take() {
+                subscript.lower = Some(Box::new(normalize_plpgsql_expr(*lower, env)));
+            }
+            if let Some(upper) = subscript.upper.take() {
+                subscript.upper = Some(Box::new(normalize_plpgsql_expr(*upper, env)));
+            }
+        }
+    }
+}
+
+fn normalize_insert_source(source: &mut InsertSource, env: &CompileEnv) {
+    match source {
+        InsertSource::Values(rows) => {
+            for row in rows {
+                for expr in row {
+                    *expr = normalize_plpgsql_expr(expr.clone(), env);
+                }
+            }
+        }
+        InsertSource::Select(select) => {
+            *select = Box::new(normalize_plpgsql_select((**select).clone(), env));
+        }
+        InsertSource::DefaultValues => {}
+    }
 }
 
 fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {

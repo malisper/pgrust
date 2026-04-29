@@ -48965,6 +48965,70 @@ fn plpgsql_partitioned_table_percent_type_signatures() {
 }
 
 #[test]
+fn plpgsql_where_current_of_updates_cursor_row() {
+    let dir = temp_dir("plpgsql_where_current_of");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_current_items (i int4, j int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into pl_current_items values (1, 1), (2, 2), (3, 3)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_current_bound() returns void language plpgsql as $$
+         declare
+           c cursor for select * from pl_current_items order by i;
+         begin
+           for r in c loop
+             update pl_current_items set i = i * 10, j = r.j * 2 where current of c;
+           end loop;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(1, "select pl_current_bound()").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_current_items order by i"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(2)],
+            vec![Value::Int32(20), Value::Int32(4)],
+            vec![Value::Int32(30), Value::Int32(6)],
+        ]
+    );
+
+    db.execute(
+        1,
+        "create function pl_current_refcursor() returns void language plpgsql as $$
+         declare
+           c refcursor := 'renamed_current_cursor';
+           r record;
+         begin
+           open c for select * from pl_current_items order by i;
+           loop
+             fetch c into r;
+             exit when not found;
+             update pl_current_items set i = i * 10, j = r.j + 1 where current of c;
+           end loop;
+           close c;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(1, "select pl_current_refcursor()").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_current_items order by i"),
+        vec![
+            vec![Value::Int32(100), Value::Int32(3)],
+            vec![Value::Int32(200), Value::Int32(5)],
+            vec![Value::Int32(300), Value::Int32(7)],
+        ]
+    );
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();

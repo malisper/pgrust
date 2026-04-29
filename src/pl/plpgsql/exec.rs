@@ -15,7 +15,8 @@ use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, cast_value_with_config,
     cast_value_with_source_type_catalog_and_config, compare_order_values, eval_expr,
-    eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement, render_interval_text,
+    eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement, executor_start,
+    render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint};
@@ -36,9 +37,12 @@ use crate::include::catalog::{
     EVENT_TRIGGER_TYPE_OID, PgProcRow, TEXT_TYPE_OID, range_type_ref_for_multirange_sql_type,
     range_type_ref_for_sql_type,
 };
+use crate::include::executor::execdesc::create_query_desc;
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
-use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow};
-use crate::include::nodes::primnodes::{QueryColumn, expr_sql_type_hint};
+use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow, SystemVarBinding};
+use crate::include::nodes::primnodes::{
+    OpExprKind, QueryColumn, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint,
+};
 use crate::pgrust::portal::{
     CursorOptions, Portal, PortalExecution, PortalFetchDirection, PortalFetchLimit, PortalStatus,
     PortalStrategy,
@@ -223,15 +227,21 @@ struct PlpgsqlContextFrame {
 #[derive(Debug, Clone)]
 struct FunctionCursor {
     columns: Vec<QueryColumn>,
-    rows: Vec<Vec<Value>>,
+    rows: Vec<FunctionQueryRow>,
     current: isize,
     scrollable: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionQueryRow {
+    values: Vec<Value>,
+    system_bindings: Vec<SystemVarBinding>,
 }
 
 #[derive(Debug)]
 struct FunctionQueryResult {
     columns: Vec<QueryColumn>,
-    rows: Vec<Vec<Value>>,
+    rows: Vec<FunctionQueryRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -2662,7 +2672,7 @@ fn exec_function_return_query(
     let row_count = result.rows.len();
     for row in result.rows {
         state.rows.push(coerce_function_result_row(
-            row,
+            row.values,
             &compiled.return_contract,
             expected_record_shape,
         )?);
@@ -2697,8 +2707,9 @@ fn exec_function_select_into(
     let result = execute_function_query_result(plan, compiled, state, ctx)?;
     let strict_detail =
         strict_param_detail_if_enabled(strict_params, compiled, state, ctx).map(|detail| detail);
+    let rows = function_query_row_values(&result.rows);
     assign_query_rows_into_targets(
-        &result.rows,
+        &rows,
         &result.columns,
         targets,
         strict,
@@ -2709,6 +2720,10 @@ fn exec_function_select_into(
         state,
         ctx,
     )
+}
+
+fn function_query_row_values(rows: &[FunctionQueryRow]) -> Vec<Vec<Value>> {
+    rows.iter().map(|row| row.values.clone()).collect()
 }
 
 fn assign_query_rows_into_targets(
@@ -2888,6 +2903,15 @@ fn exec_function_for_query(
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
     let result = execute_for_query_source(source, compiled, state, ctx)?;
+    let cursor_loop_name = match source {
+        CompiledForQuerySource::Cursor {
+            slot,
+            name,
+            scrollable,
+            ..
+        } => Some((cursor_name_for_slot(*slot, name, state), *scrollable)),
+        _ => None,
+    };
 
     if result.rows.is_empty() {
         assign_null_to_targets(&target.targets, state)?;
@@ -2895,13 +2919,47 @@ fn exec_function_for_query(
         return Ok(FunctionControl::Continue);
     }
 
-    for row in &result.rows {
-        assign_query_row_to_targets(row, &result.columns, &target.targets, state, ctx, true)?;
+    if let Some((portal_name, scrollable)) = &cursor_loop_name {
+        state.cursors.insert(
+            portal_name.clone(),
+            FunctionCursor {
+                columns: result.columns.clone(),
+                rows: result.rows.clone(),
+                current: -1,
+                scrollable: *scrollable,
+            },
+        );
+    }
+
+    let mut completed = FunctionControl::Continue;
+    for (index, row) in result.rows.iter().enumerate() {
+        if let Some((portal_name, _)) = &cursor_loop_name
+            && let Some(cursor) = state.cursors.get_mut(portal_name)
+        {
+            cursor.current = index as isize;
+        }
+        assign_query_row_to_targets(
+            &row.values,
+            &result.columns,
+            &target.targets,
+            state,
+            ctx,
+            true,
+        )?;
         match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
             FunctionControl::Continue | FunctionControl::LoopContinue => {}
             FunctionControl::ExitLoop => break,
-            FunctionControl::Return => return Ok(FunctionControl::Return),
+            FunctionControl::Return => {
+                completed = FunctionControl::Return;
+                break;
+            }
         }
+    }
+    if let Some((portal_name, _)) = &cursor_loop_name {
+        state.cursors.remove(portal_name);
+    }
+    if matches!(completed, FunctionControl::Return) {
+        return Ok(completed);
     }
 
     state.values[compiled.found_slot] = Value::Bool(true);
@@ -3135,7 +3193,8 @@ fn exec_function_update(
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
-    let result = execute_update(stmt.clone(), catalog.as_ref(), ctx, xid, cid);
+    let stmt = bind_update_current_of(stmt, compiled, state)?;
+    let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
     advance_plpgsql_command_id(ctx);
@@ -3160,7 +3219,8 @@ fn exec_function_update_into(
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
-    let result = execute_update(stmt.clone(), catalog.as_ref(), ctx, xid, cid);
+    let stmt = bind_update_current_of(stmt, compiled, state)?;
+    let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -3190,7 +3250,8 @@ fn exec_function_delete(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_delete(stmt.clone(), catalog.as_ref(), ctx, xid);
+    let stmt = bind_delete_current_of(stmt, compiled, state)?;
+    let result = execute_delete(stmt, catalog.as_ref(), ctx, xid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
     advance_plpgsql_command_id(ctx);
@@ -3214,7 +3275,8 @@ fn exec_function_delete_into(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_delete(stmt.clone(), catalog.as_ref(), ctx, xid);
+    let stmt = bind_delete_current_of(stmt, compiled, state)?;
+    let result = execute_delete(stmt, catalog.as_ref(), ctx, xid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -3706,11 +3768,77 @@ fn execute_function_query_result(
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionQueryResult, ExecError> {
     execute_function_query_with_bindings(compiled, state, ctx, true, |ctx| {
-        statement_result_to_query_result(
-            execute_planned_stmt(plan.clone(), ctx)?,
-            "PL/pgSQL SQL statement did not produce rows",
-        )
+        execute_planned_query_result_with_bindings(plan.clone(), ctx)
     })
+}
+
+fn execute_planned_query_result_with_bindings(
+    plan: crate::include::nodes::plannodes::PlannedStmt,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionQueryResult, ExecError> {
+    let query_desc = create_query_desc(plan, None);
+    let columns = query_desc.columns();
+    let planned_stmt = query_desc.planned_stmt;
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, planned_stmt.subplans);
+    let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
+    let result = (|| {
+        let saved_exec_params = if planned_stmt.ext_params.is_empty() {
+            Vec::new()
+        } else {
+            let mut param_slot = ctx
+                .expr_bindings
+                .outer_tuple
+                .clone()
+                .map(TupleSlot::virtual_row)
+                .unwrap_or_else(|| TupleSlot::empty(0));
+            let mut saved = Vec::with_capacity(planned_stmt.ext_params.len());
+            for param in &planned_stmt.ext_params {
+                let value = eval_expr(&param.expr, &mut param_slot, ctx)?;
+                let old = ctx.expr_bindings.exec_params.insert(param.paramid, value);
+                saved.push((param.paramid, old));
+            }
+            saved
+        };
+        ctx.cte_tables.clear();
+        ctx.cte_tables.extend(
+            ctx.pinned_cte_tables
+                .iter()
+                .map(|(cte_id, table)| (*cte_id, table.clone())),
+        );
+        ctx.cte_producers.clear();
+        ctx.recursive_worktables.clear();
+        let result = (|| {
+            let mut state = executor_start(planned_stmt.plan_tree);
+            let mut rows = Vec::new();
+            loop {
+                if state.exec_proc_node(ctx)?.is_none() {
+                    break;
+                }
+                let mut row = state.materialize_current_row()?;
+                let mut values = row.slot.values()?.iter().cloned().collect::<Vec<_>>();
+                Value::materialize_all(&mut values);
+                rows.push(FunctionQueryRow {
+                    values,
+                    system_bindings: row.system_bindings,
+                });
+            }
+            Ok(FunctionQueryResult { columns, rows })
+        })();
+        ctx.cte_tables.clear();
+        ctx.cte_producers.clear();
+        ctx.recursive_worktables.clear();
+        for (paramid, old) in saved_exec_params {
+            if let Some(value) = old {
+                ctx.expr_bindings.exec_params.insert(paramid, value);
+            } else {
+                ctx.expr_bindings.exec_params.remove(&paramid);
+            }
+        }
+        result
+    })();
+    ctx.scalar_function_cache = saved_scalar_function_cache;
+    ctx.subplans = saved_subplans;
+    result
 }
 
 fn execute_dynamic_for_query(
@@ -3885,6 +4013,7 @@ fn execute_dynamic_sql_statement(
                     &[],
                 )
                 .map_err(ExecError::Parse)?;
+                let stmt = bind_update_current_of(&stmt, compiled, state)?;
                 let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
                 if result.is_ok() {
                     advance_plpgsql_command_id(ctx);
@@ -3899,6 +4028,7 @@ fn execute_dynamic_sql_statement(
                     &[],
                 )
                 .map_err(ExecError::Parse)?;
+                let stmt = bind_delete_current_of(&stmt, compiled, state)?;
                 let result = execute_delete(stmt, catalog.as_ref(), ctx, xid);
                 if result.is_ok() {
                     advance_plpgsql_command_id(ctx);
@@ -4041,31 +4171,36 @@ fn execute_literal_query_result(
     execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
         let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
         match stmt {
-            crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
-                pg_plan_query_with_outer_scopes_and_ctes(
-                    &stmt,
-                    catalog.as_ref(),
-                    &[],
-                    &compiled.local_ctes,
+            crate::backend::parser::Statement::Select(stmt) => {
+                execute_planned_query_result_with_bindings(
+                    pg_plan_query_with_outer_scopes_and_ctes(
+                        &stmt,
+                        catalog.as_ref(),
+                        &[],
+                        &compiled.local_ctes,
+                    )
+                    .map_err(ExecError::Parse)?,
+                    ctx,
                 )
-                .map_err(ExecError::Parse)?,
-                ctx,
+            }
+            crate::backend::parser::Statement::Values(stmt) => statement_result_to_query_result(
+                execute_planned_stmt(
+                    pg_plan_values_query_with_outer_scopes_and_ctes(
+                        &stmt,
+                        catalog.as_ref(),
+                        &[],
+                        &compiled.local_ctes,
+                    )
+                    .map_err(ExecError::Parse)?,
+                    ctx,
+                )?,
+                "cursor query did not produce rows",
             ),
-            crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
-                pg_plan_values_query_with_outer_scopes_and_ctes(
-                    &stmt,
-                    catalog.as_ref(),
-                    &[],
-                    &compiled.local_ctes,
-                )
-                .map_err(ExecError::Parse)?,
-                ctx,
+            other => statement_result_to_query_result(
+                execute_readonly_statement(other, catalog.as_ref(), ctx)?,
+                "cursor query did not produce rows",
             ),
-            other => execute_readonly_statement(other, catalog.as_ref(), ctx),
         }
-    })
-    .and_then(|result| {
-        statement_result_to_query_result(result, "cursor query did not produce rows")
     })
 }
 
@@ -4096,7 +4231,16 @@ fn statement_result_to_query_result(
     let StatementResult::Query { columns, rows, .. } = result else {
         return Err(function_runtime_error(message, None, "XX000"));
     };
-    Ok(FunctionQueryResult { columns, rows })
+    Ok(FunctionQueryResult {
+        columns,
+        rows: rows
+            .into_iter()
+            .map(|values| FunctionQueryRow {
+                values,
+                system_bindings: Vec::new(),
+            })
+            .collect(),
+    })
 }
 
 fn cursor_name_for_slot(slot: usize, fallback: &str, state: &FunctionState) -> String {
@@ -4135,7 +4279,7 @@ fn export_open_cursors_as_portals(state: &FunctionState, ctx: &mut ExecutorConte
             execution: PortalExecution::Materialized {
                 columns: cursor.columns.clone(),
                 column_names,
-                rows: cursor.rows.clone(),
+                rows: cursor.rows.iter().map(|row| row.values.clone()).collect(),
                 pos,
             },
         });
@@ -4256,7 +4400,7 @@ fn exec_function_fetch_cursor(
                 "55000",
             ));
         }
-        let row = cursor_fetch(cursor, direction);
+        let row = cursor_fetch(cursor, direction).map(|row| row.values);
         (row.into_iter().collect::<Vec<_>>(), cursor.columns.clone())
     } else if let Some(portal) = ctx
         .pending_portals
@@ -4341,7 +4485,10 @@ fn cursor_direction_is_forward_only(direction: CursorDirection) -> bool {
     )
 }
 
-fn cursor_fetch(cursor: &mut FunctionCursor, direction: CursorDirection) -> Option<Vec<Value>> {
+fn cursor_fetch(
+    cursor: &mut FunctionCursor,
+    direction: CursorDirection,
+) -> Option<FunctionQueryRow> {
     let target = cursor_target_position(cursor, direction)?;
     if target >= 0 && (target as usize) < cursor.rows.len() {
         cursor.current = target;
@@ -4662,6 +4809,214 @@ fn function_outer_tuple(compiled: &CompiledFunction, state: &FunctionState) -> V
         values.push(trigger_relation_record_value(&bindings.old_row, state));
     }
     values
+}
+
+fn bind_update_current_of(
+    stmt: &crate::backend::parser::BoundUpdateStatement,
+    compiled: &CompiledFunction,
+    state: &FunctionState,
+) -> Result<crate::backend::parser::BoundUpdateStatement, ExecError> {
+    let mut stmt = stmt.clone();
+    let Some(cursor_name) = stmt.current_of.clone() else {
+        return Ok(stmt);
+    };
+    let predicate =
+        current_of_predicate(resolve_current_of_binding(&cursor_name, compiled, state)?)?;
+    for target in &mut stmt.targets {
+        target.predicate = Some(match target.predicate.take() {
+            Some(existing) => Expr::and(existing, predicate.clone()),
+            None => predicate.clone(),
+        });
+    }
+    stmt.current_of = None;
+    Ok(stmt)
+}
+
+fn bind_delete_current_of(
+    stmt: &crate::backend::parser::BoundDeleteStatement,
+    compiled: &CompiledFunction,
+    state: &FunctionState,
+) -> Result<crate::backend::parser::BoundDeleteStatement, ExecError> {
+    let mut stmt = stmt.clone();
+    let Some(cursor_name) = stmt.current_of.clone() else {
+        return Ok(stmt);
+    };
+    let predicate =
+        current_of_predicate(resolve_current_of_binding(&cursor_name, compiled, state)?)?;
+    for target in &mut stmt.targets {
+        target.predicate = Some(match target.predicate.take() {
+            Some(existing) => Expr::and(existing, predicate.clone()),
+            None => predicate.clone(),
+        });
+    }
+    stmt.current_of = None;
+    Ok(stmt)
+}
+
+fn resolve_current_of_binding(
+    cursor_name: &str,
+    compiled: &CompiledFunction,
+    state: &FunctionState,
+) -> Result<SystemVarBinding, ExecError> {
+    if let Some(cursor) = cursor_by_portal_name(state, cursor_name) {
+        return current_cursor_system_binding(cursor).ok_or_else(|| {
+            function_runtime_error(
+                &format!("cursor \"{cursor_name}\" is not positioned on a row"),
+                None,
+                "24000",
+            )
+        });
+    }
+
+    let mut slots = Vec::new();
+    collect_compiled_slot_names(compiled, &mut slots);
+    for (name, slot) in slots {
+        if !name.eq_ignore_ascii_case(cursor_name) {
+            continue;
+        }
+        let Some(portal_name) = state.values.get(slot).and_then(Value::as_text) else {
+            continue;
+        };
+        let Some(cursor) = cursor_by_portal_name(state, portal_name) else {
+            continue;
+        };
+        return current_cursor_system_binding(cursor).ok_or_else(|| {
+            function_runtime_error(
+                &format!("cursor \"{cursor_name}\" is not positioned on a row"),
+                None,
+                "24000",
+            )
+        });
+    }
+
+    Err(function_runtime_error(
+        &format!("cursor \"{cursor_name}\" does not exist"),
+        None,
+        "34000",
+    ))
+}
+
+fn cursor_by_portal_name<'a>(
+    state: &'a FunctionState,
+    portal_name: &str,
+) -> Option<&'a FunctionCursor> {
+    state.cursors.get(portal_name).or_else(|| {
+        state
+            .cursors
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(portal_name))
+            .map(|(_, cursor)| cursor)
+    })
+}
+
+fn current_of_predicate(binding: SystemVarBinding) -> Result<Expr, ExecError> {
+    let tid = binding.tid.ok_or_else(|| {
+        function_runtime_error("cursor is not positioned on a table row", None, "24000")
+    })?;
+    let tableoid = Expr::Var(Var {
+        varno: 1,
+        varattno: TABLE_OID_ATTR_NO,
+        varlevelsup: 0,
+        vartype: SqlType::new(SqlTypeKind::Oid),
+    });
+    let ctid = Expr::Var(Var {
+        varno: 1,
+        varattno: SELF_ITEM_POINTER_ATTR_NO,
+        varlevelsup: 0,
+        vartype: SqlType::new(SqlTypeKind::Tid),
+    });
+    Ok(Expr::and(
+        Expr::op_auto(
+            OpExprKind::Eq,
+            vec![
+                tableoid,
+                Expr::Const(Value::Int64(i64::from(binding.table_oid))),
+            ],
+        ),
+        Expr::op_auto(
+            OpExprKind::Eq,
+            vec![
+                ctid,
+                Expr::Const(Value::Text(
+                    format!("({},{})", tid.block_number, tid.offset_number).into(),
+                )),
+            ],
+        ),
+    ))
+}
+
+fn current_cursor_system_binding(cursor: &FunctionCursor) -> Option<SystemVarBinding> {
+    if cursor.current < 0 || cursor.current as usize >= cursor.rows.len() {
+        return None;
+    }
+    cursor.rows[cursor.current as usize]
+        .system_bindings
+        .iter()
+        .find(|binding| binding.tid.is_some())
+        .copied()
+}
+
+fn collect_compiled_slot_names(compiled: &CompiledFunction, out: &mut Vec<(String, usize)>) {
+    out.extend(
+        compiled
+            .parameter_slots
+            .iter()
+            .map(|slot| (slot.name.clone(), slot.slot)),
+    );
+    out.extend(
+        compiled
+            .output_slots
+            .iter()
+            .map(|slot| (slot.name.clone(), slot.slot)),
+    );
+    collect_block_slot_names(&compiled.body, out);
+}
+
+fn collect_block_slot_names(block: &CompiledBlock, out: &mut Vec<(String, usize)>) {
+    out.extend(
+        block
+            .local_slots
+            .iter()
+            .map(|slot| (slot.name.clone(), slot.slot)),
+    );
+    for stmt in &block.statements {
+        collect_stmt_slot_names(stmt, out);
+    }
+    for handler in &block.exception_handlers {
+        for stmt in &handler.statements {
+            collect_stmt_slot_names(stmt, out);
+        }
+    }
+}
+
+fn collect_stmt_slot_names(stmt: &CompiledStmt, out: &mut Vec<(String, usize)>) {
+    match stmt {
+        CompiledStmt::WithLine { stmt, .. } => collect_stmt_slot_names(stmt, out),
+        CompiledStmt::Block(block) => collect_block_slot_names(block, out),
+        CompiledStmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (_, body) in branches {
+                for stmt in body {
+                    collect_stmt_slot_names(stmt, out);
+                }
+            }
+            for stmt in else_branch {
+                collect_stmt_slot_names(stmt, out);
+            }
+        }
+        CompiledStmt::While { body, .. }
+        | CompiledStmt::Loop { body }
+        | CompiledStmt::ForInt { body, .. }
+        | CompiledStmt::ForQuery { body, .. }
+        | CompiledStmt::ForEach { body, .. } => {
+            for stmt in body {
+                collect_stmt_slot_names(stmt, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn trigger_relation_record_value(

@@ -21749,6 +21749,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut assignments = Vec::new();
     let mut from = None;
     let mut where_clause = None;
+    let mut current_of = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -21765,7 +21766,10 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
             }
             Rule::from_item => from = Some(build_from_item(part)?),
             Rule::assignment_item => assignments.extend(build_assignment_item(part)?),
-            Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::update_where_clause => match build_update_where_clause(part)? {
+                UpdateWhereClause::Expr(expr) => where_clause = Some(expr),
+                UpdateWhereClause::CurrentOf(cursor_name) => current_of = Some(cursor_name),
+            },
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
@@ -21779,6 +21783,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         assignments,
         from,
         where_clause,
+        current_of,
         returning,
     })
 }
@@ -21815,6 +21820,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut only = false;
     let mut using = None;
     let mut where_clause = None;
+    let mut current_of = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -21826,7 +21832,10 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::from_item => using = Some(build_from_item(part)?),
-            Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::update_where_clause => match build_update_where_clause(part)? {
+                UpdateWhereClause::Expr(expr) => where_clause = Some(expr),
+                UpdateWhereClause::CurrentOf(cursor_name) => current_of = Some(cursor_name),
+            },
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
@@ -21838,8 +21847,32 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         only,
         using,
         where_clause,
+        current_of,
         returning,
     })
+}
+
+enum UpdateWhereClause {
+    Expr(SqlExpr),
+    CurrentOf(String),
+}
+
+fn build_update_where_clause(pair: Pair<'_, Rule>) -> Result<UpdateWhereClause, ParseError> {
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => return build_expr(part).map(UpdateWhereClause::Expr),
+            Rule::current_of_clause => {
+                let cursor_name = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .map(build_identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                return Ok(UpdateWhereClause::CurrentOf(cursor_name));
+            }
+            _ => {}
+        }
+    }
+    Err(ParseError::UnexpectedEof)
 }
 
 fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
