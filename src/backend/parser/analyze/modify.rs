@@ -4540,6 +4540,9 @@ fn bind_update_from(
         predicate.clone(),
         catalog,
     )?;
+    let [query] = crate::backend::rewrite::pg_rewrite_query(query, catalog)?
+        .try_into()
+        .expect("UPDATE FROM input rewrite should return a single query");
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 

@@ -44,8 +44,8 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind, OrderByEntry,
-    ProjectSetTarget, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl,
+    BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExprKind,
+    OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl,
     SetReturningCall, TargetEntry, ToastRelationRef, Var, attrno_index, set_returning_call_exprs,
     user_attrno,
 };
@@ -3163,6 +3163,17 @@ fn deparameterize_immediate_outer_vars(expr: Expr) -> Expr {
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(deparameterize_immediate_outer_vars(*inner)), ty)
         }
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(deparameterize_immediate_outer_vars(*array)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript.lower.map(deparameterize_immediate_outer_vars),
+                    upper: subscript.upper.map(deparameterize_immediate_outer_vars),
+                })
+                .collect(),
+        },
         other => other,
     }
 }
@@ -4220,6 +4231,21 @@ fn parameterize_outer_vars(expr: Expr, outer_relids: &[usize]) -> Expr {
             saop.right = Box::new(parameterize_outer_vars(*saop.right, outer_relids));
             Expr::ScalarArrayOp(saop)
         }
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(parameterize_outer_vars(*array, outer_relids)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| parameterize_outer_vars(expr, outer_relids)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| parameterize_outer_vars(expr, outer_relids)),
+                })
+                .collect(),
+        },
         Expr::ArrayLiteral {
             elements,
             array_type,

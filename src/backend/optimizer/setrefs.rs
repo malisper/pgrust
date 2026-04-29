@@ -207,6 +207,17 @@ fn build_base_scan_tlist(
 ) -> IndexedTlist {
     let output_vars = slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs;
     let mut tlist = build_simple_tlist_from_exprs(&output_vars);
+    if let Some(rtindex) = rte_slot_varno(source_id) {
+        for (index, entry) in tlist.entries.iter_mut().enumerate() {
+            entry.match_exprs.push(Expr::Var(Var {
+                varno: rtindex,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: entry.sql_type,
+            }));
+            entry.match_exprs = dedup_match_exprs(std::mem::take(&mut entry.match_exprs));
+        }
+    }
     if let Some(info) = root.and_then(|root| append_translation(root, source_id)) {
         for (index, entry) in tlist.entries.iter_mut().enumerate() {
             if info
@@ -811,6 +822,18 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             output_columns,
             ..
         } => build_subquery_tlist(*rtindex, query, input, output_columns),
+        Path::SeqScan {
+            source_id, desc, ..
+        }
+        | Path::IndexOnlyScan {
+            source_id, desc, ..
+        }
+        | Path::IndexScan {
+            source_id, desc, ..
+        }
+        | Path::BitmapHeapScan {
+            source_id, desc, ..
+        } => build_base_scan_tlist(root, *source_id, desc),
         Path::NestedLoopJoin { left, right, .. }
         | Path::HashJoin { left, right, .. }
         | Path::MergeJoin { left, right, .. } => build_join_tlist(root, path, left, right),

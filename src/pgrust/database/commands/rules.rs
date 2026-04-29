@@ -8,19 +8,19 @@ use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::CatalogMutationEffect;
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::commands::tablecmds::{
-    apply_base_delete_row, apply_base_update_row, execute_delete_with_waiter, execute_insert,
-    execute_insert_values, execute_update_with_waiter, finalize_bound_delete_stmt,
-    finalize_bound_insert_stmt, finalize_bound_update_stmt, materialize_delete_row_events,
-    materialize_insert_rows, materialize_update_row_events,
+    apply_assignment_target, apply_base_delete_row, apply_base_update_row,
+    execute_delete_with_waiter, execute_insert, execute_insert_values, execute_update_with_waiter,
+    finalize_bound_delete_stmt, finalize_bound_insert_stmt, finalize_bound_update_stmt,
+    materialize_delete_row_events, materialize_insert_rows, materialize_update_row_events,
 };
 use crate::backend::commands::trigger::{RuntimeTriggers, relation_has_instead_row_trigger};
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, TupleSlot, Value, eval_expr,
 };
 use crate::backend::parser::{
-    CatalogLookup, CommentOnRuleStatement, CreateRuleStatement, DropRuleStatement, FromItem,
-    ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement, Statement,
-    bind_rule_action_statement, bind_rule_qual, rewrite_bound_delete_auto_view_target,
+    BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement,
+    DropRuleStatement, FromItem, ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement,
+    Statement, bind_rule_action_statement, bind_rule_qual, rewrite_bound_delete_auto_view_target,
     rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
     validate_rule_definition,
 };
@@ -661,7 +661,9 @@ pub(crate) fn execute_bound_update_with_rules(
     let result = (|| {
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
-        let joined_update_events = if stmt.input_plan.is_some() {
+        let joined_update_events = if stmt.input_plan.is_some()
+            && stmt.targets.iter().any(|target| target.relkind != 'v')
+        {
             Some(materialize_update_row_events(&stmt, ctx)?)
         } else {
             None
@@ -678,7 +680,13 @@ pub(crate) fn execute_bound_update_with_rules(
                 )
             {
                 let (target_affected_rows, mut target_returned_rows) =
-                    execute_view_update_with_triggers(target, &stmt.returning, catalog, ctx)?;
+                    execute_view_update_with_triggers(
+                        &stmt,
+                        target,
+                        &stmt.returning,
+                        catalog,
+                        ctx,
+                    )?;
                 affected_rows += target_affected_rows;
                 returned_rows.append(&mut target_returned_rows);
                 continue;
@@ -696,13 +704,11 @@ pub(crate) fn execute_bound_update_with_rules(
                         ViewDmlEvent::Update,
                     ));
                 }
-                for (old_values, new_values) in
-                    materialize_view_update_events(target, catalog, ctx)?
-                {
+                for event in materialize_view_update_events_for_stmt(&stmt, target, catalog, ctx)? {
                     let outcome = execute_matching_rules(
                         &rules,
-                        &old_values,
-                        &new_values,
+                        &event.old_values,
+                        &event.new_values,
                         catalog,
                         ctx,
                         xid,
@@ -723,9 +729,11 @@ pub(crate) fn execute_bound_update_with_rules(
                                 &target.relation_name,
                             ));
                         }
+                        let returning_rows =
+                            append_update_from_source_rows(&outcome.returning_rows, &event);
                         returned_rows.extend(project_statement_returning_rows(
                             &stmt.returning,
-                            &outcome.returning_rows,
+                            &returning_rows,
                             ctx,
                         )?);
                     }
@@ -857,6 +865,66 @@ pub(crate) fn execute_bound_delete_with_rules(
     let result = (|| {
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
+        if stmt.input_plan.is_some() && stmt.targets.iter().all(|target| target.relkind != 'v') {
+            for event in materialize_delete_row_events(&stmt, ctx)? {
+                let target = event.target;
+                let rules = load_prepared_rules(
+                    target.relation_oid,
+                    RuleEvent::Delete,
+                    &target.desc,
+                    catalog,
+                )?;
+                let null_new = vec![Value::Null; target.desc.columns.len()];
+                let outcome = execute_matching_rules(
+                    &rules,
+                    &event.old_values,
+                    &null_new,
+                    catalog,
+                    ctx,
+                    xid,
+                    0,
+                    waiter,
+                    !stmt.returning.is_empty(),
+                )?;
+                if outcome.matched_instead {
+                    if !stmt.returning.is_empty() {
+                        if !outcome.returning_seen {
+                            return Err(missing_rule_returning_error(
+                                RuleEvent::Delete,
+                                &target.relation_name,
+                            ));
+                        }
+                        returned_rows.extend(project_statement_returning_rows(
+                            &stmt.returning,
+                            &outcome.returning_rows,
+                            ctx,
+                        )?);
+                    }
+                    if outcome.matched_actions {
+                        affected_rows += 1;
+                    }
+                    continue;
+                }
+                if apply_base_delete_row(&target, event.tid, event.old_values, ctx, xid, waiter)? {
+                    if !stmt.returning.is_empty() {
+                        returned_rows.push(project_statement_returning_row(
+                            &stmt.returning,
+                            &event.returning_values,
+                            ctx,
+                        )?);
+                    }
+                    affected_rows += 1;
+                }
+            }
+            return if stmt.returning.is_empty() {
+                Ok(StatementResult::AffectedRows(affected_rows))
+            } else {
+                Ok(build_statement_returning_result(
+                    &stmt.returning,
+                    returned_rows,
+                ))
+            };
+        }
         for target in &stmt.targets {
             let view_has_user_rules =
                 relation_has_user_rules_for_event(target.relation_oid, RuleEvent::Delete, catalog);
@@ -1100,6 +1168,7 @@ fn execute_view_insert_with_triggers(
 }
 
 fn execute_view_update_with_triggers(
+    stmt: &crate::backend::parser::BoundUpdateStatement,
     target: &crate::backend::parser::BoundUpdateTarget,
     returning: &[TargetEntry],
     catalog: &dyn CatalogLookup,
@@ -1123,11 +1192,15 @@ fn execute_view_update_with_triggers(
     triggers.before_statement(ctx)?;
     let mut affected_rows = 0usize;
     let mut returned_rows = Vec::new();
-    for (old_values, new_values) in materialize_view_update_events(target, catalog, ctx)? {
-        let Some(returned_row) = triggers.instead_row_update(&old_values, new_values, ctx)? else {
+    for event in materialize_view_update_events_for_stmt(stmt, target, catalog, ctx)? {
+        let Some(returned_row) =
+            triggers.instead_row_update(&event.old_values, event.new_values, ctx)?
+        else {
             continue;
         };
         if !returning.is_empty() {
+            let mut returned_row = returned_row;
+            returned_row.extend(event.source_values.iter().cloned());
             returned_rows.push(project_statement_returning_row(
                 returning,
                 &returned_row,
@@ -1396,6 +1469,104 @@ fn materialize_view_update_events(
         out.push((row, new_values));
     }
     Ok(out)
+}
+
+fn materialize_view_update_events_for_stmt(
+    stmt: &crate::backend::parser::BoundUpdateStatement,
+    target: &crate::backend::parser::BoundUpdateTarget,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<ViewUpdateEvent>, ExecError> {
+    if stmt.input_plan.is_some() {
+        materialize_joined_view_update_events(stmt, target, ctx)
+    } else {
+        materialize_view_update_events(target, catalog, ctx).map(|events| {
+            events
+                .into_iter()
+                .map(|(old_values, new_values)| ViewUpdateEvent {
+                    old_values,
+                    new_values,
+                    source_values: Vec::new(),
+                })
+                .collect()
+        })
+    }
+}
+
+struct ViewUpdateEvent {
+    old_values: Vec<Value>,
+    new_values: Vec<Value>,
+    source_values: Vec<Value>,
+}
+
+fn materialize_joined_view_update_events(
+    stmt: &crate::backend::parser::BoundUpdateStatement,
+    target: &crate::backend::parser::BoundUpdateTarget,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<ViewUpdateEvent>, ExecError> {
+    let input_plan = stmt.input_plan.as_ref().ok_or(ExecError::DetailedError {
+        message: "UPDATE ... FROM is missing its input plan".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let mut state = crate::backend::executor::executor_start(input_plan.plan_tree.clone());
+    let mut out = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let mut row_values = slot.values()?.to_vec();
+        Value::materialize_all(&mut row_values);
+        if row_values.len() < stmt.visible_column_count {
+            return Err(ExecError::DetailedError {
+                message: "update input row is missing visible columns".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        }
+        let old_values = row_values[..stmt.target_visible_count].to_vec();
+        let source_values = &row_values[stmt.target_visible_count..stmt.visible_column_count];
+        let mut eval_row = old_values.clone();
+        eval_row.extend(source_values.iter().cloned());
+        let mut eval_slot = TupleSlot::virtual_row(eval_row);
+        let mut new_values = old_values.clone();
+        for assignment in &target.assignments {
+            let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+            apply_assignment_target(
+                &target.desc,
+                &mut new_values,
+                &BoundAssignmentTarget {
+                    column_index: assignment.column_index,
+                    subscripts: assignment.subscripts.clone(),
+                    field_path: assignment.field_path.clone(),
+                    indirection: assignment.indirection.clone(),
+                    target_sql_type: assignment.target_sql_type,
+                },
+                value,
+                &mut eval_slot,
+                ctx,
+            )?;
+        }
+        out.push(ViewUpdateEvent {
+            old_values,
+            new_values,
+            source_values: source_values.to_vec(),
+        });
+    }
+    Ok(out)
+}
+
+fn append_update_from_source_rows(rows: &[Vec<Value>], event: &ViewUpdateEvent) -> Vec<Vec<Value>> {
+    if event.source_values.is_empty() {
+        return rows.to_vec();
+    }
+    rows.iter()
+        .map(|row| {
+            let mut values = row.clone();
+            values.extend(event.source_values.iter().cloned());
+            values
+        })
+        .collect()
 }
 
 fn materialize_view_delete_events(

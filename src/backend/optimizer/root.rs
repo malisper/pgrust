@@ -2219,6 +2219,9 @@ fn make_group_input_target(parse: &Query, group_by: &[Expr]) -> PathTarget {
         for arg in &accum.args {
             collect_group_input_exprs(arg, group_by, &mut exprs);
         }
+        for item in &accum.order_by {
+            collect_group_input_exprs(&item.expr, group_by, &mut exprs);
+        }
         if let Some(filter) = accum.filter.as_ref() {
             collect_group_input_exprs(filter, group_by, &mut exprs);
         }
@@ -2467,6 +2470,9 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
             for arg in &aggref.args {
                 collect_group_input_exprs(arg, group_by, exprs);
             }
+            for item in &aggref.aggorder {
+                collect_group_input_exprs(&item.expr, group_by, exprs);
+            }
             if let Some(filter) = aggref.aggfilter.as_ref() {
                 collect_group_input_exprs(filter, group_by, exprs);
             }
@@ -2478,6 +2484,9 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
             if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
                 &window_func.kind
             {
+                for item in &aggref.aggorder {
+                    collect_group_input_exprs(&item.expr, group_by, exprs);
+                }
                 if let Some(filter) = aggref.aggfilter.as_ref() {
                     collect_group_input_exprs(filter, group_by, exprs);
                 }
