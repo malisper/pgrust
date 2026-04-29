@@ -434,15 +434,7 @@ fn build_alias_decl(pair: Pair<'_, Rule>) -> Result<AliasDecl, ParseError> {
 fn build_alias_target(pair: Pair<'_, Rule>) -> Result<AliasTarget, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
-        Rule::positional_param => {
-            let raw = inner.as_str();
-            Ok(AliasTarget::Parameter(raw[1..].parse::<usize>().map_err(
-                |_| ParseError::UnexpectedToken {
-                    expected: "valid positional parameter reference",
-                    actual: raw.into(),
-                },
-            )?))
-        }
+        Rule::positional_param => Ok(AliasTarget::Parameter(parse_positional_param_index(inner)?)),
         Rule::ident => match build_ident(inner).as_str() {
             target if target.eq_ignore_ascii_case("new") => Ok(AliasTarget::New),
             target if target.eq_ignore_ascii_case("old") => Ok(AliasTarget::Old),
@@ -456,6 +448,16 @@ fn build_alias_target(pair: Pair<'_, Rule>) -> Result<AliasTarget, ParseError> {
             actual: inner.as_str().into(),
         }),
     }
+}
+
+fn parse_positional_param_index(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
+    let raw = pair.as_str();
+    raw[1..]
+        .parse::<usize>()
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected: "valid positional parameter reference",
+            actual: raw.into(),
+        })
 }
 
 fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
@@ -523,10 +525,12 @@ fn build_assign_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 fn build_assign_target(pair: Pair<'_, Rule>) -> Result<AssignTarget, ParseError> {
     let raw = pair.as_str().to_string();
     let mut parts = Vec::new();
+    let mut parameter = None;
     let mut subscripts = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::ident => parts.push(build_ident(part)),
+            Rule::positional_param => parameter = Some(parse_positional_param_index(part)?),
             Rule::assign_target_subscript => {
                 let expr = part
                     .into_inner()
@@ -538,6 +542,11 @@ fn build_assign_target(pair: Pair<'_, Rule>) -> Result<AssignTarget, ParseError>
             _ => {}
         }
     }
+    if let Some(index) = parameter {
+        if parts.is_empty() && subscripts.is_empty() {
+            return Ok(AssignTarget::Parameter(index));
+        }
+    }
     match (parts.as_slice(), subscripts.is_empty()) {
         ([name], true) => Ok(AssignTarget::Name(name.clone())),
         ([name], false) => Ok(AssignTarget::Subscript {
@@ -547,6 +556,11 @@ fn build_assign_target(pair: Pair<'_, Rule>) -> Result<AssignTarget, ParseError>
         ([relation, field], true) => Ok(AssignTarget::Field {
             relation: relation.clone(),
             field: field.clone(),
+        }),
+        ([relation, field], false) => Ok(AssignTarget::FieldSubscript {
+            relation: relation.clone(),
+            field: field.clone(),
+            subscripts,
         }),
         _ => Err(ParseError::UnexpectedToken {
             expected: "assignment target",

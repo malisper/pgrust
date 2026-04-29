@@ -220,7 +220,13 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
                         let coerced = vec![pack_sql_function_record_row(row, &columns)];
                         return Ok(TupleSlot::virtual_row(coerced));
                     }
-                    if row.len() == 1 {
+                    if row.len() == 1
+                        && sql_function_single_value_is_whole_result(
+                            runtime_result_type,
+                            output_columns,
+                            row.as_slice(),
+                        )
+                    {
                         return sql_function_result_row_for_output(
                             row,
                             runtime_result_type,
@@ -244,6 +250,30 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
         }
     })
     .map_err(|err| sql_function_context_error(row, err))
+}
+
+fn sql_function_single_value_is_whole_result(
+    runtime_result_type: Option<SqlType>,
+    output_columns: &[QueryColumn],
+    values: &[Value],
+) -> bool {
+    if matches!(values, [Value::Record(_)]) {
+        return true;
+    }
+    let Some(return_type) = runtime_result_type else {
+        return true;
+    };
+    if !matches!(
+        return_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Record
+    ) {
+        return true;
+    }
+    output_columns.len() == 1
+        && matches!(
+            output_columns[0].sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
 }
 
 fn should_pack_sql_set_returning_record_row(

@@ -1659,6 +1659,11 @@ fn exec_do_stmt(
                 "subscripted PL/pgSQL assignment is only supported inside CREATE FUNCTION".into(),
             )))
         }
+        CompiledStmt::AssignIndirect { .. } => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "indirect PL/pgSQL assignment is only supported inside CREATE FUNCTION".into(),
+            )))
+        }
         CompiledStmt::Null => Ok(DoControl::Continue),
         CompiledStmt::If {
             branches,
@@ -2145,6 +2150,20 @@ fn exec_function_stmt(
                 ctx,
             )?;
             state.values[*slot] = enforce_domain_constraints_for_value(assigned, *root_ty, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::AssignIndirect { target, expr, .. } => {
+            let indirection = eval_assign_indirection_function(target, &state.values, ctx)?;
+            let value = eval_function_expr(expr, &state.values, ctx)?;
+            let assigned = assign_indirect_value(
+                state.values[target.slot].clone(),
+                target.ty,
+                &indirection,
+                value,
+                Some(ctx),
+            )?;
+            state.values[target.slot] =
+                enforce_domain_constraints_for_value(assigned, target.ty, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Null => Ok(FunctionControl::Continue),
@@ -4957,13 +4976,27 @@ fn cast_function_value(
     target_type: SqlType,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let casted = cast_value_with_source_type_catalog_and_config(
+    let mut casted = cast_value_with_source_type_catalog_and_config(
         value,
         source_type,
         target_type,
         ctx.catalog.as_deref(),
         &ctx.datetime_config,
     )?;
+    if let Value::Record(record) = &casted
+        && !matches!(
+            target_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+    {
+        casted = cast_value_with_source_type_catalog_and_config(
+            Value::Text(crate::backend::executor::value_io::format_record_text(&record).into()),
+            Some(SqlType::new(SqlTypeKind::Text)),
+            target_type,
+            ctx.catalog.as_deref(),
+            &ctx.datetime_config,
+        )?;
+    }
     enforce_domain_constraints_for_value(casted, target_type, ctx)
 }
 
@@ -7100,6 +7133,7 @@ fn stmt_context_line(stmt: &CompiledStmt) -> usize {
         | CompiledStmt::DynamicExecute { line, .. }
         | CompiledStmt::Assign { line, .. }
         | CompiledStmt::AssignSubscript { line, .. }
+        | CompiledStmt::AssignIndirect { line, .. }
         | CompiledStmt::Return { line, .. } => *line,
         _ => 1,
     }
@@ -7109,7 +7143,9 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
     match stmt {
         CompiledStmt::WithLine { stmt, .. } => stmt_context_action(stmt),
         CompiledStmt::Block(_) => "statement block",
-        CompiledStmt::Assign { .. } | CompiledStmt::AssignSubscript { .. } => "assignment",
+        CompiledStmt::Assign { .. }
+        | CompiledStmt::AssignSubscript { .. }
+        | CompiledStmt::AssignIndirect { .. } => "assignment",
         CompiledStmt::Null => "NULL",
         CompiledStmt::If { .. } => "IF",
         CompiledStmt::While { .. } => "WHILE",

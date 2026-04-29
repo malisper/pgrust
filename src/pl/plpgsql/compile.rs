@@ -303,6 +303,11 @@ pub(crate) enum CompiledStmt {
         expr: CompiledExpr,
         line: usize,
     },
+    AssignIndirect {
+        target: CompiledIndirectAssignTarget,
+        expr: CompiledExpr,
+        line: usize,
+    },
     Null,
     If {
         branches: Vec<(CompiledExpr, Vec<CompiledStmt>)>,
@@ -1511,7 +1516,13 @@ fn compile_stmt(
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }
         Stmt::Assign { target, expr, line } => {
-            if let AssignTarget::Subscript { name, subscripts } = target {
+            if let Some(target) = compile_indirect_assign_target(target, catalog, env)? {
+                CompiledStmt::AssignIndirect {
+                    target,
+                    expr: compile_assignment_expr_text(expr, catalog, env)?,
+                    line: *line,
+                }
+            } else if let AssignTarget::Subscript { name, subscripts } = target {
                 let (slot, root_ty, _, _) =
                     resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
                 CompiledStmt::AssignSubscript {
@@ -5572,6 +5583,13 @@ fn resolve_assign_target(
             })
             .transpose()?
             .ok_or_else(|| ParseError::UnknownColumn(name.clone())),
+        AssignTarget::Parameter(index) => env
+            .get_parameter(*index)
+            .map(|var| (var.slot, var.ty, None, false))
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "existing positional parameter reference",
+                actual: format!("${index}"),
+            }),
         AssignTarget::Field { relation, field } => env
             .get_relation_field(relation, field)
             .map(|column| (column.slot, column.sql_type, None, false))
@@ -5580,6 +5598,75 @@ fn resolve_assign_target(
             .get_var(name)
             .map(|var| (var.slot, var.ty, Some(name.clone()), var.not_null))
             .ok_or_else(|| ParseError::UnknownColumn(name.clone())),
+        AssignTarget::FieldSubscript {
+            relation, field, ..
+        } => env
+            .get_relation_field(relation, field)
+            .map(|column| (column.slot, column.sql_type, None, false))
+            .or_else(|| {
+                env.get_var(relation)
+                    .map(|var| (var.slot, var.ty, None, false))
+            })
+            .ok_or_else(|| ParseError::UnknownColumn(format!("{relation}.{field}"))),
+    }
+}
+
+fn compile_indirect_assign_target(
+    target: &AssignTarget,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<Option<CompiledIndirectAssignTarget>, ParseError> {
+    match target {
+        AssignTarget::Field { relation, field } => {
+            let Some(var) = env.get_var(relation) else {
+                return Ok(None);
+            };
+            Ok(Some(CompiledIndirectAssignTarget {
+                slot: var.slot,
+                ty: var.ty,
+                indirection: vec![CompiledAssignIndirection::Field(field.clone())],
+            }))
+        }
+        AssignTarget::FieldSubscript {
+            relation,
+            field,
+            subscripts,
+        } => {
+            if let Some(var) = env.get_var(relation) {
+                let mut indirection = Vec::with_capacity(subscripts.len() + 1);
+                indirection.push(CompiledAssignIndirection::Field(field.clone()));
+                indirection.extend(
+                    subscripts
+                        .iter()
+                        .map(|subscript| {
+                            compile_expr_text(subscript, catalog, env)
+                                .map(CompiledAssignIndirection::Subscript)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                return Ok(Some(CompiledIndirectAssignTarget {
+                    slot: var.slot,
+                    ty: var.ty,
+                    indirection,
+                }));
+            }
+
+            let column = env
+                .get_relation_field(relation, field)
+                .ok_or_else(|| ParseError::UnknownColumn(format!("{relation}.{field}")))?;
+            Ok(Some(CompiledIndirectAssignTarget {
+                slot: column.slot,
+                ty: column.sql_type,
+                indirection: subscripts
+                    .iter()
+                    .map(|subscript| {
+                        compile_expr_text(subscript, catalog, env)
+                            .map(CompiledAssignIndirection::Subscript)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            }))
+        }
+        _ => Ok(None),
     }
 }
 

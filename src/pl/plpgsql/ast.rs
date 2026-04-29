@@ -78,12 +78,18 @@ pub struct RaiseUsingOption {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignTarget {
     Name(String),
+    Parameter(usize),
     Field {
         relation: String,
         field: String,
     },
     Subscript {
         name: String,
+        subscripts: Vec<String>,
+    },
+    FieldSubscript {
+        relation: String,
+        field: String,
         subscripts: Vec<String>,
     },
 }
