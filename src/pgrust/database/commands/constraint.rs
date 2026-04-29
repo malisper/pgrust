@@ -720,7 +720,29 @@ fn find_referenced_foreign_key_index(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
     attnums: &[i16],
+    conperiod: bool,
 ) -> Option<crate::backend::parser::BoundIndexRelation> {
+    if conperiod {
+        let constraint = catalog
+            .constraint_rows_for_relation(relation_oid)
+            .into_iter()
+            .find(|row| {
+                matches!(row.contype, CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE)
+                    && row.conperiod
+                    && row.conindid != 0
+                    && row.conkey.as_deref() == Some(attnums)
+            })?;
+        return catalog
+            .index_relations_for_heap(relation_oid)
+            .into_iter()
+            .find(|index| {
+                index.relation_oid == constraint.conindid
+                    && index.index_meta.indisvalid
+                    && index.index_meta.indisready
+                    && index.index_meta.indisexclusion
+            });
+    }
+
     catalog
         .index_relations_for_heap(relation_oid)
         .into_iter()
@@ -3203,6 +3225,7 @@ impl Database {
             &catalog,
             referenced_child.relation_oid,
             &referenced_attnums,
+            parent_constraint.conperiod,
         )
         .ok_or_else(|| {
             ExecError::Parse(ParseError::UnexpectedToken {
