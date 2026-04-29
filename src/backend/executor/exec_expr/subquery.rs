@@ -83,12 +83,12 @@ pub(super) fn eval_scalar_subquery(
         while let Some(inner_slot) = exec_next(&mut state, ctx)? {
             let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
             Value::materialize_all(&mut values);
-            if values.len() != 1 {
+            let Some(value) = values.into_iter().next() else {
                 return Err(ExecError::CardinalityViolation {
                     message: "subquery must return only one column".into(),
                     hint: None,
                 });
-            }
+            };
             if first_value.is_some() {
                 return Err(ExecError::CardinalityViolation {
                     message: "more than one row returned by a subquery used as an expression"
@@ -96,7 +96,7 @@ pub(super) fn eval_scalar_subquery(
                     hint: None,
                 });
             }
-            first_value = Some(values[0].clone());
+            first_value = Some(value);
         }
         Ok(first_value.unwrap_or(Value::Null))
     })
@@ -159,7 +159,7 @@ pub(super) fn eval_array_subquery(
         while let Some(inner_slot) = exec_next(&mut state, ctx)? {
             let mut row = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
             Value::materialize_all(&mut row);
-            if row.len() != 1 {
+            if row.is_empty() {
                 return Err(ExecError::CardinalityViolation {
                     message: "subquery must return only one column".into(),
                     hint: None,

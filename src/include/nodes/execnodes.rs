@@ -251,6 +251,9 @@ pub trait PlanNode: std::fmt::Debug {
     fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
         None
     }
+    fn explain_one_time_false_input(&self) -> bool {
+        false
+    }
     fn explain_details(
         &self,
         _indent: usize,

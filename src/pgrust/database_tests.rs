@@ -7855,6 +7855,112 @@ fn runtime_hash_pruning_uses_custom_opclass_support_proc() {
 }
 
 #[test]
+fn partitioned_scalar_array_null_rhs_keeps_child_scans() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table null_saop_parted (a timestamp) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table null_saop_parted_1 partition of null_saop_parted for values from ('2000-01-01') to ('2000-02-01')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table null_saop_parted_2 partition of null_saop_parted for values from ('2000-02-01') to ('2000-03-01')",
+        )
+        .unwrap();
+
+    let plan = session_explain_lines(
+        &mut session,
+        &db,
+        "(costs off) select * from null_saop_parted where a = any(null::timestamptz[])",
+    )
+    .join("\n");
+    assert!(plan.contains("Append"), "{plan}");
+    assert!(plan.contains("Seq Scan on null_saop_parted_1"), "{plan}");
+    assert!(plan.contains("Seq Scan on null_saop_parted_2"), "{plan}");
+    assert!(!plan.contains("One-Time Filter: false"), "{plan}");
+
+    let false_plan = session_explain_lines(
+        &mut session,
+        &db,
+        "(analyze, costs off, summary off, timing off, buffers off) select * from null_saop_parted where a = any(array['2010-02-01']::timestamp[])",
+    )
+    .join("\n");
+    assert!(false_plan.contains("Result"), "{false_plan}");
+    assert!(
+        false_plan.contains("One-Time Filter: false"),
+        "{false_plan}"
+    );
+    assert!(!false_plan.contains("->  Append"), "{false_plan}");
+}
+
+#[test]
+fn scalar_subquery_cardinality_ignores_internal_sort_columns() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table ma_subquery_test (a int, b int) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table ma_subquery_test_p1 partition of ma_subquery_test for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table ma_subquery_test_p2 partition of ma_subquery_test for values from (10) to (20)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table ma_subquery_test_p3 partition of ma_subquery_test for values from (20) to (30)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into ma_subquery_test select x, x from generate_series(0, 29) t(x)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on ma_subquery_test (b)")
+        .unwrap();
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+    session.execute(&db, "set enable_sort = off").unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select * from ma_subquery_test where a >= (select min(b) from ma_subquery_test_p2) order by b",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows.len(), 20);
+    assert_eq!(
+        rows.first().and_then(|row| row.first()),
+        Some(&Value::Int32(10))
+    );
+}
+
+#[test]
 fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);

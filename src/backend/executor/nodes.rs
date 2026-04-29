@@ -1064,6 +1064,9 @@ impl PlanNode for AppendState {
     fn node_label(&self) -> String {
         "Append".into()
     }
+    fn explain_one_time_false_input(&self) -> bool {
+        self.children.is_empty()
+    }
     fn explain_details(
         &self,
         indent: usize,
@@ -5533,7 +5536,11 @@ impl PlanNode for FilterState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        "Filter".into()
+        if filter_state_is_one_time_false_result(self) {
+            "Result".into()
+        } else {
+            "Filter".into()
+        }
     }
     fn explain_details(
         &self,
@@ -5543,10 +5550,14 @@ impl PlanNode for FilterState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
-        lines.push(format!(
-            "{prefix}Filter: {}",
-            render_explain_expr(&self.predicate, self.column_names())
-        ));
+        if filter_state_is_one_time_false_result(self) {
+            lines.push(format!("{prefix}One-Time Filter: false"));
+        } else {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(&self.predicate, self.column_names())
+            ));
+        }
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
@@ -5562,6 +5573,9 @@ impl PlanNode for FilterState {
         timing: bool,
         lines: &mut Vec<String>,
     ) {
+        if filter_state_is_one_time_false_result(self) {
+            return;
+        }
         format_explain_lines_with_costs(
             &*self.input,
             indent + 1,
@@ -5571,6 +5585,11 @@ impl PlanNode for FilterState {
             lines,
         );
     }
+}
+
+fn filter_state_is_one_time_false_result(state: &FilterState) -> bool {
+    matches!(state.predicate, Expr::Const(Value::Bool(false)))
+        && state.input.explain_one_time_false_input()
 }
 
 impl PlanNode for NestedLoopJoinState {

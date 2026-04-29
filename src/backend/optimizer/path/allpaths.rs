@@ -216,6 +216,13 @@ fn add_one_time_false_path(
     bestpath::set_cheapest(rel);
 }
 
+fn is_append_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
+    root.simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .is_some_and(|rel| matches!(rel.reloptkind, RelOptKind::OtherMemberRel))
+}
+
 fn relation_oid_for_rtindex(root: &PlannerInfo, rtindex: usize) -> Option<u32> {
     root.parse
         .rtable
@@ -2585,7 +2592,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             .get(rtindex)
             .and_then(Option::as_ref)
             .and_then(base_filter_expr);
-        if filter.as_ref().is_some_and(scalar_array_null_filter) {
+        if relkind != 'p' && filter.as_ref().is_some_and(scalar_array_null_filter) {
             if let Some(rel) = root
                 .simple_rel_array
                 .get_mut(rtindex)
@@ -2849,7 +2856,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         .get(rtindex)
         .and_then(Option::as_ref)
         .and_then(base_filter_expr);
-    if base_filter.as_ref().is_some_and(scalar_array_null_filter) {
+    if !is_append_child_rel(root, rtindex)
+        && base_filter.as_ref().is_some_and(scalar_array_null_filter)
+    {
         if let Some(rel) = root
             .simple_rel_array
             .get_mut(rtindex)

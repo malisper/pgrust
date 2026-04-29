@@ -26,6 +26,8 @@ Implementation slices completed:
 - Removed the non-PostgreSQL `Result` wrapper from non-false EXPLAIN UPDATE/DELETE scan output while preserving one-time-false `Result` output.
 - Allowed `MERGE USING` to accept the existing joined-from-item grammar, and fixed EXPLAIN rendering for SQL datetime keywords plus `to_char(...)` builtin names.
 - Allowed auto-updatable views over partitioned base tables, and rewrote partitioned-view UPDATE check options/RETURNING through child column mappings.
+- Fixed scalar subquery execution to ignore planner-only/internal columns when enforcing scalar-subquery cardinality; this removed the `subquery must return only one column` runtime error in the `ma_test` initplan case.
+- Kept partitioned child scans for scalar-array `NULL` RHS filters instead of turning inherited children into one-time-false paths, and taught EXPLAIN ANALYZE to render dummy false Append filters as `Result` / `One-Time Filter: false`.
 
 Files touched:
 crates/pgrust_sql_grammar/src/gram.pest
@@ -43,6 +45,7 @@ src/backend/executor/tests.rs
 src/backend/rewrite/views.rs
 src/backend/rewrite/view_dml.rs
 src/backend/optimizer/sublink_pullup.rs
+src/backend/optimizer/path/allpaths.rs
 src/backend/commands/tablecmds.rs
 src/pgrust/database/commands/create.rs
 src/pgrust/database/commands/matview.rs
@@ -50,7 +53,6 @@ src/include/nodes/plannodes.rs
 src/include/nodes/pathnodes.rs
 src/include/nodes/execnodes.rs
 src/backend/executor/startup.rs
-src/backend/optimizer/path/allpaths.rs
 src/backend/optimizer/path/costsize.rs
 src/backend/optimizer/plan/subselect.rs
 src/backend/optimizer/setrefs.rs
@@ -65,7 +67,6 @@ src/pgrust/database/commands/opclass.rs
 src/pgrust/database/commands/execute.rs
 src/backend/executor/driver.rs
 src/bin/query_repl.rs
-src/backend/commands/tablecmds.rs
 
 Tests run:
 scripts/cargo_isolated.sh check
@@ -88,24 +89,29 @@ scripts/cargo_isolated.sh test --lib --quiet parse_merge_joined_source
 scripts/cargo_isolated.sh test --lib --quiet merge_accepts_joined_source
 scripts/cargo_isolated.sh test --lib --quiet explain_expr_matches_postgres_filter_formatting
 scripts/cargo_isolated.sh test --lib --quiet auto_view_dml_routes_to_partitioned_base_table
+scripts/cargo_isolated.sh test --lib --quiet partitioned_scalar_array_null_rhs_keeps_child_scans
+scripts/cargo_isolated.sh test --lib --quiet scalar_subquery_cardinality_ignores_internal_sort_columns
 scripts/run_regression.sh --test partition_prune --timeout 60 --port 65452
 PGRUST_STATEMENT_TIMEOUT=30 PGRUST_REGRESS_BASE_SETUP_TIMEOUT=600 scripts/run_regression.sh --test partition_prune --timeout 180 --port 65452
 PGRUST_STATEMENT_TIMEOUT=30 PGRUST_REGRESS_BASE_SETUP_TIMEOUT=600 scripts/run_regression.sh --test partition_prune --timeout 300 --port 65452
+CARGO_TARGET_DIR=/tmp/pgrust-target-pool/indianapolis-v2-prune-array PGRUST_STATEMENT_TIMEOUT=30 PGRUST_REGRESS_BASE_SETUP_TIMEOUT=600 scripts/run_regression.sh --test partition_prune --timeout 300 --port 65452
 
 Remaining:
 Committed implementation as c1d59343b.
 Committed implementation as e8145e080.
-Latest slice is at 644/750 queries matched, 106 mismatched queries, 126 diff hunks, 2593 diff lines. Latest diff copied to /tmp/diffs/partition_prune.diff.
+Latest uncommitted slice is validated by focused tests and `check`. Latest full regression is 643/750 queries matched, 107 mismatched queries, 134 diff hunks, 2619 diff lines. Latest diff copied to /tmp/diffs/partition_prune.diff.
 Prepared external params now work through normal `EXPLAIN EXECUTE` and through PL/pgSQL dynamic SQL in the server streaming SELECT path. The previous 4 `unsupported statement` failures from `explain_parallel_append('execute ab_q4/ab_q5 ...')` are gone; they are now ordinary runtime pruning/plan shape mismatches.
 Non-ANALYZE `EXPLAIN EXECUTE hp_q1('xxx')` now prunes to `hp2` and prints `Subplans Removed: 3`, matching PostgreSQL for the custom hash opclass case.
+The explicit `subquery must return only one column` error in the `ma_test` initplan MergeAppend case is gone; that query now reaches the normal plan-shape/runtime-pruning diff category.
 Array hash partition support, enum/record bound serialization, composite text casts, and partition-prune constant cast folding have focused coverage. The full regression no longer has `pp_enumpart`, `pp_recpart`, `pph_arrpart`, or `pp_arrpart` hunks.
 Main remaining categories:
 - Runtime Append/MergeAppend pruning/explain state remains the largest blocker: 37 `Subplans Removed` mentions and 117 `never executed` mentions in the diff. The non-ANALYZE prepared external-param path is fixed, but EXPLAIN ANALYZE still needs PostgreSQL-style visible pruned child state for InitPlan/nested-loop/parallel-shaped plans.
 - Static nested/default pruning is reduced but not gone. Remaining notable cases are PostgreSQL-conservative OR/range behavior around `rlp` and multi-key `mc3p`; pgrust is sometimes keeping too many child ranges/defaults.
+- Scalar-array timestamp/timestamptz cases still need proper PostgreSQL volatility/type handling. `ANY(NULL::timestamptz[])` now keeps child scans, but renders the RHS type as `timestamp[]` because scalar-array binding still coerces that NULL RHS toward the left timestamp key.
 - PL/pgSQL CONTINUE is fixed. Remaining PL/pgSQL-related hunks are plan-shape/runtime-pruning output, not syntax errors.
 - EXPLAIN ANALYZE UPDATE is partly wired. Partitioned view UPDATE now executes through child mappings, but EXPLAIN plan shape still differs.
 - MERGE source grammar is fixed for joined sources. Remaining MERGE blockers are now data-modifying CTE syntax/execution, child-tableoid update/delete for partitioned MERGE targets, and ordinary runtime-pruning plan mismatches.
 - Array/enum/record partition key blockers are mostly fixed for this file: hash array partition creation/routing is available, enum/record bound storage works, enum/record query comparisons now prune/render correctly, and array-key `IN` list comparisons render/prune correctly for `pph_arrpart`.
 - View update/check-option path: the prior `cannot update view` and child-order TypeMismatch errors are gone; remaining hunks are plan-shape/runtime-pruning differences.
-- Scalar-array NULL/empty pruning, view update rewrites, data-modifying CTEs, and formatting-only plan differences remain as smaller isolated categories.
-Latest category counts in `/tmp/diffs/partition_prune.diff`: `Subplans Removed` 37, `never executed` 117, `ERROR:` 4, `syntax error` 2, `TypeMismatch` 0, `cannot update view` 0, `cannot execute MERGE` 0, `rlp` 35, `mc2p` 8, `mc3p` 125, `pph_arrpart` 0, `pp_arrpart` 0, `pp_enumpart` 0, `pp_recpart` 0, `to_char` 7, `ToChar` 0, `LocalTimestamp` 0, `MERGE` 2, `UPDATE` 0, `ATTACH PARTITION` 0, `ANY` 55, `ALL` 4.
+- Data-modifying MERGE CTEs, scalar-array volatility/output, and formatting-only plan differences remain as smaller isolated categories.
+Latest category counts in `/tmp/diffs/partition_prune.diff`: `Subplans Removed` 37, `never executed` 117, `ERROR:` 3, `syntax error` 2, `subquery must return only one column` 0, `TypeMismatch` 0, `cannot update view` 0, `cannot execute MERGE` 0, `rlp` 35, `mc2p` 8, `mc3p` 125, `pph_arrpart` 0, `pp_arrpart` 0, `pp_enumpart` 0, `pp_recpart` 0, `to_char` 7, `ToChar` 0, `LocalTimestamp` 0, `MERGE` 2, `UPDATE` 0, `ATTACH PARTITION` 0, `ANY` 61, `ALL` 7.
