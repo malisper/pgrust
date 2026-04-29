@@ -15785,6 +15785,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         limit: None,
         offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         set_operation: None,
     })
 }
@@ -16210,10 +16211,10 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
-            Rule::prepare_type_list => {
+            Rule::prepare_arg_types => {
                 parameter_types = part
                     .into_inner()
-                    .filter(|part| part.as_rule() == Rule::type_name)
+                    .filter(|inner| inner.as_rule() == Rule::type_name)
                     .map(build_type_name)
                     .collect();
             }
@@ -16234,23 +16235,23 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
 
 fn build_execute_statement(pair: Pair<'_, Rule>) -> Result<ExecuteStatement, ParseError> {
     let mut name = None;
-    let mut args = Vec::new();
+    let mut args_sql = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier => name = Some(build_identifier(part)),
-            Rule::execute_arg_list => {
-                args = part
-                    .into_inner()
-                    .filter(|part| part.as_rule() == Rule::expr)
-                    .map(build_expr)
-                    .collect::<Result<Vec<_>, _>>()?;
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::expr_list => {
+                args_sql.extend(
+                    part.into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::expr)
+                        .map(|inner| inner.as_str().trim().to_string()),
+                );
             }
             _ => {}
         }
     }
     Ok(ExecuteStatement {
         name: name.ok_or(ParseError::UnexpectedEof)?,
-        args,
+        args_sql,
     })
 }
 
@@ -17181,6 +17182,7 @@ fn build_simple_select_statement(
     let mut limit = None;
     let mut offset = None;
     let mut locking_clause = None;
+    let mut locking_targets = Vec::new();
     for part in parts {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -17208,7 +17210,11 @@ fn build_simple_select_statement(
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
                         Rule::limit_clause => limit = build_limit_clause(inner)?,
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
-                        Rule::locking_clause => locking_clause = Some(build_locking_clause(inner)?),
+                        Rule::locking_clause => {
+                            let (strength, targets) = build_locking_clause(inner)?;
+                            locking_clause = Some(strength);
+                            locking_targets = targets;
+                        }
                         _ => {}
                     }
                 }
@@ -17222,7 +17228,11 @@ fn build_simple_select_statement(
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
-            Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
+            Rule::locking_clause => {
+                let (strength, targets) = build_locking_clause(part)?;
+                locking_clause = Some(strength);
+                locking_targets = targets;
+            }
             _ => {}
         }
     }
@@ -17241,6 +17251,7 @@ fn build_simple_select_statement(
         limit,
         offset,
         locking_clause,
+        locking_targets,
         set_operation: None,
     })
 }
@@ -17359,6 +17370,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     let mut limit = None;
     let mut offset = None;
     let mut locking_clause = None;
+    let mut locking_targets = Vec::new();
     let mut operators = Vec::new();
     let mut inputs = Vec::new();
 
@@ -17386,7 +17398,11 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
-            Rule::locking_clause => locking_clause = Some(build_locking_clause(part)?),
+            Rule::locking_clause => {
+                let (strength, targets) = build_locking_clause(part)?;
+                locking_clause = Some(strength);
+                locking_targets = targets;
+            }
             _ => {}
         }
     }
@@ -17415,6 +17431,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         limit,
         offset,
         locking_clause,
+        locking_targets,
         set_operation: Some(Box::new(nested_set_operation)),
     })
 }
@@ -17477,6 +17494,7 @@ fn select_statement_for_set_operation(
         limit: None,
         offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         set_operation: Some(Box::new(SetOperationStatement {
             op,
             inputs: vec![left, right],
@@ -17534,6 +17552,7 @@ pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         limit: stmt.limit,
         offset: stmt.offset,
         locking_clause: None,
+        locking_targets: Vec::new(),
         set_operation: None,
     }
 }
@@ -17653,25 +17672,35 @@ fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, Parse
         .collect()
 }
 
-fn build_locking_clause(pair: Pair<'_, Rule>) -> Result<SelectLockingClause, ParseError> {
+fn build_locking_clause(
+    pair: Pair<'_, Rule>,
+) -> Result<(SelectLockingClause, Vec<String>), ParseError> {
     let raw = pair.as_str().trim().to_ascii_lowercase();
     let strength = raw
         .split_once(" of ")
         .map(|(strength, _)| strength)
         .unwrap_or(&raw);
-    // :HACK: Parse FOR UPDATE/SHARE OF relation lists so view definitions and
-    // regression inputs bind, but keep using the existing all-relation row-mark
-    // model until SelectLockingClause carries the relation-name list.
-    match strength {
-        "for no key update" => Ok(SelectLockingClause::ForNoKeyUpdate),
-        "for update" => Ok(SelectLockingClause::ForUpdate),
-        "for key share" => Ok(SelectLockingClause::ForKeyShare),
-        "for share" => Ok(SelectLockingClause::ForShare),
+    let locking_clause = match strength {
+        "for no key update" => SelectLockingClause::ForNoKeyUpdate,
+        "for update" => SelectLockingClause::ForUpdate,
+        "for key share" => SelectLockingClause::ForKeyShare,
+        "for share" => SelectLockingClause::ForShare,
         _ => Err(ParseError::UnexpectedToken {
             expected: "FOR UPDATE, FOR NO KEY UPDATE, FOR SHARE, or FOR KEY SHARE",
             actual: pair.as_str().into(),
-        }),
-    }
+        })?,
+    };
+    let targets = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::locking_of_clause)
+        .map(|part| {
+            part.into_inner()
+                .filter(|inner| inner.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok((locking_clause, targets))
 }
 
 fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> {
@@ -18545,7 +18574,7 @@ fn consume_join_part(
     natural: &mut bool,
 ) -> Result<(), ParseError> {
     match part.as_rule() {
-        Rule::aliased_from_item => *right = Some(build_from_item(part)?),
+        Rule::aliased_from_item | Rule::joined_from_item => *right = Some(build_from_item(part)?),
         Rule::expr => *constraint = JoinConstraint::On(build_expr(part)?),
         Rule::join_using_clause => {
             let mut columns = Vec::new();
@@ -19197,7 +19226,7 @@ fn build_ctas_query(
         }
         Rule::execute_prepared_stmt => {
             let execute = build_execute_statement(pair)?;
-            Ok((CreateTableAsQuery::Execute(execute.name), None))
+            Ok((CreateTableAsQuery::Execute(execute), None))
         }
         _ => Err(ParseError::UnexpectedToken {
             expected: "CREATE TABLE AS query",
@@ -21569,6 +21598,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut with = Vec::new();
     let mut table_name = None;
     let mut only = false;
+    let mut using = None;
     let mut where_clause = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
@@ -21580,6 +21610,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
             }
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::from_item => using = Some(build_from_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
@@ -21590,6 +21621,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         only,
+        using,
         where_clause,
         returning,
     })
@@ -24875,6 +24907,22 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         "!~" => SqlExpr::Not(Box::new(SqlExpr::RegexMatch(
                             Box::new(left),
                             Box::new(right),
+                        ))),
+                        "~*" => simple_func_call(
+                            "regexp_like",
+                            vec![
+                                SqlFunctionArg::positional(left),
+                                SqlFunctionArg::positional(right),
+                                SqlFunctionArg::positional(SqlExpr::Const(Value::Text("i".into()))),
+                            ],
+                        ),
+                        "!~*" => SqlExpr::Not(Box::new(simple_func_call(
+                            "regexp_like",
+                            vec![
+                                SqlFunctionArg::positional(left),
+                                SqlFunctionArg::positional(right),
+                                SqlFunctionArg::positional(SqlExpr::Const(Value::Text("i".into()))),
+                            ],
                         ))),
                         _ => unreachable!(),
                     })

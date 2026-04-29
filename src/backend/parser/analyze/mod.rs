@@ -3284,6 +3284,8 @@ pub(crate) struct SlotScopeColumn {
     pub hidden: bool,
 }
 
+const NAMED_SLOT_VARNO: usize = 0;
+
 pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     expr: &SqlExpr,
     relation_scopes: &[(String, Vec<SlotScopeColumn>)],
@@ -3321,7 +3323,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             source_columns: Vec::new(),
         });
         output_exprs.push(Expr::Var(Var {
-            varno: 1,
+            varno: NAMED_SLOT_VARNO,
             varattno: user_attrno(column.slot),
             varlevelsup: 0,
             vartype: column.sql_type,
@@ -3350,7 +3352,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
                 source_columns: Vec::new(),
             });
             output_exprs.push(Expr::Var(Var {
-                varno: 1,
+                varno: NAMED_SLOT_VARNO,
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
@@ -3575,6 +3577,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             limit: values.limit,
             offset: values.offset,
             locking_clause: None,
+            locking_targets: Vec::new(),
             set_operation: None,
         }),
         CteBody::Insert(_) => Err(ParseError::FeatureNotSupported(
@@ -3599,6 +3602,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             limit: None,
             offset: None,
             locking_clause: None,
+            locking_targets: Vec::new(),
             set_operation: Some(Box::new(SetOperationStatement {
                 op: SetOperator::Union { all: *all },
                 inputs: vec![cte_body_as_select(anchor)?, (**recursive).clone()],
@@ -3695,6 +3699,7 @@ fn bind_ctes(
                         limit_count: None,
                         limit_offset: 0,
                         locking_clause: None,
+                        locking_targets: Vec::new(),
                         row_marks: Vec::new(),
                         has_target_srfs: false,
                         recursive_union: None,
@@ -3784,6 +3789,7 @@ fn bind_ctes(
                         limit_count: None,
                         limit_offset: 0,
                         locking_clause: None,
+                        locking_targets: Vec::new(),
                         row_marks: Vec::new(),
                         has_target_srfs: false,
                         recursive_union: Some(Box::new(RecursiveUnionQuery {
@@ -4920,6 +4926,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             limit_count: None,
             limit_offset: 0,
             locking_clause: None,
+            locking_targets: Vec::new(),
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -4969,6 +4976,7 @@ pub(crate) fn bound_cte_from_query_rows(
             limit_count: None,
             limit_offset: 0,
             locking_clause: None,
+            locking_targets: Vec::new(),
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -5064,6 +5072,7 @@ fn bind_values_query_with_outer(
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
             locking_clause: None,
+            locking_targets: Vec::new(),
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -5809,6 +5818,7 @@ fn bind_select_query_with_outer(
                         limit_count: stmt.limit,
                         limit_offset: stmt.offset.unwrap_or(0),
                         locking_clause: stmt.locking_clause,
+                        locking_targets: stmt.locking_targets.clone(),
                         row_marks: Vec::new(),
                         has_target_srfs,
                         recursive_union: None,
@@ -5913,6 +5923,7 @@ fn bind_select_query_with_outer(
                     limit_count: stmt.limit,
                     limit_offset: stmt.offset.unwrap_or(0),
                     locking_clause: stmt.locking_clause,
+                    locking_targets: stmt.locking_targets.clone(),
                     row_marks: Vec::new(),
                     has_target_srfs,
                     recursive_union: None,
@@ -6149,6 +6160,7 @@ fn bind_set_operation_query_with_outer(
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
             locking_clause: stmt.locking_clause,
+            locking_targets: stmt.locking_targets.clone(),
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,

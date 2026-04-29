@@ -1963,6 +1963,23 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
 }
 
 #[test]
+fn analyze_join_using_alias_exposes_only_merged_columns() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+
+    let stmt = parse_select("select x.* from people join pets using (id) as x").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+    assert_eq!(query.target_list.len(), 1);
+    assert_eq!(query.target_list[0].name, "id");
+
+    let stmt = parse_select("select x.name from people join pets using (id) as x").unwrap();
+    let err =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap_err();
+    assert!(matches!(err, ParseError::UnknownColumn(name) if name == "x.name"));
+}
+
+#[test]
 fn analyze_pg_typeof_unknown_literals_preserves_unknown() {
     for sql in ["select pg_typeof(null)", "select pg_typeof('x')"] {
         let stmt = parse_select(sql).unwrap();
@@ -10601,7 +10618,7 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("prepare q as select * from cmdata").unwrap(), Statement::Prepare(PrepareStatement { name, .. }) if name == "q")
     );
     assert!(
-        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute(name), .. }) if name == "q")
+        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute(ExecuteStatement { name, args_sql }), .. }) if name == "q" && args_sql.is_empty())
     );
     assert!(
         matches!(parse_statement("deallocate prepare q").unwrap(), Statement::Deallocate(DeallocateStatement { name: Some(name) }) if name == "q")
@@ -11170,14 +11187,27 @@ fn assert_returning_var(expr: &Expr, varno: usize, attno: AttrNumber) {
     }
 }
 
+fn returning_row_fields(expr: &Expr) -> &[(String, Expr)] {
+    match expr {
+        Expr::Row { fields, .. } => fields,
+        Expr::Case(case_expr) => match case_expr.defresult.as_ref() {
+            Expr::Row { fields, .. } => fields,
+            other => panic!("expected CASE default row expression, got {other:?}"),
+        },
+        other => panic!("expected row expression, got {other:?}"),
+    }
+}
+
 fn assert_returning_row(expr: &Expr, varno: usize, attnos: &[AttrNumber]) {
-    let Expr::Row { fields, .. } = expr else {
-        panic!("expected row expression, got {expr:?}");
-    };
+    let fields = returning_row_fields(expr);
     assert_eq!(fields.len(), attnos.len());
     for ((_, field), attno) in fields.iter().zip(attnos.iter().copied()) {
         assert_returning_var(field, varno, attno);
     }
+}
+
+fn assert_whole_row_expr(expr: &Expr, width: usize) {
+    assert_eq!(returning_row_fields(expr).len(), width);
 }
 
 struct ReturningTestCatalog {
@@ -11456,7 +11486,7 @@ fn bind_insert_returning_relation_name_as_whole_row() {
 
     let bound =
         stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
-    assert!(matches!(bound.returning[0].expr, Expr::Row { .. }));
+    assert_whole_row_expr(&bound.returning[0].expr, 3);
 }
 
 #[test]
@@ -12557,8 +12587,12 @@ fn parse_select_for_update_of_clause() {
         Statement::Select(SelectStatement {
             from: Some(FromItem::Table { name, only: false }),
             locking_clause: Some(SelectLockingClause::ForUpdate),
+            locking_targets,
             ..
-        }) => assert_eq!(name, "people"),
+        }) => {
+            assert_eq!(name, "people");
+            assert_eq!(locking_targets, vec!["people"]);
+        }
         other => panic!("expected Select with FOR UPDATE OF, got {:?}", other),
     }
 }
@@ -15660,7 +15694,34 @@ fn parse_prepare_and_execute_statements() {
         stmt,
         Statement::Execute(ExecuteStatement {
             name: "foo".into(),
-            args: Vec::new(),
+            args_sql: Vec::new(),
+        })
+    );
+
+    let stmt = parse_statement("prepare foo(bool) as select $1").unwrap();
+    match stmt {
+        Statement::Prepare(PrepareStatement {
+            name,
+            parameter_types,
+            query,
+            ..
+        }) => {
+            assert_eq!(name, "foo");
+            assert_eq!(
+                parameter_types,
+                vec![RawTypeName::builtin(SqlTypeKind::Bool)]
+            );
+            assert_eq!(query.targets.len(), 1);
+        }
+        other => panic!("expected PREPARE statement, got {other:?}"),
+    }
+
+    let stmt = parse_statement("execute foo(true)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Execute(ExecuteStatement {
+            name: "foo".into(),
+            args_sql: vec!["true".into()],
         })
     );
 
@@ -15679,8 +15740,8 @@ fn parse_prepare_and_execute_statements() {
 
     let stmt = parse_statement("execute foo(xml '<a/>')").unwrap();
     match stmt {
-        Statement::Execute(ExecuteStatement { args, .. }) => {
-            assert_eq!(args.len(), 1);
+        Statement::Execute(ExecuteStatement { args_sql, .. }) => {
+            assert_eq!(args_sql, vec!["xml '<a/>'"]);
         }
         other => panic!("expected EXECUTE statement, got {other:?}"),
     }
@@ -17219,6 +17280,33 @@ fn parse_join_using_clause() {
             constraint: JoinConstraint::Using(columns),
             ..
         }) if columns == vec!["id".to_string()]
+    ));
+}
+
+#[test]
+fn parse_join_rhs_can_be_join_tree() {
+    let stmt =
+        parse_select("select * from a join b left join c on b.id = c.id on a.id = b.id").unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Join {
+            right,
+            constraint: JoinConstraint::On(_),
+            ..
+        }) if matches!(*right, FromItem::Join { kind: JoinKind::Left, .. })
+    ));
+}
+
+#[test]
+fn parse_delete_using_clause() {
+    let stmt = parse_statement("delete from t3 using t1 table1 where t3.x = table1.a").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Delete(DeleteStatement {
+            table_name,
+            using: Some(FromItem::Alias { alias, .. }),
+            ..
+        }) if table_name == "t3" && alias == "table1"
     ));
 }
 

@@ -34,6 +34,11 @@ fn prepare_query_for_locking_with_inherited(
     mut query: Query,
     inherited_lock: Option<SelectLockingClause>,
 ) -> Result<Query, ParseError> {
+    let local_locking_targets = if query.locking_clause.is_some() {
+        query.locking_targets.clone()
+    } else {
+        Vec::new()
+    };
     let effective_lock = match (query.locking_clause, inherited_lock) {
         (Some(local), Some(inherited)) => Some(local.strongest(inherited)),
         (Some(local), None) => Some(local),
@@ -92,7 +97,14 @@ fn prepare_query_for_locking_with_inherited(
     query.row_marks.clear();
     if let Some(strength) = effective_lock {
         let mut row_marks = Vec::new();
-        if let Some(jointree) = &query.jointree {
+        if !local_locking_targets.is_empty() {
+            collect_query_row_marks_for_targets(
+                &query.rtable,
+                &local_locking_targets,
+                strength,
+                &mut row_marks,
+            )?;
+        } else if let Some(jointree) = &query.jointree {
             collect_query_row_marks(&query.rtable, jointree, strength, &mut row_marks);
         }
         row_marks.sort_by_key(|mark| mark.rtindex);
@@ -107,6 +119,7 @@ fn prepare_query_for_locking_with_inherited(
         query.row_marks = row_marks;
     }
     query.locking_clause = None;
+    query.locking_targets.clear();
     Ok(query)
 }
 
@@ -249,6 +262,86 @@ fn collect_query_row_marks(
             collect_query_row_marks(rtable, right, strength, row_marks);
         }
     }
+}
+
+fn collect_query_row_marks_for_targets(
+    rtable: &[RangeTblEntry],
+    targets: &[String],
+    strength: SelectLockingClause,
+    row_marks: &mut Vec<QueryRowMark>,
+) -> Result<(), ParseError> {
+    for target in targets {
+        let mut matches = rtable
+            .iter()
+            .enumerate()
+            .filter(|(_, rte)| {
+                rte.alias
+                    .as_deref()
+                    .is_some_and(|alias| alias.eq_ignore_ascii_case(target))
+            })
+            .collect::<Vec<_>>();
+        let Some((index, rte)) = matches.pop() else {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "relation \"{target}\" in FOR UPDATE clause not found in FROM clause"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
+            });
+        };
+        if !matches.is_empty() {
+            return Err(ParseError::DetailedError {
+                message: format!("table reference \"{target}\" is ambiguous"),
+                detail: None,
+                hint: None,
+                sqlstate: "42702",
+            });
+        }
+        match &rte.kind {
+            RangeTblEntryKind::Relation { .. } => {
+                let rtindex = index + 1;
+                if let Some(existing) = row_marks
+                    .iter_mut()
+                    .find(|row_mark| row_mark.rtindex == rtindex)
+                {
+                    existing.strength = existing.strength.strongest(strength);
+                } else {
+                    row_marks.push(QueryRowMark { rtindex, strength });
+                }
+            }
+            RangeTblEntryKind::Join { .. } => {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "FOR UPDATE cannot be applied to a join".into(),
+                ));
+            }
+            RangeTblEntryKind::Values { .. } => {
+                return Err(ParseError::FeatureNotSupportedMessage(format!(
+                    "{} cannot be applied to VALUES",
+                    strength.sql()
+                )));
+            }
+            RangeTblEntryKind::Subquery { .. } => {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "FOR UPDATE cannot be applied to a subquery".into(),
+                ));
+            }
+            RangeTblEntryKind::Function { .. }
+            | RangeTblEntryKind::WorkTable { .. }
+            | RangeTblEntryKind::Cte { .. }
+            | RangeTblEntryKind::Result => {
+                return Err(ParseError::DetailedError {
+                    message: format!(
+                        "relation \"{target}\" in FOR UPDATE clause not found in FROM clause"
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn prepare_rte_for_locking(
@@ -1012,6 +1105,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
+        locking_targets: query.locking_targets,
         row_marks: query.row_marks,
         has_target_srfs: false,
         recursive_union: None,
@@ -1379,6 +1473,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         limit_count: Some(1),
         limit_offset: 0,
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,

@@ -7,6 +7,7 @@ use crate::backend::access::heap::heapam::{
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::backend::access::index::indexam;
+use crate::backend::access::nbtree::nbtcompare::compare_bt_values;
 use crate::backend::access::nbtree::nbtree::decode_key_payload;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
@@ -860,6 +861,150 @@ fn eval_index_scan_keys(
         scan_keys.push(key.to_scan_key(argument));
     }
     Ok(Some(scan_keys))
+}
+
+fn expand_array_equality_scan_keys(
+    keys: Vec<ScanKeyData>,
+    allow_array_expansion: bool,
+) -> Vec<Vec<ScanKeyData>> {
+    if !allow_array_expansion {
+        return vec![keys];
+    }
+    let Some((array_key_index, array)) = keys.iter().enumerate().find_map(|(index, key)| {
+        (key.strategy == 3)
+            .then(|| key.argument.as_array_value().map(|array| (index, array)))
+            .flatten()
+    }) else {
+        return vec![keys];
+    };
+
+    let mut values = Vec::new();
+    for value in array.elements {
+        if matches!(value, Value::Null) || values.iter().any(|existing| existing == &value) {
+            continue;
+        }
+        values.push(value);
+    }
+    values.sort_by(compare_bt_values);
+
+    values
+        .into_iter()
+        .map(|value| {
+            let mut scan_keys = keys.clone();
+            scan_keys[array_key_index].argument = value;
+            scan_keys
+        })
+        .collect()
+}
+
+fn begin_index_only_scan(
+    state: &mut IndexOnlyScanState,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    if !state.array_scan_keys_initialized {
+        let Some(key_data) = eval_index_scan_keys(&state.keys, ctx, true)? else {
+            return Ok(false);
+        };
+        let mut scans = expand_array_equality_scan_keys(
+            key_data,
+            state.order_by_keys.is_empty()
+                && matches!(
+                    state.direction,
+                    crate::include::access::relscan::ScanDirection::Forward
+                ),
+        );
+        scans.reverse();
+        state.pending_array_scan_keys = scans;
+        state.array_scan_seen_tids.clear();
+        state.array_scan_keys_initialized = true;
+    }
+
+    let Some(key_data) = state.pending_array_scan_keys.pop() else {
+        return Ok(false);
+    };
+    state.stats.index_searches = state.stats.index_searches.saturating_add(1);
+    let order_by_data = eval_index_scan_keys(&state.order_by_keys, ctx, false)?.unwrap_or_default();
+    let begin = crate::include::access::amapi::IndexBeginScanContext {
+        pool: ctx.pool.clone(),
+        client_id: ctx.client_id,
+        snapshot: ctx.snapshot.clone(),
+        heap_relation: state.rel,
+        index_relation: state.index_rel,
+        index_desc: (*state.index_desc).clone(),
+        index_meta: state.index_meta.clone(),
+        key_data,
+        order_by_data,
+        direction: state.direction,
+        want_itup: true,
+    };
+    state.scan = Some(
+        indexam::index_beginscan(&begin, state.am_oid).map_err(|err| {
+            ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                expected: "index access method begin scan",
+                actual: format!("{err:?}"),
+            })
+        })?,
+    );
+    let mut session_stats = ctx.session_stats.write();
+    session_stats.note_relation_scan(state.index_meta.indexrelid);
+    session_stats.note_io_read("client backend", "relation", "normal", 8192);
+    session_stats.note_io_hit("client backend", "relation", "normal");
+    Ok(true)
+}
+
+fn begin_index_scan(
+    state: &mut IndexScanState,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    if !state.array_scan_keys_initialized {
+        let Some(key_data) = eval_index_scan_keys(&state.keys, ctx, true)? else {
+            return Ok(false);
+        };
+        let mut scans = expand_array_equality_scan_keys(
+            key_data,
+            state.order_by_keys.is_empty()
+                && matches!(
+                    state.direction,
+                    crate::include::access::relscan::ScanDirection::Forward
+                ),
+        );
+        scans.reverse();
+        state.pending_array_scan_keys = scans;
+        state.array_scan_seen_tids.clear();
+        state.array_scan_keys_initialized = true;
+    }
+
+    let Some(key_data) = state.pending_array_scan_keys.pop() else {
+        return Ok(false);
+    };
+    state.stats.index_searches = state.stats.index_searches.saturating_add(1);
+    let order_by_data = eval_index_scan_keys(&state.order_by_keys, ctx, false)?.unwrap_or_default();
+    let begin = crate::include::access::amapi::IndexBeginScanContext {
+        pool: ctx.pool.clone(),
+        client_id: ctx.client_id,
+        snapshot: ctx.snapshot.clone(),
+        heap_relation: state.rel,
+        index_relation: state.index_rel,
+        index_desc: (*state.index_desc).clone(),
+        index_meta: state.index_meta.clone(),
+        key_data,
+        order_by_data,
+        direction: state.direction,
+        want_itup: state.index_only,
+    };
+    state.scan = Some(
+        indexam::index_beginscan(&begin, state.am_oid).map_err(|err| {
+            ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                expected: "index access method begin scan",
+                actual: format!("{err:?}"),
+            })
+        })?,
+    );
+    let mut session_stats = ctx.session_stats.write();
+    session_stats.note_relation_scan(state.index_meta.indexrelid);
+    session_stats.note_io_read("client backend", "relation", "normal", 8192);
+    session_stats.note_io_hit("client backend", "relation", "normal");
+    Ok(true)
 }
 
 fn collect_visible_page_offsets(
@@ -1725,39 +1870,11 @@ impl PlanNode for IndexOnlyScanState {
             return Ok(None);
         }
         if self.scan.is_none() {
-            let Some(key_data) = eval_index_scan_keys(&self.keys, ctx, true)? else {
+            if !begin_index_only_scan(self, ctx)? {
                 self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
-            };
-            self.stats.index_searches = self.stats.index_searches.saturating_add(1);
-            let order_by_data =
-                eval_index_scan_keys(&self.order_by_keys, ctx, false)?.unwrap_or_default();
-            let begin = crate::include::access::amapi::IndexBeginScanContext {
-                pool: ctx.pool.clone(),
-                client_id: ctx.client_id,
-                snapshot: ctx.snapshot.clone(),
-                heap_relation: self.rel,
-                index_relation: self.index_rel,
-                index_desc: (*self.index_desc).clone(),
-                index_meta: self.index_meta.clone(),
-                key_data,
-                order_by_data,
-                direction: self.direction,
-                want_itup: true,
-            };
-            self.scan = Some(
-                indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
-                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                        expected: "index access method begin scan",
-                        actual: format!("{err:?}"),
-                    })
-                })?,
-            );
-            let mut session_stats = ctx.session_stats.write();
-            session_stats.note_relation_scan(self.index_meta.indexrelid);
-            session_stats.note_io_read("client backend", "relation", "normal", 8192);
-            session_stats.note_io_hit("client backend", "relation", "normal");
+            }
         }
 
         loop {
@@ -1780,6 +1897,9 @@ impl PlanNode for IndexOnlyScanState {
                         })
                     })?;
                 }
+                if begin_index_only_scan(self, ctx)? {
+                    continue;
+                }
                 self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
@@ -1796,6 +1916,9 @@ impl PlanNode for IndexOnlyScanState {
                     scan.xs_itup.clone(),
                 )
             };
+            if !self.array_scan_seen_tids.insert(tid) {
+                continue;
+            }
             {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
@@ -2002,39 +2125,11 @@ impl PlanNode for IndexScanState {
             return Ok(None);
         }
         if self.scan.is_none() {
-            let Some(key_data) = eval_index_scan_keys(&self.keys, ctx, true)? else {
+            if !begin_index_scan(self, ctx)? {
                 self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
-            };
-            self.stats.index_searches = self.stats.index_searches.saturating_add(1);
-            let order_by_data =
-                eval_index_scan_keys(&self.order_by_keys, ctx, false)?.unwrap_or_default();
-            let begin = crate::include::access::amapi::IndexBeginScanContext {
-                pool: ctx.pool.clone(),
-                client_id: ctx.client_id,
-                snapshot: ctx.snapshot.clone(),
-                heap_relation: self.rel,
-                index_relation: self.index_rel,
-                index_desc: (*self.index_desc).clone(),
-                index_meta: self.index_meta.clone(),
-                key_data,
-                order_by_data,
-                direction: self.direction,
-                want_itup: self.index_only,
-            };
-            self.scan = Some(
-                indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
-                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                        expected: "index access method begin scan",
-                        actual: format!("{err:?}"),
-                    })
-                })?,
-            );
-            let mut session_stats = ctx.session_stats.write();
-            session_stats.note_relation_scan(self.index_meta.indexrelid);
-            session_stats.note_io_read("client backend", "relation", "normal", 8192);
-            session_stats.note_io_hit("client backend", "relation", "normal");
+            }
         }
 
         loop {
@@ -2057,6 +2152,9 @@ impl PlanNode for IndexScanState {
                         })
                     })?;
                 }
+                if begin_index_scan(self, ctx)? {
+                    continue;
+                }
                 self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
@@ -2067,6 +2165,9 @@ impl PlanNode for IndexScanState {
                 .as_ref()
                 .and_then(|scan| scan.xs_heaptid)
                 .expect("index scan tuple must set heap tid");
+            if !self.array_scan_seen_tids.insert(tid) {
+                continue;
+            }
             {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
@@ -5679,6 +5780,36 @@ impl PlanNode for NestedLoopJoinState {
         };
         if self.right_plan.is_some() {
             return exec_lateral_join(self, ctx, start);
+        }
+
+        if self.join_qual_never_matches && matches!(self.kind, JoinType::Left | JoinType::Anti) {
+            match self.left.exec_proc_node(ctx)?.is_some() {
+                true => {
+                    let left = self.left.materialize_current_row()?;
+                    if matches!(self.kind, JoinType::Anti) {
+                        self.slot.tts_values = left.slot.tts_values;
+                        self.slot.tts_nvalid = self.left_width;
+                    } else {
+                        let mut combined_values = left.slot.tts_values;
+                        combined_values.extend(std::iter::repeat_n(Value::Null, self.right_width));
+                        self.slot.tts_values = combined_values;
+                        self.slot.tts_nvalid = self.left_width + self.right_width;
+                    }
+                    self.slot.kind = SlotKind::Virtual;
+                    self.slot.virtual_tid = None;
+                    self.slot.decode_offset = 0;
+                    self.current_bindings = left.system_bindings;
+                    set_active_system_bindings(ctx, &self.current_bindings);
+                    clear_outer_expr_bindings(ctx);
+                    clear_inner_expr_bindings(ctx);
+                    finish_row(&mut self.stats, start);
+                    return Ok(Some(&mut self.slot));
+                }
+                false => {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+            }
         }
 
         if self.right_rows.is_none() {
