@@ -6,7 +6,7 @@ use crate::backend::executor::expr_ops::{
     order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
 use crate::backend::executor::{ExecError, Value, cast_value};
-use crate::backend::parser::ParseError;
+use crate::backend::parser::{ParseError, is_binary_coercible_type};
 use crate::include::catalog::builtin_range_spec_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::parsenodes::{
@@ -18,7 +18,7 @@ use crate::include::nodes::primnodes::{
     Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, ScalarFunctionImpl,
     SetReturningCall, SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior,
     SqlJsonTablePassingArg, SubLinkType, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
-    WindowFuncExpr, WindowFuncKind, XmlExpr,
+    WindowFuncExpr, WindowFuncKind, XmlExpr, expr_sql_type_hint,
 };
 
 pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
@@ -692,7 +692,10 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
         Expr::ScalarArrayOp(saop) => Ok(Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(simplify_expr(*saop.left, case_test_value)?),
-                right: Box::new(simplify_expr(*saop.right, case_test_value)?),
+                right: Box::new(simplify_scalar_array_rhs_expr(
+                    *saop.right,
+                    case_test_value,
+                )?),
                 ..*saop
             },
         ))),
@@ -843,6 +846,30 @@ fn simplify_sql_json_behavior(
     }
 }
 
+fn simplify_scalar_array_rhs_expr(
+    expr: Expr,
+    case_test_value: Option<&Value>,
+) -> Result<Expr, ParseError> {
+    match expr {
+        Expr::Cast(inner, ty) => {
+            let inner = simplify_expr(*inner, case_test_value)?;
+            if ty.is_array && matches!(inner, Expr::Const(Value::Null)) {
+                Ok(Expr::Cast(Box::new(inner), ty))
+            } else {
+                simplify_expr(Expr::Cast(Box::new(inner), ty), case_test_value)
+            }
+        }
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Ok(Expr::Collate {
+            expr: Box::new(simplify_scalar_array_rhs_expr(*expr, case_test_value)?),
+            collation_oid,
+        }),
+        other => simplify_expr(other, case_test_value),
+    }
+}
+
 fn evaluate_const_func(
     implementation: ScalarFunctionImpl,
     args: &[Value],
@@ -882,20 +909,51 @@ fn simplify_where_null_scalar_array_ops(expr: Expr) -> Expr {
                 })),
             }
         }
-        Expr::ScalarArrayOp(saop) if scalar_array_right_is_null(&saop.right) => {
+        Expr::ScalarArrayOp(saop) if scalar_array_null_where_is_false(&saop) => {
             Expr::Const(Value::Bool(false))
         }
         other => other,
     }
 }
 
+fn scalar_array_null_where_is_false(
+    saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
+) -> bool {
+    let Some(left_type) = transparent_scalar_array_left_type(&saop.left) else {
+        return false;
+    };
+    let Some(array_type) = scalar_array_null_array_type(&saop.right) else {
+        return matches!(*saop.right, Expr::Const(Value::Null));
+    };
+    if !array_type.is_array {
+        return false;
+    }
+    let element_type = array_type.element_type();
+    is_binary_coercible_type(left_type, element_type)
+        || is_binary_coercible_type(element_type, left_type)
+}
+
 fn scalar_array_right_is_null(expr: &Expr) -> bool {
+    matches!(expr, Expr::Const(Value::Null)) || scalar_array_null_array_type(expr).is_some()
+}
+
+fn scalar_array_null_array_type(expr: &Expr) -> Option<SqlType> {
     match expr {
-        Expr::Const(Value::Null) => true,
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            scalar_array_right_is_null(inner)
+        Expr::Cast(inner, ty) if scalar_array_right_is_null(inner) => Some(*ty),
+        Expr::Collate { expr: inner, .. } => scalar_array_null_array_type(inner),
+        _ => None,
+    }
+}
+
+fn transparent_scalar_array_left_type(expr: &Expr) -> Option<SqlType> {
+    match expr {
+        Expr::Cast(inner, target_type) => {
+            let source_type = transparent_scalar_array_left_type(inner)?;
+            is_binary_coercible_type(source_type, *target_type).then_some(*target_type)
         }
-        _ => false,
+        Expr::Collate { expr: inner, .. } => transparent_scalar_array_left_type(inner),
+        Expr::Var(_) | Expr::Param(_) => expr_sql_type_hint(expr),
+        _ => None,
     }
 }
 
@@ -1369,5 +1427,32 @@ mod tests {
             simplify_where_qual(expr).unwrap(),
             Expr::Const(Value::Bool(false))
         );
+    }
+
+    #[test]
+    fn where_scalar_array_null_keeps_non_binary_left_cast() {
+        let expr = Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            op: crate::backend::parser::SubqueryComparisonOp::Eq,
+            use_or: true,
+            left: Box::new(Expr::Cast(
+                Box::new(Expr::Var(Var {
+                    varno: 1,
+                    varattno: 1,
+                    varlevelsup: 0,
+                    vartype: SqlType::new(SqlTypeKind::Timestamp),
+                })),
+                SqlType::new(SqlTypeKind::TimestampTz),
+            )),
+            right: Box::new(Expr::Cast(
+                Box::new(Expr::Const(Value::Null)),
+                SqlType::array_of(SqlType::new(SqlTypeKind::TimestampTz)),
+            )),
+            collation_oid: None,
+        }));
+
+        assert!(matches!(
+            simplify_where_qual(expr).unwrap(),
+            Expr::ScalarArrayOp(_)
+        ));
     }
 }
