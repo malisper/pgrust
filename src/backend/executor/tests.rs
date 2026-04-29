@@ -24493,6 +24493,55 @@ fn in_subquery_where_qual_uses_semi_join() {
 }
 
 #[test]
+fn in_subquery_inside_derived_table_uses_semi_join() {
+    let mut harness = seed_people_and_pets("in_subquery_inside_derived_table_uses_semi_join");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select count(*) from (
+                     select 1
+                     from people p
+                     where p.id in (select q.owner_id from pets q)
+                 ) ss",
+            )
+            .unwrap(),
+        vec![vec![Value::Int64(2)]],
+    );
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off)
+             select count(*) from (
+                 select 1
+                 from people p
+                 where p.id in (select q.owner_id from pets q)
+             ) ss",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Semi Join")),
+                "expected derived-table IN pull-up to use a semi join, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("SubPlan")),
+                "expected derived-table IN pull-up without SubPlan, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn row_valued_in_subquery_matches_all_columns() {
     let mut harness = seed_people_and_pets("row_valued_in_subquery");
     assert_query_rows(

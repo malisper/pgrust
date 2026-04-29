@@ -54,12 +54,13 @@ use super::super::util::{
 use super::super::{
     CPU_OPERATOR_COST, IndexPathSpec, JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids,
     flatten_and_conjuncts, has_outer_joins, is_pushable_base_clause, path_relids, predicate_cost,
-    relids_disjoint, relids_overlap, relids_subset, relids_union, reverse_join_type,
+    pull_up_sublinks, relids_disjoint, relids_overlap, relids_subset, relids_union,
+    reverse_join_type,
 };
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
-    estimate_index_candidate, estimate_seqscan_candidate, index_supports_index_only_attrs,
-    optimize_path_with_config, relation_stats,
+    estimate_index_candidate, estimate_seqscan_candidate, full_index_scan_spec,
+    index_supports_index_only_attrs, optimize_path_with_config, relation_stats,
 };
 
 type PlannerIndexExprCache = RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>;
@@ -1349,27 +1350,6 @@ fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<
     }
 }
 
-fn full_index_scan_spec(
-    index: &BoundIndexRelation,
-    filter: Option<Expr>,
-) -> crate::backend::optimizer::IndexPathSpec {
-    let filter_quals = filter.iter().cloned().collect::<Vec<_>>();
-    crate::backend::optimizer::IndexPathSpec {
-        index: index.clone(),
-        keys: Vec::new(),
-        order_by_keys: Vec::new(),
-        residual: filter,
-        used_quals: Vec::new(),
-        scan_quals: Vec::new(),
-        recheck_quals: Vec::new(),
-        filter_quals,
-        direction: crate::include::access::relscan::ScanDirection::Forward,
-        removes_order: false,
-        btree_prefix_columns: 0,
-        row_prefix: false,
-    }
-}
-
 fn collect_relation_access_paths(
     rtindex: usize,
     heap_rel: RelFileLocator,
@@ -1522,6 +1502,30 @@ fn collect_relation_access_paths(
                     full_index_scan_spec(index, filter.clone()),
                     None,
                     target_index_only,
+                    config,
+                    catalog,
+                )
+                .plan,
+            );
+        }
+        if config.enable_indexscan
+            && !config.enable_seqscan
+            && query_order_items.is_none()
+            && filter.is_some()
+            && access_method_supports_index_scan(index.index_meta.am_oid)
+        {
+            paths.push(
+                estimate_index_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_name.clone(),
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    full_index_scan_spec(index, filter.clone()),
+                    None,
+                    false,
                     config,
                     catalog,
                 )
@@ -1846,7 +1850,7 @@ fn plan_query_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> (PlannerInfo, Path) {
-    let query = super::super::root::prepare_query_for_planning(query, catalog);
+    let query = prepare_query_path_input(query, catalog);
     let aggregate_layout = super::super::groupby_rewrite::build_aggregate_layout(&query, catalog);
     let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);
     let scanjoin_rel = query_planner(&mut root, catalog);
@@ -1859,6 +1863,14 @@ fn plan_query_path(
             pathtarget: PathTarget::new(Vec::new()),
         });
     (root, path)
+}
+
+fn prepare_query_path_input(
+    query: crate::include::nodes::parsenodes::Query,
+    catalog: &dyn CatalogLookup,
+) -> crate::include::nodes::parsenodes::Query {
+    let query = super::super::root::prepare_query_for_planning(query, catalog);
+    pull_up_sublinks(query)
 }
 
 fn plan_set_operation_child_path(
@@ -2394,7 +2406,7 @@ fn build_cte_scan_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = super::super::root::prepare_query_for_planning(query, catalog);
+    let query = prepare_query_path_input(query, catalog);
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
         let planned_query = query.clone();
         let aggregate_layout =
@@ -2435,7 +2447,7 @@ fn build_subquery_scan_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = super::super::root::prepare_query_for_planning(query, catalog);
+    let query = prepare_query_path_input(query, catalog);
     if simple_subquery_where_qual_is_contradictory(&query) {
         return optimize_path_with_config(
             const_false_relation_path(rtindex, desc),

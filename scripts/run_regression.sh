@@ -630,6 +630,9 @@ direct_test_dependencies() {
         join)
             echo "create_index create_misc"
             ;;
+        memoize)
+            echo "create_index"
+            ;;
         select_parallel|with)
             echo "create_misc"
             ;;

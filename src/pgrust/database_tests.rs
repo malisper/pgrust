@@ -13607,6 +13607,145 @@ fn merge_accepts_joined_source() {
 }
 
 #[test]
+fn merge_inserts_from_unaliased_joined_source() {
+    let dir = temp_dir("merge_unaliased_joined_source_insert");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table cj_target (tid int4, balance float8, val text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table cj_source1 (sid1 int4, scat int4, delta int4)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table cj_source2 (sid2 int4, sval text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cj_source1 values (1, 10, 100), (2, 20, 300)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cj_source2 values (1, 'source one'), (2, 'source two')",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "merge into cj_target t \
+             using cj_source1 s1 inner join cj_source2 s2 on sid1 = sid2 \
+             on t.tid = sid1 \
+             when not matched then insert values (sid1, delta, sval)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select tid, balance, val from cj_target order by tid",
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Float64(100.0),
+                Value::Text("source one".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Float64(300.0),
+                Value::Text("source two".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn merge_updates_pg_class_through_auto_updatable_view() {
+    let dir = temp_dir("merge_pg_class_view_update");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "merge into pg_class c \
+             using (select 'pg_depend'::regclass as oid) as j \
+             on j.oid = c.oid \
+             when matched then update set reltuples = reltuples + 1 \
+             returning j.oid",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create view classv as select * from pg_class")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into classv c \
+             using pg_namespace n \
+             on n.oid = c.relnamespace \
+             when matched and c.oid = 'pg_depend'::regclass then \
+                 update set reltuples = reltuples - 1 \
+             returning c.oid",
+        ),
+        vec![vec![Value::Int64(2608)]]
+    );
+}
+
+#[test]
+fn duplicate_table_grant_keeps_pg_class_tuple_layout() {
+    let dir = temp_dir("duplicate_table_grant_pg_class_layout");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create user regress_merge_privs")
+        .unwrap();
+    session
+        .execute(&db, "create user regress_merge_no_privs")
+        .unwrap();
+    session
+        .execute(&db, "create table target (tid int4, balance int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table target owner to regress_merge_privs")
+        .unwrap();
+    session
+        .execute(&db, "grant insert on target to regress_merge_no_privs")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization regress_merge_privs")
+        .unwrap();
+    session
+        .execute(&db, "grant insert on target to regress_merge_no_privs")
+        .unwrap();
+    session.execute(&db, "reset session authorization").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class where relname = 'target'",
+        ),
+        vec![vec![Value::Text("target".into())]]
+    );
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
@@ -19689,6 +19828,48 @@ fn view_dml_routes_through_instead_rules() {
 }
 
 #[test]
+fn view_update_from_routes_joined_rows_through_instead_rules() {
+    let base = temp_dir("rule_view_update_from");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "create table source_items (id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view item_view as select id, name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_upd as on update to item_view do instead update base_items set name = new.name where id = old.id",
+    )
+    .unwrap();
+    db.execute(1, "insert into base_items values (1, 'alpha'), (2, 'beta')")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into source_items values (1, 'ALPHA'), (3, 'unused')",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "update item_view set name = source_items.name from source_items where item_view.id = source_items.id",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("ALPHA".into())],
+            vec![Value::Int32(2), Value::Text("beta".into())],
+        ]
+    );
+}
+
+#[test]
 fn view_dml_returning_routes_through_instead_rules() {
     let base = temp_dir("rule_view_dml_returning");
     let db = Database::open(&base, 16).unwrap();
@@ -20657,6 +20838,49 @@ fn update_and_delete_rules_propagate_old_and_new_values() {
     assert_eq!(
         query_rows(&db, 1, "select name from interfaces"),
         Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn delete_using_rules_use_joined_input_rows() {
+    let base = temp_dir("rule_delete_using");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table employees (name text, salary int4)")
+        .unwrap();
+    db.execute(1, "create table mass_delete (name text)")
+        .unwrap();
+    db.execute(1, "create table employee_log (name text, action text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule employees_del as on delete to employees do also insert into employee_log values (old.name, 'fired')",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "insert into employees values ('alpha', 10), ('beta', 20)",
+    )
+    .unwrap();
+    db.execute(1, "insert into mass_delete values ('alpha'), ('gamma')")
+        .unwrap();
+    db.execute(
+        1,
+        "delete from employees using mass_delete where employees.name = mass_delete.name",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select name, salary from employees order by name"),
+        vec![vec![Value::Text("beta".into()), Value::Int32(20)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select name, action from employee_log"),
+        vec![vec![
+            Value::Text("alpha".into()),
+            Value::Text("fired".into())
+        ]]
     );
 }
 
@@ -27734,6 +27958,35 @@ fn explain_verbose_count_nonnull_constant_elides_projection() {
 }
 
 #[test]
+fn ordered_aggregate_keeps_order_inputs_available_after_join_grouping() {
+    let base = temp_dir("ordered_aggregate_order_inputs");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table group_agg_pk (x int4, y int4, w int4, z int4, f int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into group_agg_pk values (1, 1, 10, 20, 5), (1, 2, 10, 20, 7)",
+    )
+    .unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "(costs off) select avg(c1.f order by c1.x, c1.y) \
+         from group_agg_pk c1 join group_agg_pk c2 on c1.x = c2.x \
+         group by c1.w, c1.z",
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Aggregate")),
+        "expected aggregate plan, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_inner_join_can_reorder_commutative_inputs() {
     let base = temp_dir("explain_inner_join_reorder");
     let db = Database::open(&base, 16).unwrap();
@@ -29073,6 +29326,33 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
     reopened
         .execute(1, "insert into items values (null, 'still nullable')")
         .unwrap();
+}
+
+#[test]
+fn not_null_constraint_describe_query_lowers_conkey_subscript_join_qual() {
+    let base = temp_dir("not_null_describe_conkey_subscript");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table widgets (id int4 not null, note text)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.conname, a.attname, c.convalidated
+             from pg_catalog.pg_constraint c join pg_catalog.pg_attribute a
+               on (a.attrelid = c.conrelid and a.attnum = c.conkey[1])
+             where c.contype = 'n'
+               and c.conrelid = 'widgets'::pg_catalog.regclass
+             order by a.attnum",
+        ),
+        vec![vec![
+            Value::Text("widgets_id_not_null".into()),
+            Value::Text("id".into()),
+            Value::Bool(true),
+        ]]
+    );
 }
 
 #[test]
@@ -53478,6 +53758,62 @@ $$",
         ]
     );
     assert!(query_rows(&db, 1, "select * from main_table").is_empty());
+}
+
+#[test]
+fn view_update_from_routes_joined_rows_through_instead_of_triggers() {
+    let dir = temp_dir("view_instead_of_update_from");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table main_table (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "create table source_table (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "create view main_view as select a, b from main_table")
+        .unwrap();
+    db.execute(
+        1,
+        "create function view_update_from_trigger() returns trigger language plpgsql as $$
+begin
+    update main_table set b = NEW.b where a = OLD.a;
+    if not found then
+        return null;
+    end if;
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger instead_of_update_trig instead of update on main_view for each row execute function view_update_from_trigger()",
+    )
+    .unwrap();
+    db.execute(1, "insert into main_table values (1, 10), (2, 20)")
+        .unwrap();
+    db.execute(1, "insert into source_table values (1, 100), (3, 300)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update main_view set b = source_table.b from source_table where main_view.a = source_table.a returning *",
+        ),
+        vec![vec![
+            Value::Int32(1),
+            Value::Int32(100),
+            Value::Int32(1),
+            Value::Int32(100),
+        ]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from main_table order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(20)],
+        ]
+    );
 }
 
 #[test]

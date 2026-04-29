@@ -265,4 +265,48 @@ mod tests {
         assert_eq!(after.header.infomask & 0x0400, 0x0400);
         assert_eq!(after.data, vec![0xAA, 0xBB, 0xCC, 0xDD]);
     }
+
+    #[test]
+    fn replace_tuple_preserves_tuple_layout_bits() {
+        let mut page = [0u8; BLCKSZ];
+        heap_page_init(&mut page);
+
+        let desc = vec![
+            AttributeDesc {
+                name: "a".into(),
+                attlen: 4,
+                attalign: AttributeAlign::Int,
+                attstorage: AttributeStorage::Plain,
+                attcompression: AttributeCompression::Default,
+                nullable: false,
+            },
+            AttributeDesc {
+                name: "b".into(),
+                attlen: -1,
+                attalign: AttributeAlign::Int,
+                attstorage: AttributeStorage::Extended,
+                attcompression: AttributeCompression::Default,
+                nullable: true,
+            },
+        ];
+        let tuple = HeapTuple::from_values(
+            &desc,
+            &[TupleValue::Bytes(vec![1, 0, 0, 0]), TupleValue::Null],
+        )
+        .unwrap();
+        let off = heap_page_add_tuple(&mut page, 0, &tuple).unwrap();
+        let original = heap_page_get_tuple(&page, off).unwrap();
+
+        let mut modified = original.clone();
+        modified.header.xmax = 42;
+        modified.header.infomask &= !HEAP_HASNULL;
+        modified.header.null_bitmap = Vec::new();
+        heap_page_replace_tuple(&mut page, off, &modified).unwrap();
+
+        let after = heap_page_get_tuple(&page, off).unwrap();
+        assert_eq!(after.header.xmax, 42);
+        assert_eq!(after.header.infomask & HEAP_HASNULL, HEAP_HASNULL);
+        assert_eq!(after.header.null_bitmap, original.header.null_bitmap);
+        assert_eq!(after.deform(&desc).unwrap()[1], None);
+    }
 }

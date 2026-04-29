@@ -138,6 +138,13 @@ pub(super) fn estimate_index_candidate(
     )
 }
 
+pub(super) fn full_index_scan_spec(
+    index: &BoundIndexRelation,
+    filter: Option<Expr>,
+) -> IndexPathSpec {
+    costsize::full_index_scan_spec(index, filter)
+}
+
 pub(super) fn index_supports_index_only_attrs(
     index: &BoundIndexRelation,
     required_attrs: &[usize],

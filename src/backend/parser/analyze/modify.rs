@@ -1585,7 +1585,23 @@ pub fn plan_merge(
         return Err(ParseError::DuplicateTableName(target_relation_name.clone()));
     }
 
-    let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
+    // PostgreSQL's setrefs.c handles MERGE actions by rewriting source Vars
+    // against the MERGE subplan targetlist while leaving target-table Vars as
+    // scan-tuple references. pgrust represents the source side as a projected
+    // subquery, so bind source references to that projection before building
+    // the target/source join.
+    let source_scope = shift_scope_rtindexes(
+        scope_with_output_exprs(
+            source_scope_raw,
+            source_from
+                .output_exprs
+                .iter()
+                .take(source_visible_count)
+                .cloned()
+                .collect(),
+        ),
+        target_from.rtable.len(),
+    );
     let merged_scope = combine_scopes(&target_scope, &source_scope);
     let join_condition = bind_expr_with_outer_and_ctes(
         &stmt.join_condition,
@@ -4524,6 +4540,9 @@ fn bind_update_from(
         predicate.clone(),
         catalog,
     )?;
+    let [query] = crate::backend::rewrite::pg_rewrite_query(query, catalog)?
+        .try_into()
+        .expect("UPDATE FROM input rewrite should return a single query");
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 

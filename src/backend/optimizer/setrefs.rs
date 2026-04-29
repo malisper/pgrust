@@ -207,6 +207,17 @@ fn build_base_scan_tlist(
 ) -> IndexedTlist {
     let output_vars = slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs;
     let mut tlist = build_simple_tlist_from_exprs(&output_vars);
+    if let Some(rtindex) = rte_slot_varno(source_id) {
+        for (index, entry) in tlist.entries.iter_mut().enumerate() {
+            entry.match_exprs.push(Expr::Var(Var {
+                varno: rtindex,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: entry.sql_type,
+            }));
+            entry.match_exprs = dedup_match_exprs(std::mem::take(&mut entry.match_exprs));
+        }
+    }
     if let Some(info) = root.and_then(|root| append_translation(root, source_id)) {
         for (index, entry) in tlist.entries.iter_mut().enumerate() {
             if info
@@ -811,6 +822,18 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             output_columns,
             ..
         } => build_subquery_tlist(*rtindex, query, input, output_columns),
+        Path::SeqScan {
+            source_id, desc, ..
+        }
+        | Path::IndexOnlyScan {
+            source_id, desc, ..
+        }
+        | Path::IndexScan {
+            source_id, desc, ..
+        }
+        | Path::BitmapHeapScan {
+            source_id, desc, ..
+        } => build_base_scan_tlist(root, *source_id, desc),
         Path::NestedLoopJoin { left, right, .. }
         | Path::HashJoin { left, right, .. }
         | Path::MergeJoin { left, right, .. } => build_join_tlist(root, path, left, right),
@@ -5991,6 +6014,12 @@ fn maybe_wrap_nested_loop_inner_plan(
     if !root.is_some_and(|root| root.config.enable_memoize) || nest_params.is_empty() {
         return right_plan;
     }
+    // :HACK: PostgreSQL avoids wrapping the whole lateral VALUES branch in
+    // Memoize when the outer key has little reuse; keeping the inner index
+    // Memoize visible lets repeated VALUES constants share one cache.
+    if _outer_rows > 5000.0 && plan_contains_values_scan(&right_plan) {
+        return right_plan;
+    }
     let mut dependent_paramids = BTreeSet::new();
     collect_plan_exec_paramids(&right_plan, &mut dependent_paramids);
     if dependent_paramids.is_empty() {
@@ -6045,6 +6074,50 @@ fn maybe_wrap_nested_loop_inner_plan(
         binary_mode,
         single_row: false,
         est_entries: 0,
+    }
+}
+
+fn plan_contains_values_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::Values { .. } => true,
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains_values_scan(input),
+        Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_contains_values_scan),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_values_scan(left) || plan_contains_values_scan(right)
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::RecursiveUnion { .. } => false,
     }
 }
 

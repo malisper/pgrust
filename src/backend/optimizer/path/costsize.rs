@@ -44,8 +44,8 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind, OrderByEntry,
-    ProjectSetTarget, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl,
+    BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExprKind,
+    OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl,
     SetReturningCall, TargetEntry, ToastRelationRef, Var, attrno_index, set_returning_call_exprs,
     user_attrno,
 };
@@ -1271,6 +1271,29 @@ fn try_optimize_access_subtree(
             index,
             config.retain_partial_index_filters,
         ) else {
+            if !config.enable_seqscan && order_items.is_none() {
+                let candidate = estimate_index_candidate(
+                    source_id,
+                    rel,
+                    relation_name.clone(),
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    full_index_scan_spec(index, filter.clone()),
+                    None,
+                    None,
+                    false,
+                    config,
+                    catalog,
+                );
+                if best
+                    .as_ref()
+                    .is_none_or(|best| candidate.total_cost < best.total_cost)
+                {
+                    best = Some(candidate);
+                }
+            }
             continue;
         };
         let candidate = estimate_index_candidate(
@@ -2203,8 +2226,17 @@ pub(super) fn estimate_index_candidate(
 
     let scan_sel = clauses_selectivity(&spec.scan_quals, Some(stats), stats.reltuples);
     let used_sel = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
-    let index_scan_rows = clamp_rows(stats.reltuples * scan_sel);
-    let index_rows = clamp_rows(stats.reltuples * used_sel);
+    let unique_eq_lookup = unique_equality_index_lookup(&spec);
+    let mut index_scan_rows = clamp_rows(stats.reltuples * scan_sel);
+    let mut index_rows = clamp_rows(stats.reltuples * used_sel);
+    if let Some(runtime_rows) = runtime_equality_index_rows(&spec, stats) {
+        index_scan_rows = index_scan_rows.min(runtime_rows);
+        index_rows = index_rows.min(runtime_rows);
+    }
+    if unique_eq_lookup {
+        index_scan_rows = index_scan_rows.min(1.0);
+        index_rows = index_rows.min(1.0);
+    }
     let unordered_probe = order_items.is_none();
     let broad_unordered_btree_range =
         unordered_btree_range_probe_needs_heap_penalty(&spec, stats, scan_sel);
@@ -2364,6 +2396,39 @@ pub(super) fn estimate_index_candidate(
     }
 
     AccessCandidate { total_cost, plan }
+}
+
+fn unique_equality_index_lookup(spec: &IndexPathSpec) -> bool {
+    if !spec.index.index_meta.indisunique {
+        return false;
+    }
+    let key_count = spec.index.index_meta.indnkeyatts.max(0) as usize;
+    key_count > 0
+        && (1..=key_count).all(|position| {
+            spec.keys.iter().any(|key| {
+                usize::try_from(key.attribute_number).ok() == Some(position) && key.strategy == 3
+            })
+        })
+}
+
+fn runtime_equality_index_rows(spec: &IndexPathSpec, stats: &RelationStats) -> Option<f64> {
+    let mut selectivity = 1.0;
+    let mut saw_runtime_eq = false;
+    for key in &spec.keys {
+        if key.strategy != 3 || !matches!(key.argument, IndexScanKeyArgument::Runtime(_)) {
+            continue;
+        }
+        let index_pos = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
+        let heap_attno = *spec.index.index_meta.indkey.get(index_pos)?;
+        if heap_attno <= 0 {
+            continue;
+        }
+        let row = stats.stats_by_attnum.get(&heap_attno)?;
+        let ndistinct = effective_ndistinct(row, stats.reltuples)?;
+        selectivity *= (1.0 / ndistinct.max(1.0)).clamp(0.0, 1.0);
+        saw_runtime_eq = true;
+    }
+    saw_runtime_eq.then(|| clamp_rows(stats.reltuples * selectivity))
 }
 
 fn unordered_btree_range_probe_needs_heap_penalty(
@@ -2691,6 +2756,26 @@ fn build_join_paths_internal(
                 ),
             );
         }
+        if let Some(path) = reassociate_lateral_values_index_join(
+            root,
+            catalog,
+            left.clone(),
+            right.clone(),
+            kind,
+            pathtarget.clone(),
+            output_columns.clone(),
+            config.enable_material,
+        ) {
+            if config.enable_hashjoin {
+                return vec![path];
+            }
+            push_join_path(
+                &mut paths,
+                &mut disabled_paths,
+                config.enable_hashjoin,
+                path,
+            );
+        }
     }
 
     if allow_swapped_orientation {
@@ -2775,6 +2860,7 @@ fn build_join_paths_internal(
             config.enable_mergejoin,
             estimate_merge_join_internal(
                 root,
+                catalog,
                 left.clone(),
                 right.clone(),
                 kind,
@@ -2827,6 +2913,7 @@ fn build_join_paths_internal(
             config.enable_mergejoin,
             estimate_merge_join_internal(
                 root,
+                catalog,
                 right,
                 left,
                 kind,
@@ -2846,6 +2933,248 @@ fn build_join_paths_internal(
         disabled_paths
     } else {
         paths
+    }
+}
+
+fn reassociate_lateral_values_index_join(
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+    left: Path,
+    right: Path,
+    kind: JoinType,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
+    enable_material: bool,
+) -> Option<Path> {
+    // :HACK: PostgreSQL can form a parameterized path where the lateral VALUES
+    // rows are joined to their outer relation before probing the indexed table.
+    // Reassociate that narrow shape so the inner Memoize/index state is shared
+    // across all generated VALUES rows instead of being rebuilt per outer row.
+    let Path::NestedLoopJoin {
+        left: values,
+        right: index_inner,
+        kind: JoinType::Inner,
+        restrict_clauses: _,
+        ..
+    } = right
+    else {
+        return None;
+    };
+    let left_relids = path_relids(&left);
+    let values_depends_on_left =
+        path_uses_outer_relids(&values, &left_relids) || path_uses_immediate_outer_columns(&values);
+    if !matches!(kind, JoinType::Inner | JoinType::Cross)
+        || !path_is_values_relation(&values)
+        || !values_depends_on_left
+        || !path_contains_runtime_index_arg(&index_inner)
+        || left.plan_info().plan_rows.as_f64() <= 1000.0
+    {
+        return None;
+    }
+
+    let mut outer_exprs = left.semantic_output_target().exprs;
+    let mut outer_sortgrouprefs = left.semantic_output_target().sortgrouprefs;
+    outer_exprs.extend(values.semantic_output_target().exprs);
+    outer_sortgrouprefs.extend(values.semantic_output_target().sortgrouprefs);
+    let mut outer_columns = left.columns();
+    outer_columns.extend(values.columns());
+    let (hash_inner, hash_clause, outer_hash_key, inner_hash_key) =
+        full_index_scan_hash_join_parts(*index_inner)?;
+    let outer = estimate_nested_loop_join_internal(
+        root,
+        left,
+        *values,
+        JoinType::Cross,
+        Vec::new(),
+        PathTarget::with_sortgrouprefs(outer_exprs, outer_sortgrouprefs),
+        outer_columns,
+        enable_material,
+    );
+    Some(estimate_hash_join_internal(
+        root,
+        catalog,
+        outer,
+        hash_inner,
+        JoinType::Inner,
+        pathtarget,
+        output_columns,
+        vec![hash_clause.clone()],
+        vec![outer_hash_key],
+        vec![inner_hash_key],
+        Vec::new(),
+        vec![hash_clause],
+    ))
+}
+
+fn full_index_scan_hash_join_parts(path: Path) -> Option<(Path, RestrictInfo, Expr, Expr)> {
+    match path {
+        Path::IndexOnlyScan {
+            plan_info,
+            pathtarget,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
+            pathkeys,
+        } => {
+            let (clause, outer_key, inner_key) =
+                hash_clause_from_runtime_index_key(source_id, &desc, &index_meta, &keys)?;
+            Some((
+                Path::IndexOnlyScan {
+                    plan_info: PlanEstimate::new(
+                        plan_info.startup_cost.as_f64(),
+                        plan_info.total_cost.as_f64(),
+                        plan_info.plan_rows.as_f64().max(10000.0),
+                        plan_info.plan_width,
+                    ),
+                    pathtarget,
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    index_rel,
+                    index_name,
+                    am_oid,
+                    toast,
+                    desc,
+                    index_desc,
+                    index_meta,
+                    keys: Vec::new(),
+                    order_by_keys,
+                    direction,
+                    pathkeys,
+                },
+                clause,
+                outer_key,
+                inner_key,
+            ))
+        }
+        Path::IndexScan {
+            plan_info,
+            pathtarget,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
+            index_only,
+            pathkeys,
+        } => {
+            let (clause, outer_key, inner_key) =
+                hash_clause_from_runtime_index_key(source_id, &desc, &index_meta, &keys)?;
+            Some((
+                Path::IndexScan {
+                    plan_info: PlanEstimate::new(
+                        plan_info.startup_cost.as_f64(),
+                        plan_info.total_cost.as_f64(),
+                        plan_info.plan_rows.as_f64().max(10000.0),
+                        plan_info.plan_width,
+                    ),
+                    pathtarget,
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    index_rel,
+                    index_name,
+                    am_oid,
+                    toast,
+                    desc,
+                    index_desc,
+                    index_meta,
+                    keys: Vec::new(),
+                    order_by_keys,
+                    direction,
+                    index_only,
+                    pathkeys,
+                },
+                clause,
+                outer_key,
+                inner_key,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn hash_clause_from_runtime_index_key(
+    source_id: usize,
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    keys: &[IndexScanKey],
+) -> Option<(RestrictInfo, Expr, Expr)> {
+    let key = keys.iter().find(|key| {
+        key.strategy == 3 && matches!(key.argument, IndexScanKeyArgument::Runtime(_))
+    })?;
+    let index_pos = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
+    let heap_attno = *index_meta.indkey.get(index_pos)?;
+    let heap_index = attrno_index(heap_attno.into())?;
+    let column = desc.columns.get(heap_index)?;
+    let inner_key = Expr::Var(Var {
+        varno: source_id,
+        varattno: heap_attno.into(),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+    });
+    let IndexScanKeyArgument::Runtime(runtime) = &key.argument else {
+        return None;
+    };
+    let outer_key = deparameterize_immediate_outer_vars(runtime.clone());
+    let clause = Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+        opno: 0,
+        opfuncid: 0,
+        op: OpExprKind::Eq,
+        opresulttype: SqlType::new(SqlTypeKind::Bool),
+        args: vec![outer_key.clone(), inner_key.clone()],
+        collation_oid: None,
+    }));
+    Some((
+        RestrictInfo::new(clause.clone(), expr_relids(&clause)),
+        outer_key,
+        inner_key,
+    ))
+}
+
+fn deparameterize_immediate_outer_vars(expr: Expr) -> Expr {
+    match expr {
+        Expr::Var(mut var) if var.varlevelsup == 1 => {
+            var.varlevelsup = 0;
+            Expr::Var(var)
+        }
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(deparameterize_immediate_outer_vars(*inner)), ty)
+        }
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(deparameterize_immediate_outer_vars(*array)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript.lower.map(deparameterize_immediate_outer_vars),
+                    upper: subscript.upper.map(deparameterize_immediate_outer_vars),
+                })
+                .collect(),
+        },
+        other => other,
     }
 }
 
@@ -3902,6 +4231,21 @@ fn parameterize_outer_vars(expr: Expr, outer_relids: &[usize]) -> Expr {
             saop.right = Box::new(parameterize_outer_vars(*saop.right, outer_relids));
             Expr::ScalarArrayOp(saop)
         }
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(parameterize_outer_vars(*array, outer_relids)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| parameterize_outer_vars(expr, outer_relids)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| parameterize_outer_vars(expr, outer_relids)),
+                })
+                .collect(),
+        },
         Expr::ArrayLiteral {
             elements,
             array_type,
@@ -4017,6 +4361,12 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
     {
         return false;
     }
+    if preferred_reassociated_lateral_values_hash_join(candidate, current) {
+        return true;
+    }
+    if preferred_reassociated_lateral_values_hash_join(current, candidate) {
+        return false;
+    }
     if near_tied_non_nested_join(candidate, current) {
         return true;
     }
@@ -4033,6 +4383,29 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
         .unwrap_or(Ordering::Equal);
     startup_cmp == Ordering::Less
         || (startup_cmp == Ordering::Equal && candidate.pathkeys().len() > current.pathkeys().len())
+}
+
+fn preferred_reassociated_lateral_values_hash_join(preferred: &Path, other: &Path) -> bool {
+    let Path::HashJoin {
+        left,
+        right,
+        kind: JoinType::Inner,
+        ..
+    } = preferred
+    else {
+        return false;
+    };
+    let Path::NestedLoopJoin {
+        right: values,
+        kind: JoinType::Cross,
+        ..
+    } = left.as_ref()
+    else {
+        return false;
+    };
+    path_is_values_relation(values)
+        && !path_contains_runtime_index_arg(right)
+        && matches!(other, Path::NestedLoopJoin { .. })
 }
 
 fn near_tied_non_nested_join(preferred: &Path, other: &Path) -> bool {
@@ -4247,6 +4620,7 @@ fn is_mergejoinable_sql_type(sql_type: SqlType) -> bool {
             | SqlTypeKind::Char
             | SqlTypeKind::Varchar
             | SqlTypeKind::Bool
+            | SqlTypeKind::Tid
     )
 }
 fn clause_exprs(clauses: &[RestrictInfo]) -> Vec<Expr> {
@@ -4260,6 +4634,19 @@ fn selectivity_for_restrict_clauses(clauses: &[RestrictInfo], rows: f64) -> f64 
     clauses
         .iter()
         .map(|restrict| clause_selectivity(&restrict.clause, None, rows))
+        .product::<f64>()
+        .clamp(0.0, 1.0)
+}
+
+fn join_selectivity_for_restrict_clauses(
+    clauses: &[RestrictInfo],
+    rows: f64,
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> f64 {
+    clauses
+        .iter()
+        .map(|restrict| join_clause_selectivity(&restrict.clause, rows, root, catalog))
         .product::<f64>()
         .clamp(0.0, 1.0)
 }
@@ -5407,13 +5794,69 @@ fn output_tuple_cpu_cost(rows: f64) -> f64 {
     clamp_rows(rows) * CPU_TUPLE_COST
 }
 
-fn hash_join_selectivity(hash_clauses: &[Expr], join_qual: &[Expr], left_rows: f64) -> f64 {
+fn hash_join_selectivity(
+    hash_clauses: &[Expr],
+    join_qual: &[Expr],
+    left_rows: f64,
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> f64 {
     hash_clauses
         .iter()
         .chain(join_qual.iter())
-        .map(|expr| clause_selectivity(expr, None, left_rows))
+        .map(|expr| join_clause_selectivity(expr, left_rows, root, catalog))
         .product::<f64>()
         .clamp(0.0, 1.0)
+}
+
+fn join_clause_selectivity(
+    expr: &Expr,
+    rows: f64,
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> f64 {
+    var_eq_join_selectivity(expr, root, catalog)
+        .unwrap_or_else(|| clause_selectivity(expr, None, rows))
+}
+
+fn var_eq_join_selectivity(
+    expr: &Expr,
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<f64> {
+    let Expr::Op(op) = strip_casts(expr) else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    let left = simple_local_var(strip_casts(&op.args[0]))?;
+    let right = simple_local_var(strip_casts(&op.args[1]))?;
+    let left_ndistinct = var_ndistinct(root?, catalog?, left)?;
+    let right_ndistinct = var_ndistinct(root?, catalog?, right)?;
+    Some((1.0 / left_ndistinct.max(right_ndistinct).max(1.0)).clamp(0.0, 1.0))
+}
+
+fn simple_local_var(expr: &Expr) -> Option<&Var> {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => Some(var),
+        _ => None,
+    }
+}
+
+fn var_ndistinct(root: &PlannerInfo, catalog: &dyn CatalogLookup, var: &Var) -> Option<f64> {
+    let varno = rte_slot_varno(var.varno).unwrap_or(var.varno);
+    let rte = root.parse.rtable.get(varno.checked_sub(1)?)?;
+    let RangeTblEntryKind::Relation { relation_oid, .. } = &rte.kind else {
+        return None;
+    };
+    let attno = i16::try_from(var.varattno).ok()?;
+    if attno <= 0 {
+        return None;
+    }
+    let stats = relation_stats(catalog, *relation_oid, &rte.desc);
+    let row = stats.stats_by_attnum.get(&attno)?;
+    effective_ndistinct(row, stats.reltuples)
 }
 
 fn estimate_join_rows(left_rows: f64, right_rows: f64, kind: JoinType, join_sel: f64) -> f64 {
@@ -5650,7 +6093,7 @@ fn estimate_hash_join(
 }
 
 fn estimate_hash_join_internal(
-    _root: Option<&PlannerInfo>,
+    root: Option<&PlannerInfo>,
     catalog: Option<&dyn CatalogLookup>,
     left: Path,
     right: Path,
@@ -5676,11 +6119,13 @@ fn estimate_hash_join_internal(
     let right_info = right.plan_info();
     let left_rows = clamp_rows(left_info.plan_rows.as_f64());
     let right_rows = clamp_rows(right_info.plan_rows.as_f64());
-    let hash_sel = selectivity_for_restrict_clauses(&hash_clauses, left_rows);
+    let hash_sel = join_selectivity_for_restrict_clauses(&hash_clauses, left_rows, root, catalog);
     let join_sel = hash_join_selectivity(
         &clause_exprs(&hash_clauses),
         &clause_exprs(&join_clauses),
         left_rows,
+        root,
+        catalog,
     );
     let rows = adjust_left_join_rows_for_unique_inner(
         estimate_join_rows(left_rows, right_rows, kind, join_sel),
@@ -5748,6 +6193,7 @@ fn estimate_merge_join(
 ) -> Path {
     estimate_merge_join_internal(
         None,
+        None,
         left,
         right,
         kind,
@@ -5764,6 +6210,7 @@ fn estimate_merge_join(
 
 fn estimate_merge_join_internal(
     _root: Option<&PlannerInfo>,
+    _catalog: Option<&dyn CatalogLookup>,
     left: Path,
     right: Path,
     kind: JoinType,
@@ -5801,11 +6248,14 @@ fn estimate_merge_join_internal(
     let right_info = right.plan_info();
     let left_rows = clamp_rows(left_info.plan_rows.as_f64());
     let right_rows = clamp_rows(right_info.plan_rows.as_f64());
-    let merge_sel = selectivity_for_restrict_clauses(&merge_clauses, left_rows);
+    let merge_sel =
+        join_selectivity_for_restrict_clauses(&merge_clauses, left_rows, _root, _catalog);
     let join_sel = hash_join_selectivity(
         &clause_exprs(&merge_clauses),
         &clause_exprs(&join_clauses),
         left_rows,
+        _root,
+        _catalog,
     );
     let rows = adjust_left_join_rows_for_unique_inner(
         estimate_join_rows(left_rows, right_rows, kind, join_sel),
@@ -6120,6 +6570,27 @@ pub(super) fn build_index_path_spec(
             .iter()
             .any(|idx| parsed_quals.get(*idx).is_some_and(|qual| qual.row_prefix)),
     })
+}
+
+pub(super) fn full_index_scan_spec(
+    index: &BoundIndexRelation,
+    filter: Option<Expr>,
+) -> IndexPathSpec {
+    let filter_quals = filter.iter().cloned().collect::<Vec<_>>();
+    IndexPathSpec {
+        index: index.clone(),
+        keys: Vec::new(),
+        order_by_keys: Vec::new(),
+        residual: filter,
+        used_quals: Vec::new(),
+        scan_quals: Vec::new(),
+        recheck_quals: Vec::new(),
+        filter_quals,
+        direction: crate::include::access::relscan::ScanDirection::Forward,
+        removes_order: false,
+        btree_prefix_columns: 0,
+        row_prefix: false,
+    }
 }
 
 fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64) -> f64 {
@@ -9001,7 +9472,7 @@ fn qual_strategy(
     {
         return None;
     }
-    let argument_type_oid = index_argument_type_oid(&qual.argument);
+    let argument_type_oid = index_argument_type_oid_for_qual(qual);
     match qual.lookup {
         super::super::IndexStrategyLookup::Operator { oid, kind } => {
             if index.index_meta.am_oid == SPGIST_AM_OID
@@ -9023,7 +9494,7 @@ fn qual_strategy(
                         && builtin_btree_strategy_type_compatible(
                             index,
                             index_pos,
-                            index_argument_sql_type(&qual.argument),
+                            index_argument_sql_type_for_qual(qual),
                         ))
                     .then(|| btree_builtin_strategy(kind))
                     .flatten()
@@ -9053,6 +9524,24 @@ fn qual_strategy(
             (index.index_meta.am_oid == BTREE_AM_OID && exact).then_some(3)
         }
     }
+}
+
+fn index_argument_type_oid_for_qual(qual: &IndexableQual) -> Option<u32> {
+    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.expr)
+        && saop.use_or
+    {
+        return Some(sql_type_oid(expr_sql_type(&saop.right).element_type()));
+    }
+    index_argument_type_oid(&qual.argument)
+}
+
+fn index_argument_sql_type_for_qual(qual: &IndexableQual) -> Option<SqlType> {
+    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.expr)
+        && saop.use_or
+    {
+        return Some(expr_sql_type(&saop.right).element_type());
+    }
+    index_argument_sql_type(&qual.argument)
 }
 
 fn build_btree_index_keys(

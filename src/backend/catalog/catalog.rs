@@ -5,7 +5,8 @@ use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    C_COLLATION_OID, DEFAULT_COLLATION_OID, multirange_type_ref_for_sql_type,
+    ACLITEM_ARRAY_TYPE_OID, ACLITEM_TYPE_OID, C_COLLATION_OID, DEFAULT_COLLATION_OID,
+    INT8_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, multirange_type_ref_for_sql_type,
     range_type_ref_for_sql_type,
 };
 
@@ -52,7 +53,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Enum => (4, AttributeAlign::Int),
         ScalarType::Record => (-1, AttributeAlign::Double),
         ScalarType::Bool => (1, AttributeAlign::Char),
-        ScalarType::Array(_) => (-1, AttributeAlign::Int),
+        ScalarType::Array(_) => (-1, array_attribute_align(sql_type)),
     };
     ColumnDesc {
         name: name.clone(),
@@ -86,6 +87,49 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         identity: None,
         missing_default_value: None,
         fdw_options: None,
+    }
+}
+
+fn array_attribute_align(sql_type: SqlType) -> AttributeAlign {
+    if sql_type.type_oid == ACLITEM_ARRAY_TYPE_OID {
+        return AttributeAlign::Double;
+    }
+
+    let element = sql_type.element_type();
+    if array_element_uses_double_align(element) {
+        AttributeAlign::Double
+    } else {
+        AttributeAlign::Int
+    }
+}
+
+fn array_element_uses_double_align(element: SqlType) -> bool {
+    if element.type_oid == ACLITEM_TYPE_OID {
+        return true;
+    }
+
+    match element.kind {
+        SqlTypeKind::Int8
+        | SqlTypeKind::Float8
+        | SqlTypeKind::Money
+        | SqlTypeKind::Time
+        | SqlTypeKind::TimeTz
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::TimestampTz
+        | SqlTypeKind::Interval
+        | SqlTypeKind::PgLsn
+        | SqlTypeKind::Point
+        | SqlTypeKind::Lseg
+        | SqlTypeKind::Line
+        | SqlTypeKind::Box
+        | SqlTypeKind::Circle
+        | SqlTypeKind::Record
+        | SqlTypeKind::Composite => true,
+        SqlTypeKind::Range | SqlTypeKind::Multirange => matches!(
+            element.range_subtype_oid,
+            INT8_TYPE_OID | TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID
+        ),
+        _ => false,
     }
 }
 
@@ -330,5 +374,33 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Timestamp => ScalarType::Timestamp,
         SqlTypeKind::TimestampTz => ScalarType::TimestampTz,
         SqlTypeKind::Bool => ScalarType::Bool,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn array_column_alignment_follows_postgres_element_alignment() {
+        let aclitem_array =
+            SqlType::array_of(SqlType::new(SqlTypeKind::Text).with_identity(ACLITEM_TYPE_OID, 0))
+                .with_identity(ACLITEM_ARRAY_TYPE_OID, 0);
+        let relacl = column_desc("relacl", aclitem_array, true);
+        assert_eq!(relacl.storage.attalign, AttributeAlign::Double);
+
+        let int4_array = column_desc(
+            "items",
+            SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
+            true,
+        );
+        assert_eq!(int4_array.storage.attalign, AttributeAlign::Int);
+
+        let float8_array = column_desc(
+            "items",
+            SqlType::array_of(SqlType::new(SqlTypeKind::Float8)),
+            true,
+        );
+        assert_eq!(float8_array.storage.attalign, AttributeAlign::Double);
     }
 }
