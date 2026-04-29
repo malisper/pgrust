@@ -33,9 +33,15 @@ fn raise_fd_limit() {
 
 fn usage() -> String {
     format!(
-        "Usage: pgrust_server [--dir PATH] [--port PORT] [--pool-size PAGES]\n       pgrust_server [PATH [PORT [POOL_SIZE]]]\n\nDefaults:\n  PATH = {}\n  PORT = 5433\n  POOL_SIZE = 16384",
-        std::env::temp_dir().join("pgrust_server").display()
+        "Usage: pgrust_server [--dir PATH] [--port PORT] [--pool-size PAGES]\n       pgrust_server [PATH [PORT [POOL_SIZE]]]\n\nDefaults:\n  PATH = {} ($PGRUST_DATA_DIR if set, otherwise temp dir)\n  PORT = 5433\n  POOL_SIZE = 16384",
+        default_base_dir().display()
     )
+}
+
+fn default_base_dir() -> PathBuf {
+    std::env::var_os("PGRUST_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("pgrust_server"))
 }
 
 fn take_value(raw: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -65,7 +71,7 @@ where
     I: IntoIterator<Item = String>,
 {
     let mut config = Config {
-        base_dir: std::env::temp_dir().join("pgrust_server"),
+        base_dir: default_base_dir(),
         port: 5433,
         pool_size: 16384,
     };
