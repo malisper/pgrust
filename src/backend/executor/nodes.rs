@@ -51,14 +51,14 @@ use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
     BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState, GatherState,
     IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MaterializeState, MaterializedRow, MemoizeState, MergeAppendState, NestedLoopJoinState,
-    NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState, ProjectionState,
-    RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind, SubqueryScanState,
-    SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState, ValuesState, WindowAggState,
-    WorkTableScanState,
+    MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState, MergeAppendState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
+    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
+    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState, ValuesState,
+    WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{
-    AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan,
+    AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan, Plan,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
@@ -2229,6 +2229,7 @@ impl PlanNode for IndexOnlyScanState {
                 return Ok(Some(&mut self.slot));
             }
 
+            self.stats.heap_fetches = self.stats.heap_fetches.saturating_add(1);
             let visible = heap_fetch_visible_with_txns(
                 &ctx.pool,
                 ctx.client_id,
@@ -2348,6 +2349,9 @@ impl PlanNode for IndexOnlyScanState {
                 "{prefix}Rows Removed by Filter: {}",
                 self.stats.rows_removed_by_filter
             ));
+        }
+        if analyze {
+            lines.push(format!("{prefix}Heap Fetches: {}", self.stats.heap_fetches));
         }
         if analyze && self.stats.index_searches > 0 {
             lines.push(format!(
@@ -2508,6 +2512,9 @@ impl PlanNode for IndexScanState {
                     return Ok(Some(&mut self.slot));
                 }
             }
+            if self.index_only {
+                self.stats.heap_fetches = self.stats.heap_fetches.saturating_add(1);
+            }
             let visible = heap_fetch_visible_with_txns(
                 &ctx.pool,
                 ctx.client_id,
@@ -2627,6 +2634,9 @@ impl PlanNode for IndexScanState {
                 self.stats.rows_removed_by_filter
             ));
         }
+        if analyze && self.index_only {
+            lines.push(format!("{prefix}Heap Fetches: {}", self.stats.heap_fetches));
+        }
         if analyze && self.stats.index_searches > 0 {
             lines.push(format!(
                 "{prefix}Index Searches: {}",
@@ -2736,8 +2746,10 @@ fn render_index_scan_key(
             ),
             None => render_explain_literal(value),
         },
-        IndexScanKeyArgument::Runtime(expr) => runtime_renderer
-            .map(|render| render(expr))
+        IndexScanKeyArgument::Runtime(expr) => key
+            .runtime_label
+            .clone()
+            .or_else(|| runtime_renderer.map(|render| render(expr)))
             .unwrap_or_else(|| render_explain_expr(expr, &[])),
     };
     if key.strategy == 3
@@ -6052,77 +6064,306 @@ impl PlanNode for MaterializeState {
     }
 }
 
+fn memoize_param_value(
+    ctx: &ExecutorContext,
+    paramid: usize,
+    binary_mode: bool,
+) -> Result<Value, ExecError> {
+    let value = ctx
+        .expr_bindings
+        .exec_params
+        .get(&paramid)
+        .cloned()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "executor param reached memoize without a binding".into(),
+            detail: Some(format!("paramid={paramid}")),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let mut values = vec![value];
+    Value::materialize_all(&mut values);
+    let value = values.pop().unwrap_or(Value::Null);
+    if !binary_mode
+        && let Value::Float64(float) = value
+        && float == 0.0
+    {
+        return Ok(Value::Float64(0.0));
+    }
+    Ok(value)
+}
+
+fn memoize_key(state: &MemoizeState, ctx: &ExecutorContext) -> Result<MemoizeCacheKey, ExecError> {
+    state
+        .key_paramids
+        .iter()
+        .copied()
+        .map(|paramid| memoize_param_value(ctx, paramid, state.binary_mode))
+        .collect::<Result<Vec<_>, _>>()
+        .map(MemoizeCacheKey)
+}
+
+fn memoize_nonkey_dependents(
+    state: &MemoizeState,
+    ctx: &ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    state
+        .dependent_paramids
+        .iter()
+        .copied()
+        .filter(|paramid| !state.key_paramids.contains(paramid))
+        .map(|paramid| memoize_param_value(ctx, paramid, true))
+        .collect()
+}
+
+fn memoize_value_memory(value: &Value) -> usize {
+    match value {
+        Value::Text(text) | Value::Json(text) | Value::JsonPath(text) | Value::Xml(text) => {
+            24 + text.len()
+        }
+        Value::TextRef(_, len) => 24 + *len as usize,
+        Value::Bytea(bytes) | Value::Jsonb(bytes) => 24 + bytes.len(),
+        Value::Array(values) => 24 + values.iter().map(memoize_value_memory).sum::<usize>(),
+        Value::PgArray(array) => {
+            24 + array
+                .to_nested_values()
+                .iter()
+                .map(memoize_value_memory)
+                .sum::<usize>()
+        }
+        Value::Record(record) => {
+            24 + record
+                .fields
+                .iter()
+                .map(memoize_value_memory)
+                .sum::<usize>()
+        }
+        _ => 32,
+    }
+}
+
+fn memoize_rows_memory(rows: &[MaterializedRow]) -> usize {
+    rows.iter()
+        .map(|row| {
+            64 + row
+                .slot
+                .tts_values
+                .iter()
+                .map(memoize_value_memory)
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+fn memoize_key_memory(key: &MemoizeCacheKey) -> usize {
+    48 + key.0.iter().map(memoize_value_memory).sum::<usize>()
+}
+
+fn memoize_entry_memory(key: &MemoizeCacheKey, rows: &[MaterializedRow]) -> usize {
+    // Account for the hash table entry, tuple array, and per-entry memory
+    // context overhead that PostgreSQL charges outside the raw key/row bytes.
+    8192 + memoize_key_memory(key) + memoize_rows_memory(rows)
+}
+
+fn parse_memory_kb(raw: &str) -> Option<usize> {
+    let trimmed = raw.trim().trim_matches('\'').trim();
+    let mut parts = trimmed.split_whitespace();
+    let number = parts.next()?;
+    let unit = parts.next().unwrap_or("kB");
+    let value = number.parse::<f64>().ok()?;
+    let multiplier = match unit.to_ascii_lowercase().as_str() {
+        "b" | "byte" | "bytes" => 1.0 / 1024.0,
+        "kb" | "kib" => 1.0,
+        "mb" | "mib" => 1024.0,
+        "gb" | "gib" => 1024.0 * 1024.0,
+        _ => 1.0,
+    };
+    value
+        .is_finite()
+        .then(|| (value * multiplier).ceil() as usize)
+}
+
+fn memoize_memory_limit_bytes(ctx: &ExecutorContext) -> usize {
+    let work_mem_kb = ctx
+        .gucs
+        .get("work_mem")
+        .and_then(|value| parse_memory_kb(value))
+        .unwrap_or(4096);
+    let hash_multiplier = ctx
+        .gucs
+        .get("hash_mem_multiplier")
+        .and_then(|value| value.trim().trim_matches('\'').parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(2.0);
+    ((work_mem_kb as f64) * 1024.0 * hash_multiplier) as usize
+}
+
+fn memoize_evict_if_needed(state: &mut MemoizeState, ctx: &ExecutorContext) {
+    let limit = memoize_memory_limit_bytes(ctx);
+    while (state.memoize_stats.memory_usage_bytes > limit
+        || (state.est_entries > 0 && state.cache.len() > state.est_entries))
+        && !state.lru.is_empty()
+    {
+        let Some(key) = state.lru.pop_front() else {
+            break;
+        };
+        if let Some(rows) = state.cache.remove(&key) {
+            state.memoize_stats.memory_usage_bytes = state
+                .memoize_stats
+                .memory_usage_bytes
+                .saturating_sub(memoize_entry_memory(&key, &rows));
+            state.memoize_stats.evictions += 1;
+        }
+    }
+}
+
+fn memoize_prepare_scan(
+    state: &mut MemoizeState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let nonkey_dependents = memoize_nonkey_dependents(state, ctx)?;
+    if state
+        .last_nonkey_dependents
+        .as_ref()
+        .is_some_and(|last| *last != nonkey_dependents)
+    {
+        state.cache.clear();
+        state.lru.clear();
+        state.memoize_stats.memory_usage_bytes = 0;
+    }
+    state.last_nonkey_dependents = Some(nonkey_dependents);
+
+    let key = memoize_key(state, ctx)?;
+    if let Some(rows) = state.cache.get(&key) {
+        state.memoize_stats.hits += 1;
+        state.active_rows = rows.clone();
+        state.active_index = 0;
+        state.scan_prepared = true;
+        return Ok(());
+    }
+
+    state.memoize_stats.misses += 1;
+    state.input = executor_start(state.input_plan.clone());
+    let mut rows = Vec::new();
+    while state.input.exec_proc_node(ctx)?.is_some() {
+        ctx.check_for_interrupts()?;
+        rows.push(state.input.materialize_current_row()?);
+        if state.single_row {
+            break;
+        }
+    }
+    let entry_memory = memoize_entry_memory(&key, &rows);
+    if entry_memory > memoize_memory_limit_bytes(ctx) {
+        state.memoize_stats.overflows += 1;
+    }
+    state.memoize_stats.memory_usage_bytes = state
+        .memoize_stats
+        .memory_usage_bytes
+        .saturating_add(entry_memory);
+    state.cache.insert(key.clone(), rows.clone());
+    state.lru.push_back(key);
+    memoize_evict_if_needed(state, ctx);
+    state.active_rows = rows;
+    state.active_index = 0;
+    state.scan_prepared = true;
+    Ok(())
+}
+
 impl PlanNode for MemoizeState {
     fn exec_proc_node<'a>(
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-        // :HACK: This is a semantic pass-through for now. The planner needs a
-        // real Memoize node for PostgreSQL-compatible EXPLAIN output; caching
-        // can be added here when non-EXPLAIN workloads start depending on it.
         let start = if ctx.timed {
             Some(Instant::now())
         } else {
             None
         };
         begin_node(&mut self.stats, ctx)?;
-        if self.input.exec_proc_node(ctx)?.is_some() {
-            finish_row(&mut self.stats, start);
-            Ok(self.input.current_slot())
-        } else {
-            finish_eof(&mut self.stats, start, ctx);
-            Ok(None)
+        if !self.scan_prepared {
+            memoize_prepare_scan(self, ctx)?;
         }
+        if self.active_index >= self.active_rows.len() {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        }
+        let row = &self.active_rows[self.active_index];
+        self.active_index += 1;
+        self.slot = row.slot.clone();
+        self.current_bindings = row.system_bindings.clone();
+        set_active_system_bindings(ctx, &self.current_bindings);
+        finish_row(&mut self.stats, start);
+        Ok(Some(&mut self.slot))
+    }
+
+    fn rescan(&mut self, _ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.active_rows.clear();
+        self.active_index = 0;
+        self.scan_prepared = false;
+        self.current_bindings.clear();
+        self.slot = TupleSlot::empty(self.column_names.len());
+        Ok(())
     }
 
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        self.input.current_slot()
+        Some(&mut self.slot)
     }
-
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
-        self.input.current_system_bindings()
+        &self.current_bindings
     }
-
     fn column_names(&self) -> &[String] {
-        self.input.column_names()
+        &self.column_names
     }
-
     fn node_stats(&self) -> &NodeExecStats {
         &self.stats
     }
-
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
     }
-
     fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
         self.plan_info
     }
-
     fn node_label(&self) -> String {
         "Memoize".into()
     }
-
     fn explain_details(
         &self,
         indent: usize,
-        _analyze: bool,
+        analyze: bool,
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
-        if !self.cache_keys.is_empty() {
-            let keys = self
-                .cache_keys
-                .iter()
-                .map(|expr| render_explain_expr(expr, self.input.column_names()))
-                .collect::<Vec<_>>()
-                .join(", ");
+        if !self.cache_keys.is_empty() || !self.cache_key_labels.is_empty() {
+            let keys = if !self.cache_key_labels.is_empty() {
+                self.cache_key_labels.join(", ")
+            } else {
+                self.cache_keys
+                    .iter()
+                    .map(|expr| render_explain_expr(expr, &self.column_names))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             lines.push(format!("{prefix}Cache Key: {keys}"));
         }
-        lines.push(format!("{prefix}Cache Mode: logical"));
+        lines.push(format!(
+            "{prefix}Cache Mode: {}",
+            if self.binary_mode {
+                "binary"
+            } else {
+                "logical"
+            }
+        ));
+        if analyze {
+            let memory_kb = self.memoize_stats.memory_usage_bytes.div_ceil(1024).max(1);
+            lines.push(format!(
+                "{prefix}Hits: {}  Misses: {}  Evictions: {}  Overflows: {}  Memory Usage: {memory_kb}kB",
+                self.memoize_stats.hits,
+                self.memoize_stats.misses,
+                self.memoize_stats.evictions,
+                self.memoize_stats.overflows
+            ));
+        }
     }
-
     fn explain_children(
         &self,
         indent: usize,
@@ -6552,13 +6793,17 @@ fn exec_lateral_join<'a>(
                         &mut state.current_left.as_mut().unwrap().slot,
                         ctx,
                     )?;
-                    state.right = super::executor_start(
-                        state
-                            .right_plan
-                            .as_ref()
-                            .expect("lateral right plan")
-                            .clone(),
-                    );
+                    if matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. })) {
+                        state.right.rescan(ctx)?;
+                    } else {
+                        state.right = super::executor_start(
+                            state
+                                .right_plan
+                                .as_ref()
+                                .expect("lateral right plan")
+                                .clone(),
+                        );
+                    }
                     let mut rows = Vec::new();
                     while state.right.exec_proc_node(ctx)?.is_some() {
                         ctx.check_for_interrupts()?;

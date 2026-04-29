@@ -3925,7 +3925,7 @@ fn bind_ctes(
                         sort_clause: Vec::new(),
                         constraint_deps: Vec::new(),
                         limit_count: None,
-                        limit_offset: 0,
+                        limit_offset: None,
                         locking_clause: None,
                         locking_targets: Vec::new(),
                         row_marks: Vec::new(),
@@ -4015,7 +4015,7 @@ fn bind_ctes(
                         sort_clause: Vec::new(),
                         constraint_deps: Vec::new(),
                         limit_count: None,
-                        limit_offset: 0,
+                        limit_offset: None,
                         locking_clause: None,
                         locking_targets: Vec::new(),
                         row_marks: Vec::new(),
@@ -5078,15 +5078,23 @@ pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes(
     outer_scopes: &[BoundScope],
     outer_ctes: &[BoundCte],
 ) -> Result<PlannedStmt, ParseError> {
-    build_plan_with_outer(
+    pg_plan_query_with_outer_scopes_and_ctes_config(
         stmt,
         catalog,
         outer_scopes,
-        None,
         outer_ctes,
-        &[],
         PlannerConfig::default(),
     )
+}
+
+pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes_config(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+    config: PlannerConfig,
+) -> Result<PlannedStmt, ParseError> {
+    build_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[], config)
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
@@ -5153,15 +5161,23 @@ pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes(
     outer_scopes: &[BoundScope],
     outer_ctes: &[BoundCte],
 ) -> Result<PlannedStmt, ParseError> {
-    build_values_plan_with_outer(
+    pg_plan_values_query_with_outer_scopes_and_ctes_config(
         stmt,
         catalog,
         outer_scopes,
-        None,
         outer_ctes,
-        &[],
         PlannerConfig::default(),
     )
+}
+
+pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes_config(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+    config: PlannerConfig,
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[], config)
 }
 
 pub(crate) fn bound_cte_from_materialized_rows(
@@ -5217,7 +5233,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             sort_clause: Vec::new(),
             constraint_deps: Vec::new(),
             limit_count: None,
-            limit_offset: 0,
+            limit_offset: None,
             locking_clause: None,
             locking_targets: Vec::new(),
             row_marks: Vec::new(),
@@ -5267,7 +5283,7 @@ pub(crate) fn bound_cte_from_query_rows(
             sort_clause: Vec::new(),
             constraint_deps: Vec::new(),
             limit_count: None,
-            limit_offset: 0,
+            limit_offset: None,
             locking_clause: None,
             locking_targets: Vec::new(),
             row_marks: Vec::new(),
@@ -5363,7 +5379,7 @@ fn bind_values_query_with_outer(
             sort_clause,
             constraint_deps: Vec::new(),
             limit_count: stmt.limit,
-            limit_offset: stmt.offset.unwrap_or(0),
+            limit_offset: stmt.offset,
             locking_clause: None,
             locking_targets: Vec::new(),
             row_marks: Vec::new(),
@@ -6160,7 +6176,7 @@ fn bind_select_query_with_outer(
                         sort_clause,
                         constraint_deps,
                         limit_count: stmt.limit,
-                        limit_offset: stmt.offset.unwrap_or(0),
+                        limit_offset: stmt.offset,
                         locking_clause: stmt.locking_clause,
                         locking_targets: stmt.locking_targets.clone(),
                         row_marks: Vec::new(),
@@ -6265,7 +6281,7 @@ fn bind_select_query_with_outer(
                     sort_clause,
                     constraint_deps: Vec::new(),
                     limit_count: stmt.limit,
-                    limit_offset: stmt.offset.unwrap_or(0),
+                    limit_offset: stmt.offset,
                     locking_clause: stmt.locking_clause,
                     locking_targets: stmt.locking_targets.clone(),
                     row_marks: Vec::new(),
@@ -6505,7 +6521,7 @@ fn bind_set_operation_query_with_outer(
             sort_clause,
             constraint_deps: Vec::new(),
             limit_count: stmt.limit,
-            limit_offset: stmt.offset.unwrap_or(0),
+            limit_offset: stmt.offset,
             locking_clause: stmt.locking_clause,
             locking_targets: stmt.locking_targets.clone(),
             row_marks: Vec::new(),

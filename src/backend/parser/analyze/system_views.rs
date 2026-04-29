@@ -1048,7 +1048,7 @@ fn describe_auto_updatable_view_shape(
         || query.recursive_union.is_some()
         || !raw_select.with.is_empty()
         || query.limit_count.is_some()
-        || query.limit_offset != 0
+        || query.limit_offset.is_some()
         || !query.accumulators.is_empty()
         || !query.window_clauses.is_empty()
         || query.has_target_srfs

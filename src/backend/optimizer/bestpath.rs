@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use crate::include::nodes::pathnodes::{Path, PathKey, RelOptInfo};
+use crate::include::nodes::primnodes::Expr;
 use crate::include::nodes::primnodes::JoinType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +85,32 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
     {
         return candidate_left_relids > current_left_relids;
     }
+    let candidate_disabled = contains_disabled_seq_scan(candidate);
+    let current_disabled = contains_disabled_seq_scan(current);
+    if candidate_disabled != current_disabled {
+        return !candidate_disabled;
+    }
     if matches!(cost, CostSelector::Total) {
+        if preferred_partitionwise_join_append(candidate)
+            && !preferred_partitionwise_join_append(current)
+        {
+            return true;
+        }
+        if preferred_partitionwise_join_append(current)
+            && !preferred_partitionwise_join_append(candidate)
+        {
+            return false;
+        }
+        if preferred_parameterized_append_inner_nested_loop(candidate)
+            && !preferred_parameterized_append_inner_nested_loop(current)
+        {
+            return true;
+        }
+        if preferred_parameterized_append_inner_nested_loop(current)
+            && !preferred_parameterized_append_inner_nested_loop(candidate)
+        {
+            return false;
+        }
         if preferred_parameterized_index_nested_loop(candidate)
             && !preferred_parameterized_index_nested_loop(current)
         {
@@ -117,6 +143,50 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
         || (cmp == Ordering::Equal && better_pathkeys(&candidate.pathkeys(), &current.pathkeys()))
 }
 
+fn preferred_partitionwise_join_append(path: &Path) -> bool {
+    match path {
+        Path::Append { children, .. } if children.len() > 1 => {
+            children.iter().all(path_is_join_child)
+        }
+        _ => false,
+    }
+}
+
+fn path_is_join_child(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin { .. } | Path::HashJoin { .. } | Path::MergeJoin { .. } => true,
+        Path::Projection { input, .. } | Path::Filter { input, .. } => path_is_join_child(input),
+        _ => false,
+    }
+}
+
+fn preferred_parameterized_append_inner_nested_loop(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind: JoinType::Inner,
+            ..
+        } => {
+            !path_is_append_like(left)
+                && path_is_append_like(right)
+                && path_has_runtime_index_scan(right)
+        }
+        _ => false,
+    }
+}
+
+fn path_is_append_like(path: &Path) -> bool {
+    match path {
+        Path::Append { .. } | Path::MergeAppend { .. } => true,
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::Limit { input, .. } => path_is_append_like(input),
+        _ => false,
+    }
+}
+
 pub(super) fn non_nested_join_nearly_as_cheap(preferred: &Path, other: &Path) -> bool {
     if !matches!(preferred, Path::HashJoin { .. } | Path::MergeJoin { .. })
         || !matches!(other, Path::NestedLoopJoin { .. })
@@ -145,6 +215,17 @@ pub(super) fn preferred_parameterized_index_nested_loop(path: &Path) -> bool {
             // shape when a small outer path can drive runtime index probes.
             left.plan_info().plan_rows.as_f64() <= 100.0 && path_has_runtime_index_scan(right)
         }
+        _ => false,
+    }
+}
+
+pub(super) fn preferred_parameterized_nested_loop(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin {
+            right,
+            kind: JoinType::Inner | JoinType::Left,
+            ..
+        } => path_uses_immediate_outer(right),
         _ => false,
     }
 }
@@ -218,6 +299,84 @@ fn path_has_runtime_index_scan(path: &Path) -> bool {
         | Path::CteScan {
             cte_plan: input, ..
         } => path_has_runtime_index_scan(input),
+        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
+            children.iter().any(path_has_runtime_index_scan)
+        }
+        _ => false,
+    }
+}
+
+fn path_uses_immediate_outer(path: &Path) -> bool {
+    match path {
+        Path::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Path::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys.iter().chain(order_by_keys.iter()).any(|key| {
+            matches!(
+                key.argument,
+                crate::include::nodes::plannodes::IndexScanKeyArgument::Runtime(_)
+            ) || key
+                .display_expr
+                .as_ref()
+                .is_some_and(expr_uses_immediate_outer)
+        }),
+        Path::Filter {
+            input, predicate, ..
+        } => path_uses_immediate_outer(input) || expr_uses_immediate_outer(predicate),
+        Path::Projection { input, targets, .. } => {
+            path_uses_immediate_outer(input)
+                || targets
+                    .iter()
+                    .any(|target| expr_uses_immediate_outer(&target.expr))
+        }
+        Path::OrderBy { input, items, .. } | Path::IncrementalSort { input, items, .. } => {
+            path_uses_immediate_outer(input)
+                || items
+                    .iter()
+                    .any(|item| expr_uses_immediate_outer(&item.expr))
+        }
+        Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_uses_immediate_outer(input),
+        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
+            children.iter().any(path_uses_immediate_outer)
+        }
+        _ => false,
+    }
+}
+
+fn expr_uses_immediate_outer(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 1,
+        Expr::Param(_) => true,
+        Expr::Op(op) => op.args.iter().any(expr_uses_immediate_outer),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_immediate_outer),
+        Expr::Func(func) => func.args.iter().any(expr_uses_immediate_outer),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_uses_immediate_outer(inner),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            expr_uses_immediate_outer(left) || expr_uses_immediate_outer(right)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_immediate_outer(&saop.left) || expr_uses_immediate_outer(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_uses_immediate_outer),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_uses_immediate_outer(expr)),
         _ => false,
     }
 }
@@ -273,6 +432,48 @@ fn contains_seq_scan(path: &Path) -> bool {
         Path::RecursiveUnion {
             anchor, recursive, ..
         } => contains_seq_scan(anchor) || contains_seq_scan(recursive),
+        Path::Result { .. }
+        | Path::IndexOnlyScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
+        | Path::Values { .. }
+        | Path::FunctionScan { .. }
+        | Path::WorkTableScan { .. } => false,
+    }
+}
+
+fn contains_disabled_seq_scan(path: &Path) -> bool {
+    match path {
+        Path::SeqScan { disabled, .. } => *disabled,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => contains_disabled_seq_scan(input),
+        Path::Append { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(contains_disabled_seq_scan),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
+            contains_disabled_seq_scan(left) || contains_disabled_seq_scan(right)
+        }
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => contains_disabled_seq_scan(anchor) || contains_disabled_seq_scan(recursive),
         Path::Result { .. }
         | Path::IndexOnlyScan { .. }
         | Path::IndexScan { .. }
