@@ -4,23 +4,26 @@ name: regression-tests
 # pgrust_server. Results (summary + per-test output + diffs) are pushed to the
 # `regression-history` orphan branch and a summary is posted to Slack.
 #
-# Cron times are UTC. With a 30-minute build/test head start, results land
-# around 1:00pm and 8:15pm Pacific (during PDT). Times will drift by 1 hour
-# around DST transitions; bump the cron then.
+# Cron times are UTC. Times will drift by 1 hour around DST transitions; bump
+# the cron then if Pacific-local delivery time matters.
 on:
   schedule:
-    - cron: '30 19 * * *'   # ~12:30 PDT start -> ~1:00pm PDT finish
-    - cron: '45 2 * * *'    # ~7:45pm PDT start -> ~8:15pm PDT finish
+    - cron: '30 19 * * *'   # ~12:30 PDT start
+    - cron: '45 2 * * *'    # ~7:45pm PDT start
   workflow_dispatch:
     inputs:
       command_timeout:
-        description: 'Regression command timeout, e.g. 210m for normal runs or 2m for abort-path smoke tests'
+        description: 'Shard command watchdog, e.g. 75m for normal runs or 2m for abort-path smoke tests'
         required: false
-        default: '210m'
+        default: '75m'
       jobs:
-        description: 'Number of isolated concurrent regression test workers'
+        description: 'Number of isolated concurrent regression workers per shard'
         required: false
         default: '4'
+      shard_deadline_secs:
+        description: 'Seconds before each shard stops scheduling new tests and writes a partial summary'
+        required: false
+        default: '3000'
 
 permissions:
   contents: write   # required to push to the regression-history branch
@@ -32,29 +35,62 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  REGRESS_RESULTS_DIR: ${{ github.workspace }}/regress-results
-  REGRESS_ARTIFACT_DIR: ${{ github.workspace }}/regress-artifact
-  REGRESS_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '210m' }}
+  REGRESS_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '75m' }}
   REGRESS_JOBS: ${{ inputs.jobs || '4' }}
+  REGRESS_SHARD_TOTAL: "4"
+  REGRESS_SHARD_DEADLINE_SECS: ${{ inputs.shard_deadline_secs || '3000' }}
   REGRESS_FILE_TIMEOUT: "300"
   PGRUST_STATEMENT_TIMEOUT: "15"
-  # Keep the explicit build step and run_regression.sh --skip-build looking at
-  # the same target directory. Otherwise the script may fall back to an isolated
-  # target pool and fail to find the binary that CI just built.
   CARGO_TARGET_DIR: ${{ github.workspace }}/pgrust/target
-  # Pin to the PG18 SHA the project currently develops against. Bump when the
-  # team decides to track a newer upstream — fixtures (.out files) are tied to
-  # this revision.
-  POSTGRES_REF: 4b2aa4b39cbac71d9795ff760af3991a681eae00
+  # Pin to the latest stable PG18 release tag. Do not track master/PG19 here:
+  # fixtures (.sql/.out files) define the compatibility target.
+  POSTGRES_REF: REL_18_3
 
 jobs:
-  regression:
-    name: regression
-    # The full suite runs multiple isolated pgrust servers and copies staged
-    # database clusters. Standard private-repo runners have been too small and
-    # can lose contact with GitHub mid-run under this load.
+  build:
+    name: build regression binary
     runs-on: 32x
-    timeout-minutes: 240
+    timeout-minutes: 45
+    steps:
+      - name: Checkout pgrust
+        uses: actions/checkout@v4
+        with:
+          path: pgrust
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pgrust
+
+      - name: Build pgrust_server (release)
+        working-directory: pgrust
+        run: cargo build --release --locked --bin pgrust_server
+
+      - name: Upload pgrust_server
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgrust-server-release
+          path: pgrust/target/release/pgrust_server
+          if-no-files-found: error
+          retention-days: 7
+
+  regression-shard:
+    name: regression shard ${{ matrix.shard }}
+    needs: build
+    runs-on: 32x
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      REGRESS_RESULTS_DIR: ${{ github.workspace }}/regress-results
+      REGRESS_ARTIFACT_DIR: ${{ github.workspace }}/regress-artifact
     steps:
       - name: Checkout pgrust
         uses: actions/checkout@v4
@@ -68,15 +104,14 @@ jobs:
           ref: ${{ env.POSTGRES_REF }}
           path: postgres
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - name: Download pgrust_server
+        uses: actions/download-artifact@v4
         with:
-          toolchain: 1.94.1
+          name: pgrust-server-release
+          path: pgrust/target/release
 
-      - name: Restore cargo cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: pgrust
+      - name: Prepare pgrust_server
+        run: chmod +x pgrust/target/release/pgrust_server
 
       - name: Install postgresql-client-18
         run: |
@@ -89,11 +124,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client-18 lsof
 
-      - name: Build pgrust_server (release)
-        working-directory: pgrust
-        run: cargo build --release --locked --bin pgrust_server
-
-      - name: Run regression tests
+      - name: Run regression shard
         id: regress
         continue-on-error: true
         working-directory: pgrust
@@ -111,6 +142,10 @@ jobs:
               cat > "$REGRESS_RESULTS_DIR/summary.json" <<EOF
           {
             "status": "aborted",
+            "shard": {
+              "index": ${{ matrix.shard }},
+              "total": $REGRESS_SHARD_TOTAL
+            },
             "tests": {
               "planned": 0,
               "total": 0,
@@ -131,7 +166,7 @@ jobs:
             fi
             echo "exit_code=$final_status" >> "$GITHUB_OUTPUT"
             if [[ -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
-              echo "## Regression summary" >> "$GITHUB_STEP_SUMMARY"
+              echo "## Regression shard summary" >> "$GITHUB_STEP_SUMMARY"
               echo '```json' >> "$GITHUB_STEP_SUMMARY"
               cat "$REGRESS_RESULTS_DIR/summary.json" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -142,18 +177,21 @@ jobs:
           trap 'status=130; finalize_regression_step "$status"; exit 0' INT
 
           mkdir -p "$REGRESS_RESULTS_DIR"
-          timeout --signal=TERM --kill-after=30s "$REGRESS_COMMAND_TIMEOUT" \
+          timeout --foreground --signal=TERM --kill-after=30s "$REGRESS_COMMAND_TIMEOUT" \
             scripts/run_regression.sh \
             --skip-build \
             --timeout "$REGRESS_FILE_TIMEOUT" \
             --jobs "$REGRESS_JOBS" \
-            --results-dir "$REGRESS_RESULTS_DIR" || status=$?
+            --results-dir "$REGRESS_RESULTS_DIR" \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-total "$REGRESS_SHARD_TOTAL" \
+            --deadline-secs "$REGRESS_SHARD_DEADLINE_SECS" || status=$?
           trap - TERM INT
           finalize_regression_step "$status"
           exit 0
 
-      - name: Prepare compact regression artifacts
-        if: always()
+      - name: Prepare compact shard artifacts
+        if: always() && !cancelled()
         run: |
           set -euo pipefail
           rm -rf "$REGRESS_ARTIFACT_DIR"
@@ -173,7 +211,8 @@ jobs:
           done
 
           {
-            echo "Compact regression artifact bundle."
+            echo "Compact regression shard artifact bundle."
+            echo "Shard: ${{ matrix.shard }}/$REGRESS_SHARD_TOTAL"
             echo "Source results dir: $REGRESS_RESULTS_DIR"
             echo "Included: summary.json, summary.md, exit_code.txt, output/, diff/, status/, fixtures/"
             echo "Excluded: base/, workers/, and tablespaces/ database state"
@@ -186,8 +225,61 @@ jobs:
             du -sh "$REGRESS_ARTIFACT_DIR" || true
           } > "$REGRESS_ARTIFACT_DIR/artifact_manifest.txt"
 
-      - name: Upload regression artifacts (workflow run)
-        if: always()
+      - name: Upload regression shard artifacts
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-shard-${{ matrix.shard }}
+          path: ${{ env.REGRESS_ARTIFACT_DIR }}
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    name: aggregate regression shards
+    needs: regression-shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REGRESS_RESULTS_DIR: ${{ github.workspace }}/regress-results
+      REGRESS_ARTIFACT_DIR: ${{ github.workspace }}/regress-artifact
+    steps:
+      - name: Checkout pgrust
+        uses: actions/checkout@v4
+        with:
+          path: pgrust
+
+      - name: Download shard artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: regression-shard-*
+          path: shard-artifacts
+          merge-multiple: false
+
+      - name: Aggregate shard results
+        working-directory: pgrust
+        run: |
+          set -euo pipefail
+          scripts/github/aggregate_regression_shards.py \
+            "$GITHUB_WORKSPACE/shard-artifacts" \
+            "$REGRESS_RESULTS_DIR" \
+            "$REGRESS_SHARD_TOTAL"
+          echo "## Aggregated regression summary" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat "$REGRESS_RESULTS_DIR/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare aggregate artifact
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          rm -rf "$REGRESS_ARTIFACT_DIR"
+          mkdir -p "$REGRESS_ARTIFACT_DIR"
+          cp -R "$REGRESS_RESULTS_DIR/." "$REGRESS_ARTIFACT_DIR/" 2>/dev/null || true
+
+      - name: Upload aggregated regression artifacts
+        if: always() && !cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: regression-results
@@ -197,7 +289,7 @@ jobs:
 
       - name: Publish results to regression-history
         id: publish
-        if: always()
+        if: always() && !cancelled()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RESULTS_DIR: ${{ env.REGRESS_RESULTS_DIR }}
@@ -206,12 +298,11 @@ jobs:
           RUN_SHA: ${{ github.sha }}
           RUN_REF: ${{ github.ref }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REGRESS_EXIT_CODE: ${{ steps.regress.outputs.exit_code }}
         working-directory: pgrust
         run: scripts/github/publish_regression_history.sh
 
       - name: Notify Slack
-        if: always() && steps.publish.outputs.run_dir_name != ''
+        if: always() && !cancelled() && steps.publish.outputs.run_dir_name != ''
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           RESULTS_DIR: ${{ env.REGRESS_RESULTS_DIR }}
@@ -222,19 +313,28 @@ jobs:
           RUN_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_FULL_NAME: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          # Keep this aligned with the rerun policy in regression-tests-rerun.yml
+          # (run_attempt < 2). Bump both together if the policy ever changes.
+          MAX_ATTEMPTS: "2"
         working-directory: pgrust
         run: scripts/github/notify_slack_regression.sh
 
-      - name: Mark workflow failed when regressions fail
-        if: always()
+      - name: Mark workflow failed only when no aggregate exists
+        if: always() && !cancelled()
         run: |
-          status=0
+          if [[ ! -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
+            echo "No aggregate summary was produced."
+            exit 1
+          fi
+          if [[ "${{ steps.publish.outcome }}" != "success" ]]; then
+            echo "Publish step outcome: ${{ steps.publish.outcome }}"
+            exit 1
+          fi
           if [[ -f "$REGRESS_RESULTS_DIR/exit_code.txt" ]]; then
             status="$(cat "$REGRESS_RESULTS_DIR/exit_code.txt")"
-          elif [[ "${{ steps.regress.outcome }}" != "success" ]]; then
-            status=1
-          fi
-          echo "Regression exit code: $status"
-          if [[ "$status" != "0" ]]; then
-            exit "$status"
+            echo "Aggregate exit code: $status"
+            if [[ "$status" != "0" ]]; then
+              exit "$status"
+            fi
           fi

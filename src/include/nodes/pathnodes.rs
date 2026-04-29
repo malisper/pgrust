@@ -435,6 +435,7 @@ pub enum Path {
     Append {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,
+        pathkeys: Vec<PathKey>,
         relids: Vec<usize>,
         source_id: usize,
         desc: RelationDesc,

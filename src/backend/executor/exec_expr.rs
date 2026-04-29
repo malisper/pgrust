@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::sql_deparse::{
-    normalize_index_expression_sql, normalize_index_predicate_sql,
+    normalize_check_expr_sql, normalize_index_expression_sql, normalize_index_predicate_sql,
 };
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
@@ -86,13 +86,14 @@ use super::expr_partition::eval_satisfies_hash_partition;
 use super::expr_range::eval_range_function;
 use super::expr_reg;
 use super::expr_string::{
-    eval_ascii_function, eval_bit_count_bytes, eval_bpchar_to_text_function, eval_bytea_overlay,
-    eval_bytea_position_function, eval_bytea_substring, eval_chr_function, eval_concat_function,
-    eval_concat_ws_function, eval_convert_from_function, eval_convert_to_function,
-    eval_crc32_function, eval_crc32c_function, eval_decode_function, eval_encode_function,
-    eval_format_function, eval_get_bit_bytes, eval_get_byte, eval_initcap_function,
-    eval_left_function, eval_length_function, eval_like, eval_lower_function, eval_lpad_function,
-    eval_md5_function, eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
+    eval_ascii_function, eval_bit_count_bytes, eval_bit_length_function,
+    eval_bpchar_to_text_function, eval_bytea_overlay, eval_bytea_position_function,
+    eval_bytea_substring, eval_chr_function, eval_concat_function, eval_concat_ws_function,
+    eval_convert_from_function, eval_convert_to_function, eval_crc32_function,
+    eval_crc32c_function, eval_decode_function, eval_encode_function, eval_format_function,
+    eval_get_bit_bytes, eval_get_byte, eval_initcap_function, eval_left_function,
+    eval_length_function, eval_like, eval_lower_function, eval_lpad_function, eval_md5_function,
+    eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
     eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
     eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
@@ -169,7 +170,7 @@ use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Rec
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
     OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
-    attrno_index, is_executor_special_varno,
+    attrno_index, is_executor_special_varno, is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pl::plpgsql::current_event_trigger_table_rewrite;
@@ -3283,6 +3284,13 @@ fn eval_pg_get_expr_text(
         }
     }
     let catalog = executor_catalog(ctx)?;
+    if catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| row.contype == CONSTRAINT_CHECK && row.conbin.as_deref() == Some(text))
+    {
+        return Ok(Value::Text(normalize_check_expr_sql(text).into()));
+    }
     Ok(Value::Text(
         canonicalize_catalog_expr_sql(text, relation_oid, catalog)
             .unwrap_or_else(|| text.to_string())
@@ -4023,9 +4031,11 @@ fn format_constraintdef_for_catalog(
     match row.contype {
         CONSTRAINT_NOTNULL => Some("NOT NULL".into()),
         CONSTRAINT_CHECK => row.conbin.as_deref().map(|expr_sql| {
-            let expr_sql = canonicalize_catalog_expr_sql(expr_sql, row.conrelid, catalog)
-                .unwrap_or_else(|| expr_sql.to_string());
-            format!("CHECK ({expr_sql})")
+            let mut def = format!("CHECK {}", normalize_check_expr_sql(expr_sql));
+            if row.connoinherit {
+                def.push_str(" NO INHERIT");
+            }
+            def
         }),
         CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
             format_index_backed_constraintdef_for_catalog(catalog, row)
@@ -4045,7 +4055,7 @@ fn format_index_backed_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let all_columns = index_display_names_for_heap(&relation.desc, &index.index_meta)?;
     let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
     let mut columns = all_columns
         .iter()
@@ -4086,7 +4096,7 @@ fn format_exclusion_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let all_columns = index_display_names_for_heap(&relation.desc, &index.index_meta)?;
     let operators = row
         .conexclop
         .as_ref()?
@@ -4449,6 +4459,36 @@ fn index_column_names_for_heap(desc: &RelationDesc, attnums: &[i16]) -> Option<V
                 .then(|| desc.columns.get((*attnum as usize).saturating_sub(1)))
                 .flatten()
                 .map(|column| column.name.clone())
+        })
+        .collect()
+}
+
+fn index_display_names_for_heap(
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+) -> Option<Vec<String>> {
+    let expression_sqls = index_meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    index_meta
+        .indkey
+        .iter()
+        .map(|attnum| {
+            if *attnum > 0 {
+                return desc
+                    .columns
+                    .get((*attnum as usize).saturating_sub(1))
+                    .map(|column| column.name.clone());
+            }
+            let rendered = expression_sqls
+                .get(expression_index)
+                .map(|expr| parenthesized_index_expression(&normalize_index_expression_sql(expr)))
+                .unwrap_or_else(|| format!("expr{}", expression_index + 1));
+            expression_index += 1;
+            Some(rendered)
         })
         .collect()
 }
@@ -7177,6 +7217,17 @@ fn whole_row_relation_varno(fields: &[(String, Expr)]) -> Option<usize> {
     varno
 }
 
+fn eval_bound_system_var(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    var: &crate::include::nodes::primnodes::Var,
+) -> Option<Value> {
+    match var.varattno {
+        TABLE_OID_ATTR_NO => lookup_system_binding(bindings, var.varno),
+        SELF_ITEM_POINTER_ATTR_NO => lookup_ctid_binding(bindings, var.varno),
+        _ => None,
+    }
+}
+
 fn expr_requires_stack_check(expr: &Expr) -> bool {
     !matches!(
         expr,
@@ -7265,16 +7316,41 @@ pub fn eval_expr(
             }),
         Expr::Var(var) => {
             if var.varno == OUTER_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.outer_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var)
+                }
             } else if var.varno == INNER_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.inner_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
+                }
             } else if var.varno == INDEX_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.index_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
+                }
             } else if var.varlevelsup == 1 {
                 let mut outer_var = var.clone();
                 outer_var.varno = OUTER_VAR;
                 outer_var.varlevelsup = 0;
-                eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var)
+                if is_system_attr(outer_var.varattno) {
+                    Ok(
+                        eval_bound_system_var(
+                            &ctx.expr_bindings.outer_system_bindings,
+                            &outer_var,
+                        )
+                        .unwrap_or(Value::Null),
+                    )
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var)
+                }
             } else if var.varlevelsup > 0 {
                 Err(ExecError::DetailedError {
                     message: "unlowered outer Var reached executor".into(),
@@ -7975,7 +8051,49 @@ fn cast_record_value_for_target(
         _ => return Ok(Value::Record(record)),
     };
 
-    if descriptor.fields.len() != record.fields.len() {
+    let source_fields = if descriptor.fields.len() == record.fields.len() {
+        record
+            .fields
+            .into_iter()
+            .map(|value| (value, None))
+            .collect::<Vec<_>>()
+    } else if descriptor.typrelid != 0 {
+        let mut projected = Vec::with_capacity(descriptor.fields.len());
+        for target_field in &descriptor.fields {
+            let Some((source_index, source_field)) = record
+                .descriptor
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, source_field)| {
+                    source_field.name.eq_ignore_ascii_case(&target_field.name)
+                })
+            else {
+                return Err(ExecError::DetailedError {
+                    message: "cannot cast record to target composite type".into(),
+                    detail: Some(format!(
+                        "target expects field \"{}\" but source record does not provide it",
+                        target_field.name
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            };
+            let value = record.fields.get(source_index).cloned().ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: "cannot cast record to target composite type".into(),
+                    detail: Some(format!(
+                        "source record is missing value for field \"{}\"",
+                        source_field.name
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                }
+            })?;
+            projected.push((value, Some(source_field.sql_type)));
+        }
+        projected
+    } else {
         return Err(ExecError::DetailedError {
             message: "cannot cast record to target composite type".into(),
             detail: Some(format!(
@@ -7986,16 +8104,15 @@ fn cast_record_value_for_target(
             hint: None,
             sqlstate: "42804",
         });
-    }
+    };
 
-    let fields = record
-        .fields
+    let fields = source_fields
         .into_iter()
         .zip(descriptor.fields.iter())
-        .map(|(value, field)| {
+        .map(|((value, source_type), field)| {
             cast_value_with_source_type_catalog_and_config(
                 value,
-                None,
+                source_type,
                 field.sql_type,
                 ctx.catalog.as_deref(),
                 &ctx.datetime_config,
@@ -8279,6 +8396,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
+        },
+        BuiltinScalarFunction::BitLength => match values.first() {
+            Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
+            _ => eval_bit_length_function(&values),
         },
         BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
         BuiltinScalarFunction::PgSleep => eval_pg_sleep_function(&values),
@@ -10931,6 +11052,10 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
+        },
+        BuiltinScalarFunction::BitLength => match values.first() {
+            Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
+            _ => eval_bit_length_function(&values),
         },
         BuiltinScalarFunction::Concat => {
             eval_concat_function(&values, func_variadic, &ctx.datetime_config)

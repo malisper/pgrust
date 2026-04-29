@@ -4669,6 +4669,66 @@ fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
         render_explain_expr(&numeric_array, &[]),
         "(((random())::integer)::numeric = ANY ('{1,4,8.0}'::numeric[]))"
     );
+
+    let bpchar_singleton = Expr::scalar_array_op(
+        SubqueryComparisonOp::Eq,
+        true,
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(1),
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Char),
+        }),
+        Expr::ArrayLiteral {
+            elements: vec![Expr::Const(Value::Text("ab".into()))],
+            array_type: SqlType::array_of(SqlType::new(SqlTypeKind::Char)),
+        },
+    );
+    assert_eq!(
+        render_explain_expr(&bpchar_singleton, &["a".into(), "b".into()]),
+        "(b = 'ab'::bpchar)"
+    );
+}
+
+#[test]
+fn explain_join_expr_renders_function_args_with_join_vars() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{
+        BuiltinScalarFunction, OUTER_VAR, OpExprKind, ScalarFunctionImpl,
+    };
+
+    let text = SqlType::new(SqlTypeKind::Text);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let left_call = Expr::func_with_impl(
+        3060,
+        Some(text),
+        false,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Left),
+        vec![
+            Expr::Var(Var {
+                varno: OUTER_VAR,
+                varattno: user_attrno(2),
+                varlevelsup: 0,
+                vartype: text,
+            }),
+            Expr::Const(Value::Int32(3)),
+        ],
+    );
+    let regex = Expr::binary_op(
+        OpExprKind::RegexMatch,
+        bool_ty,
+        left_call,
+        Expr::Const(Value::Text("a1$".into())),
+    );
+
+    assert_eq!(
+        render_explain_join_expr(
+            &regex,
+            &["p1.a".into(), "p1.b".into(), "p1.c".into()],
+            &["p2.a".into(), "p2.b".into(), "p2.c".into()],
+        ),
+        "(\"left\"(p1.c, 3) ~ 'a1$'::text)"
+    );
 }
 
 #[test]
@@ -5181,6 +5241,61 @@ fn explain_uses_query_aliases_in_sort_key_and_scan_label() {
                     .iter()
                     .any(|line| line.contains("Seq Scan on people_alias t")),
                 "expected scan label to keep base relation name and alias, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_partition_index_scan_does_not_duplicate_child_alias() {
+    let base = temp_dir("explain_partition_index_alias");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table alias_parted (a int) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table alias_parted0 partition of alias_parted for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table alias_parted1 partition of alias_parted for values from (10) to (20)",
+    )
+    .unwrap();
+    db.execute(1, "create index on alias_parted (a)").unwrap();
+    db.execute(1, "set enable_seqscan = off").unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (costs off) select * from alias_parted order by a",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Index Only Scan") || line.contains("Index Scan")),
+                "expected index scans in partitioned ordered plan, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| {
+                    !line.contains("alias_parted_1 alias_parted_1")
+                        && !line.contains("alias_parted_2 alias_parted_2")
+                }),
+                "expected child aliases not to be duplicated, got {rendered:?}"
             );
         }
         other => panic!("expected query result, got {:?}", other),

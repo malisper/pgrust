@@ -3612,7 +3612,7 @@ fn bind_ctes(
                     worktable_id,
                 });
                 let recursive_outer_scopes = cte_body_outer_scopes(outer_scopes);
-                let (recursive_query, _) = analyze_select_query_with_outer(
+                let (mut recursive_query, _) = analyze_select_query_with_outer(
                     recursive,
                     catalog,
                     &recursive_outer_scopes,
@@ -3639,15 +3639,31 @@ fn bind_ctes(
                     .enumerate()
                 {
                     if left.sql_type != right.sql_type {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "recursive term column types matching non-recursive term",
-                            actual: format!(
-                                "recursive CTE column {} has type {} in the non-recursive term but {} in the recursive term",
-                                index + 1,
-                                sql_type_name(left.sql_type),
-                                sql_type_name(right.sql_type)
-                            ),
-                        });
+                        let target = recursive_query
+                            .target_list
+                            .get_mut(index)
+                            .expect("recursive term target width checked earlier");
+                        if is_binary_coercible_type(right.sql_type, left.sql_type)
+                            || resolve_common_scalar_type(left.sql_type, right.sql_type)
+                                == Some(left.sql_type)
+                        {
+                            target.expr = coerce_bound_expr(
+                                target.expr.clone(),
+                                right.sql_type,
+                                left.sql_type,
+                            );
+                            target.sql_type = left.sql_type;
+                        } else {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "recursive term column types matching non-recursive term",
+                                actual: format!(
+                                    "recursive CTE column {} has type {} in the non-recursive term but {} in the recursive term",
+                                    index + 1,
+                                    sql_type_name(left.sql_type),
+                                    sql_type_name(right.sql_type)
+                                ),
+                            });
+                        }
                     }
                 }
                 let recursive_plan = AnalyzedFrom::worktable(worktable_id, output_columns.clone());

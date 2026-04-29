@@ -40,10 +40,12 @@ use crate::backend::utils::misc::notices::{
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::sql_deparse::{
-    normalize_index_expression_sql, normalize_index_predicate_sql,
+    normalize_check_expr_sql, normalize_index_expression_sql, normalize_index_predicate_sql,
 };
 use crate::include::access::htup::TupleError;
-use crate::include::catalog::{ANYELEMENTOID, PG_CLASS_RELATION_OID, RECORD_TYPE_OID};
+use crate::include::catalog::{
+    ANYELEMENTOID, PG_CLASS_RELATION_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
+};
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
@@ -4792,15 +4794,20 @@ fn execute_psql_describe_query(
         && lower.contains("::pg_catalog.regclass")
     {
         let include_relkind = psql_describe_inherits_query_includes_relkind(&lower);
+        let regclass_column = || QueryColumn {
+            name: "regclass".into(),
+            sql_type: SqlType::new(SqlTypeKind::RegClass),
+            wire_type_oid: Some(REGCLASS_TYPE_OID),
+        };
         let columns = if include_relkind {
             vec![
-                QueryColumn::text("regclass"),
+                regclass_column(),
                 QueryColumn::text("relkind"),
                 QueryColumn::text("inhdetachpending"),
                 QueryColumn::text("pg_get_expr"),
             ]
         } else {
-            vec![QueryColumn::text("regclass")]
+            vec![regclass_column()]
         };
         return Some((
             columns,
@@ -4811,9 +4818,14 @@ fn execute_psql_describe_query(
         && lower.contains("join pg_catalog.pg_inherits i")
         && lower.contains("pg_get_expr(c.relpartbound")
     {
+        let regclass_column = QueryColumn {
+            name: "regclass".into(),
+            sql_type: SqlType::new(SqlTypeKind::RegClass),
+            wire_type_oid: Some(REGCLASS_TYPE_OID),
+        };
         return Some((
             vec![
-                QueryColumn::text("regclass"),
+                regclass_column,
                 QueryColumn::text("pg_get_expr"),
                 QueryColumn::text("inhdetachpending"),
                 QueryColumn::text("pg_get_partition_constraintdef"),
@@ -5138,18 +5150,19 @@ fn psql_describe_inherits_query_rows(
             let name = db
                 .relation_display_name(session.client_id, txn_ctx, search_path.as_deref(), oid)
                 .unwrap_or_else(|| oid.to_string());
+            let name = name.trim_end().to_string();
             if include_relkind {
                 let bound = catalog
                     .relation_by_oid(row.inhrelid)
                     .and_then(|child| child.relpartbound)
                     .and_then(|text| deserialize_partition_bound(&text).ok())
-                    .map(|bound| psql_partition_bound_text(&bound))
-                    .unwrap_or_default();
+                    .map(|bound| Value::Text(psql_partition_bound_text(&bound).into()))
+                    .unwrap_or(Value::Null);
                 Some(vec![
                     Value::Text(name.into()),
                     Value::InternalChar(relation.relkind as u8),
                     Value::Bool(row.inhdetachpending),
-                    Value::Text(bound.into()),
+                    bound,
                 ])
             } else {
                 Some(vec![Value::Text(name.into())])
@@ -5613,32 +5626,46 @@ fn psql_describe_lookup_query(
     let search_path = session.configured_search_path();
     let relation_name = extract_psql_pattern_name(sql);
     let rows = relation_name
-        .and_then(|name| catalog.lookup_any_relation(name).map(|entry| (name, entry)))
-        .map(|(name, entry)| {
-            let nspname = db
-                .relation_namespace_name(session.client_id, txn_ctx, entry.relation_oid)
-                .or_else(|| name.split_once('.').map(|(schema, _)| schema.to_string()))
-                .unwrap_or_else(|| "public".to_string());
-            let relname = db
-                .relation_display_name(
-                    session.client_id,
-                    txn_ctx,
-                    search_path.as_deref(),
-                    entry.relation_oid,
-                )
-                .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name).to_string());
-            vec![vec![
-                Value::Int32(entry.relation_oid as i32),
-                Value::Text(nspname.into()),
-                Value::Text(
-                    relname
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or(relname.as_str())
-                        .to_string()
-                        .into(),
-                ),
-            ]]
+        .map(|pattern| {
+            if psql_describe_pattern_is_plain(pattern) {
+                catalog
+                    .lookup_any_relation(pattern)
+                    .map(|entry| {
+                        let nspname = db
+                            .relation_namespace_name(session.client_id, txn_ctx, entry.relation_oid)
+                            .or_else(|| {
+                                pattern
+                                    .split_once('.')
+                                    .map(|(schema, _)| schema.to_string())
+                            })
+                            .unwrap_or_else(|| "public".to_string());
+                        let relname = db
+                            .relation_display_name(
+                                session.client_id,
+                                txn_ctx,
+                                search_path.as_deref(),
+                                entry.relation_oid,
+                            )
+                            .unwrap_or_else(|| {
+                                pattern.rsplit('.').next().unwrap_or(pattern).to_string()
+                            });
+                        vec![vec![
+                            Value::Int32(entry.relation_oid as i32),
+                            Value::Text(nspname.into()),
+                            Value::Text(
+                                relname
+                                    .rsplit('.')
+                                    .next()
+                                    .unwrap_or(relname.as_str())
+                                    .to_string()
+                                    .into(),
+                            ),
+                        ]]
+                    })
+                    .unwrap_or_default()
+            } else {
+                psql_describe_lookup_regex_rows(db, session, &catalog, pattern)
+            }
         })
         .unwrap_or_default();
     (
@@ -5653,6 +5680,75 @@ fn psql_describe_lookup_query(
         ],
         rows,
     )
+}
+
+fn psql_describe_pattern_is_plain(pattern: &str) -> bool {
+    !pattern.chars().any(|ch| {
+        matches!(
+            ch,
+            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
+        )
+    })
+}
+
+fn psql_describe_lookup_regex_rows(
+    db: &Database,
+    session: &Session,
+    catalog: &dyn CatalogLookup,
+    pattern: &str,
+) -> Vec<Vec<Value>> {
+    let Ok(regex) = regex::Regex::new(&format!("^(?:{pattern})$")) else {
+        return Vec::new();
+    };
+    let txn_ctx = session.catalog_txn_ctx();
+    let namespaces = catalog
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<HashMap<_, _>>();
+    let search_path = session.configured_search_path();
+    let mut rows = catalog
+        .class_rows()
+        .into_iter()
+        .filter(|class| regex.is_match(&class.relname))
+        .filter_map(|class| {
+            let entry = catalog.relation_by_oid(class.oid)?;
+            let nspname = namespaces
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            let relname = db
+                .relation_display_name(
+                    session.client_id,
+                    txn_ctx,
+                    search_path.as_deref(),
+                    entry.relation_oid,
+                )
+                .unwrap_or(class.relname);
+            Some(vec![
+                Value::Int32(entry.relation_oid as i32),
+                Value::Text(nspname.into()),
+                Value::Text(
+                    relname
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(relname.as_str())
+                        .to_string()
+                        .into(),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        let left_nsp = left.get(1).and_then(value_as_text).unwrap_or_default();
+        let right_nsp = right.get(1).and_then(value_as_text).unwrap_or_default();
+        let left_rel = left.get(2).and_then(value_as_text).unwrap_or_default();
+        let right_rel = right.get(2).and_then(value_as_text).unwrap_or_default();
+        left_nsp
+            .cmp(&right_nsp)
+            .then_with(|| left_rel.cmp(&right_rel))
+    });
+    rows
 }
 
 fn psql_describe_tableinfo_query(
@@ -6574,10 +6670,13 @@ fn constraint_def_for_row(
 ) -> Option<String> {
     match row.contype {
         crate::include::catalog::CONSTRAINT_NOTNULL => Some("NOT NULL".to_string()),
-        crate::include::catalog::CONSTRAINT_CHECK => row
-            .conbin
-            .as_deref()
-            .map(|expr_sql| format!("CHECK ({expr_sql})")),
+        crate::include::catalog::CONSTRAINT_CHECK => row.conbin.as_deref().map(|expr_sql| {
+            let mut def = format!("CHECK {}", normalize_check_expr_sql(expr_sql));
+            if row.connoinherit {
+                def.push_str(" NO INHERIT");
+            }
+            def
+        }),
         crate::include::catalog::CONSTRAINT_PRIMARY
         | crate::include::catalog::CONSTRAINT_UNIQUE => {
             let relation = relation.cloned().or_else(|| {
@@ -6666,19 +6765,31 @@ fn exclusion_constraint_def(
     let index = db
         .describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), row.conindid)?
         .index?;
+    let expression_sqls = index
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
     let all_columns = index
         .indkey
         .iter()
         .map(|attnum| {
-            (*attnum > 0)
-                .then(|| {
-                    relation
-                        .desc
-                        .columns
-                        .get((*attnum as usize).saturating_sub(1))
-                })
-                .flatten()
-                .map(|column| column.name.clone())
+            if *attnum > 0 {
+                return relation
+                    .desc
+                    .columns
+                    .get((*attnum as usize).saturating_sub(1))
+                    .map(|column| column.name.clone());
+            }
+            let rendered = expression_sqls
+                .get(expression_index)
+                .cloned()
+                .unwrap_or_else(|| format!("expr{}", expression_index + 1));
+            expression_index += 1;
+            Some(parenthesized_index_expression(
+                &normalize_index_expression_sql(&rendered),
+            ))
         })
         .collect::<Option<Vec<_>>>()?;
     let operator_oids = row.conexclop.as_ref()?;
@@ -11106,6 +11217,30 @@ mod tests {
     }
 
     #[test]
+    fn psql_describe_lookup_query_matches_wildcard_pattern() {
+        let db = Database::open(temp_dir("describe_lookup_wildcard"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table inh_nn_parent (a int4)")
+            .unwrap();
+        db.execute(1, "create table inh_nn_child () inherits (inh_nn_parent)")
+            .unwrap();
+        db.execute(1, "create table other_child (a int4)").unwrap();
+
+        let sql = "select c.oid, n.nspname, c.relname \
+             from pg_catalog.pg_class c \
+             left join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
+             where c.relkind in ('r','p','v','m','S','f','') \
+             and pg_catalog.pg_table_is_visible(c.oid) \
+             and c.relname operator(pg_catalog.~) '^(inh_nn.*)$'";
+        let (_, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        let relnames = rows
+            .iter()
+            .filter_map(|row| row.get(2).and_then(value_as_text))
+            .collect::<Vec<_>>();
+        assert_eq!(relnames, vec!["inh_nn_child", "inh_nn_parent"]);
+    }
+
+    #[test]
     fn psql_permissions_query_handles_unqualified_polroles() {
         let db = Database::open(temp_dir("describe_permissions_policies"), 16).unwrap();
         let mut session = Session::new(1);
@@ -12367,6 +12502,32 @@ ORDER BY 1, 2;";
         );
         let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn psql_describe_child_tables_uses_null_bound_for_plain_inheritance() {
+        let db = Database::open(temp_dir("describe_plain_inheritance_children"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table plain_parent (a int4)").unwrap();
+        db.execute(1, "create table plain_child () inherits (plain_parent)")
+            .unwrap();
+        let parent = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("plain_parent")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, \
+                    pg_catalog.pg_get_expr(c.relpartbound, c.oid) \
+             FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i \
+             WHERE c.oid = i.inhrelid AND i.inhparent = '{}' \
+             ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', \
+                      c.oid::pg_catalog.regclass::pg_catalog.text;",
+            parent.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][3], Value::Null);
     }
 
     #[test]
