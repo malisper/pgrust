@@ -21,9 +21,10 @@ use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::libpq::pqformat::format_exec_error;
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
-    Catalog, CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, TriggerLevel,
-    TriggerTiming, bind_scalar_expr_in_named_slot_scope, parse_statement,
+    Catalog, CatalogLookup, ParseError, PreparedExternalParam, SqlType, SqlTypeKind, Statement,
+    TriggerLevel, TriggerTiming, bind_scalar_expr_in_named_slot_scope, parse_statement,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
+    resolve_raw_type_name, with_external_param_types,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::record::{
@@ -38,7 +39,7 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow};
 use crate::include::nodes::primnodes::{QueryColumn, expr_sql_type_hint};
-use crate::pgrust::session::ByteaOutputFormat;
+use crate::pgrust::session::{ByteaOutputFormat, resolve_thread_prepared_statement};
 
 use super::ast::{ExceptionCondition, RaiseLevel};
 use super::cache::{PlpgsqlFunctionCacheKey, RelationShape, TransitionTableShape};
@@ -131,6 +132,12 @@ enum FunctionControl {
 }
 
 #[derive(Debug)]
+enum DoControl {
+    Continue,
+    LoopContinue,
+}
+
+#[derive(Debug)]
 struct FunctionState {
     values: Vec<Value>,
     rows: Vec<TupleSlot>,
@@ -152,6 +159,13 @@ struct FunctionCursor {
 struct FunctionQueryResult {
     columns: Vec<QueryColumn>,
     rows: Vec<Vec<Value>>,
+}
+
+#[derive(Debug, Clone)]
+struct DynamicExternalParamBinding {
+    paramid: usize,
+    expr: Expr,
+    ty: SqlType,
 }
 
 thread_local! {
@@ -275,7 +289,15 @@ pub(crate) fn execute_block_with_gucs(
     gucs: &HashMap<String, String>,
 ) -> Result<StatementResult, ExecError> {
     let mut values = vec![Value::Null; block.total_slots];
-    exec_do_block(block, &mut values, gucs)?;
+    if matches!(
+        exec_do_block(block, &mut values, gucs)?,
+        DoControl::LoopContinue
+    ) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CONTINUE inside a loop",
+            actual: "CONTINUE".into(),
+        }));
+    }
     Ok(StatementResult::AffectedRows(0))
 }
 
@@ -539,7 +561,13 @@ pub fn execute_user_defined_trigger_function(
     ctx.pinned_cte_tables = saved_pinned_cte_tables;
     ctx.cte_tables = saved_cte_tables;
     ctx.cte_producers = saved_cte_producers;
-    let _ = result?;
+    if matches!(result?, FunctionControl::LoopContinue) {
+        return Err(function_runtime_error(
+            "CONTINUE cannot be used outside a loop",
+            None,
+            "2D000",
+        ));
+    }
     state.trigger_return.ok_or_else(|| {
         function_runtime_error(
             "control reached end of trigger procedure without RETURN",
@@ -1293,9 +1321,28 @@ fn execute_compiled_function(
     )
     .map_err(|err| with_plpgsql_context_if_missing(err, compiled, "statement"));
 
-    if let Err(err) = block_result {
-        ctx.gucs = saved_gucs;
-        return Err(err);
+    match block_result {
+        Ok(FunctionControl::Continue | FunctionControl::Return) => {}
+        Ok(FunctionControl::LoopContinue) => {
+            ctx.gucs = saved_gucs;
+            return Err(function_runtime_error(
+                "CONTINUE cannot be used outside a loop",
+                None,
+                "2D000",
+            ));
+        }
+        Ok(FunctionControl::Break) => {
+            ctx.gucs = saved_gucs;
+            return Err(function_runtime_error(
+                "EXIT cannot be used outside a loop",
+                None,
+                "2D000",
+            ));
+        }
+        Err(err) => {
+            ctx.gucs = saved_gucs;
+            return Err(err);
+        }
     }
 
     if has_function_config {
@@ -1363,7 +1410,7 @@ fn exec_do_block(
     block: &CompiledBlock,
     values: &mut [Value],
     gucs: &HashMap<String, String>,
-) -> Result<(), ExecError> {
+) -> Result<DoControl, ExecError> {
     for local in &block.local_slots {
         values[local.slot] = match &local.default_expr {
             Some(expr) => cast_value(eval_do_expr(expr, values)?, local.ty)?,
@@ -1371,15 +1418,23 @@ fn exec_do_block(
         };
     }
     for stmt in &block.statements {
-        if let Err(err) = exec_do_stmt(stmt, values, gucs) {
-            return match exec_do_exception_handlers(&block.exception_handlers, &err, values, gucs)?
-            {
-                Some(()) => Ok(()),
-                None => Err(err),
-            };
+        match exec_do_stmt(stmt, values, gucs) {
+            Ok(DoControl::Continue) => {}
+            Ok(DoControl::LoopContinue) => return Ok(DoControl::LoopContinue),
+            Err(err) => {
+                return match exec_do_exception_handlers(
+                    &block.exception_handlers,
+                    &err,
+                    values,
+                    gucs,
+                )? {
+                    Some(()) => Ok(DoControl::Continue),
+                    None => Err(err),
+                };
+            }
         }
     }
-    Ok(())
+    Ok(DoControl::Continue)
 }
 
 fn exec_do_exception_handlers(
@@ -1395,7 +1450,9 @@ fn exec_do_exception_handlers(
         return Ok(None);
     };
     for stmt in &handler.statements {
-        exec_do_stmt(stmt, values, gucs)?;
+        if matches!(exec_do_stmt(stmt, values, gucs)?, DoControl::LoopContinue) {
+            return Ok(Some(()));
+        }
     }
     Ok(Some(()))
 }
@@ -1404,14 +1461,14 @@ fn exec_do_stmt(
     stmt: &CompiledStmt,
     values: &mut [Value],
     gucs: &HashMap<String, String>,
-) -> Result<(), ExecError> {
+) -> Result<DoControl, ExecError> {
     match stmt {
         CompiledStmt::Block(block) => exec_do_block(block, values, gucs),
         CompiledStmt::Assign { slot, ty, expr } => {
             values[*slot] = cast_value(eval_do_expr(expr, values)?, *ty)?;
-            Ok(())
+            Ok(DoControl::Continue)
         }
-        CompiledStmt::Null => Ok(()),
+        CompiledStmt::Null => Ok(DoControl::Continue),
         CompiledStmt::If {
             branches,
             else_branch,
@@ -1420,26 +1477,33 @@ fn exec_do_stmt(
                 match eval_do_expr(condition, values)? {
                     Value::Bool(true) => {
                         for stmt in body {
-                            exec_do_stmt(stmt, values, gucs)?;
+                            if matches!(exec_do_stmt(stmt, values, gucs)?, DoControl::LoopContinue)
+                            {
+                                return Ok(DoControl::LoopContinue);
+                            }
                         }
-                        return Ok(());
+                        return Ok(DoControl::Continue);
                     }
                     Value::Bool(false) | Value::Null => {}
                     other => return Err(ExecError::NonBoolQual(other)),
                 }
             }
             for stmt in else_branch {
-                exec_do_stmt(stmt, values, gucs)?;
+                if matches!(exec_do_stmt(stmt, values, gucs)?, DoControl::LoopContinue) {
+                    return Ok(DoControl::LoopContinue);
+                }
             }
-            Ok(())
+            Ok(DoControl::Continue)
         }
         CompiledStmt::While { condition, body } => {
             while eval_plpgsql_condition(&eval_do_expr(condition, values)?)? {
                 for stmt in body {
-                    exec_do_stmt(stmt, values, gucs)?;
+                    if matches!(exec_do_stmt(stmt, values, gucs)?, DoControl::LoopContinue) {
+                        break;
+                    }
                 }
             }
-            Ok(())
+            Ok(DoControl::Continue)
         }
         CompiledStmt::ForInt {
             slot,
@@ -1472,17 +1536,20 @@ fn exec_do_stmt(
                 }
             };
             if start > end {
-                return Ok(());
+                return Ok(DoControl::Continue);
             }
             for current in start..=end {
                 values[*slot] = Value::Int32(current);
                 for stmt in body {
-                    exec_do_stmt(stmt, values, gucs)?;
+                    if matches!(exec_do_stmt(stmt, values, gucs)?, DoControl::LoopContinue) {
+                        break;
+                    }
                 }
             }
-            Ok(())
+            Ok(DoControl::Continue)
         }
-        CompiledStmt::ExitWhen { .. } => Ok(()),
+        CompiledStmt::ExitWhen { .. } => Ok(DoControl::Continue),
+        CompiledStmt::Continue => Ok(DoControl::LoopContinue),
         CompiledStmt::Raise {
             level,
             sqlstate,
@@ -1494,15 +1561,16 @@ fn exec_do_stmt(
                 .iter()
                 .map(|expr| eval_do_expr(expr, values))
                 .collect::<Result<Vec<_>, _>>()?;
-            finish_raise(level, sqlstate.as_deref(), message, &param_values)
+            finish_raise(level, sqlstate.as_deref(), message, &param_values)?;
+            Ok(DoControl::Continue)
         }
         CompiledStmt::Assert { condition, message } => {
             if !plpgsql_check_asserts_enabled_from_gucs(Some(gucs)) {
-                return Ok(());
+                return Ok(DoControl::Continue);
             }
             let ok = eval_plpgsql_condition(&eval_do_expr(condition, values)?)?;
             if ok {
-                return Ok(());
+                return Ok(DoControl::Continue);
             }
             let message = match message {
                 Some(expr) => render_assert_message(eval_do_expr(expr, values)?)?,
@@ -1519,19 +1587,21 @@ fn exec_do_stmt(
                 };
                 values[target.slot] = cast_value(value, target.ty)?;
             }
-            Ok(())
+            Ok(DoControl::Continue)
         }
         CompiledStmt::DynamicExecute {
             sql_expr,
             into_targets,
             using_exprs,
             ..
-        } => exec_do_dynamic_execute(sql_expr, into_targets, using_exprs, values),
+        } => {
+            exec_do_dynamic_execute(sql_expr, into_targets, using_exprs, values)?;
+            Ok(DoControl::Continue)
+        }
         CompiledStmt::SetGuc { .. } => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "SET is only supported inside CREATE FUNCTION".into(),
         ))),
         CompiledStmt::Return { .. }
-        | CompiledStmt::Continue
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
         | CompiledStmt::ReturnTriggerNull
@@ -1845,6 +1915,7 @@ fn exec_function_stmt(
             state.values[compiled.found_slot] = Value::Bool(true);
             Ok(FunctionControl::Continue)
         }
+        CompiledStmt::Continue => Ok(FunctionControl::LoopContinue),
         CompiledStmt::ForQuery {
             target,
             source,
@@ -1899,7 +1970,6 @@ fn exec_function_stmt(
             };
             Err(assert_failure(message))
         }
-        CompiledStmt::Continue => Ok(FunctionControl::LoopContinue),
         CompiledStmt::Return { expr } => {
             exec_function_return(expr.as_ref(), compiled, expected_record_shape, state, ctx)
         }
@@ -3013,7 +3083,11 @@ fn execute_dynamic_statement(
 
     let result = execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
         let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
-        match stmt {
+        let (stmt, external_params) = resolve_dynamic_prepared_statement(stmt)?;
+        let external_bindings = bind_dynamic_external_params(&external_params, catalog.as_ref())?;
+        let external_types = dynamic_external_types(&external_bindings);
+        install_dynamic_external_params(&external_bindings, ctx)?;
+        with_external_param_types(&external_types, || match stmt {
             crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
                 pg_plan_query_with_outer_scopes_and_ctes(
                     &stmt,
@@ -3111,12 +3185,87 @@ fn execute_dynamic_statement(
                 Ok(crate::backend::executor::StatementResult::AffectedRows(0))
             }
             other => execute_readonly_statement(other, catalog.as_ref(), ctx),
-        }
+        })
     });
     result.map_err(|err| ExecError::WithContext {
         source: Box::new(err),
         context: format!("SQL statement \"{sql}\""),
     })
+}
+
+fn resolve_dynamic_prepared_statement(
+    stmt: Statement,
+) -> Result<(Statement, Vec<PreparedExternalParam>), ExecError> {
+    match stmt {
+        Statement::Execute(execute_stmt) => {
+            if let Some(resolved) = resolve_thread_prepared_statement(&execute_stmt)? {
+                Ok((resolved.statement, resolved.params))
+            } else {
+                Ok((Statement::Execute(execute_stmt), Vec::new()))
+            }
+        }
+        Statement::Explain(mut explain_stmt)
+            if matches!(explain_stmt.statement.as_ref(), Statement::Execute(_)) =>
+        {
+            let Statement::Execute(execute_stmt) = explain_stmt.statement.as_ref() else {
+                unreachable!();
+            };
+            if let Some(resolved) = resolve_thread_prepared_statement(execute_stmt)? {
+                explain_stmt.statement = Box::new(resolved.statement);
+                Ok((Statement::Explain(explain_stmt), resolved.params))
+            } else {
+                Ok((Statement::Explain(explain_stmt), Vec::new()))
+            }
+        }
+        other => Ok((other, Vec::new())),
+    }
+}
+
+fn bind_dynamic_external_params(
+    params: &[PreparedExternalParam],
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<DynamicExternalParamBinding>, ExecError> {
+    params
+        .iter()
+        .map(|param| {
+            let (expr, inferred) =
+                bind_scalar_expr_in_named_slot_scope(&param.arg, &[], &[], catalog, &[])
+                    .map_err(ExecError::Parse)?;
+            let ty = match &param.type_name {
+                Some(type_name) => {
+                    resolve_raw_type_name(type_name, catalog).map_err(ExecError::Parse)?
+                }
+                None => inferred,
+            };
+            Ok(DynamicExternalParamBinding {
+                paramid: param.paramid,
+                expr,
+                ty,
+            })
+        })
+        .collect()
+}
+
+fn dynamic_external_types(bindings: &[DynamicExternalParamBinding]) -> Vec<(usize, SqlType)> {
+    bindings
+        .iter()
+        .map(|binding| (binding.paramid, binding.ty))
+        .collect()
+}
+
+fn install_dynamic_external_params(
+    bindings: &[DynamicExternalParamBinding],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let mut slot = TupleSlot::empty(0);
+    for binding in bindings {
+        let value = eval_expr(&binding.expr, &mut slot, ctx)?;
+        let value = cast_value(value, binding.ty)?;
+        ctx.expr_bindings
+            .external_params
+            .insert(binding.paramid, value);
+    }
+    Ok(())
 }
 
 fn execute_function_query_with_bindings<T>(
@@ -3128,12 +3277,14 @@ fn execute_function_query_with_bindings<T>(
 ) -> Result<T, ExecError> {
     let saved_outer_tuple = ctx.expr_bindings.outer_tuple.clone();
     let saved_exec_params = ctx.expr_bindings.exec_params.clone();
+    let saved_external_params = ctx.expr_bindings.external_params.clone();
     if bind_outer_tuple {
         ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     }
     let result = f(ctx);
     ctx.expr_bindings.outer_tuple = saved_outer_tuple;
     ctx.expr_bindings.exec_params = saved_exec_params;
+    ctx.expr_bindings.external_params = saved_external_params;
     result
 }
 

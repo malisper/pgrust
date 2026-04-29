@@ -18,9 +18,9 @@ use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, CaseExpr as BoundCaseExpr,
     CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind,
-    ScalarFunctionImpl, SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTableBehavior,
-    SqlJsonTablePassingArg, SqlJsonTableQuotes, SqlJsonTableWrapper, WindowFuncKind,
-    expr_contains_set_returning, expr_sql_type_hint,
+    Param, ParamKind, ScalarFunctionImpl, SqlJsonQueryFunction, SqlJsonQueryFunctionKind,
+    SqlJsonTableBehavior, SqlJsonTablePassingArg, SqlJsonTableQuotes, SqlJsonTableWrapper,
+    WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
 };
 
 mod func;
@@ -43,10 +43,11 @@ pub(super) use self::ops::bind_lowered_comparison_expr;
 use self::ops::bind_order_by_using_direction;
 use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_catalog_binary_operator_expr,
-    bind_comparison_expr, bind_concat_expr, bind_maybe_network_arithmetic,
-    bind_maybe_network_bitwise, bind_maybe_network_operator, bind_maybe_tsquery_contains,
-    bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
-    bind_text_pattern_comparison_expr, bind_text_starts_with_expr, supports_comparison_operator,
+    bind_catalog_equality_operator_expr, bind_comparison_expr, bind_concat_expr,
+    bind_maybe_network_arithmetic, bind_maybe_network_bitwise, bind_maybe_network_operator,
+    bind_maybe_tsquery_contains, bind_overloaded_binary_expr, bind_prefix_operator_expr,
+    bind_shift_expr, bind_text_pattern_comparison_expr, bind_text_starts_with_expr,
+    supports_comparison_operator,
 };
 pub(super) use self::subquery::exists_subquery_query;
 use self::subquery::{
@@ -2825,14 +2826,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 }
             }
         }
-        SqlExpr::Parameter(index) => {
-            return Err(ParseError::DetailedError {
-                message: format!("there is no parameter ${index}"),
-                detail: None,
-                hint: None,
-                sqlstate: "42P02",
-            });
-        }
+        SqlExpr::Parameter(index) => Expr::Param(Param {
+            paramkind: ParamKind::External,
+            paramid: *index,
+            paramtype: external_param_type(*index)
+                .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
+        }),
         SqlExpr::Default => {
             return Err(ParseError::UnexpectedToken {
                 expected: "expression",
@@ -2974,6 +2973,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )?,
             "<%" => bind_catalog_binary_operator_expr(
                 "<%",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "===" => bind_catalog_equality_operator_expr(
+                "===",
                 left,
                 right,
                 scope,
@@ -6343,6 +6352,14 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
         && let Some(multirange_type) = multirange_type_ref_for_sql_type(target_type)
     {
         return source_type == multirange_type.range_type.sql_type;
+    }
+    if !source_type.is_array
+        && is_text_like_type(source_type)
+        && !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Composite)
+        && target_type.typrelid != 0
+    {
+        return true;
     }
     if source_type.is_array || !is_text_like_type(source_type) {
         return true;

@@ -4706,6 +4706,7 @@ fn execute_query_statement(
         && !select_sql_requires_command_end_xid_handling(&sql)
     {
         let max_stack_depth_kb = state.session.datetime_config().max_stack_depth_kb;
+        let _prepared_guard = state.session.push_prepared_statement_thread_context();
         return stacker::grow(32 * 1024 * 1024, || {
             StackDepthGuard::enter(max_stack_depth_kb)
                 .run(|| execute_streaming_select_statement(stream, db, state, &sql, select_stmt))
@@ -5884,7 +5885,9 @@ fn psql_partition_value_text(value: &SerializedPartitionValue) -> String {
         | SerializedPartitionValue::TimeTz { .. }
         | SerializedPartitionValue::Timestamp(_)
         | SerializedPartitionValue::TimestampTz(_)
+        | SerializedPartitionValue::EnumOid(_)
         | SerializedPartitionValue::Array(_)
+        | SerializedPartitionValue::Record(_)
         | SerializedPartitionValue::Range(_)
         | SerializedPartitionValue::Multirange(_) => {
             let value = partition_value_to_value(value);
@@ -11780,6 +11783,40 @@ mod tests {
             }
             other => panic!("expected query result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn streaming_select_installs_prepared_context_for_plpgsql_dynamic_execute() {
+        let cluster = Cluster::open(temp_dir("streaming_prepared_plpgsql"), 16).unwrap();
+        let mut input = startup_packet("postgres", "postgres");
+        input.extend(query_message(
+            "create table stream_dyn(id int4); \
+             insert into stream_dyn values (1), (2); \
+             prepare stream_dyn_q(int4) as select avg(id) from stream_dyn where id = $1; \
+             create function stream_dyn_explain(text) returns setof text language plpgsql as $$ \
+             declare ln text; \
+             begin \
+               for ln in execute format('explain (analyze, costs off, summary off, timing off, buffers off) %s', $1) loop \
+                 return next ln; \
+               end loop; \
+             end $$; \
+             select stream_dyn_explain('execute stream_dyn_q (1)');",
+        ));
+        input.extend(terminate_message());
+
+        let mut output = Vec::new();
+        handle_connection_with_io(Cursor::new(input), &mut output, &cluster, 41).unwrap();
+
+        assert!(
+            !output
+                .windows("unsupported statement".len())
+                .any(|window| window == b"unsupported statement")
+        );
+        assert!(
+            output
+                .windows("Seq Scan on stream_dyn".len())
+                .any(|window| window == b"Seq Scan on stream_dyn")
+        );
     }
 
     #[test]

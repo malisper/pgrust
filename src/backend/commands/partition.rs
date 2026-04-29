@@ -9,12 +9,13 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
-    PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue,
+    PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SqlType,
     deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::{
-    ANYOID, BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, PgConstraintRow,
+    ANYARRAYOID, ANYOID, BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL,
+    PgConstraintRow,
 };
 use crate::include::nodes::datum::Value;
 
@@ -776,18 +777,24 @@ fn hash_support_proc(
         .opclass_rows()
         .into_iter()
         .find(|row| row.oid == opclass_oid)?;
-    let key_type_oid =
-        crate::backend::utils::cache::catcache::sql_type_oid(*spec.key_types.get(key_index)?);
+    let key_type = *spec.key_types.get(key_index)?;
+    let key_type_oid = crate::backend::utils::cache::catcache::sql_type_oid(key_type);
     catalog
         .amproc_rows()
         .into_iter()
         .find(|row| {
             row.amprocfamily == opclass.opcfamily
                 && row.amprocnum == 2
-                && (row.amproclefttype == key_type_oid || row.amproclefttype == ANYOID)
-                && (row.amprocrighttype == key_type_oid || row.amprocrighttype == ANYOID)
+                && hash_amproc_type_matches(row.amproclefttype, key_type_oid, key_type)
+                && hash_amproc_type_matches(row.amprocrighttype, key_type_oid, key_type)
         })
         .map(|row| row.amproc)
+}
+
+fn hash_amproc_type_matches(proc_type_oid: u32, key_type_oid: u32, key_type: SqlType) -> bool {
+    proc_type_oid == key_type_oid
+        || proc_type_oid == ANYOID
+        || (key_type.is_array && proc_type_oid == ANYARRAYOID)
 }
 
 fn execute_partition_hash_support_proc(

@@ -77,6 +77,7 @@ pub const BRIN_TEXT_BLOOM_FAMILY_OID: u32 = 4573;
 pub const BRIN_NETWORK_INCLUSION_FAMILY_OID: u32 = 4102;
 pub const BRIN_RANGE_INCLUSION_FAMILY_OID: u32 = 4103;
 pub const BRIN_BOX_INCLUSION_FAMILY_OID: u32 = 4104;
+pub const HASH_ARRAY_FAMILY_OID: u32 = 627;
 pub const HASH_BPCHAR_FAMILY_OID: u32 = 427;
 pub const HASH_CHAR_FAMILY_OID: u32 = 431;
 pub const HASH_DATE_FAMILY_OID: u32 = 435;
@@ -436,6 +437,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         brin_row(BRIN_NETWORK_INCLUSION_FAMILY_OID, "network_inclusion_ops"),
         brin_row(BRIN_RANGE_INCLUSION_FAMILY_OID, "range_inclusion_ops"),
         brin_row(BRIN_BOX_INCLUSION_FAMILY_OID, "box_inclusion_ops"),
+        hash_row(HASH_ARRAY_FAMILY_OID, "array_ops"),
         hash_row(HASH_BPCHAR_FAMILY_OID, "bpchar_ops"),
         hash_row(HASH_CHAR_FAMILY_OID, "char_ops"),
         hash_row(HASH_DATE_FAMILY_OID, "date_ops"),

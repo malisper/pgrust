@@ -508,6 +508,8 @@ pub(super) fn unknown_string_literal_peer_type(peer_type: SqlType) -> Option<Sql
         SqlTypeKind::Bytea => return Some(SqlType::new(SqlTypeKind::Bytea)),
         SqlTypeKind::Uuid => return Some(SqlType::new(SqlTypeKind::Uuid)),
         SqlTypeKind::Enum if peer_type.type_oid != 0 => return Some(peer_type),
+        SqlTypeKind::Composite if peer_type.type_oid != 0 => return Some(peer_type),
+        SqlTypeKind::Record if peer_type.type_oid != 0 => return Some(peer_type),
         SqlTypeKind::InternalChar => return Some(SqlType::new(SqlTypeKind::InternalChar)),
         SqlTypeKind::Name => return Some(SqlType::new(SqlTypeKind::Name)),
         SqlTypeKind::Inet => return Some(SqlType::new(SqlTypeKind::Inet)),

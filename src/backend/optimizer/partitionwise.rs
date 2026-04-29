@@ -76,6 +76,7 @@ pub(super) fn generate_partitionwise_join_path(
             source_id: next_synthetic_slot_id(),
             desc,
             child_roots: Vec::new(),
+            partition_prune: None,
             children,
         },
         catalog,

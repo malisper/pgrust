@@ -7,7 +7,7 @@ use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::tidbitmap::TidBitmap;
-use crate::include::nodes::plannodes::{IndexScanKey, PlanEstimate};
+use crate::include::nodes::plannodes::{IndexScanKey, PartitionPrunePlan, PlanEstimate};
 use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
@@ -251,6 +251,9 @@ pub trait PlanNode: std::fmt::Debug {
     fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
         None
     }
+    fn explain_one_time_false_input(&self) -> bool {
+        false
+    }
     fn explain_details(
         &self,
         _indent: usize,
@@ -297,6 +300,10 @@ pub struct AppendState {
     pub(crate) source_id: usize,
     pub(crate) children: Vec<PlanState>,
     pub(crate) current_child: usize,
+    pub(crate) active_children: Option<Vec<usize>>,
+    pub(crate) visible_children: Option<Vec<usize>>,
+    pub(crate) partition_prune: Option<PartitionPrunePlan>,
+    pub(crate) subplans_removed: usize,
     pub(crate) column_names: Vec<String>,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
@@ -308,6 +315,10 @@ pub struct AppendState {
 pub struct MergeAppendState {
     pub(crate) source_id: usize,
     pub(crate) children: Vec<PlanState>,
+    pub(crate) active_children: Option<Vec<usize>>,
+    pub(crate) visible_children: Option<Vec<usize>>,
+    pub(crate) partition_prune: Option<PartitionPrunePlan>,
+    pub(crate) subplans_removed: usize,
     pub(crate) items: Vec<OrderByEntry>,
     pub(crate) column_names: Vec<String>,
     pub(crate) rows: Option<Vec<MaterializedRow>>,

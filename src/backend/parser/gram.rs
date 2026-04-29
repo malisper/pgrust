@@ -6918,6 +6918,10 @@ fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Stateme
         return build_drop_operator_family_statement(trimmed)
             .map(|stmt| Some(Statement::DropOperatorFamily(stmt)));
     }
+    if lowered.starts_with("drop operator class ") {
+        return build_drop_operator_class_statement(trimmed)
+            .map(|stmt| Some(Statement::DropOperatorClass(stmt)));
+    }
     if lowered.starts_with("create operator class ") {
         return build_create_operator_class_statement(trimmed)
             .map(|stmt| Some(Statement::CreateOperatorClass(stmt)));
@@ -12261,6 +12265,38 @@ fn build_drop_operator_family_statement(
     })
 }
 
+fn build_drop_operator_class_statement(
+    sql: &str,
+) -> Result<DropOperatorClassStatement, ParseError> {
+    let mut rest = sql["drop operator class".len()..].trim_start();
+    let if_exists = keyword_at_start(rest, "if exists");
+    if if_exists {
+        rest = consume_keyword(rest, "if exists").trim_start();
+    }
+    let ((schema_name, opclass_name), rest) = parse_qualified_sql_name(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "using") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "USING access method",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "using").trim_start();
+    let (access_method, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of DROP OPERATOR CLASS",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(DropOperatorClassStatement {
+        if_exists,
+        schema_name,
+        opclass_name,
+        access_method,
+    })
+}
+
 fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement, ParseError> {
     let prefix = "create operator";
     let rest = sql
@@ -16269,9 +16305,9 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
 
 fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
     let mut name = None;
-    let mut parameter_types = Vec::new();
     let mut query = None;
     let mut query_sql = None;
+    let mut parameter_types = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
@@ -16284,7 +16320,14 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
             }
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
-                query = Some(build_select(part)?);
+                query = Some(PreparedStatementQuery::Select(build_select(part)?));
+            }
+            Rule::update_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(PreparedStatementQuery::Update(build_update(part)?));
+            }
+            Rule::type_name => {
+                parameter_types.push(build_type_name(part));
             }
             _ => {}
         }
@@ -17162,6 +17205,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
             Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
             Rule::delete_stmt => statement = Some(Statement::Delete(build_delete(part)?)),
+            Rule::execute_prepared_stmt => {
+                statement = Some(Statement::Execute(build_execute_statement(part)?))
+            }
             Rule::create_materialized_view_stmt => {
                 statement = Some(Statement::CreateTableAs(build_create_materialized_view(
                     part,
@@ -24761,6 +24807,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         "<=" => SubqueryComparisonOp::LtEq,
                         ">" => SubqueryComparisonOp::Gt,
                         ">=" => SubqueryComparisonOp::GtEq,
+                        "~" => SubqueryComparisonOp::RegexMatch,
+                        "!~" => SubqueryComparisonOp::NotRegexMatch,
                         other => {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "subquery comparison operator",
@@ -25941,6 +25989,11 @@ fn build_comparison_expr(left: SqlExpr, op: &str, right: SqlExpr) -> Result<SqlE
         },
         "<<<" => SqlExpr::BinaryOperator {
             op: "<<<".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "===" => SqlExpr::BinaryOperator {
+            op: "===".into(),
             left: Box::new(left),
             right: Box::new(right),
         },
@@ -27708,6 +27761,16 @@ mod tests {
                 operator_name: "===".to_string(),
                 left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
                 right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+            })
+        );
+        assert_eq!(
+            parse_statement("drop operator class if exists public.part_test_ops using hash")
+                .unwrap(),
+            Statement::DropOperatorClass(DropOperatorClassStatement {
+                if_exists: true,
+                schema_name: Some("public".to_string()),
+                opclass_name: "part_test_ops".to_string(),
+                access_method: "hash".to_string(),
             })
         );
     }
