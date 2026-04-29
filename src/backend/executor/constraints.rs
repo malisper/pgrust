@@ -90,7 +90,7 @@ pub(crate) fn enforce_row_security_write_checks(
 ) -> Result<(), ExecError> {
     enforce_row_security_write_checks_with_tid(
         relation_name,
-        _desc,
+        desc,
         checks,
         values,
         Some(row_security_new_row_tid()),
@@ -100,7 +100,7 @@ pub(crate) fn enforce_row_security_write_checks(
 
 pub(crate) fn enforce_row_security_write_checks_with_tid(
     relation_name: &str,
-    _desc: &RelationDesc,
+    desc: &RelationDesc,
     checks: &[RlsWriteCheck],
     values: &[Value],
     row_tid: Option<ItemPointerData>,

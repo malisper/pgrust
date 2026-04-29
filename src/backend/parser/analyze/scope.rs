@@ -1170,6 +1170,7 @@ fn table_sample_qual(
         implementation: ScalarFunctionImpl::Builtin(
             BuiltinScalarFunction::PgRustTablesampleBernoulli,
         ),
+        display_args: None,
         args: vec![
             Expr::Var(Var {
                 varno: 1,

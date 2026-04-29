@@ -4746,34 +4746,3 @@ fn bind_delete_using(
         subplans: Vec::new(),
     })
 }
-
-fn build_delete_target_from_joined_input(
-    base_relation_name: &str,
-    parent_desc: &RelationDesc,
-    parent_predicate: Option<&Expr>,
-    child: &BoundRelation,
-    catalog: &dyn CatalogLookup,
-) -> Result<BoundDeleteTarget, ParseError> {
-    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
-    let translation_exprs = inheritance_translation_exprs(
-        &child.desc,
-        &inheritance_translation_indexes(parent_desc, &child.desc),
-        catalog,
-    )?;
-    Ok(BoundDeleteTarget {
-        relation_name,
-        rel: child.rel,
-        relation_oid: child.relation_oid,
-        relkind: child.relkind,
-        toast: child.toast,
-        desc: child.desc.clone(),
-        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
-            child.relation_oid,
-            &child.desc,
-            catalog,
-        )?,
-        row_source: BoundModifyRowSource::Heap,
-        parent_visible_exprs: translation_exprs,
-        predicate: parent_predicate.cloned(),
-    })
-}

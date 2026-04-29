@@ -11555,42 +11555,6 @@ fn materialize_delete_from_joined_input_events(
     Ok(events)
 }
 
-fn fetch_delete_target_values(
-    target: &BoundDeleteTarget,
-    tid: ItemPointerData,
-    ctx: &mut ExecutorContext,
-) -> Result<Vec<Value>, ExecError> {
-    let desc = Rc::new(target.desc.clone());
-    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-    let tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, tid)?;
-    let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
-    slot.toast = slot_toast_context(target.toast, ctx);
-    slot.into_values()
-}
-
-fn project_delete_target_visible_values(
-    target: &BoundDeleteTarget,
-    row_values: &[Value],
-    tid: ItemPointerData,
-    ctx: &mut ExecutorContext,
-) -> Result<Vec<Value>, ExecError> {
-    if target.parent_visible_exprs.is_empty() {
-        return Ok(row_values.to_vec());
-    }
-    let mut slot = TupleSlot::virtual_row_with_metadata(
-        row_values.to_vec(),
-        Some(tid),
-        Some(target.relation_oid),
-    );
-    let mut values = target
-        .parent_visible_exprs
-        .iter()
-        .map(|expr| eval_expr(expr, &mut slot, ctx).map(|value| value.to_owned_value()))
-        .collect::<Result<Vec<_>, ExecError>>()?;
-    Value::materialize_all(&mut values);
-    Ok(values)
-}
-
 pub(crate) fn apply_base_delete_row(
     target: &BoundDeleteTarget,
     tid: ItemPointerData,
