@@ -125,6 +125,7 @@ impl AnalyzedFrom {
                     relkind,
                     relispopulated,
                     toast,
+                    tablesample: None,
                 },
             }],
             jointree: Some(JoinTreeNode::RangeTblRef(1)),

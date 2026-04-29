@@ -3192,6 +3192,7 @@ fn parse_partitioned_index_ddl_forms() {
             concurrently: true,
             if_exists: false,
             index_names,
+            cascade: false,
         }) if index_names == vec!["idxpart_a_idx"]
     ));
     assert_eq!(
@@ -7751,6 +7752,31 @@ fn parse_select_star_with_table_alias() {
 }
 
 #[test]
+fn parse_table_sample_system_repeatable() {
+    let stmt =
+        parse_select("select * from people p tablesample system (t1.a) repeatable (t1.b)").unwrap();
+    assert_eq!(
+        stmt.from,
+        Some(FromItem::TableSample {
+            source: Box::new(FromItem::Alias {
+                source: Box::new(FromItem::Table {
+                    name: "people".into(),
+                    only: false,
+                }),
+                alias: "p".into(),
+                column_aliases: AliasColumnSpec::None,
+                preserve_source_names: false,
+            }),
+            sample: RawTableSampleClause {
+                method: "system".into(),
+                args: vec![SqlExpr::Column("t1.a".into())],
+                repeatable: Some(SqlExpr::Column("t1.b".into())),
+            },
+        })
+    );
+}
+
+#[test]
 fn parse_select_alias_overrides_qualified_column_name() {
     let stmt = parse_select("select p.name as w from people p").unwrap();
     assert_eq!(stmt.targets[0].output_name, "w");
@@ -10695,7 +10721,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("drop table if exists audit_tbls.\"schema_one_table two\"").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, .. }) if table_names == vec!["audit_tbls.schema_one_table two"])
     );
     assert!(
-        matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { concurrently: false, if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
+        matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { concurrently: false, if_exists: false, index_names, cascade: false }) if index_names == vec!["tenant_idx"])
+    );
+    assert!(
+        matches!(parse_statement("drop index tenant_idx cascade").unwrap(), Statement::DropIndex(DropIndexStatement { concurrently: false, if_exists: false, index_names, cascade: true }) if index_names == vec!["tenant_idx"])
     );
     assert!(
         matches!(parse_statement("drop schema if exists tenant_a, tenant_b").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names, cascade: false }) if schema_names == vec!["tenant_a", "tenant_b"])
@@ -13060,6 +13089,9 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => children.iter().any(plan_contains_cte_scan),
             Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::IncrementalSort { input, .. }

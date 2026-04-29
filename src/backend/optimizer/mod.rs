@@ -22,6 +22,8 @@ mod tests;
 mod upperrels;
 mod util;
 
+pub(crate) use partition_prune::relation_may_satisfy_own_partition_bound;
+
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
 use crate::backend::statistics::types::{
     PgDependenciesPayload, PgMcvListPayload, PgNdistinctPayload,

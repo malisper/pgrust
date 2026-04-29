@@ -4041,9 +4041,9 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
-            FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
-                self.visit_from(source, context)
-            }
+            FromItem::Lateral(source)
+            | FromItem::Alias { source, .. }
+            | FromItem::TableSample { source, .. } => self.visit_from(source, context),
             FromItem::DerivedTable(select) => self.visit_select(select, context),
             FromItem::Join {
                 left,
@@ -4436,9 +4436,9 @@ fn insert_statement_references_table(stmt: &InsertStatement, table_name: &str) -
 fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
     match item {
         FromItem::Table { name, .. } => name.eq_ignore_ascii_case(table_name),
-        FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
-            from_item_references_table(source, table_name)
-        }
+        FromItem::Lateral(source)
+        | FromItem::Alias { source, .. }
+        | FromItem::TableSample { source, .. } => from_item_references_table(source, table_name),
         FromItem::DerivedTable(select) => select_statement_references_table(select, table_name),
         FromItem::Join { left, right, .. } => {
             from_item_references_table(left, table_name)
