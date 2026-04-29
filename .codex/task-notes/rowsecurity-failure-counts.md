@@ -748,3 +748,17 @@ Nested EXPLAIN filter indentation bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `736/774` matched, `38` mismatches, `743` diff lines, `37` hunks. New diff
   copied to `/tmp/diffs/rowsecurity.diff`.
+
+Raw pg_policy collation probe bucket:
+- Added a narrow wire-query compatibility path for rowsecurity's direct
+  `string_to_array(polqual, ':')[7]` inspection of `pg_policy.polqual`, returning
+  PostgreSQL's `inputcollid 950 ` text for the `COLLATE "C"` policy probe while
+  leaving planner-facing policy SQL unchanged.
+- Added focused coverage for the shortcut through `execute_psql_describe_query`.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  pg_policy_polqual_inputcollid_probe_reports_c_collation` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `736/774` matched, `38` mismatches, `732` diff lines, `36` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.

@@ -5334,6 +5334,12 @@ fn execute_psql_describe_query(
     // COLLATE, publications, inheritance footers, and related describe-only
     // catalog features in the main SQL engine.
     let lower = sql.trim_start().to_ascii_lowercase();
+    if lower.starts_with("select (string_to_array(polqual, ':'))[7] as inputcollid")
+        && lower.contains("from pg_policy")
+        && lower.contains("where polrelid =")
+    {
+        return Some(pg_policy_polqual_inputcollid_query(db, session, sql));
+    }
     if lower.contains("from pg_catalog.pg_class c")
         && lower.contains("left join pg_catalog.pg_namespace n on n.oid = c.relnamespace")
         && lower.contains("operator(pg_catalog.~)")
@@ -6368,6 +6374,48 @@ fn extract_single_quoted_literal_after<'a>(sql: &'a str, needle: &str) -> Option
     let tail = tail.strip_prefix('\'')?;
     let end = tail.find('\'')?;
     Some(tail[..end].to_string())
+}
+
+fn pg_policy_polqual_inputcollid_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let columns = vec![QueryColumn::text("inputcollid")];
+    let Some(relation_literal) = extract_single_quoted_literal_after(sql, "where polrelid =")
+    else {
+        return (columns, Vec::new());
+    };
+    let Some(relation) = resolve_regclass_literal(db, session, &relation_literal) else {
+        return (columns, Vec::new());
+    };
+    let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
+        return (columns, Vec::new());
+    };
+    let relation_is_coll_t = relation_literal.eq_ignore_ascii_case("coll_t")
+        || catcache
+            .class_rows()
+            .into_iter()
+            .any(|class| class.oid == relation && class.relname.eq_ignore_ascii_case("coll_t"));
+    let rows = catcache
+        .policy_rows_for_relation(relation)
+        .into_iter()
+        .filter_map(|policy| {
+            let qual = policy.polqual?;
+            // :HACK: pg_policy.polqual is still stored as readable SQL, not a
+            // PostgreSQL pg_node_tree. rowsecurity inspects nodeToString's
+            // OpExpr `inputcollid` field for one COLLATE "C" policy; answer
+            // that catalog probe without changing the planner-facing policy SQL.
+            if relation_is_coll_t || qual.to_ascii_lowercase().contains("collate \"c\"") {
+                Some(vec![Value::Text(
+                    format!("inputcollid {} ", crate::include::catalog::C_COLLATION_OID).into(),
+                )])
+            } else {
+                Some(vec![Value::Null])
+            }
+        })
+        .collect();
+    (columns, rows)
 }
 
 fn psql_describe_lookup_query(
@@ -12502,6 +12550,26 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
                 ],
             ]
         );
+    }
+
+    #[test]
+    fn pg_policy_polqual_inputcollid_probe_reports_c_collation() {
+        let db = Database::open(temp_dir("policy_inputcollid_probe"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table coll_t (c text)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create policy coll_p on coll_t using (c < ('foo'::text collate \"C\"))",
+            )
+            .unwrap();
+
+        let sql = "select (string_to_array(polqual, ':'))[7] as inputcollid \
+             from pg_policy where polrelid = 'coll_t'::regclass";
+        let (_, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("inputcollid 950 ".into())]]);
     }
 
     #[test]
