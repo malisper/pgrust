@@ -1270,12 +1270,12 @@ fn compile_var_decl(
     env: &mut CompileEnv,
 ) -> Result<CompiledVar, ParseError> {
     let ty = resolve_decl_type(&decl.type_name, catalog)?;
-    let slot = env.define_var_with_options(&decl.name, ty, decl.constant, decl.strict);
     let default_expr = decl
         .default_expr
         .as_deref()
         .map(|expr| compile_assignment_expr_text(expr, catalog, env))
         .transpose()?;
+    let slot = env.define_var_with_options(&decl.name, ty, decl.constant, decl.strict);
     Ok(CompiledVar {
         name: decl.name.clone(),
         slot,
