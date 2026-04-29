@@ -57,6 +57,7 @@ use super::super::{
     pull_up_sublinks, relids_disjoint, relids_overlap, relids_subset, relids_union,
     reverse_join_type,
 };
+use super::subquery_prune::{prune_unused_subquery_outputs, used_parent_attrs_for_rte};
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
     estimate_index_candidate, estimate_seqscan_candidate, full_index_scan_spec,
@@ -2443,11 +2444,15 @@ fn build_cte_scan_path(
 fn build_subquery_scan_path(
     rtindex: usize,
     query: crate::include::nodes::parsenodes::Query,
+    used_attrs: &BTreeSet<usize>,
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = prepare_query_path_input(query, catalog);
+    let query = prepare_query_path_input(
+        prune_unused_subquery_outputs(query, used_attrs, catalog),
+        catalog,
+    );
     if simple_subquery_where_qual_is_contradictory(&query) {
         return optimize_path_with_config(
             const_false_relation_path(rtindex, desc),
@@ -3647,6 +3652,15 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         base_filter.as_ref(),
         query_order_items.as_deref(),
     );
+    let subquery_used_attrs = if matches!(&rte.kind, RangeTblEntryKind::Subquery { .. }) {
+        Some(used_parent_attrs_for_rte(
+            root,
+            rtindex,
+            rte.desc.columns.len(),
+        ))
+    } else {
+        None
+    };
     let Some(rel) = root
         .simple_rel_array
         .get_mut(rtindex)
@@ -3824,8 +3838,14 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         }
         RangeTblEntryKind::Subquery { query } => {
             let (query, filter) = push_subquery_filter(rtindex, *query, base_filter_expr(rel));
-            let mut path =
-                build_subquery_scan_path(rtindex, query, &rte.desc, catalog, root.config);
+            let mut path = build_subquery_scan_path(
+                rtindex,
+                query,
+                subquery_used_attrs.as_ref().expect("subquery used attrs"),
+                &rte.desc,
+                catalog,
+                root.config,
+            );
             if let Some(filter) = filter {
                 path = optimize_path_with_config(
                     Path::Filter {
