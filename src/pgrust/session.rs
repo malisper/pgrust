@@ -9253,6 +9253,9 @@ impl Session {
         db.install_session_replication_role(self.client_id, self.session_replication_role());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_interrupt_state(self.client_id, self.interrupts());
+        if self.active_txn.is_none() {
+            db.accept_invalidation_messages(self.client_id);
+        }
         let (txn_ctx, transaction_lock_scope_id, catalog_effect_start, base_command_id) =
             if let Some(ref mut txn) = self.active_txn {
                 let effect_start = txn.catalog_effects.len();

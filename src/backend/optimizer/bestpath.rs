@@ -141,6 +141,12 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
         {
             return false;
         }
+        if preferred_reassociated_lateral_values_hash_join(candidate, current) {
+            return true;
+        }
+        if preferred_reassociated_lateral_values_hash_join(current, candidate) {
+            return false;
+        }
         if non_nested_join_nearly_as_cheap(candidate, current) {
             return true;
         }
@@ -197,6 +203,47 @@ fn path_is_append_like(path: &Path) -> bool {
     }
 }
 
+fn preferred_reassociated_lateral_values_hash_join(preferred: &Path, other: &Path) -> bool {
+    let Path::HashJoin {
+        left,
+        right,
+        kind: JoinType::Inner,
+        ..
+    } = preferred
+    else {
+        return false;
+    };
+    let Path::NestedLoopJoin {
+        right: values,
+        kind: JoinType::Cross,
+        ..
+    } = left.as_ref()
+    else {
+        return false;
+    };
+    path_is_values_relation(values)
+        && !path_has_runtime_index_scan(right)
+        && matches!(other, Path::NestedLoopJoin { .. })
+}
+
+fn path_is_values_relation(path: &Path) -> bool {
+    match path {
+        Path::Values { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => path_is_values_relation(input),
+        _ => false,
+    }
+}
+
 pub(super) fn non_nested_join_nearly_as_cheap(preferred: &Path, other: &Path) -> bool {
     if !matches!(preferred, Path::HashJoin { .. } | Path::MergeJoin { .. })
         || !matches!(other, Path::NestedLoopJoin { .. })
@@ -232,10 +279,11 @@ pub(super) fn preferred_parameterized_index_nested_loop(path: &Path) -> bool {
 pub(super) fn preferred_parameterized_nested_loop(path: &Path) -> bool {
     match path {
         Path::NestedLoopJoin {
+            left,
             right,
             kind: JoinType::Inner | JoinType::Left,
             ..
-        } => path_uses_immediate_outer(right),
+        } => left.plan_info().plan_rows.as_f64() <= 1000.0 && path_uses_immediate_outer(right),
         _ => false,
     }
 }

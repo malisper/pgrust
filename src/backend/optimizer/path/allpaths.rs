@@ -59,8 +59,8 @@ use super::super::{
 };
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
-    estimate_index_candidate, estimate_seqscan_candidate, index_supports_index_only_attrs,
-    optimize_path_with_config, relation_stats,
+    estimate_index_candidate, estimate_seqscan_candidate, full_index_scan_spec,
+    index_supports_index_only_attrs, optimize_path_with_config, relation_stats,
 };
 
 type PlannerIndexExprCache = RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>;
@@ -1350,27 +1350,6 @@ fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<
     }
 }
 
-fn full_index_scan_spec(
-    index: &BoundIndexRelation,
-    filter: Option<Expr>,
-) -> crate::backend::optimizer::IndexPathSpec {
-    let filter_quals = filter.iter().cloned().collect::<Vec<_>>();
-    crate::backend::optimizer::IndexPathSpec {
-        index: index.clone(),
-        keys: Vec::new(),
-        order_by_keys: Vec::new(),
-        residual: filter,
-        used_quals: Vec::new(),
-        scan_quals: Vec::new(),
-        recheck_quals: Vec::new(),
-        filter_quals,
-        direction: crate::include::access::relscan::ScanDirection::Forward,
-        removes_order: false,
-        btree_prefix_columns: 0,
-        row_prefix: false,
-    }
-}
-
 fn collect_relation_access_paths(
     rtindex: usize,
     heap_rel: RelFileLocator,
@@ -1523,6 +1502,30 @@ fn collect_relation_access_paths(
                     full_index_scan_spec(index, filter.clone()),
                     None,
                     target_index_only,
+                    config,
+                    catalog,
+                )
+                .plan,
+            );
+        }
+        if config.enable_indexscan
+            && !config.enable_seqscan
+            && query_order_items.is_none()
+            && filter.is_some()
+            && access_method_supports_index_scan(index.index_meta.am_oid)
+        {
+            paths.push(
+                estimate_index_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_name.clone(),
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    full_index_scan_spec(index, filter.clone()),
+                    None,
+                    false,
                     config,
                     catalog,
                 )

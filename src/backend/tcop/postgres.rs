@@ -5245,13 +5245,8 @@ fn execute_query_statement(
             mut columns, rows, ..
         }) => {
             let catalog = state.session.catalog_lookup(db);
-            let role_names = role_name_map(&catalog);
-            let relation_names = relation_name_map(&catalog);
-            let proc_names = proc_name_map(&catalog);
-            let proc_signatures = proc_signature_map(&catalog);
-            let namespace_names = namespace_name_map(&catalog);
-            let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
+            let catalog_maps = WireCatalogMaps::for_columns(&catalog, &columns);
             flush_pending_backend_messages_with_sql(stream, db, &state.session, &sql)?;
             let command_tag = infer_dml_returning_command_tag(&sql, rows.len())
                 .unwrap_or_else(|| format!("SELECT {}", rows.len()));
@@ -5265,12 +5260,12 @@ fn execute_query_statement(
                     bytea_output: state.session.bytea_output(),
                     datetime_config: state.session.datetime_config().clone(),
                 },
-                Some(&role_names),
-                Some(&relation_names),
-                Some(&proc_names),
-                Some(&namespace_names),
-                Some(&enum_labels),
-                Some(&proc_signatures),
+                catalog_maps.role_names(),
+                catalog_maps.relation_names(),
+                catalog_maps.proc_names(),
+                catalog_maps.namespace_names(),
+                catalog_maps.enum_labels(),
+                catalog_maps.proc_signatures(),
             )?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -5497,13 +5492,8 @@ fn execute_streaming_select_statement(
             use crate::backend::executor::exec_next;
             let mut columns = guard.columns.clone();
             let catalog = state.session.catalog_lookup(db);
-            let role_names = role_name_map(&catalog);
-            let relation_names = relation_name_map(&catalog);
-            let proc_names = proc_name_map(&catalog);
-            let proc_signatures = proc_signature_map(&catalog);
-            let namespace_names = namespace_name_map(&catalog);
-            let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
+            let catalog_maps = WireCatalogMaps::for_columns(&catalog, &columns);
             let mut row_buf = Vec::new();
             let mut row_count = 0usize;
             let mut header_sent = false;
@@ -5529,12 +5519,12 @@ fn execute_streaming_select_statement(
                                         bytea_output: state.session.bytea_output(),
                                         datetime_config: state.session.datetime_config().clone(),
                                     },
-                                    Some(&role_names),
-                                    Some(&relation_names),
-                                    Some(&proc_names),
-                                    Some(&namespace_names),
-                                    Some(&enum_labels),
-                                    Some(&proc_signatures),
+                                    catalog_maps.role_names(),
+                                    catalog_maps.relation_names(),
+                                    catalog_maps.proc_names(),
+                                    catalog_maps.namespace_names(),
+                                    catalog_maps.enum_labels(),
+                                    catalog_maps.proc_signatures(),
                                 )?;
                                 row_count += 1;
                             }
@@ -5777,6 +5767,96 @@ fn simple_query_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
+#[derive(Default)]
+struct WireCatalogMaps {
+    role_names: Option<HashMap<u32, String>>,
+    relation_names: Option<HashMap<u32, String>>,
+    proc_names: Option<HashMap<u32, String>>,
+    proc_signatures: Option<HashMap<u32, String>>,
+    namespace_names: Option<HashMap<u32, String>>,
+    enum_labels: Option<HashMap<(u32, u32), String>>,
+}
+
+#[derive(Default)]
+struct WireCatalogMapNeeds {
+    role_names: bool,
+    relation_names: bool,
+    proc_names: bool,
+    proc_signatures: bool,
+    namespace_names: bool,
+    enum_labels: bool,
+}
+
+impl WireCatalogMaps {
+    fn for_columns(catalog: &dyn CatalogLookup, columns: &[QueryColumn]) -> Self {
+        let needs = WireCatalogMapNeeds::for_columns(columns);
+        Self {
+            role_names: needs.role_names.then(|| role_name_map(catalog)),
+            relation_names: needs.relation_names.then(|| relation_name_map(catalog)),
+            proc_names: needs.proc_names.then(|| proc_name_map(catalog)),
+            proc_signatures: needs.proc_signatures.then(|| proc_signature_map(catalog)),
+            namespace_names: needs.namespace_names.then(|| namespace_name_map(catalog)),
+            enum_labels: needs.enum_labels.then(|| enum_label_map(catalog)),
+        }
+    }
+
+    fn role_names(&self) -> Option<&HashMap<u32, String>> {
+        self.role_names.as_ref()
+    }
+
+    fn relation_names(&self) -> Option<&HashMap<u32, String>> {
+        self.relation_names.as_ref()
+    }
+
+    fn proc_names(&self) -> Option<&HashMap<u32, String>> {
+        self.proc_names.as_ref()
+    }
+
+    fn proc_signatures(&self) -> Option<&HashMap<u32, String>> {
+        self.proc_signatures.as_ref()
+    }
+
+    fn namespace_names(&self) -> Option<&HashMap<u32, String>> {
+        self.namespace_names.as_ref()
+    }
+
+    fn enum_labels(&self) -> Option<&HashMap<(u32, u32), String>> {
+        self.enum_labels.as_ref()
+    }
+}
+
+impl WireCatalogMapNeeds {
+    fn for_columns(columns: &[QueryColumn]) -> Self {
+        let mut needs = Self::default();
+        for column in columns {
+            needs.add_type(column.sql_type);
+        }
+        needs
+    }
+
+    fn add_type(&mut self, sql_type: SqlType) {
+        if sql_type.is_array {
+            if matches!(sql_type.element_type().kind, SqlTypeKind::Enum) {
+                self.enum_labels = true;
+            }
+            return;
+        }
+
+        match sql_type.kind {
+            SqlTypeKind::RegRole => self.role_names = true,
+            SqlTypeKind::RegClass => self.relation_names = true,
+            SqlTypeKind::RegProc => self.proc_names = true,
+            SqlTypeKind::RegProcedure => {
+                self.proc_names = true;
+                self.proc_signatures = true;
+            }
+            SqlTypeKind::RegNamespace => self.namespace_names = true,
+            SqlTypeKind::Enum => self.enum_labels = true,
+            _ => {}
+        }
+    }
+}
+
 fn role_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
         .authid_rows()
@@ -5840,12 +5920,7 @@ fn try_handle_psql_describe_query(
         return Ok(false);
     };
     let catalog = state.session.catalog_lookup(db);
-    let role_names = role_name_map(&catalog);
-    let relation_names = relation_name_map(&catalog);
-    let proc_names = proc_name_map(&catalog);
-    let proc_signatures = proc_signature_map(&catalog);
-    let namespace_names = namespace_name_map(&catalog);
-    let enum_labels = enum_label_map(&catalog);
+    let catalog_maps = WireCatalogMaps::for_columns(&catalog, &columns);
     send_query_result(
         stream,
         &columns,
@@ -5856,12 +5931,12 @@ fn try_handle_psql_describe_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
-        Some(&role_names),
-        Some(&relation_names),
-        Some(&proc_names),
-        Some(&namespace_names),
-        Some(&enum_labels),
-        Some(&proc_signatures),
+        catalog_maps.role_names(),
+        catalog_maps.relation_names(),
+        catalog_maps.proc_names(),
+        catalog_maps.namespace_names(),
+        catalog_maps.enum_labels(),
+        catalog_maps.proc_signatures(),
     )?;
     Ok(true)
 }
@@ -6923,12 +6998,7 @@ fn try_handle_statistics_catalog_query(
         return Ok(false);
     };
     let catalog = state.session.catalog_lookup(db);
-    let role_names = role_name_map(&catalog);
-    let relation_names = relation_name_map(&catalog);
-    let proc_names = proc_name_map(&catalog);
-    let proc_signatures = proc_signature_map(&catalog);
-    let namespace_names = namespace_name_map(&catalog);
-    let enum_labels = enum_label_map(&catalog);
+    let catalog_maps = WireCatalogMaps::for_columns(&catalog, &columns);
     send_query_result(
         stream,
         &columns,
@@ -6939,12 +7009,12 @@ fn try_handle_statistics_catalog_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
-        Some(&role_names),
-        Some(&relation_names),
-        Some(&proc_names),
-        Some(&namespace_names),
-        Some(&enum_labels),
-        Some(&proc_signatures),
+        catalog_maps.role_names(),
+        catalog_maps.relation_names(),
+        catalog_maps.proc_names(),
+        catalog_maps.namespace_names(),
+        catalog_maps.enum_labels(),
+        catalog_maps.proc_signatures(),
     )?;
     Ok(true)
 }
@@ -10078,12 +10148,7 @@ fn handle_execute(
                     )?;
                     return Ok(());
                 }
-                let role_names = role_name_map(&catalog);
-                let relation_names = relation_name_map(&catalog);
-                let proc_names = proc_name_map(&catalog);
-                let proc_signatures = proc_signature_map(&catalog);
-                let namespace_names = namespace_name_map(&catalog);
-                let enum_labels = enum_label_map(&catalog);
+                let catalog_maps = WireCatalogMaps::for_columns(&catalog, &result.columns);
                 let mut row_buf = Vec::new();
                 for row in &result.rows {
                     send_typed_data_row(
@@ -10097,12 +10162,12 @@ fn handle_execute(
                             bytea_output: state.session.bytea_output(),
                             datetime_config: state.session.datetime_config().clone(),
                         },
-                        Some(&role_names),
-                        Some(&relation_names),
-                        Some(&proc_names),
-                        Some(&namespace_names),
-                        Some(&enum_labels),
-                        Some(&proc_signatures),
+                        catalog_maps.role_names(),
+                        catalog_maps.relation_names(),
+                        catalog_maps.proc_names(),
+                        catalog_maps.namespace_names(),
+                        catalog_maps.enum_labels(),
+                        catalog_maps.proc_signatures(),
                     )?;
                 }
                 if result.completed {
