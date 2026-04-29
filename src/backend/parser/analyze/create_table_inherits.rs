@@ -338,11 +338,22 @@ fn inherited_constraint_columns(parent: &BoundRelation, attnums: &[i16]) -> Vec<
 
 fn local_primary_key_count(stmt: &CreateTableStatement) -> usize {
     let column_primary_keys = stmt.columns().filter(|column| column.primary_key()).count();
+    let partition_override_primary_keys = stmt
+        .partition_column_overrides()
+        .filter(|override_| {
+            override_
+                .constraints
+                .iter()
+                .any(|constraint| matches!(constraint, ColumnConstraint::PrimaryKey { .. }))
+        })
+        .count();
     let table_primary_keys = stmt
         .constraints()
         .filter(|constraint| matches!(constraint, TableConstraint::PrimaryKey { .. }))
         .count();
-    column_primary_keys.saturating_add(table_primary_keys)
+    column_primary_keys
+        .saturating_add(partition_override_primary_keys)
+        .saturating_add(table_primary_keys)
 }
 
 fn resolve_parent_relations(
@@ -863,6 +874,20 @@ fn merge_partition_column_override(
         }
         merged.column.default_expr = Some(default_expr.clone());
         merged.conflicting_parent_default = false;
+    }
+    if override_
+        .constraints
+        .iter()
+        .any(|constraint| matches!(constraint, ColumnConstraint::PrimaryKey { .. }))
+    {
+        ensure_primary_key_constraint(&mut merged.column);
+    }
+    if override_
+        .constraints
+        .iter()
+        .any(|constraint| matches!(constraint, ColumnConstraint::Unique { .. }))
+    {
+        ensure_unique_constraint(&mut merged.column);
     }
     Ok(())
 }

@@ -2104,6 +2104,80 @@ impl Database {
         Ok(next_cid)
     }
 
+    pub(super) fn drop_partition_child_index_backed_constraints_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_constraint: &PgConstraintRow,
+        catalog: &dyn CatalogLookup,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        fn collect_descendants(
+            parent_constraint_oid: u32,
+            all_rows: &[PgConstraintRow],
+            out: &mut Vec<PgConstraintRow>,
+        ) {
+            for child_row in all_rows.iter().filter(|row| {
+                matches!(
+                    row.contype,
+                    CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE | CONSTRAINT_EXCLUSION
+                ) && row.conparentid == parent_constraint_oid
+            }) {
+                collect_descendants(child_row.oid, all_rows, out);
+                out.push(child_row.clone());
+            }
+        }
+
+        let all_rows = catalog.constraint_rows();
+        let mut rows_to_drop = Vec::new();
+        collect_descendants(parent_constraint.oid, &all_rows, &mut rows_to_drop);
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
+        for child_row in rows_to_drop {
+            let constraint_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: std::sync::Arc::clone(&interrupts),
+            };
+            let (removed, effect) = self
+                .catalog
+                .write()
+                .drop_relation_constraint_mvcc(
+                    child_row.conrelid,
+                    &child_row.conname,
+                    &constraint_ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+
+            if removed.conindid != 0 {
+                let drop_index_ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: std::sync::Arc::clone(&interrupts),
+                };
+                let (_entry, effect) = self
+                    .catalog
+                    .write()
+                    .drop_relation_entry_by_oid_mvcc(removed.conindid, &drop_index_ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+        }
+        Ok(next_cid)
+    }
+
     pub(super) fn detach_partition_child_foreign_key_constraints_in_transaction(
         &self,
         client_id: ClientId,
@@ -2605,6 +2679,7 @@ impl Database {
                         cid.saturating_add(1),
                         &relation,
                         &[action],
+                        !alter_stmt.only,
                         configured_search_path,
                         catalog_effects,
                     )?;
@@ -4784,7 +4859,15 @@ impl Database {
                         "ALTER TABLE DROP CONSTRAINT on unreferenced key",
                     )?;
                 }
-                let mut next_cid = cid;
+                let mut next_cid = self
+                    .drop_partition_child_index_backed_constraints_in_transaction(
+                        client_id,
+                        xid,
+                        cid,
+                        &row,
+                        &catalog,
+                        catalog_effects,
+                    )?;
                 if row.contype == CONSTRAINT_PRIMARY {
                     let pk_owned_not_null_oids =
                         crate::backend::utils::cache::syscache::ensure_depend_rows(

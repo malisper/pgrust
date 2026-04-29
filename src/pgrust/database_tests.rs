@@ -10481,6 +10481,282 @@ fn partitioned_index_reuses_explicit_child_and_supports_attach_drop() {
 }
 
 #[test]
+fn create_table_like_including_indexes_copies_partitioned_source_indexes() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table idxpart (a int, b int, c text, d bool) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index idxparti on idxpart (a)")
+        .unwrap();
+    session
+        .execute(&db, "create index idxparti2 on idxpart (b, c)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart1 (like idxpart including indexes)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, relkind::text, inhparent::regclass::text \
+               from pg_class left join pg_index ix on (indexrelid = oid) \
+               left join pg_inherits on (ix.indexrelid = inhrelid) \
+              where relname like 'idxpart%' order by relname",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart".into()),
+                Value::Text("p".into()),
+                Value::Null
+            ],
+            vec![
+                Value::Text("idxpart1".into()),
+                Value::Text("r".into()),
+                Value::Null
+            ],
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("i".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("idxpart1_b_c_idx".into()),
+                Value::Text("i".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("idxparti".into()),
+                Value::Text("I".into()),
+                Value::Null
+            ],
+            vec![
+                Value::Text("idxparti2".into()),
+                Value::Text("I".into()),
+                Value::Null
+            ],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "alter table idxpart attach partition idxpart1 for values from (0) to (10)",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where child.relname like 'idxpart1%idx' \
+              order by child.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("idxparti".into())
+            ],
+            vec![
+                Value::Text("idxpart1_b_c_idx".into()),
+                Value::Text("idxparti2".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_only_partitioned_primary_key_does_not_reconcile_children() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table idxpart (a int) partition by range (a)")
+        .unwrap();
+    session
+        .execute(&db, "create table idxpart0 (like idxpart)")
+        .unwrap();
+    session
+        .execute(&db, "alter table idxpart0 add unique (a)")
+        .unwrap();
+    session
+        .execute(&db, "alter table idxpart attach partition idxpart0 default")
+        .unwrap();
+
+    match session.execute(&db, "alter table only idxpart add primary key (a)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "column \"a\" of table \"idxpart0\" is not marked NOT NULL"
+            && sqlstate == "42P16" => {}
+        other => panic!("expected ONLY primary-key not-null check, got {other:?}"),
+    }
+
+    session
+        .execute(&db, "alter table idxpart0 alter column a set not null")
+        .unwrap();
+    session
+        .execute(&db, "alter table only idxpart add primary key (a)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indrelid::regclass::text, indexrelid::regclass::text, \
+                    inhparent::regclass::text, indisvalid \
+               from pg_index idx left join pg_inherits inh on (idx.indexrelid = inh.inhrelid) \
+              where indrelid::regclass::text like 'idxpart%' \
+              order by indexrelid::regclass::text",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart0".into()),
+                Value::Text("idxpart0_a_key".into()),
+                Value::Null,
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart".into()),
+                Value::Text("idxpart_pkey".into()),
+                Value::Null,
+                Value::Bool(false),
+            ],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "alter index idxpart_pkey attach partition idxpart0_a_key",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select inhparent::regclass::text, indisvalid \
+               from pg_index idx left join pg_inherits inh on (idx.indexrelid = inh.inhrelid) \
+              where indexrelid = 'idxpart0_a_key'::regclass",
+        ),
+        vec![vec![Value::Text("idxpart_pkey".into()), Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn attach_partition_rejects_mismatched_existing_primary_key() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table idxpart (c1 int primary key, c2 int, c3 text) partition by range (c1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table idxpart1 (like idxpart)")
+        .unwrap();
+    session
+        .execute(&db, "alter table idxpart1 add primary key (c1, c2)")
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "alter table idxpart attach partition idxpart1 for values from (100) to (200)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "multiple primary keys for table \"idxpart1\" are not allowed"
+            && sqlstate == "42P16" => {}
+        other => panic!("expected mismatched child primary-key rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_child_primary_key_allowed_without_parent_primary_key() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table idxpart (a int) partition by range (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart1pk partition of idxpart (a primary key) for values from (0) to (100)",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indexrelid::regclass::text, indisprimary \
+               from pg_index \
+              where indrelid = 'idxpart1pk'::regclass \
+              order by indexrelid::regclass::text",
+        ),
+        vec![vec![
+            Value::Text("idxpart1pk_pkey".into()),
+            Value::Bool(true)
+        ]]
+    );
+}
+
+#[test]
+fn dropping_parent_primary_key_drops_inherited_child_keys() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table idxpart (i int) partition by hash (i)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart0 partition of idxpart (i) for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart1 partition of idxpart (i) for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table idxpart0 add primary key(i)")
+        .unwrap();
+    session
+        .execute(&db, "alter table idxpart add primary key(i)")
+        .unwrap();
+
+    session
+        .execute(&db, "alter table idxpart drop constraint idxpart_pkey")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indrelid::regclass::text, indexrelid::regclass::text \
+               from pg_index \
+              where indrelid::regclass::text like 'idxpart%' \
+              order by indexrelid::regclass::text",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partition() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);

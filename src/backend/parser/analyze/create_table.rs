@@ -51,6 +51,7 @@ pub struct OwnedSequenceSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTableLikePostCreateAction {
     pub source_relation_oid: u32,
+    pub include_indexes: bool,
     pub include_comments: bool,
     pub include_statistics: bool,
 }
@@ -762,12 +763,14 @@ fn expand_like_clause(
         }
     }
 
-    let post_create_action =
-        (options.comments || options.statistics).then_some(CreateTableLikePostCreateAction {
+    let post_create_action = (options.indexes || options.comments || options.statistics).then_some(
+        CreateTableLikePostCreateAction {
             source_relation_oid: source.relation_oid,
+            include_indexes: options.indexes,
             include_comments: options.comments,
             include_statistics: options.statistics,
-        });
+        },
+    );
 
     Ok((elements, post_create_action))
 }
