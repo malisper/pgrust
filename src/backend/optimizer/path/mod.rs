@@ -4,6 +4,7 @@ mod allpaths;
 mod costsize;
 mod gistcost;
 mod regex_prefix;
+mod subquery_prune;
 
 use crate::RelFileLocator;
 use crate::backend::optimizer::{AccessCandidate, IndexPathSpec, RelationStats};

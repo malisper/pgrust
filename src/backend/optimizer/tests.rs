@@ -4380,6 +4380,49 @@ fn planner_memoizes_expression_key_nested_loop() {
 }
 
 #[test]
+fn unused_lateral_subquery_output_does_not_parameterize_join() {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "items",
+            RelationDesc {
+                columns: vec![column_desc("id", int4(), false)],
+            },
+        )
+        .expect("create test catalog relation");
+    catalog
+        .set_relation_stats(table.relation_oid, 32, 1_000.0)
+        .expect("seed test catalog table stats");
+
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select o.id, ss.id
+           from items o
+           left join lateral (
+             select i.id, least(o.id, i.id) as unused
+               from items i
+           ) ss on o.id = ss.id",
+        &catalog,
+        PlannerConfig {
+            enable_nestloop: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::HashJoin {
+                kind: JoinType::Left,
+                ..
+            }
+        )),
+        "unused lateral output should be pruned before join planning: {:#?}",
+        planned.plan_tree
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
 fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
     fn contains_exec_param(expr: &Expr) -> bool {
         match expr {
