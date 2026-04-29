@@ -5032,6 +5032,46 @@ fn explain_const_false_scan_filter_uses_one_time_filter() {
 }
 
 #[test]
+fn explain_const_false_and_scan_filter_uses_one_time_filter() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::OpExprKind;
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let plan = Plan::Filter {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_scan_plan()),
+        predicate: Expr::and(
+            Expr::Const(Value::Bool(false)),
+            Expr::binary_op(
+                OpExprKind::Lt,
+                bool_ty,
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(0),
+                    varlevelsup: 0,
+                    vartype: int4,
+                }),
+                Expr::Const(Value::Int32(1000)),
+            ),
+        ),
+    };
+    let mut rendered = Vec::new();
+    crate::backend::commands::explain::format_explain_plan_with_subplans(
+        &plan,
+        &[],
+        0,
+        false,
+        &mut rendered,
+    );
+
+    assert_eq!(
+        rendered,
+        vec!["Result".to_string(), "  One-Time Filter: false".to_string()]
+    );
+}
+
+#[test]
 fn select_without_from_returns_constant_row() {
     let base = temp_dir("select_without_from");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -10674,7 +10714,10 @@ fn tid_and_xid_text_casts_accept_pg_input() {
         )
         .unwrap(),
         vec![vec![
-            Value::Text("(4294967295,65535)".into()),
+            Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                block_number: 4_294_967_295,
+                offset_number: 65_535,
+            }),
             Value::Int64(4_294_967_295),
         ]],
     );

@@ -5,9 +5,9 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::{
     CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions,
-    PreparedExternalParam, SelectStatement, bind_insert_with_outer_scopes_and_ctes,
-    bind_scalar_expr_in_named_slot_scope, bound_cte_from_query_rows, resolve_raw_type_name,
-    with_external_param_types,
+    PreparedExternalParam, SelectStatement, UpdateStatement,
+    bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope,
+    bound_cte_from_query_rows, resolve_raw_type_name, with_external_param_types,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::push_warning_with_hint;
@@ -216,6 +216,7 @@ fn reject_restricted_views_in_cte_body(
         CteBody::Select(select) => reject_restricted_views_in_select(select, catalog),
         CteBody::Values(_) => Ok(()),
         CteBody::Insert(insert) => reject_restricted_views_in_insert(insert, catalog),
+        CteBody::Update(update) => reject_restricted_views_in_update(update, catalog),
         CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -259,6 +260,20 @@ fn reject_restricted_views_in_insert(
     reject_restricted_view_access(&insert.table_name, catalog)?;
     if let InsertSource::Select(select) = &insert.source {
         reject_restricted_views_in_select(select, catalog)?;
+    }
+    Ok(())
+}
+
+fn reject_restricted_views_in_update(
+    update: &UpdateStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for cte in &update.with {
+        reject_restricted_views_in_cte_body(&cte.body, catalog)?;
+    }
+    reject_restricted_view_access(&update.table_name, catalog)?;
+    if let Some(from) = &update.from {
+        reject_restricted_views_in_from_item(from, catalog)?;
     }
     Ok(())
 }

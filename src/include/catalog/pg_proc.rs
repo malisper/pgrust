@@ -11804,6 +11804,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("amvalidate", BuiltinScalarFunction::AmValidate),
         ("btequalimage", BuiltinScalarFunction::BtEqualImage),
         ("current_setting", BuiltinScalarFunction::CurrentSetting),
+        ("set_config", BuiltinScalarFunction::SetConfig),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),
@@ -12061,6 +12062,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "has_table_privilege_id",
             BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "row_security_active",
+            BuiltinScalarFunction::RowSecurityActive,
         ),
         (
             "has_sequence_privilege",

@@ -8,12 +8,13 @@ use crate::include::catalog::{
     PG_CONSTRAINT_RELATION_OID, PG_CONVERSION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_FOREIGN_SERVER_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_NAMESPACE_RELATION_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TS_CONFIG_RELATION_OID, PG_TS_DICT_RELATION_OID,
-    PG_TS_PARSER_RELATION_OID, PG_TS_TEMPLATE_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
-    PgDependRow, PgForeignServerRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgStatisticExtRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
+    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TS_CONFIG_RELATION_OID,
+    PG_TS_DICT_RELATION_OID, PG_TS_PARSER_RELATION_OID, PG_TS_TEMPLATE_RELATION_OID,
+    PG_TYPE_RELATION_OID, PgAggregateRow, PgDependRow, PgForeignServerRow, PgLanguageRow,
+    PgOpclassRow, PgOpfamilyRow, PgStatisticExtRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow,
 };
 use crate::include::nodes::parsenodes::{SqlExpr, function_arg_values};
 use std::collections::BTreeSet;
@@ -1105,6 +1106,40 @@ pub fn relation_rule_depend_rows(
         referenced_relation_oids,
         DEPENDENCY_AUTO,
     )
+}
+
+pub fn policy_depend_rows(
+    policy_oid: u32,
+    relation_oid: u32,
+    referenced_relation_oids: &[u32],
+) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_POLICY_RELATION_OID,
+        objid: policy_oid,
+        objsubid: 0,
+        refclassid: PG_CLASS_RELATION_OID,
+        refobjid: relation_oid,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_AUTO,
+    }];
+    rows.extend(
+        referenced_relation_oids
+            .iter()
+            .copied()
+            .filter(|referenced_oid| *referenced_oid != relation_oid)
+            .map(|referenced_oid| PgDependRow {
+                classid: PG_POLICY_RELATION_OID,
+                objid: policy_oid,
+                objsubid: 0,
+                refclassid: PG_CLASS_RELATION_OID,
+                refobjid: referenced_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            }),
+    );
+    sort_pg_depend_rows(&mut rows);
+    rows.dedup();
+    rows
 }
 
 fn rewrite_depend_rows(

@@ -52,9 +52,9 @@ use super::super::util::{
     required_query_pathkeys_for_rel, strip_binary_coercible_casts,
 };
 use super::super::{
-    IndexPathSpec, JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids,
-    flatten_and_conjuncts, has_outer_joins, is_pushable_base_clause, path_relids, relids_disjoint,
-    relids_overlap, relids_subset, relids_union, reverse_join_type,
+    CPU_OPERATOR_COST, IndexPathSpec, JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids,
+    flatten_and_conjuncts, has_outer_joins, is_pushable_base_clause, path_relids, predicate_cost,
+    relids_disjoint, relids_overlap, relids_subset, relids_union, reverse_join_type,
 };
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
@@ -112,13 +112,17 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
         .map(|clause| expand_join_rte_vars(root, clause))
         .filter(|clause| {
             let relids = expr_relids(clause);
-            !(!has_outer_joins(root) && relids.len() > 1) && !is_pushable_base_clause(root, &relids)
+            let pushed_to_single_base =
+                relids.is_empty() && single_direct_base_relid(root).is_some();
+            !pushed_to_single_base
+                && !(!has_outer_joins(root) && relids.len() > 1)
+                && !is_pushable_base_clause(root, &relids)
         })
         .collect();
     and_exprs(clauses)
 }
 
-fn assign_base_restrictinfo(root: &mut PlannerInfo) {
+fn assign_base_restrictinfo(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
     for rel in root.simple_rel_array.iter_mut().flatten() {
         rel.baserestrictinfo.clear();
         rel.joininfo.clear();
@@ -135,21 +139,24 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
         else {
             continue;
         };
-        rel.baserestrictinfo.extend(
-            rte.security_quals
-                .iter()
-                .cloned()
-                .map(joininfo::make_restrict_info),
-        );
+        rel.baserestrictinfo
+            .extend(rte.security_quals.iter().cloned().enumerate().map(
+                |(security_level, clause)| {
+                    joininfo::make_restrict_info_with_security(clause, security_level, catalog)
+                },
+            ));
     }
     if let Some(where_qual) = root.parse.where_qual.as_ref() {
         for clause in flatten_and_conjuncts(where_qual) {
             let clause = expand_join_rte_vars(root, clause);
-            let restrict = joininfo::make_restrict_info(clause.clone());
-            let push_relid = if is_pushable_base_clause(root, &restrict.required_relids) {
-                restrict.required_relids.first().copied()
+            let relids = expr_relids(&clause);
+            let varless_clause = relids.is_empty();
+            let push_relid = if varless_clause {
+                single_direct_base_relid(root)
+            } else if is_pushable_base_clause(root, &relids) {
+                relids.first().copied()
             } else {
-                nullable_outer_join_filter_pushdown_relid(root, &clause, &restrict.required_relids)
+                nullable_outer_join_filter_pushdown_relid(root, &clause, &relids)
             };
             if let Some(relid) = push_relid
                 && let Some(rel) = root
@@ -157,6 +164,20 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
                     .get_mut(relid)
                     .and_then(Option::as_mut)
             {
+                let security_level = root
+                    .parse
+                    .rtable
+                    .get(relid.saturating_sub(1))
+                    .map(|rte| {
+                        if varless_clause {
+                            0
+                        } else {
+                            rte.security_quals.len()
+                        }
+                    })
+                    .unwrap_or(0);
+                let restrict =
+                    joininfo::make_restrict_info_with_security(clause, security_level, catalog);
                 rel.baserestrictinfo.push(restrict);
             }
         }
@@ -267,6 +288,29 @@ fn equalities_match_commuted(left: &Expr, right: &Expr) -> bool {
     (left_a == right_a && left_b == right_b) || (left_a == right_b && left_b == right_a)
 }
 
+fn single_direct_base_relid(root: &PlannerInfo) -> Option<usize> {
+    let mut direct_relids = root
+        .parse
+        .rtable
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rte)| {
+            if matches!(rte.kind, RangeTblEntryKind::Relation { .. })
+                && root
+                    .simple_rel_array
+                    .get(index + 1)
+                    .and_then(Option::as_ref)
+                    .is_some()
+            {
+                Some(index + 1)
+            } else {
+                None
+            }
+        });
+    let relid = direct_relids.next()?;
+    direct_relids.next().is_none().then_some(relid)
+}
+
 fn nullable_outer_join_filter_pushdown_relid(
     root: &PlannerInfo,
     clause: &Expr,
@@ -289,12 +333,42 @@ fn nullable_outer_join_filter_pushdown_relid(
 }
 
 fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
-    super::super::and_exprs(
-        rel.baserestrictinfo
-            .iter()
-            .map(|restrict| restrict.clause.clone())
-            .collect(),
-    )
+    super::super::and_exprs(ordered_base_restrict_exprs(rel))
+}
+
+pub(super) fn ordered_base_restrict_exprs(rel: &RelOptInfo) -> Vec<Expr> {
+    let mut items = rel
+        .baserestrictinfo
+        .iter()
+        .enumerate()
+        .map(|(index, restrict)| {
+            let cost = qual_order_cost(&restrict.clause) * CPU_OPERATOR_COST;
+            let security_level = if restrict.leakproof && cost < 10.0 * CPU_OPERATOR_COST {
+                0
+            } else {
+                restrict.security_level
+            };
+            (security_level, cost, index, restrict.clause.clone())
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    items.into_iter().map(|(_, _, _, clause)| clause).collect()
+}
+
+fn qual_order_cost(expr: &Expr) -> f64 {
+    match expr {
+        Expr::Op(op) => 1.0 + op.args.iter().map(qual_order_cost).sum::<f64>(),
+        Expr::Func(func) => 10.0 + func.args.iter().map(qual_order_cost).sum::<f64>(),
+        Expr::Bool(bool_expr) => 1.0 + bool_expr.args.iter().map(qual_order_cost).sum::<f64>(),
+        Expr::Coalesce(left, right) => 1.0 + qual_order_cost(left) + qual_order_cost(right),
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => 1.0 + qual_order_cost(inner),
+        _ => predicate_cost(expr),
+    }
 }
 
 fn scalar_array_null_filter(expr: &Expr) -> bool {
@@ -2314,6 +2388,7 @@ fn set_op_type_sortable(sql_type: SqlType) -> bool {
 fn build_cte_scan_path(
     rtindex: usize,
     cte_id: usize,
+    cte_name: String,
     query: crate::include::nodes::parsenodes::Query,
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
@@ -2345,6 +2420,7 @@ fn build_cte_scan_path(
         pathtarget: slot_output_target(rtindex, &output_columns, |column| column.sql_type),
         slot_id: rte_slot_id(rtindex),
         cte_id,
+        cte_name,
         subroot: PlannerSubroot::new(subroot),
         query: Box::new(query),
         cte_plan: Box::new(cte_path),
@@ -3710,8 +3786,15 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rel.add_path(path);
         }
         RangeTblEntryKind::Cte { cte_id, query } => {
-            let mut path =
-                build_cte_scan_path(rtindex, cte_id, *query, &rte.desc, catalog, root.config);
+            let mut path = build_cte_scan_path(
+                rtindex,
+                cte_id,
+                rte.eref.aliasname.clone(),
+                *query,
+                &rte.desc,
+                catalog,
+                root.config,
+            );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
                 path = optimize_path_with_config(
@@ -4610,7 +4693,7 @@ fn translate_restrict_clauses_to_child(
                     clause = translate_append_rel_expr(clause, info);
                 }
             }
-            joininfo::make_restrict_info_with_pushdown(clause, restrict.is_pushed_down)
+            joininfo::translated_restrict_info(clause, restrict)
         })
         .collect()
 }
@@ -5291,7 +5374,7 @@ fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn Cat
 }
 
 pub(super) fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
-    assign_base_restrictinfo(root);
+    assign_base_restrictinfo(root, catalog);
     expand_inherited_rtentries(root, catalog);
     root.inner_join_clauses = collect_inner_join_clauses(root);
     set_base_rel_pathlists(root, catalog);

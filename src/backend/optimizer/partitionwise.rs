@@ -462,9 +462,7 @@ fn translate_restrict_clauses(
                 .fold(restrict.clause.clone(), |expr, info| {
                     translate_append_rel_expr(expr, info)
                 });
-            let mut translated = joininfo::make_restrict_info(clause);
-            translated.is_pushed_down = restrict.is_pushed_down;
-            translated
+            joininfo::translated_restrict_info(clause, restrict)
         })
         .collect()
 }

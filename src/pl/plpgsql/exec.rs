@@ -46,8 +46,8 @@ use crate::include::nodes::primnodes::{
     OpExprKind, QueryColumn, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint,
 };
 use crate::pgrust::portal::{
-    CursorOptions, Portal, PortalExecution, PortalFetchDirection, PortalFetchLimit, PortalStatus,
-    PortalStrategy,
+    CursorOptions, Portal, PortalExecution, PortalFetchDirection, PortalFetchLimit,
+    PositionedCursorRow,
 };
 use crate::pgrust::session::{ByteaOutputFormat, resolve_thread_prepared_statement};
 
@@ -4387,6 +4387,19 @@ fn cursor_name_for_slot(slot: usize, fallback: &str, state: &FunctionState) -> S
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn positioned_cursor_row_from_bindings(
+    bindings: &[SystemVarBinding],
+) -> Option<PositionedCursorRow> {
+    let mut positioned = bindings.iter().filter_map(|binding| {
+        binding.tid.map(|tid| PositionedCursorRow {
+            table_oid: binding.table_oid,
+            tid,
+        })
+    });
+    let first = positioned.next()?;
+    positioned.next().is_none().then_some(first)
+}
+
 fn export_open_cursors_as_portals(state: &FunctionState, ctx: &mut ExecutorContext) {
     for (name, cursor) in &state.cursors {
         ctx.pending_portals.retain(|portal| portal.name != *name);
@@ -4396,29 +4409,43 @@ fn export_open_cursors_as_portals(state: &FunctionState, ctx: &mut ExecutorConte
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
         let pos = (cursor.current + 1).clamp(0, cursor.rows.len() as isize) as usize;
-        ctx.pending_portals.push(Portal {
-            name: name.clone(),
-            prep_stmt_name: None,
-            source_text: String::new(),
-            command_tag: "SELECT".into(),
-            status: PortalStatus::Ready,
-            strategy: PortalStrategy::OneSelect,
-            options: CursorOptions {
+        let rows = cursor
+            .rows
+            .iter()
+            .map(|row| row.values.clone())
+            .collect::<Vec<_>>();
+        let row_positions = cursor
+            .rows
+            .iter()
+            .map(|row| positioned_cursor_row_from_bindings(&row.system_bindings))
+            .collect::<Vec<_>>();
+        let mut portal = Portal::materialized_select(
+            name.clone(),
+            String::new(),
+            None,
+            Vec::new(),
+            CursorOptions {
                 holdable: false,
                 binary: false,
                 scroll: cursor.scrollable,
                 no_scroll: !cursor.scrollable,
                 visible: true,
             },
-            result_formats: Vec::new(),
-            created_in_transaction: true,
-            execution: PortalExecution::Materialized {
-                columns: cursor.columns.clone(),
-                column_names,
-                rows: cursor.rows.iter().map(|row| row.values.clone()).collect(),
-                pos,
-            },
-        });
+            true,
+            cursor.columns.clone(),
+            column_names,
+            rows,
+        );
+        if let PortalExecution::Materialized {
+            row_positions: portal_row_positions,
+            pos: portal_pos,
+            ..
+        } = &mut portal.execution
+        {
+            *portal_row_positions = row_positions;
+            *portal_pos = pos;
+        }
+        ctx.pending_portals.push(portal);
     }
 }
 
@@ -6261,9 +6288,11 @@ fn eval_function_expr_inner(
                 return eval_expr(expr, &mut slot, ctx);
             }
             let saved_subplans = std::mem::replace(&mut ctx.subplans, subplans.clone());
+            let saved_initplan_values = std::mem::take(&mut ctx.expr_bindings.initplan_values);
             let saved_outer_tuple = ctx.expr_bindings.outer_tuple.replace(values.to_vec());
             let result = eval_expr(expr, &mut slot, ctx);
             ctx.expr_bindings.outer_tuple = saved_outer_tuple;
+            ctx.expr_bindings.initplan_values = saved_initplan_values;
             ctx.subplans = saved_subplans;
             result
         }

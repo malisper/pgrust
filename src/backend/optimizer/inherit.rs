@@ -147,17 +147,17 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                 rel.baserestrictinfo = parent_restrictinfo
                     .iter()
                     .map(|restrict| {
-                        let mut translated =
-                            joininfo::make_restrict_info(translate_append_rel_expr(
+                        joininfo::translated_restrict_info(
+                            translate_append_rel_expr(
                                 restrict.clause.clone(),
                                 &AppendRelInfo {
                                     parent_relid: parent_rtindex,
                                     child_relid: child_rtindex,
                                     translated_vars: translated_vars.clone(),
                                 },
-                            ));
-                        translated.is_pushed_down = restrict.is_pushed_down;
-                        translated
+                            ),
+                            restrict,
+                        )
                     })
                     .collect();
             }

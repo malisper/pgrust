@@ -399,6 +399,23 @@ pub(crate) fn format_verbose_explain_plan_with_catalog(
     format_verbose_explain_plan_with_context(plan, subplans, indent, show_costs, ctx, lines);
 }
 
+pub(crate) fn format_verbose_explain_child_plan_with_catalog(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    catalog: &dyn CatalogLookup,
+    lines: &mut Vec<String>,
+) {
+    let ctx = VerboseExplainContext {
+        type_names: collect_explain_type_names(plan, subplans, catalog),
+        ..VerboseExplainContext::default()
+    };
+    format_explain_plan_with_subplans_inner(
+        plan, subplans, indent, show_costs, true, true, false, &ctx, lines,
+    );
+}
+
 pub(crate) fn format_verbose_explain_plan_json_with_catalog(
     plan: &Plan,
     subplans: &[Plan],
@@ -2515,6 +2532,7 @@ fn verbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String
             Some(scan_name) => format!("Subquery Scan on {}", quote_explain_identifier(scan_name)),
             None => "Subquery Scan".into(),
         }),
+        Plan::CteScan { cte_name, .. } => Some(format!("CTE Scan on {cte_name}")),
         _ => None,
     }
 }
@@ -2582,6 +2600,7 @@ fn nonverbose_plan_label(
         Plan::SubqueryScan { scan_name, .. } => scan_name
             .as_ref()
             .map(|scan_name| format!("Subquery Scan on {scan_name}")),
+        Plan::CteScan { cte_name, .. } => Some(format!("CTE Scan on {cte_name}")),
         Plan::Values { .. } => Some(format!(
             "Values Scan on {}",
             ctx.values_scan_name.as_deref().unwrap_or("\"*VALUES*\"")
@@ -4100,6 +4119,24 @@ fn explain_plan_children_with_context(
             format_partitionwise_aggregate_append_children(
                 &children, subplans, indent, show_costs, verbose, ctx, lines,
             );
+        }
+        Plan::CteScan {
+            cte_name, cte_plan, ..
+        } => {
+            lines.push(format!("{}CTE {cte_name}", explain_detail_prefix(indent)));
+            let mut cte_lines = Vec::new();
+            format_explain_plan_with_subplans_inner(
+                cte_plan,
+                subplans,
+                indent + 1,
+                show_costs,
+                verbose,
+                true,
+                false,
+                ctx,
+                &mut cte_lines,
+            );
+            lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
         }
         Plan::Append { desc, .. } | Plan::MergeAppend { desc, .. } => {
             let mut values_seen = 0usize;
@@ -6647,8 +6684,12 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
         Plan::Filter {
             plan_info,
             input,
-            predicate: Expr::Const(Value::Bool(false)),
-        } if const_false_filter_input_can_render_as_result(input) => Some(*plan_info),
+            predicate,
+        } if const_false_filter_predicate(predicate)
+            && const_false_filter_input_can_render_as_result(input) =>
+        {
+            Some(*plan_info)
+        }
         Plan::Append {
             plan_info,
             children,
@@ -6705,6 +6746,16 @@ fn join_with_const_false_side_can_render_as_result(
         JoinType::Left | JoinType::Semi | JoinType::Anti => left_false,
         JoinType::Right => right_false,
         JoinType::Full => left_false && right_false,
+    }
+}
+
+fn const_false_filter_predicate(predicate: &Expr) -> bool {
+    match predicate {
+        Expr::Const(Value::Bool(false)) => true,
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            bool_expr.args.iter().any(const_false_filter_predicate)
+        }
+        _ => false,
     }
 }
 

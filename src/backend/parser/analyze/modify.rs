@@ -2,8 +2,10 @@ use super::paths::choose_modify_row_source;
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::backend::rewrite::{
-    RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, build_target_relation_row_security,
-    relation_has_row_security, relation_has_security_invoker, resolve_auto_updatable_view_target,
+    RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, apply_query_row_security,
+    build_target_relation_row_security, build_target_relation_row_security_for_user,
+    pg_rewrite_query, relation_has_row_security, relation_has_security_invoker,
+    resolve_auto_updatable_view_target,
 };
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PolicyCommand;
@@ -149,6 +151,10 @@ pub struct BoundMergeStatement {
     pub visible_column_count: usize,
     pub target_ctid_index: usize,
     pub source_present_index: usize,
+    pub merge_update_visibility_checks: Vec<RlsWriteCheck>,
+    pub merge_delete_visibility_checks: Vec<RlsWriteCheck>,
+    pub merge_update_write_checks: Vec<RlsWriteCheck>,
+    pub merge_insert_write_checks: Vec<RlsWriteCheck>,
     pub when_clauses: Vec<BoundMergeWhenClause>,
     pub returning: Vec<TargetEntry>,
     pub required_privileges: Vec<RelationPrivilegeRequirement>,
@@ -334,6 +340,28 @@ fn update_privilege_requirement(
 ) -> RelationPrivilegeRequirement {
     let mut requirement =
         relation_privilege_requirement(relation, relation_name, RelationPrivilegeMask::update());
+    requirement.updated_columns = assignments
+        .iter()
+        .map(|assignment| assignment.column_index)
+        .collect();
+    requirement
+}
+
+fn on_conflict_update_privilege_requirement(
+    relation: &BoundRelation,
+    relation_name: impl Into<String>,
+    assignments: &[BoundAssignment],
+) -> RelationPrivilegeRequirement {
+    let mut requirement = relation_privilege_requirement(
+        relation,
+        relation_name,
+        RelationPrivilegeMask {
+            select: true,
+            update: true,
+            ..RelationPrivilegeMask::default()
+        },
+    );
+    requirement.selected_columns = relation.desc.visible_column_indexes();
     requirement.updated_columns = assignments
         .iter()
         .map(|assignment| assignment.column_index)
@@ -1201,6 +1229,97 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
     }
 }
 
+fn query_from_projection_with_target_security_quals(
+    mut input: AnalyzedFrom,
+    security_quals: Vec<Expr>,
+    where_qual: Option<Expr>,
+    catalog: &dyn CatalogLookup,
+) -> Result<Query, ParseError> {
+    if let Some(rte) = input.rtable.first_mut() {
+        match &mut rte.kind {
+            crate::include::nodes::parsenodes::RangeTblEntryKind::Subquery { query } => {
+                if let Some(target_rte) = query.rtable.first_mut() {
+                    target_rte.security_quals.extend(security_quals);
+                }
+                apply_query_row_security(query, catalog)?;
+            }
+            _ => {
+                rte.security_quals.extend(security_quals);
+                let mut query = query_from_projection_with_qual(input, where_qual);
+                apply_query_row_security(&mut query, catalog)?;
+                return Ok(query);
+            }
+        }
+    }
+    Ok(query_from_projection_with_qual(input, where_qual))
+}
+
+fn prepend_visibility_quals(
+    mut visibility_quals: Vec<Expr>,
+    predicate: Option<Expr>,
+) -> Option<Expr> {
+    if let Some(predicate) = predicate {
+        visibility_quals.push(predicate);
+    }
+    let first = visibility_quals.first().cloned()?;
+    Some(visibility_quals.into_iter().skip(1).fold(first, Expr::and))
+}
+
+fn build_visibility_write_checks(
+    visibility_quals: Vec<Expr>,
+    source: crate::backend::rewrite::RlsWriteCheckSource,
+) -> Vec<RlsWriteCheck> {
+    visibility_quals
+        .into_iter()
+        .map(|expr| RlsWriteCheck {
+            expr,
+            policy_name: None,
+            source: source.clone(),
+        })
+        .collect()
+}
+
+fn build_conflict_visibility_checks(visibility_quals: Vec<Expr>) -> Vec<RlsWriteCheck> {
+    build_visibility_write_checks(
+        visibility_quals,
+        crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility,
+    )
+}
+
+fn auto_view_base_rls_user_oid(
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+    catalog: &dyn CatalogLookup,
+) -> u32 {
+    resolved
+        .privilege_contexts
+        .iter()
+        .rev()
+        .find(|context| context.relation.relation_oid == resolved.base_relation.relation_oid)
+        .and_then(|context| context.check_as_user_oid)
+        .unwrap_or_else(|| catalog.current_user_oid())
+}
+
+fn build_auto_view_base_row_security(
+    relation_name: &str,
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+    command: PolicyCommand,
+    include_select_visibility: bool,
+    include_select_check: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<crate::backend::rewrite::TargetRlsState, ViewDmlRewriteError> {
+    build_target_relation_row_security_for_user(
+        relation_name,
+        resolved.base_relation.relation_oid,
+        &resolved.base_relation.desc,
+        command,
+        include_select_visibility,
+        include_select_check,
+        auto_view_base_rls_user_oid(resolved, catalog),
+        catalog,
+    )
+    .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
+}
+
 fn merge_mutating_event(stmt: &MergeStatement) -> Option<ViewDmlEvent> {
     stmt.when_clauses
         .iter()
@@ -1419,9 +1538,6 @@ pub fn plan_merge(
         .as_ref()
         .map(|target| target.base_relation.clone())
         .unwrap_or_else(|| entry.clone());
-    if relation_has_row_security(execution_relation.relation_oid, catalog) {
-        return Err(unsupported_with_row_security("MERGE"));
-    }
     let column_defaults =
         bind_insert_column_defaults(&execution_relation.desc, catalog, &local_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
@@ -1511,12 +1627,13 @@ pub fn plan_merge(
         ),
     );
     let action_merged_scope = combine_scopes(&action_target_scope, &action_source_scope);
+    let returning_merged_scope = combine_scopes(&action_source_scope, &action_target_scope);
 
     let returning_visible_column_count =
         execution_relation.desc.columns.len() + source_visible_count;
     let returning_scope = if let Some(resolved) = auto_view_target.as_ref() {
         scope_with_returning_pseudo_row_exprs(
-            action_merged_scope.clone(),
+            returning_merged_scope,
             &entry.desc,
             view_returning_pseudo_output_exprs(
                 &resolved.visible_output_exprs,
@@ -1530,7 +1647,7 @@ pub fn plan_merge(
             ),
         )
     } else {
-        scope_with_returning_pseudo_rows(action_merged_scope.clone(), &execution_relation.desc)
+        scope_with_returning_pseudo_rows(returning_merged_scope, &execution_relation.desc)
     };
     let returning = bind_merge_returning_targets(
         &stmt.returning,
@@ -1538,6 +1655,33 @@ pub fn plan_merge(
         returning_visible_column_count,
         catalog,
         &local_ctes,
+    )?;
+    let merge_update_rls = build_target_relation_row_security(
+        &stmt.target_table,
+        execution_relation.relation_oid,
+        &execution_relation.desc,
+        PolicyCommand::Update,
+        false,
+        true,
+        catalog,
+    )?;
+    let merge_delete_rls = build_target_relation_row_security(
+        &stmt.target_table,
+        execution_relation.relation_oid,
+        &execution_relation.desc,
+        PolicyCommand::Delete,
+        false,
+        false,
+        catalog,
+    )?;
+    let merge_insert_rls = build_target_relation_row_security(
+        &stmt.target_table,
+        execution_relation.relation_oid,
+        &execution_relation.desc,
+        PolicyCommand::Insert,
+        false,
+        !returning.is_empty(),
+        catalog,
     )?;
 
     let mut when_clauses = stmt
@@ -1634,6 +1778,9 @@ pub fn plan_merge(
         .with_input_resno(source_marker_input),
     );
     let query = query_from_from_projection(joined, projection_targets);
+    let [query] = pg_rewrite_query(query, catalog)?
+        .try_into()
+        .expect("MERGE input rewrite should return a single query");
 
     Ok(BoundMergeStatement {
         relation_name: stmt.target_table.clone(),
@@ -1660,6 +1807,16 @@ pub fn plan_merge(
         visible_column_count,
         target_ctid_index,
         source_present_index,
+        merge_update_visibility_checks: build_visibility_write_checks(
+            merge_update_rls.visibility_quals,
+            crate::backend::rewrite::RlsWriteCheckSource::MergeUpdateVisibility,
+        ),
+        merge_delete_visibility_checks: build_visibility_write_checks(
+            merge_delete_rls.visibility_quals,
+            crate::backend::rewrite::RlsWriteCheckSource::MergeDeleteVisibility,
+        ),
+        merge_update_write_checks: merge_update_rls.write_checks,
+        merge_insert_write_checks: merge_insert_rls.write_checks,
         when_clauses,
         returning,
         required_privileges,
@@ -2755,6 +2912,8 @@ fn bind_auto_view_on_conflict_clause(
             BoundOnConflictAction::Update {
                 assignments,
                 predicate,
+                conflict_visibility_checks: Vec::new(),
+                update_write_checks: Vec::new(),
             }
         }
     };
@@ -2834,6 +2993,14 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         )?),
         None => stmt.on_conflict,
     };
+    let base_rls = build_auto_view_base_row_security(
+        &relation_name,
+        &resolved,
+        PolicyCommand::Insert,
+        false,
+        !stmt.returning.is_empty(),
+        catalog,
+    )?;
 
     Ok(BoundInsertStatement {
         relation_name: relation_name.clone(),
@@ -2870,9 +3037,10 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
-        rls_write_checks: stmt
-            .rls_write_checks
+        rls_write_checks: base_rls
+            .write_checks
             .into_iter()
+            .chain(stmt.rls_write_checks)
             .chain(
                 resolved
                     .view_check_options
@@ -2969,6 +3137,14 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
             &target.assignments,
         ));
     }
+    let base_rls = build_auto_view_base_row_security(
+        &relation_name,
+        &resolved,
+        PolicyCommand::Update,
+        true,
+        !stmt.returning.is_empty(),
+        catalog,
+    )?;
     let predicate = and_predicates(
         resolved.combined_predicate.clone(),
         target
@@ -2976,6 +3152,12 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
             .as_ref()
             .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &input_output_exprs)),
     );
+    let predicate = prepend_visibility_quals(base_rls.visibility_quals.clone(), predicate);
+    let rls_write_checks = base_rls
+        .write_checks
+        .into_iter()
+        .chain(target.rls_write_checks.clone())
+        .collect::<Vec<_>>();
 
     let targets = auto_view_base_children(&resolved, catalog)?
         .into_iter()
@@ -2989,7 +3171,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                     &resolved.base_relation.desc,
                     &assignments,
                     predicate.as_ref(),
-                    &target.rls_write_checks,
+                    &rls_write_checks,
                     partition_update_root_oid,
                     allow_partition_routing,
                     &child,
@@ -3001,7 +3183,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                     &resolved.base_relation.desc,
                     &assignments,
                     predicate.as_ref(),
-                    &target.rls_write_checks,
+                    &rls_write_checks,
                     partition_update_root_oid,
                     allow_partition_routing,
                     &child,
@@ -3097,12 +3279,21 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
             context_name,
         ));
     }
+    let base_rls = build_auto_view_base_row_security(
+        &relation_name,
+        &resolved,
+        PolicyCommand::Delete,
+        true,
+        false,
+        catalog,
+    )?;
     let predicate = and_predicates(
         resolved.combined_predicate.clone(),
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
         }),
     );
+    let predicate = prepend_visibility_quals(base_rls.visibility_quals.clone(), predicate);
 
     let targets = auto_view_base_children(&resolved, catalog)?
         .into_iter()
@@ -3126,11 +3317,11 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
-        input_plan: None,
-        target_visible_count: resolved.base_relation.desc.columns.len(),
-        visible_column_count: resolved.base_relation.desc.columns.len(),
-        target_ctid_index: resolved.base_relation.desc.columns.len(),
-        target_tableoid_index: resolved.base_relation.desc.columns.len() + 1,
+        input_plan: stmt.input_plan,
+        target_visible_count: stmt.target_visible_count,
+        visible_column_count: stmt.visible_column_count,
+        target_ctid_index: stmt.target_ctid_index,
+        target_tableoid_index: stmt.target_tableoid_index,
         required_privileges,
         subplans: stmt.subplans,
         current_of: stmt.current_of,
@@ -3198,6 +3389,38 @@ fn build_delete_target(
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         parent_visible_exprs: translation_exprs,
         predicate,
+    })
+}
+
+fn build_delete_target_from_joined_input(
+    base_relation_name: &str,
+    parent_desc: &RelationDesc,
+    parent_predicate: Option<&Expr>,
+    child: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundDeleteTarget, ParseError> {
+    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
+    let translation_exprs = inheritance_translation_exprs(
+        &child.desc,
+        &inheritance_translation_indexes(parent_desc, &child.desc),
+        catalog,
+    )?;
+
+    Ok(BoundDeleteTarget {
+        relation_name,
+        rel: child.rel,
+        relation_oid: child.relation_oid,
+        relkind: child.relkind,
+        toast: child.toast,
+        desc: child.desc.clone(),
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
+        row_source: BoundModifyRowSource::Heap,
+        parent_visible_exprs: translation_exprs,
+        predicate: parent_predicate.cloned(),
     })
 }
 
@@ -3609,12 +3832,9 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
     let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
-    if stmt.on_conflict.as_ref().is_some_and(|clause| {
-        clause.action == crate::include::nodes::parsenodes::OnConflictAction::Update
-    }) && relation_has_row_security(entry.relation_oid, catalog)
-    {
-        return Err(unsupported_with_row_security(
-            "INSERT ... ON CONFLICT DO UPDATE",
+    if entry.relkind == 'p' && stmt.on_conflict.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "INSERT ... ON CONFLICT on partitioned tables".into(),
         ));
     }
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &visible_ctes)?;
@@ -3624,7 +3844,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         &entry.desc,
         PolicyCommand::Insert,
         false,
-        false,
+        !stmt.returning.is_empty(),
         catalog,
     )?;
     let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
@@ -3811,11 +4031,74 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         }
     };
     let (target_columns, source) = source;
-    let required_privileges = vec![insert_privilege_requirement(
+    let mut on_conflict = stmt
+        .on_conflict
+        .as_ref()
+        .filter(|_| entry.relkind != 'v')
+        .map(|clause| {
+            super::on_conflict::bind_on_conflict_clause(
+                clause,
+                visible_target_name,
+                entry.relation_oid,
+                &entry.desc,
+                catalog,
+                &visible_ctes,
+            )
+        })
+        .transpose()?;
+    if let Some(BoundOnConflictClause {
+        action:
+            BoundOnConflictAction::Update {
+                conflict_visibility_checks,
+                update_write_checks,
+                ..
+            },
+        ..
+    }) = &mut on_conflict
+    {
+        let update_rls = build_target_relation_row_security(
+            &stmt.table_name,
+            entry.relation_oid,
+            &entry.desc,
+            PolicyCommand::Update,
+            false,
+            true,
+            catalog,
+        )?;
+        let conflict_quals = update_rls
+            .visibility_quals
+            .into_iter()
+            .filter(|qual| {
+                !update_rls.write_checks.iter().any(|check| {
+                    matches!(
+                        check.source,
+                        crate::backend::rewrite::RlsWriteCheckSource::Update
+                    ) && check.expr == *qual
+                })
+            })
+            .collect();
+        *conflict_visibility_checks = build_conflict_visibility_checks(conflict_quals);
+        *update_write_checks = update_rls.write_checks;
+    }
+    let raw_on_conflict = (entry.relkind == 'v')
+        .then(|| stmt.on_conflict.clone())
+        .flatten();
+    let mut required_privileges = vec![insert_privilege_requirement(
         &entry,
         &stmt.table_name,
         &target_columns,
     )];
+    if let Some(BoundOnConflictClause {
+        action: BoundOnConflictAction::Update { assignments, .. },
+        ..
+    }) = &on_conflict
+    {
+        required_privileges.push(on_conflict_update_privilege_requirement(
+            &entry,
+            &stmt.table_name,
+            assignments,
+        ));
+    }
 
     Ok(BoundInsertStatement {
         relation_name: stmt.table_name.clone(),
@@ -3841,24 +4124,8 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
             &entry.desc,
             catalog,
         )?,
-        on_conflict: stmt
-            .on_conflict
-            .as_ref()
-            .filter(|_| entry.relkind != 'v')
-            .map(|clause| {
-                super::on_conflict::bind_on_conflict_clause(
-                    clause,
-                    visible_target_name,
-                    entry.relation_oid,
-                    &entry.desc,
-                    catalog,
-                    &visible_ctes,
-                )
-            })
-            .transpose()?,
-        raw_on_conflict: (entry.relkind == 'v')
-            .then(|| stmt.on_conflict.clone())
-            .flatten(),
+        on_conflict,
+        raw_on_conflict,
         returning,
         rls_write_checks: target_rls.write_checks,
         required_privileges,
@@ -3878,20 +4145,31 @@ pub(crate) fn bind_update_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<BoundUpdateStatement, ParseError> {
+    bind_update_with_outer_scopes_and_ctes(stmt, catalog, outer_scopes, &[])
+}
+
+pub(crate) fn bind_update_with_outer_scopes_and_ctes(
+    stmt: &UpdateStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<BoundUpdateStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
         outer_scopes,
         None,
-        &[],
+        outer_ctes,
         &[],
     )?;
+    let mut visible_ctes = local_ctes.clone();
+    visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     if stmt.from.is_some() {
-        return bind_update_from(stmt, catalog, outer_scopes, &local_ctes, &entry);
+        return bind_update_from(stmt, catalog, outer_scopes, &visible_ctes, &entry);
     }
-    bind_simple_update(stmt, catalog, outer_scopes, &local_ctes, &entry)
+    bind_simple_update(stmt, catalog, outer_scopes, &visible_ctes, &entry)
 }
 
 fn bind_simple_update(
@@ -3933,15 +4211,10 @@ fn bind_simple_update(
         // :HACK: pgrust always materializes old target rows through one path today,
         // so first-pass UPDATE RLS also requires SELECT visibility on the target.
         true,
-        false,
+        !stmt.returning.is_empty(),
         catalog,
     )?;
-    let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(visibility_qual, predicate)),
-        (Some(predicate), None) => Some(predicate),
-        (None, Some(visibility_qual)) => Some(visibility_qual),
-        (None, None) => None,
-    };
+    let predicate = prepend_visibility_quals(target_rls.visibility_quals.clone(), predicate);
     let assignments = stmt
         .assignments
         .iter()
@@ -4103,10 +4376,10 @@ fn bind_update_from(
         &entry.desc,
         PolicyCommand::Update,
         true,
-        false,
+        !stmt.returning.is_empty(),
         catalog,
     )?;
-    let predicate = stmt
+    let user_predicate = stmt
         .where_clause
         .as_ref()
         .map(|expr| {
@@ -4120,12 +4393,8 @@ fn bind_update_from(
             )
         })
         .transpose()?;
-    let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
-        (Some(predicate), None) => Some(predicate),
-        (None, Some(visibility_qual)) => Some(visibility_qual),
-        (None, None) => None,
-    };
+    let predicate =
+        prepend_visibility_quals(target_rls.visibility_quals.clone(), user_predicate.clone());
     let assignments = stmt
         .assignments
         .iter()
@@ -4186,7 +4455,12 @@ fn bind_update_from(
         outer_scopes,
         local_ctes,
     )?;
-    let query = query_from_projection_with_qual(projected, predicate.clone());
+    let query = query_from_projection_with_target_security_quals(
+        projected,
+        Vec::new(),
+        predicate.clone(),
+        catalog,
+    )?;
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 
@@ -4366,7 +4640,12 @@ pub(crate) fn bind_delete_with_outer_scopes(
     if stmt.using.is_some() {
         return bind_delete_using(stmt, catalog, outer_scopes, &local_ctes, &entry);
     }
-    let scope = scope_for_relation_with_generated(Some(&stmt.table_name), &entry.desc, catalog)?;
+    let scope = scope_for_base_relation_with_generated(
+        &stmt.table_name,
+        &entry.desc,
+        Some(entry.relation_oid),
+        catalog,
+    )?;
     let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
     let predicate = stmt
         .where_clause
@@ -4393,12 +4672,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         false,
         catalog,
     )?;
-    let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(visibility_qual, predicate)),
-        (Some(predicate), None) => Some(predicate),
-        (None, Some(visibility_qual)) => Some(visibility_qual),
-        (None, None) => None,
-    };
+    let predicate = prepend_visibility_quals(target_rls.visibility_quals.clone(), predicate);
 
     let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
         .into_iter()
@@ -4437,8 +4711,9 @@ fn bind_delete_using(
     local_ctes: &[BoundCte],
     entry: &BoundRelation,
 ) -> Result<BoundDeleteStatement, ParseError> {
+    let target_relation_name = stmt.table_name.clone();
     let target_scope = scope_for_base_relation_with_generated(
-        &stmt.table_name,
+        &target_relation_name,
         &entry.desc,
         Some(entry.relation_oid),
         catalog,
@@ -4446,9 +4721,17 @@ fn bind_delete_using(
     let source_stmt = stmt.using.as_ref().expect("checked above");
     let (source_from, source_scope_raw) =
         bind_from_item_with_ctes(source_stmt, catalog, outer_scopes, None, local_ctes, &[])?;
+    if source_scope_raw.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&target_relation_name))
+    }) {
+        return Err(ParseError::DuplicateTableName(target_relation_name));
+    }
 
     let mut target_base = AnalyzedFrom::relation(
-        stmt.table_name.clone(),
+        target_relation_name.clone(),
         entry.rel,
         entry.relation_oid,
         entry.relkind,
@@ -4486,7 +4769,7 @@ fn bind_delete_using(
         false,
         catalog,
     )?;
-    let predicate = stmt
+    let user_predicate = stmt
         .where_clause
         .as_ref()
         .map(|expr| {
@@ -4500,12 +4783,8 @@ fn bind_delete_using(
             )
         })
         .transpose()?;
-    let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
-        (Some(predicate), None) => Some(predicate),
-        (None, Some(visibility_qual)) => Some(visibility_qual),
-        (None, None) => None,
-    };
+    let predicate =
+        prepend_visibility_quals(target_rls.visibility_quals.clone(), user_predicate.clone());
     let returning = bind_returning_targets(
         &stmt.returning,
         &returning_scope,
@@ -4513,7 +4792,12 @@ fn bind_delete_using(
         outer_scopes,
         local_ctes,
     )?;
-    let query = query_from_projection_with_qual(projected, predicate.clone());
+    let query = query_from_projection_with_target_security_quals(
+        projected,
+        Vec::new(),
+        predicate.clone(),
+        catalog,
+    )?;
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 
@@ -4544,36 +4828,5 @@ fn bind_delete_using(
         required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
         subplans: Vec::new(),
         current_of: stmt.current_of.clone(),
-    })
-}
-
-fn build_delete_target_from_joined_input(
-    base_relation_name: &str,
-    parent_desc: &RelationDesc,
-    parent_predicate: Option<&Expr>,
-    child: &BoundRelation,
-    catalog: &dyn CatalogLookup,
-) -> Result<BoundDeleteTarget, ParseError> {
-    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
-    let translation_exprs = inheritance_translation_exprs(
-        &child.desc,
-        &inheritance_translation_indexes(parent_desc, &child.desc),
-        catalog,
-    )?;
-    Ok(BoundDeleteTarget {
-        relation_name,
-        rel: child.rel,
-        relation_oid: child.relation_oid,
-        relkind: child.relkind,
-        toast: child.toast,
-        desc: child.desc.clone(),
-        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
-            child.relation_oid,
-            &child.desc,
-            catalog,
-        )?,
-        row_source: BoundModifyRowSource::Heap,
-        parent_visible_exprs: translation_exprs,
-        predicate: parent_predicate.cloned(),
     })
 }

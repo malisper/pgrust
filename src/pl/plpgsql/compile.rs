@@ -5181,6 +5181,9 @@ fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
         CteBody::Insert(insert) => {
             CteBody::Insert(Box::new(normalize_plpgsql_insert(*insert, env)))
         }
+        CteBody::Update(update) => {
+            CteBody::Update(Box::new(normalize_plpgsql_update(*update, env)))
+        }
         CteBody::RecursiveUnion {
             all,
             anchor,
@@ -5272,6 +5275,9 @@ fn normalize_plpgsql_delete(mut stmt: DeleteStatement, env: &CompileEnv) -> Dele
     stmt.where_clause = stmt
         .where_clause
         .map(|expr| normalize_plpgsql_expr(expr, env));
+    stmt.using = stmt
+        .using
+        .map(|from| normalize_plpgsql_from_item(from, env));
     stmt.returning = stmt
         .returning
         .into_iter()

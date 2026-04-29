@@ -752,6 +752,7 @@ pub(super) fn optimize_path_with_config(
                 pathtarget,
                 slot_id,
                 cte_id,
+                cte_name,
                 subroot,
                 query,
                 cte_plan,
@@ -774,6 +775,7 @@ pub(super) fn optimize_path_with_config(
                     pathtarget,
                     slot_id,
                     cte_id,
+                    cte_name,
                     subroot,
                     query,
                     cte_plan: Box::new(cte_plan),
@@ -8856,6 +8858,7 @@ fn const_gist_argument_value(expr: &Expr) -> Option<Value> {
 fn runtime_index_argument_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Const(_) | Expr::Param(_) => true,
+        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => true,
         Expr::Var(var) => var.varlevelsup > 0,
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
             runtime_index_argument_expr(inner)
@@ -8869,6 +8872,7 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
 
 fn expr_contains_runtime_input(expr: &Expr) -> bool {
     match expr {
+        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => true,
         Expr::Var(var) => var.varlevelsup > 0,
         Expr::Param(_) => true,
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {

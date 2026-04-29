@@ -1850,6 +1850,28 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                 .join(" OR "),
         },
         Expr::Op(op) => render_op(op, ctx),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            ..
+        } => render_like_expr(
+            expr,
+            pattern,
+            escape.as_deref(),
+            *case_insensitive,
+            *negated,
+            ctx,
+        ),
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+            ..
+        } => render_similar_expr(expr, pattern, escape.as_deref(), *negated, ctx),
         Expr::SubLink(sublink) => render_sublink(sublink, ctx),
         Expr::ScalarArrayOp(saop) => render_scalar_array_op(saop, ctx),
         Expr::Func(func) => render_function(func, ctx),
@@ -2026,7 +2048,12 @@ fn render_view_interval_text(interval: IntervalValue) -> String {
 
 fn render_wrapped_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) | Expr::ScalarArrayOp(_) | Expr::Collate { .. } => {
+        Expr::Op(_)
+        | Expr::Bool(_)
+        | Expr::ScalarArrayOp(_)
+        | Expr::Collate { .. }
+        | Expr::Like { .. }
+        | Expr::Similar { .. } => {
             format!("({})", render_expr(expr, ctx))
         }
         _ => render_expr(expr, ctx),
@@ -2764,6 +2791,57 @@ fn render_bpchar_comparison_operand(expr: &Expr, ctx: &ViewDeparseContext<'_>) -
         Expr::Const(value) => format!("{}::bpchar", render_literal(value)),
         _ => render_wrapped_expr(expr, ctx),
     }
+}
+
+fn render_like_expr(
+    expr: &Expr,
+    pattern: &Expr,
+    escape: Option<&Expr>,
+    case_insensitive: bool,
+    negated: bool,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    let op = match (case_insensitive, negated) {
+        (true, true) => "NOT ILIKE",
+        (true, false) => "ILIKE",
+        (false, true) => "NOT LIKE",
+        (false, false) => "LIKE",
+    };
+    let mut rendered = format!(
+        "{} {} {}",
+        render_wrapped_expr(expr, ctx),
+        op,
+        render_wrapped_expr(pattern, ctx)
+    );
+    if let Some(escape) = escape {
+        rendered.push_str(" ESCAPE ");
+        rendered.push_str(&render_wrapped_expr(escape, ctx));
+    }
+    rendered
+}
+
+fn render_similar_expr(
+    expr: &Expr,
+    pattern: &Expr,
+    escape: Option<&Expr>,
+    negated: bool,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    let mut rendered = format!(
+        "{} {} {}",
+        render_wrapped_expr(expr, ctx),
+        if negated {
+            "NOT SIMILAR TO"
+        } else {
+            "SIMILAR TO"
+        },
+        render_wrapped_expr(pattern, ctx)
+    );
+    if let Some(escape) = escape {
+        rendered.push_str(" ESCAPE ");
+        rendered.push_str(&render_wrapped_expr(escape, ctx));
+    }
+    rendered
 }
 
 fn render_binary_operator(op: OpExprKind) -> &'static str {

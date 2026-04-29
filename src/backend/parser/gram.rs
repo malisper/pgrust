@@ -166,6 +166,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_copy_statement(&sql, options)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_prepared_statement(&sql, options)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1243,6 +1246,230 @@ fn try_parse_copy_statement(
         return Ok(Some(stmt));
     }
     build_copy_from_statement(rest).map(Some)
+}
+
+fn try_parse_prepared_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if keyword_at_start(trimmed, "prepare") {
+        return build_raw_prepare_statement(trimmed, options).map(Some);
+    }
+    if keyword_at_start(trimmed, "execute") {
+        return build_raw_execute_statement(trimmed).map(Some);
+    }
+    if keyword_at_start(trimmed, "explain") {
+        return build_raw_explain_execute_statement(trimmed);
+    }
+    Ok(None)
+}
+
+fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<Statement, ParseError> {
+    let rest = consume_keyword(sql, "prepare").trim_start();
+    let (name, mut rest) = parse_unqualified_identifier(rest, "prepared statement name")?;
+    rest = rest.trim_start();
+    let parameter_types = if rest.starts_with('(') {
+        let (segment, after) = take_parenthesized_segment(rest)?;
+        rest = after.trim_start();
+        split_top_level_items(&segment, ',')?
+            .into_iter()
+            .filter_map(|item| {
+                let item = item.trim().to_string();
+                (!item.is_empty()).then_some(item)
+            })
+            .map(|item| parse_type_name(&item))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    if !keyword_at_start(rest, "as") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "AS",
+            actual: rest.into(),
+        });
+    }
+    let query_sql = consume_keyword(rest, "as").trim_start().to_string();
+    if query_sql.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    let query = match parse_statement_with_options_inner(query_sql.clone(), options)? {
+        Statement::Select(select) => PreparedStatementQuery::Select(select),
+        Statement::Update(update) => PreparedStatementQuery::Update(update),
+        other => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "SELECT or UPDATE",
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+    Ok(Statement::Prepare(PrepareStatement {
+        name,
+        parameter_types,
+        query,
+        query_sql,
+    }))
+}
+
+fn build_raw_execute_statement(sql: &str) -> Result<Statement, ParseError> {
+    let rest = consume_keyword(sql, "execute").trim_start();
+    let (name, mut rest) = parse_unqualified_identifier(rest, "prepared statement name")?;
+    rest = rest.trim_start();
+    let args_sql = if rest.starts_with('(') {
+        let (segment, after) = take_parenthesized_segment(rest)?;
+        rest = after.trim_start();
+        split_top_level_items(&segment, ',')?
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !rest.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of EXECUTE",
+            actual: rest.into(),
+        });
+    }
+    Ok(Statement::Execute(ExecuteStatement { name, args_sql }))
+}
+
+fn build_raw_explain_execute_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let mut rest = consume_keyword(sql, "explain").trim_start();
+    let mut explain = ExplainStatement {
+        analyze: false,
+        buffers: false,
+        costs: true,
+        summary: true,
+        format: ExplainFormat::Text,
+        timing: true,
+        verbose: false,
+        statement: Box::new(Statement::Unsupported(UnsupportedStatement {
+            sql: String::new(),
+            feature: "EXPLAIN",
+        })),
+    };
+    if keyword_at_start(rest, "analyze") {
+        explain.analyze = true;
+        rest = consume_keyword(rest, "analyze").trim_start();
+    } else if rest.starts_with('(') {
+        let (segment, after) = take_parenthesized_segment(rest)?;
+        apply_raw_explain_options(&mut explain, &segment)?;
+        rest = after.trim_start();
+    }
+    if !keyword_at_start(rest, "execute") {
+        return Ok(None);
+    }
+    let Statement::Execute(execute) = build_raw_execute_statement(rest)? else {
+        unreachable!("raw EXECUTE parser returned non-EXECUTE");
+    };
+    explain.statement = Box::new(Statement::Execute(execute));
+    Ok(Some(Statement::Explain(explain)))
+}
+
+fn apply_raw_explain_options(
+    explain: &mut ExplainStatement,
+    options: &str,
+) -> Result<(), ParseError> {
+    for item in split_top_level_items(options, ',')? {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let mut parts = item.split_whitespace();
+        let name = parts.next().unwrap_or_default().to_ascii_lowercase();
+        let value = parts.next().unwrap_or("true").to_ascii_lowercase();
+        let bool_val = !matches!(value.as_str(), "off" | "false");
+        match name.as_str() {
+            "analyze" => explain.analyze = bool_val,
+            "buffers" => explain.buffers = bool_val,
+            "costs" => explain.costs = bool_val,
+            "summary" => explain.summary = bool_val,
+            "timing" => explain.timing = bool_val,
+            "verbose" => explain.verbose = bool_val,
+            "format" if value == "json" => explain.format = ExplainFormat::Json,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn substitute_prepared_parameter_refs(
+    input: &str,
+    mut replacement: impl FnMut(usize) -> String,
+) -> Result<String, ParseError> {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if in_single_quote {
+            out.push(ch);
+            if ch == '\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double_quote {
+            out.push(ch);
+            if ch == '"' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                    out.push('"');
+                    i += 2;
+                    continue;
+                }
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single_quote = true;
+                out.push(ch);
+                i += 1;
+            }
+            '"' => {
+                in_double_quote = true;
+                out.push(ch);
+                i += 1;
+            }
+            '$' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+                    end += 1;
+                }
+                if end == start {
+                    out.push(ch);
+                    i += 1;
+                    continue;
+                }
+                let position = input[start..end].parse::<usize>().map_err(|_| {
+                    ParseError::UnexpectedToken {
+                        expected: "prepared statement parameter",
+                        actual: input[i..end].into(),
+                    }
+                })?;
+                out.push_str(&replacement(position));
+                i = end;
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn build_copy_from_statement(rest: &str) -> Result<Statement, ParseError> {
@@ -17748,6 +17975,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
         }
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
         Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
+        Rule::update_stmt => Ok(CteBody::Update(Box::new(build_update(pair)?))),
         Rule::recursive_union_cte_body => {
             let all = contains_union_all(pair.as_str());
             let mut inner = pair.into_inner();
@@ -18149,20 +18377,21 @@ fn build_table_sample_clause(pair: Pair<'_, Rule>) -> Result<RawTableSampleClaus
     let mut method = None;
     let mut args = Vec::new();
     let mut repeatable = None;
+    let mut seen_method = false;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier => {
+            Rule::identifier if !seen_method => {
                 method = Some(build_identifier(part));
+                seen_method = true;
             }
             Rule::expr_list => {
                 args = part
                     .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::expr)
                     .map(build_expr)
                     .collect::<Result<Vec<_>, _>>()?;
             }
-            Rule::expr => {
-                repeatable = Some(build_expr(part)?);
-            }
+            Rule::expr => repeatable = Some(build_expr(part)?),
             _ => {}
         }
     }

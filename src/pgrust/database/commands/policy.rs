@@ -1,10 +1,14 @@
 use super::super::*;
 use crate::backend::parser::{
     AlterPolicyAction, AlterPolicyStatement, CatalogLookup, CreatePolicyStatement,
-    DropPolicyStatement, ParseError, SqlTypeKind, bind_scalar_expr_in_named_relation_scope,
+    DropPolicyStatement, ParseError, SqlExpr, SqlTypeKind,
+    bind_policy_expr_in_named_relation_scope, parse_expr,
 };
 use crate::include::catalog::PgPolicyRow;
-use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_heap_relation_for_ddl};
+use crate::pgrust::database::ddl::{
+    ensure_relation_owner, lookup_table_or_partitioned_table_for_alter_table,
+};
+use crate::pgrust::database::relation_refs::collect_direct_relation_oids_from_sql_exprs;
 
 const PUBLIC_ROLE_OID: u32 = 0;
 
@@ -41,7 +45,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &stmt.table_name, false)?
+        else {
+            unreachable!("if_exists is false");
+        };
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
         validate_policy_stmt(
             &catalog,
@@ -73,10 +81,14 @@ impl Database {
             polrelid: relation.relation_oid,
             polcmd: stmt.command,
             polpermissive: stmt.permissive,
-            polroles: resolve_policy_roles(self, client_id, &stmt.role_names)?,
+            polroles: resolve_policy_roles(self, client_id, Some((xid, cid)), &stmt.role_names)?,
             polqual: stmt.using_sql.clone(),
             polwithcheck: stmt.with_check_sql.clone(),
         };
+        let referenced_relation_oids = policy_referenced_relation_oids(
+            &catalog,
+            [stmt.using_expr.as_ref(), stmt.with_check_expr.as_ref()],
+        );
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -89,7 +101,7 @@ impl Database {
         let (_oid, effect) = self
             .catalog
             .write()
-            .create_policy_mvcc(policy_row, &ctx)
+            .create_policy_mvcc(policy_row, &referenced_relation_oids, &ctx)
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
@@ -129,12 +141,17 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &stmt.table_name, false)?
+        else {
+            unreachable!("if_exists is false");
+        };
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
-        let existing = catalog
-            .policy_rows_for_relation(relation.relation_oid)
-            .into_iter()
+        let policies = catalog.policy_rows_for_relation(relation.relation_oid);
+        let existing = policies
+            .iter()
             .find(|row| row.polname.eq_ignore_ascii_case(&stmt.policy_name))
+            .cloned()
             .ok_or_else(|| ExecError::DetailedError {
                 message: format!(
                     "policy \"{}\" for table \"{}\" does not exist",
@@ -146,10 +163,26 @@ impl Database {
             })?;
 
         let updated = match &stmt.action {
-            AlterPolicyAction::Rename { new_name } => PgPolicyRow {
-                polname: new_name.to_ascii_lowercase(),
-                ..existing.clone()
-            },
+            AlterPolicyAction::Rename { new_name } => {
+                if policies
+                    .iter()
+                    .any(|row| row.polname.eq_ignore_ascii_case(new_name))
+                {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "policy \"{}\" for table \"{}\" already exists",
+                            new_name, stmt.table_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42710",
+                    });
+                }
+                PgPolicyRow {
+                    polname: new_name.to_ascii_lowercase(),
+                    ..existing.clone()
+                }
+            }
             AlterPolicyAction::Update {
                 role_names,
                 using_expr,
@@ -167,7 +200,7 @@ impl Database {
                 PgPolicyRow {
                     polroles: role_names
                         .as_ref()
-                        .map(|names| resolve_policy_roles(self, client_id, names))
+                        .map(|names| resolve_policy_roles(self, client_id, Some((xid, cid)), names))
                         .transpose()?
                         .unwrap_or_else(|| existing.polroles.clone()),
                     polqual: using_sql.clone().or_else(|| existing.polqual.clone()),
@@ -178,6 +211,22 @@ impl Database {
                 }
             }
         };
+        let parsed_using = updated
+            .polqual
+            .as_deref()
+            .map(parse_expr)
+            .transpose()
+            .map_err(ExecError::Parse)?;
+        let parsed_with_check = updated
+            .polwithcheck
+            .as_deref()
+            .map(parse_expr)
+            .transpose()
+            .map_err(ExecError::Parse)?;
+        let referenced_relation_oids = policy_referenced_relation_oids(
+            &catalog,
+            [parsed_using.as_ref(), parsed_with_check.as_ref()],
+        );
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -190,7 +239,7 @@ impl Database {
         let (_oid, effect) = self
             .catalog
             .write()
-            .replace_policy_mvcc(&existing, updated, &ctx)
+            .replace_policy_mvcc(&existing, updated, &referenced_relation_oids, &ctx)
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
@@ -230,7 +279,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &stmt.table_name, false)?
+        else {
+            unreachable!("if_exists is false");
+        };
         ensure_drop_policy_relation_owner(self, client_id, &relation, &stmt.table_name)?;
         let Some(_existing) = catalog
             .policy_rows_for_relation(relation.relation_oid)
@@ -275,9 +328,10 @@ impl Database {
 fn resolve_policy_roles(
     db: &Database,
     client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
     role_names: &[String],
 ) -> Result<Vec<u32>, ExecError> {
-    let auth_catalog = db.auth_catalog(client_id, None).map_err(|err| {
+    let auth_catalog = db.auth_catalog(client_id, txn_ctx).map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
             expected: "authorization catalog",
             actual: format!("{err:?}"),
@@ -299,6 +353,15 @@ fn resolve_policy_roles(
                     sqlstate: "42704",
                 })
         })
+        .collect()
+}
+
+fn policy_referenced_relation_oids<'a>(
+    catalog: &dyn CatalogLookup,
+    exprs: impl IntoIterator<Item = Option<&'a SqlExpr>>,
+) -> Vec<u32> {
+    collect_direct_relation_oids_from_sql_exprs(exprs.into_iter().flatten(), catalog)
+        .into_iter()
         .collect()
 }
 
@@ -335,7 +398,7 @@ fn validate_policy_stmt(
 ) -> Result<(), ExecError> {
     for expr in [using_expr, with_check_expr].into_iter().flatten() {
         let (_, expr_type) =
-            bind_scalar_expr_in_named_relation_scope(expr, &[(relation_name, desc)], &[], catalog)
+            bind_policy_expr_in_named_relation_scope(expr, &[(relation_name, desc)], &[], catalog)
                 .map_err(ExecError::Parse)?;
         if expr_type.kind != SqlTypeKind::Bool {
             return Err(ExecError::DetailedError {

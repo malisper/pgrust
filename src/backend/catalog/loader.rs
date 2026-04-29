@@ -28,11 +28,12 @@ use crate::backend::catalog::rowcodec::{
     pg_opfamily_row_from_values, pg_partitioned_table_row_from_values, pg_policy_row_from_values,
     pg_proc_row_from_values, pg_publication_namespace_row_from_values,
     pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
-    pg_sequence_row_from_values, pg_statistic_ext_data_row_from_values,
-    pg_statistic_ext_row_from_values, pg_statistic_row_from_values, pg_tablespace_row_from_values,
-    pg_trigger_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
-    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
-    pg_type_row_from_values, pg_user_mapping_row_from_values,
+    pg_sequence_row_from_values, pg_shdepend_row_from_values,
+    pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
+    pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
+    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
+    pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
+    pg_user_mapping_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -999,9 +1000,14 @@ fn append_catalog_kind_rows(
         | BootstrapCatalogKind::PgTransform
         | BootstrapCatalogKind::PgSubscription
         | BootstrapCatalogKind::PgParameterAcl
-        | BootstrapCatalogKind::PgShdepend
         | BootstrapCatalogKind::PgShdescription
         | BootstrapCatalogKind::PgReplicationOrigin => {}
+        BootstrapCatalogKind::PgShdepend => {
+            rows.shdepends = values
+                .into_iter()
+                .map(pg_shdepend_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         BootstrapCatalogKind::PgDescription => {
             rows.descriptions = values
                 .into_iter()
@@ -1786,6 +1792,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         attributes: attribute_rows,
         attrdefs: attrdef_rows,
         depends: depend_rows,
+        shdepends: Vec::new(),
         inherits: inherit_rows,
         descriptions: description_rows,
         foreign_data_wrappers: Vec::new(),
@@ -2523,6 +2530,7 @@ fn load_physical_catalog_rows_visible_legacy(
         attributes: attribute_rows,
         attrdefs: attrdef_rows,
         depends: depend_rows,
+        shdepends: Vec::new(),
         inherits: inherit_rows,
         descriptions: description_rows,
         foreign_data_wrappers: Vec::new(),

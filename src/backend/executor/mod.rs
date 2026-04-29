@@ -190,7 +190,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub(crate) use constraints::{enforce_relation_constraints, enforce_row_security_write_checks};
+pub(crate) use constraints::{
+    enforce_relation_constraints, enforce_row_security_write_checks,
+    enforce_row_security_write_checks_with_tid,
+};
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
@@ -205,6 +208,7 @@ pub(crate) use permissions::relation_values_visible_for_error_detail;
 #[derive(Debug, Clone, Default)]
 pub struct ExprEvalBindings {
     pub exec_params: HashMap<usize, Value>,
+    pub initplan_values: HashMap<usize, Value>,
     pub external_params: HashMap<usize, Value>,
     pub outer_tuple: Option<Vec<Value>>,
     pub outer_system_bindings: Vec<SystemVarBinding>,

@@ -1031,6 +1031,37 @@ fn sql_set_returning_function_accepts_values_body() {
 }
 
 #[test]
+fn sql_function_accepts_with_body() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table sql_fn_with_body (c text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into sql_fn_with_body values ('a'), ('b')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function sql_fn_with_body()
+             returns setof sql_fn_with_body
+             stable language sql
+             as $$ with cte as (select * from sql_fn_with_body) select * from cte $$",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select * from sql_fn_with_body() order by c"
+        ),
+        vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())],]
+    );
+}
+
+#[test]
 fn sql_set_returning_function_with_ordinality_has_declared_width() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -1330,6 +1361,64 @@ fn sql_polymorphic_out_function_resolves_anyelement_outputs() {
             Value::Text("bigint".into()),
             Value::Text("bigint[]".into()),
         ]]
+    );
+}
+
+#[test]
+fn sql_function_accepts_begin_atomic_body() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function sql_fn_begin_atomic(value text) returns text
+             begin atomic
+               select value || '_ok';
+             end",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select sql_fn_begin_atomic('body')"),
+        vec![vec![Value::Text("body_ok".into())]]
+    );
+}
+
+#[test]
+fn sql_function_set_config_updates_current_statement_guc() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function sql_fn_set_config(value text) returns text
+             begin atomic
+               select set_config('custom.sqlfunc.test', value, true)
+                      || ':' || current_setting('custom.sqlfunc.test');
+             end",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select sql_fn_set_config('body')"),
+        vec![vec![Value::Text("body:body".into())]]
+    );
+}
+
+#[test]
+fn set_config_row_security_returns_postgres_bool_text() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select set_config('row_security', 'false', true)"
+        ),
+        vec![vec![Value::Text("off".into())]]
     );
 }
 
@@ -2738,6 +2827,16 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
     }
 }
 
+fn query_text_column(session: &mut Session, db: &Database, sql: &str) -> Vec<String> {
+    session_query_rows(session, db, sql)
+        .into_iter()
+        .map(|row| match row.first() {
+            Some(Value::Text(text)) => text.to_string(),
+            other => panic!("expected text row, got {other:?}"),
+        })
+        .collect()
+}
+
 fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
     match err {
         ExecError::WithContext { source, .. } => {
@@ -3747,6 +3846,146 @@ fn sql_cursor_fetch_move_close_and_cleanup() {
 }
 
 #[test]
+fn update_where_current_of_uses_cursor_tuple() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table current_of_items (id int4, label text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into current_of_items values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c cursor for select * from current_of_items order by id",
+        )
+        .unwrap();
+    session.execute(&db, "fetch next from c").unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update current_of_items set label = 'uno' where current of c returning id, label",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("uno".into())]]);
+        }
+        other => panic!("expected returning rows, got {other:?}"),
+    }
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, label from current_of_items order by id",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("uno".into())],
+            vec![Value::Int32(2), Value::Text("two".into())],
+        ]
+    );
+}
+
+#[test]
+fn delete_where_current_of_uses_cursor_tuple() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table delete_current_of_items (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into delete_current_of_items values (1), (2)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c cursor for select * from delete_current_of_items order by id",
+        )
+        .unwrap();
+    session.execute(&db, "fetch next from c").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from delete_current_of_items where current of c returning id",
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from delete_current_of_items order by id",
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn update_current_of_refreshes_scroll_cursor_tuple() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table current_of_refresh_items (id int4, label text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into current_of_refresh_items values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c scroll cursor for select * from current_of_refresh_items order by id",
+        )
+        .unwrap();
+    session.execute(&db, "fetch next from c").unwrap();
+    session
+        .execute(
+            &db,
+            "update current_of_refresh_items set label = 'uno' where current of c",
+        )
+        .unwrap();
+    session.execute(&db, "fetch absolute 1 from c").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from current_of_refresh_items where current of c returning id",
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, label from current_of_refresh_items order by id",
+        ),
+        vec![vec![Value::Int32(2), Value::Text("two".into())]]
+    );
+}
+
+#[test]
 fn scroll_cursor_backward_all_leaves_cursor_before_first() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -4586,6 +4825,433 @@ fn delete_returning_target_lists() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn delete_using_returning_projects_target_and_source_rows() {
+    let dir = temp_dir("delete_using_returning");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table du_t1 (a int4)").unwrap();
+    session.execute(&db, "create table du_t2 (a int4)").unwrap();
+    session
+        .execute(&db, "insert into du_t1 values (11), (12), (21), (22)")
+        .unwrap();
+    session
+        .execute(&db, "insert into du_t2 values (10), (20)")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "delete from du_t1 using du_t2 where du_t1.a = du_t2.a + 2 returning *",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "a"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(12), Value::Int32(10)],
+                    vec![Value::Int32(22), Value::Int32(20)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select * from du_t1 order by a"),
+        vec![vec![Value::Int32(11)], vec![Value::Int32(21)]]
+    );
+}
+
+#[test]
+fn delete_returning_tableoid_uses_deleted_relation() {
+    let dir = temp_dir("delete_returning_tableoid");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table delete_returning_oid_tbl (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into delete_returning_oid_tbl values (1), (2)")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "delete from delete_returning_oid_tbl
+             where id = 1
+             returning tableoid::regclass::text, id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("delete_returning_oid_tbl".into()),
+                    Value::Int32(1),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table delete_returning_parent (id int4, a int4, junk text, b text)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table delete_returning_parent drop column junk")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table delete_returning_child (c float4) inherits (delete_returning_parent)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into delete_returning_child(id, a, b, c) values (10, 20, 'child', 2.2)",
+        )
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "delete from delete_returning_parent
+             returning tableoid::regclass::text, id, a, b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("delete_returning_child".into()),
+                    Value::Int32(10),
+                    Value::Int32(20),
+                    Value::Text("child".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn update_returning_tableoid_projects_inherited_parent_columns() {
+    let dir = temp_dir("update_returning_tableoid_inherits");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table update_returning_parent (id int4, a int4, junk text, b text)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table update_returning_parent drop column junk")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table update_returning_child (c float4) inherits (update_returning_parent)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_returning_child(id, a, b, c) values (10, 20, 'child', 2.2)",
+        )
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update update_returning_parent
+             set b = b || '_updated'
+             returning tableoid::regclass::text, id, a, b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("update_returning_child".into()),
+                    Value::Int32(10),
+                    Value::Int32(20),
+                    Value::Text("child_updated".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_view_defers_recursive_rls_policy_expansion_until_use() {
+    let dir = temp_dir("create_view_defers_recursive_rls");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role recursive_view_reader")
+        .unwrap();
+    session
+        .execute(&db, "create table recursive_view_base (x int4, y int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy recursive_view_policy on recursive_view_base
+             using (x = (select r.x from recursive_view_base r where y = r.y))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table recursive_view_base enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on recursive_view_base to recursive_view_reader",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization recursive_view_reader")
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create view recursive_view_base_v as select * from recursive_view_base",
+        )
+        .unwrap();
+
+    match session.execute(&db, "select * from recursive_view_base_v") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(sqlstate, "42P17");
+            assert_eq!(
+                message,
+                "infinite recursion detected in policy for relation \"recursive_view_base\""
+            );
+        }
+        other => panic!("expected recursive RLS error, got {other:?}"),
+    }
+}
+
+#[test]
+fn update_from_applies_source_relation_rls() {
+    let dir = temp_dir("update_from_source_rls");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role update_from_rls_user")
+        .unwrap();
+    session
+        .execute(&db, "create table update_from_rls_target (id int4, b text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table update_from_rls_source (id int4, a int4, b text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_from_rls_target values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_from_rls_source values (1, 1, 'blocked'), (2, 2, 'allowed')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table update_from_rls_target enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table update_from_rls_source enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy target_update on update_from_rls_target for update using (true) with check (true)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy target_select on update_from_rls_target for select using (true)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy source_select on update_from_rls_source for select using (a % 2 = 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant all on update_from_rls_target, update_from_rls_source to update_from_rls_user",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization update_from_rls_user")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update update_from_rls_target t
+             set b = s.b
+             from update_from_rls_source s
+             where t.id = s.id
+             returning t.id, t.b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(2), Value::Text("allowed".into())]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, b from update_from_rls_target order by id",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Int32(2), Value::Text("allowed".into())],
+        ]
+    );
+}
+
+#[test]
+fn update_from_filters_target_rows_with_rls_using() {
+    let dir = temp_dir("update_from_target_rls");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role update_from_target_rls_user")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table update_from_target_rls_target (id int4, b text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table update_from_target_rls_source (id int4, b text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_from_target_rls_target values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_from_target_rls_source values (1, 'blocked'), (2, 'allowed')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table update_from_target_rls_target enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy target_update on update_from_target_rls_target
+             for update using (id = 2) with check (true)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy target_select on update_from_target_rls_target
+             for select using (true)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant all on update_from_target_rls_target, update_from_target_rls_source
+             to update_from_target_rls_user",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization update_from_target_rls_user")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update update_from_target_rls_target t
+             set b = s.b
+             from update_from_target_rls_source s
+             where t.id = s.id
+             returning t.id, t.b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(2), Value::Text("allowed".into())]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, b from update_from_target_rls_target order by id",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Int32(2), Value::Text("allowed".into())],
+        ]
+    );
 }
 
 #[test]
@@ -10434,6 +11100,91 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
 }
 
 #[test]
+fn pg_stats_hides_rows_when_row_security_is_active() {
+    let dir = temp_dir("pg_stats_rls_filter");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role pg_stats_owner nologin")
+        .unwrap();
+    session
+        .execute(&db, "create role pg_stats_reader nologin")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization pg_stats_owner")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pg_stats_rls_items(a int4, owner_name text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into pg_stats_rls_items values
+               (1, 'pg_stats_owner'),
+               (2, 'pg_stats_reader'),
+               (3, 'pg_stats_reader')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant select on pg_stats_rls_items to pg_stats_reader")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table pg_stats_rls_items enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on pg_stats_rls_items using (owner_name = current_user)",
+        )
+        .unwrap();
+    session.execute(&db, "analyze pg_stats_rls_items").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select row_security_active('pg_stats_rls_items')",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_stats where tablename = 'pg_stats_rls_items'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+
+    session
+        .execute(&db, "set session authorization pg_stats_reader")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select row_security_active('pg_stats_rls_items')",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_stats where tablename = 'pg_stats_rls_items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn table_inheritance_merges_columns_and_scans_children() {
     let dir = temp_dir("table_inheritance_scan");
     let db = Database::open(&dir, 128).unwrap();
@@ -10515,6 +11266,18 @@ fn table_inheritance_merges_columns_and_scans_children() {
 
     let explain = explain_lines(&db, 1, "select a, b from parent_inh order by a");
     assert!(explain.iter().any(|line| line.contains("Append")));
+    assert!(
+        explain
+            .iter()
+            .any(|line| line.contains("Seq Scan on parent_inh parent_inh_1")),
+        "expected parent append child alias, got {explain:?}"
+    );
+    assert!(
+        explain
+            .iter()
+            .any(|line| line.contains("Seq Scan on child_inh parent_inh_2")),
+        "expected inherited child append alias, got {explain:?}"
+    );
 }
 
 #[test]
@@ -12016,7 +12779,7 @@ fn relation_privileges_gate_select_dml_copy_and_locking() {
         .unwrap();
 
     assert_table_permission_denied(session.execute(&db, "select * from rel_acl"), "rel_acl");
-    assert_table_permission_denied(session.execute(&db, "select * from pg_class"), "pg_class");
+    session.execute(&db, "select * from pg_class").unwrap();
 
     session.execute(&db, "reset session authorization").unwrap();
     session
@@ -27097,7 +27860,7 @@ fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
         .iter()
         .enumerate()
         .skip(filtered_child_pos + 1)
-        .find(|(_, line)| line.trim_start().starts_with("->  CTE Scan  (cost="))
+        .find(|(_, line)| line.starts_with("  ->  CTE Scan"))
         .map(|(idx, _)| idx)
         .unwrap_or_else(|| panic!("expected unfiltered cte scan in explain output, got {lines:?}"));
     let pushed_filter_pos = lines
@@ -37641,6 +38404,9 @@ fn custom_gucs_can_be_set_reset_and_reject_invalid_names() {
         session_query_rows(&mut session, &db, "show custom.my_guc"),
         vec![vec![Value::Text("".into())]]
     );
+    session
+        .execute(&db, "reset custom.previously_unknown_guc")
+        .unwrap();
 
     match session.execute(&db, "set custom.\"bad-guc\" = 1") {
         Err(ExecError::DetailedError {
@@ -39922,6 +40688,39 @@ fn create_operator_resolves_factorial_int8() {
     assert_eq!(
         query_rows(&db, 1, "select !=- 10"),
         vec![vec![Value::Numeric("3628800".into())]]
+    );
+}
+
+#[test]
+fn create_operator_supports_regression_triple_less_than() {
+    let base = temp_dir("create_operator_triple_less_than");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function op_leak(int, int) returns bool language plpgsql as $$
+         begin
+           return $1 < $2;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator <<< (procedure = op_leak, leftarg = int, rightarg = int, restrict = scalarltsel)",
+    )
+    .unwrap();
+    db.execute(1, "create table custom_op_t (a int4)").unwrap();
+    db.execute(1, "insert into custom_op_t values (1), (12)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a from custom_op_t where a <<< 10 order by a",
+        ),
+        vec![vec![Value::Int32(1)]]
     );
 }
 
@@ -42873,6 +43672,38 @@ fn copy_to_stdout_renders_header_and_csv_rows() {
             "expected COPY output, got {:?}",
             std::mem::discriminant(&other)
         ),
+    }
+}
+
+#[test]
+fn copy_relation_to_stdout_skips_inherited_children() {
+    let base = temp_dir("copy_to_inherits_only_parent");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_parent (a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "create table copy_child () inherits (copy_parent)")
+        .unwrap();
+    session
+        .execute(&db, "insert into copy_parent values (1, 'parent')")
+        .unwrap();
+    session
+        .execute(&db, "insert into copy_child values (2, 'child')")
+        .unwrap();
+    let copy =
+        crate::pgrust::session::parse_copy_command("copy copy_parent to stdout with delimiter ','")
+            .unwrap()
+            .unwrap();
+
+    match session.execute_copy_command(&db, &copy).unwrap() {
+        crate::pgrust::session::CopyExecutionResult::Output { data, rows } => {
+            assert_eq!(rows, 1);
+            assert_eq!(String::from_utf8(data).unwrap(), "1,parent\n");
+        }
+        other => panic!("expected COPY output, got {other:?}"),
     }
 }
 
@@ -47565,9 +48396,18 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         vec![vec![
             Value::Text("p1".into()),
             typed_text_array_value(&["app_role"], crate::include::catalog::NAME_TYPE_OID),
-            Value::Text("a > 0".into()),
+            Value::Text("(a > 0)".into()),
             Value::Null,
         ]]
+    );
+
+    let err = session
+        .execute(&db, "alter policy p1 on items rename to p1")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42710",
+        "policy \"p1\" for table \"items\" already exists",
     );
 
     session
@@ -47603,8 +48443,8 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         vec![vec![
             Value::Text("p2".into()),
             typed_text_array_value(&["app_role"], crate::include::catalog::NAME_TYPE_OID),
-            Value::Text("a > 1".into()),
-            Value::Text("a > 2".into()),
+            Value::Text("(a > 1)".into()),
+            Value::Text("(a > 2)".into()),
         ]]
     );
 
@@ -47625,6 +48465,423 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn policy_expressions_can_reference_ctid() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role ctid_policy_owner nologin")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization ctid_policy_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table ctid_policy_items (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_policy_items values (10), (20)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on ctid_policy_items using (ctid in ('(0,1)'::tid))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ctid_policy_items enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ctid_policy_items force row level security",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ctid, a from ctid_policy_items order by a",
+        ),
+        vec![vec![
+            Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                block_number: 0,
+                offset_number: 1,
+            }),
+            Value::Int32(10),
+        ]]
+    );
+}
+
+#[test]
+fn update_rls_write_check_uses_invalid_new_ctid() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ctid_update_items (a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_update_items values (1, 'Apple')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ctid_update_items enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ctid_update_items force row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on ctid_update_items using (ctid in ('(0,1)'::tid, '(0,2)'::tid, '(4294967295,0)'::tid))",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "update ctid_update_items set b = 'Manzana' where ctid = '(0,1)'::tid",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ctid, a, b from ctid_update_items"
+        ),
+        vec![vec![
+            Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                block_number: 0,
+                offset_number: 2,
+            }),
+            Value::Int32(1),
+            Value::Text("Manzana".into())
+        ]]
+    );
+}
+
+#[test]
+fn create_policy_rejects_aggregate_with_policy_error() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table items (a int4)").unwrap();
+    let err = session
+        .execute(&db, "create policy p1 on items using (max(a))")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42803",
+        "aggregate functions are not allowed in policy expressions",
+    );
+}
+
+#[test]
+fn create_policy_resolves_roles_created_in_same_transaction() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "create role txn_policy_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create table txn_policy_items (a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on txn_policy_items to txn_policy_role using (true)",
+        )
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn policy_catalog_dependencies_track_roles_and_referenced_tables() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role policy_dep_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create role policy_dep_role2 nologin")
+        .unwrap();
+    session
+        .execute(&db, "create table policy_dep_base (c1 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table policy_dep_lookup (c1 int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy dep_p1 on policy_dep_base to policy_dep_role using \
+             (c1 > (select max(policy_dep_lookup.c1) from policy_dep_lookup))",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_depend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refobjid = 'policy_dep_base'::regclass \
+               and deptype = 'a'"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_depend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refobjid = 'policy_dep_lookup'::regclass"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_shdepend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refclassid = 'pg_authid'::regclass \
+               and refobjid = 'policy_dep_role'::regrole \
+               and deptype = 'r'"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    session
+        .execute(
+            &db,
+            "alter policy dep_p1 on policy_dep_base to policy_dep_role, policy_dep_role2 \
+             using (true)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_depend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refobjid = 'policy_dep_lookup'::regclass"
+        ),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_shdepend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refobjid in ('policy_dep_role'::regrole, 'policy_dep_role2'::regrole)"
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn create_policy_with_exists_subquery_on_rls_table_returns() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ref_tbl (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ref_tbl values (1)")
+        .unwrap();
+    session
+        .execute(&db, "create table rls_tbl (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table rls_tbl enable row level security")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on rls_tbl using (exists (select 1 from ref_tbl))",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select polname, polqual from pg_policy where polname = 'p1'",
+        ),
+        vec![vec![
+            Value::Text("p1".into()),
+            Value::Text("exists (select 1 from ref_tbl)".into()),
+        ]]
+    );
+}
+
+#[test]
+fn policy_relation_dependencies_block_and_cascade_drop() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table dependee (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table dependent (a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy d1 on dependent using (a in (select a from dependee))",
+        )
+        .unwrap();
+
+    match session.execute(&db, "drop table dependee").unwrap_err() {
+        ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => {
+            assert_eq!(
+                message,
+                "cannot drop table dependee because other objects depend on it"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("policy d1 on table dependent depends on table dependee")
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use DROP ... CASCADE to drop the dependent objects too.")
+            );
+            assert_eq!(sqlstate, "2BP01");
+        }
+        other => panic!("expected dependency error, got {other:?}"),
+    }
+
+    clear_backend_notices();
+    session.execute(&db, "drop table dependee cascade").unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].message,
+        "drop cascades to policy d1 on table dependent"
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_policy where polname = 'd1'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn policy_dependency_catalog_queries_complete() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role policy_dep_bob nologin")
+        .unwrap();
+    session
+        .execute(&db, "create role policy_dep_carol nologin")
+        .unwrap();
+    session.execute(&db, "create table dep1 (c1 int)").unwrap();
+    session.execute(&db, "create table dep2 (c1 int)").unwrap();
+    session
+        .execute(
+            &db,
+            "create policy dep_p1 on dep1 to policy_dep_bob using (c1 > (select max(dep2.c1) from dep2))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter policy dep_p1 on dep1 to policy_dep_bob, policy_dep_carol",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) = 1 from pg_depend
+             where objid = (select oid from pg_policy where polname = 'dep_p1')
+               and refobjid = (select oid from pg_class where relname = 'dep2')",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn drop_view_cascade_removes_policies_that_reference_views() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table rec1 (a int4)").unwrap();
+    session.execute(&db, "create table rec2 (a int4)").unwrap();
+    session
+        .execute(&db, "create view rec1v as select a from rec1")
+        .unwrap();
+    session
+        .execute(&db, "create view rec2v as select a from rec2")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy r1 on rec1 using (exists (select 1 from rec2v))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy r2 on rec2 using (exists (select 1 from rec1v))",
+        )
+        .unwrap();
+
+    clear_backend_notices();
+    session
+        .execute(&db, "drop view rec1v, rec2v cascade")
+        .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message, "drop cascades to 2 other objects");
+    assert_eq!(
+        notices[0].detail.as_deref(),
+        Some("drop cascades to policy r1 on table rec1\ndrop cascades to policy r2 on table rec2")
+    );
+
+    session
+        .execute(&db, "create policy r1 on rec1 using (true)")
+        .unwrap();
+    session
+        .execute(&db, "create policy r2 on rec2 using (true)")
+        .unwrap();
 }
 
 #[test]
@@ -47743,6 +49000,679 @@ fn rls_key_errors_hide_values_when_relation_rows_are_not_visible() {
 }
 
 #[test]
+fn auto_view_dml_enforces_base_rls_before_view_check() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut table_owner = Session::new(1);
+    let mut view_owner = Session::new(2);
+    let mut caller = Session::new(3);
+
+    table_owner
+        .execute(&db, "create role view_base_owner nologin")
+        .unwrap();
+    table_owner
+        .execute(&db, "create role view_owner nologin")
+        .unwrap();
+    table_owner
+        .execute(&db, "create role view_caller nologin")
+        .unwrap();
+    table_owner
+        .execute(&db, "set session authorization view_base_owner")
+        .unwrap();
+    table_owner
+        .execute(&db, "create table base_rls (a int4, b text)")
+        .unwrap();
+    table_owner
+        .execute(&db, "grant all on base_rls to view_owner")
+        .unwrap();
+    table_owner
+        .execute(&db, "create policy p1 on base_rls using (a % 2 = 0)")
+        .unwrap();
+    table_owner
+        .execute(&db, "alter table base_rls enable row level security")
+        .unwrap();
+
+    view_owner
+        .execute(&db, "set session authorization view_owner")
+        .unwrap();
+    view_owner
+        .execute(
+            &db,
+            "create view base_rls_view with (security_barrier) as
+             select * from base_rls where a > 0 with check option",
+        )
+        .unwrap();
+    view_owner
+        .execute(&db, "grant all on base_rls_view to view_caller")
+        .unwrap();
+
+    caller
+        .execute(&db, "set session authorization view_caller")
+        .unwrap();
+    let err = caller
+        .execute(&db, "insert into base_rls_view values (-1, 'blocked')")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "new row violates row-level security policy for table \"base_rls\"",
+    );
+    let err = caller
+        .execute(&db, "insert into base_rls_view values (11, 'blocked')")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "new row violates row-level security policy for table \"base_rls\"",
+    );
+
+    caller
+        .execute(&db, "insert into base_rls_view values (12, 'allowed')")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut table_owner, &db, "select a, b from base_rls"),
+        vec![vec![Value::Int32(12), Value::Text("allowed".into())]]
+    );
+}
+
+#[test]
+fn partitioned_insert_rls_reports_parent_table_name() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut writer = Session::new(2);
+
+    owner
+        .execute(&db, "create role part_writer nologin")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table part_parent (a int4) partition by range (a)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table part_parent_low partition of part_parent for values from (0) to (10)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant insert on part_parent to part_writer")
+        .unwrap();
+    owner
+        .execute(&db, "alter table part_parent enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy p1 on part_parent for insert to part_writer with check (a = 1)",
+        )
+        .unwrap();
+
+    writer
+        .execute(&db, "set session authorization part_writer")
+        .unwrap();
+    let err = writer
+        .execute(&db, "insert into part_parent values (2)")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "new row violates row-level security policy for table \"part_parent\"",
+    );
+}
+
+#[test]
+fn rls_policy_subquery_privileges_are_checked_for_select_and_explain() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut app = Session::new(2);
+
+    owner
+        .execute(&db, "create role policy_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role policy_app nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization policy_owner")
+        .unwrap();
+    owner
+        .execute(&db, "create table visible_docs (a int4)")
+        .unwrap();
+    owner
+        .execute(&db, "create table hidden_docs (a int4)")
+        .unwrap();
+    owner
+        .execute(&db, "insert into visible_docs values (1), (2)")
+        .unwrap();
+    owner
+        .execute(&db, "insert into hidden_docs values (1)")
+        .unwrap();
+    owner
+        .execute(&db, "grant select on visible_docs to policy_app")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy visible_policy on visible_docs for select to policy_app
+             using (not exists (select 1 from hidden_docs h where h.a = visible_docs.a))",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table visible_docs enable row level security")
+        .unwrap();
+
+    app.execute(&db, "set session authorization policy_app")
+        .unwrap();
+    let err = app.execute(&db, "select * from visible_docs").unwrap_err();
+    assert_sqlstate(err, "42501", "permission denied for table hidden_docs");
+    let err = app
+        .execute(&db, "explain (costs off) select * from visible_docs")
+        .unwrap_err();
+    assert_sqlstate(err, "42501", "permission denied for table hidden_docs");
+}
+
+#[test]
+fn tablesample_bernoulli_repeatable_filters_heap_offsets() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table sampled_docs (id int4, title text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into sampled_docs values
+             (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five'),
+             (6, 'six'), (7, 'seven'), (8, 'eight'), (9, 'nine'), (10, 'ten')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from sampled_docs tablesample bernoulli(50) repeatable(0) order by id",
+        ),
+        vec![
+            vec![Value::Int32(4)],
+            vec![Value::Int32(5)],
+            vec![Value::Int32(6)],
+            vec![Value::Int32(8)],
+            vec![Value::Int32(9)],
+        ]
+    );
+}
+
+#[test]
+fn explain_insert_select_shows_rewritten_source_plan() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut app = Session::new(2);
+
+    owner
+        .execute(&db, "create role explain_insert_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role explain_insert_app nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization explain_insert_owner")
+        .unwrap();
+    owner
+        .execute(&db, "create table explain_src (a int4, b text)")
+        .unwrap();
+    owner
+        .execute(&db, "create table explain_dst (a int4, b text)")
+        .unwrap();
+    owner
+        .execute(&db, "grant select on explain_src to explain_insert_app")
+        .unwrap();
+    owner
+        .execute(&db, "grant insert on explain_dst to explain_insert_app")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy src_even on explain_src for select using (a % 2 = 0)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table explain_src enable row level security")
+        .unwrap();
+
+    app.execute(&db, "set session authorization explain_insert_app")
+        .unwrap();
+    let StatementResult::Query { rows, .. } = app
+        .execute(
+            &db,
+            "explain (costs off) insert into explain_dst select * from explain_src",
+        )
+        .unwrap()
+    else {
+        panic!("expected EXPLAIN query result");
+    };
+    let lines = rows
+        .into_iter()
+        .map(|row| match row.first() {
+            Some(Value::Text(text)) => text.to_string(),
+            other => panic!("expected EXPLAIN text row, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("Insert on explain_dst")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim() == "->  Seq Scan on explain_src"),
+        "expected source scan under insert, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("(a % 2) = 0")),
+        "expected source RLS filter under insert, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_delete_shows_target_scans_with_rls_filters() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut app = Session::new(2);
+
+    owner
+        .execute(&db, "create role delete_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role delete_app nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization delete_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table delete_parent (id int4 primary key, a int4, b text)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table delete_child (extra int4) inherits (delete_parent)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into delete_parent values (1, 1, 'one'), (2, 2, 'two')",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into delete_child(id, a, b, extra) values (3, 3, 'three', 30), (4, 4, 'four', 40)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "grant all on delete_parent, delete_child to delete_app",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy delete_even on delete_parent using (a % 2 = 0)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table delete_parent enable row level security")
+        .unwrap();
+
+    app.execute(&db, "set session authorization delete_app")
+        .unwrap();
+    let only_lines = query_text_column(
+        &mut app,
+        &db,
+        "explain (costs off) delete from only delete_parent where b <> 'skip'",
+    );
+    assert_eq!(
+        only_lines.first().map(String::as_str),
+        Some("Delete on delete_parent")
+    );
+    assert!(
+        only_lines
+            .iter()
+            .any(|line| line.trim() == "->  Seq Scan on delete_parent"),
+        "expected parent scan, got {only_lines:?}"
+    );
+    assert!(
+        only_lines
+            .iter()
+            .any(|line| line.contains("(a % 2) = 0") && line.contains("b <> 'skip'::text")),
+        "expected RLS and user filter, got {only_lines:?}"
+    );
+
+    let inherited_lines = query_text_column(
+        &mut app,
+        &db,
+        "explain (costs off) delete from delete_parent where b <> 'skip'",
+    );
+    assert!(
+        inherited_lines.iter().any(|line| line == "  ->  Append"),
+        "expected append, got {inherited_lines:?}"
+    );
+    assert!(
+        inherited_lines
+            .iter()
+            .any(|line| line.trim() == "Delete on delete_parent delete_parent_1"),
+        "expected parent delete child label, got {inherited_lines:?}"
+    );
+    assert!(
+        inherited_lines
+            .iter()
+            .any(|line| line.trim() == "->  Seq Scan on delete_child delete_parent_2"),
+        "expected inherited child scan, got {inherited_lines:?}"
+    );
+}
+
+#[test]
+fn on_conflict_do_update_enforces_rls_update_path_checks() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut bob = Session::new(2);
+
+    owner.execute(&db, "create role rls_owner nologin").unwrap();
+    owner.execute(&db, "create role rls_bob nologin").unwrap();
+    owner
+        .execute(&db, "set session authorization rls_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table conflict_docs (id int4 primary key, kind int4, author name, title text)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant all on conflict_docs to public")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into conflict_docs values (1, 1, 'rls_bob', 'old'), (2, 2, 'rls_bob', 'hidden')",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table conflict_docs enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy conflict_select on conflict_docs for select using (true)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy conflict_insert on conflict_docs for insert with check (author = current_user)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy conflict_update on conflict_docs for update using (kind = 1) with check (author = current_user)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization rls_bob")
+        .unwrap();
+    let parsed = crate::backend::parser::parse_statement(
+        "insert into conflict_docs values (2, 2, 'rls_bob', 'blocked')
+         on conflict (id) do update set title = excluded.title",
+    )
+    .unwrap();
+    let crate::backend::parser::Statement::Insert(parsed_insert) = parsed else {
+        panic!("expected insert statement");
+    };
+    let catalog = bob.catalog_lookup(&db);
+    let bound_insert = crate::backend::parser::bind_insert(&parsed_insert, &catalog).unwrap();
+    let conflict_checks = match bound_insert
+        .on_conflict
+        .as_ref()
+        .map(|clause| &clause.action)
+    {
+        Some(crate::backend::parser::BoundOnConflictAction::Update {
+            conflict_visibility_checks,
+            ..
+        }) => conflict_visibility_checks,
+        other => panic!("expected bound ON CONFLICT DO UPDATE, got {other:?}"),
+    };
+    assert!(
+        !conflict_checks.is_empty(),
+        "ON CONFLICT UPDATE should bind RLS conflict checks"
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut bob,
+            &db,
+            "insert into conflict_docs values (1, 1, 'rls_bob', 'new')
+             on conflict (id) do update set title = excluded.title returning id, title",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("new".into())]]
+    );
+
+    let err = bob
+        .execute(
+            &db,
+            "insert into conflict_docs values (2, 2, 'rls_bob', 'blocked')
+             on conflict (id) do update set title = excluded.title",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42501", "USING expression");
+
+    let err = bob
+        .execute(
+            &db,
+            "insert into conflict_docs values (1, 1, 'rls_owner', 'bad author')
+             on conflict (id) do update set author = excluded.author",
+        )
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "new row violates row-level security policy for table \"conflict_docs\"",
+    );
+}
+
+#[test]
+fn merge_enforces_action_specific_rls_checks() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut bob = Session::new(2);
+
+    owner
+        .execute(&db, "create role merge_owner nologin")
+        .unwrap();
+    owner.execute(&db, "create role merge_bob nologin").unwrap();
+    owner
+        .execute(&db, "set session authorization merge_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table merge_docs (id int4 primary key, kind int4, author name, title text)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant all on merge_docs to public")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into merge_docs values
+             (1, 1, 'merge_bob', 'old'),
+             (2, 2, 'merge_bob', 'blocked')",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table merge_docs enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy merge_select on merge_docs for select using (true)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy merge_insert on merge_docs for insert with check (author = current_user)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy merge_update on merge_docs for update
+             using (kind = 1) with check (author = current_user and kind = 1)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization merge_bob")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut bob,
+            &db,
+            "merge into merge_docs d using (values (1, 'updated')) as s(id, title)
+             on d.id = s.id
+             when matched then update set title = s.title
+             returning d.id, d.title",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("updated".into())]]
+    );
+
+    let err = bob
+        .execute(
+            &db,
+            "merge into merge_docs d using (values (2, 'blocked update')) as s(id, title)
+             on d.id = s.id
+             when matched then update set title = s.title",
+        )
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "target row violates row-level security policy",
+    );
+
+    let err = bob
+        .execute(
+            &db,
+            "merge into merge_docs d using (values (3, 'merge_owner', 'bad insert')) as s(id, author, title)
+             on d.id = s.id
+             when not matched then insert values (s.id, 1, s.author, s.title)",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42501", "new row violates row-level security policy");
+
+    owner.execute(&db, "reset session authorization").unwrap();
+    owner
+        .execute(&db, "drop policy merge_select on merge_docs")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy merge_select on merge_docs for select using (kind = 1)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization merge_bob")
+        .unwrap();
+    match bob.execute(
+        &db,
+        "merge into merge_docs d using (values (2, 'dupe')) as s(id, title)
+         on d.id = s.id
+         when matched then update set title = s.title
+         when not matched then insert values (s.id, 2, current_user, s.title)",
+    ) {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "merge_docs_pkey");
+        }
+        other => panic!("expected hidden target row to produce duplicate key, got {other:?}"),
+    }
+
+    bob.execute(
+        &db,
+        "merge into merge_docs d using (values (4, 'hidden')) as s(id, title)
+         on d.id = s.id
+         when not matched then insert values (s.id, 2, current_user, s.title)",
+    )
+    .unwrap();
+    assert_eq!(
+        session_query_rows(&mut bob, &db, "select id from merge_docs where id = 4"),
+        Vec::<Vec<Value>>::new()
+    );
+
+    let err = bob
+        .execute(
+            &db,
+            "merge into merge_docs d using (values (5, 'hidden returning')) as s(id, title)
+             on d.id = s.id
+             when not matched then insert values (s.id, 2, current_user, s.title)
+             returning d.id",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42501", "new row violates row-level security policy");
+}
+
+#[test]
+fn row_security_active_reports_current_user_policy_state() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut tenant = Session::new(2);
+
+    owner.execute(&db, "create role rls_owner nologin").unwrap();
+    owner
+        .execute(&db, "create role rls_tenant nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization rls_owner")
+        .unwrap();
+    owner
+        .execute(&db, "create table active_docs (id int4)")
+        .unwrap();
+    owner
+        .execute(&db, "grant select on active_docs to public")
+        .unwrap();
+    owner
+        .execute(&db, "create policy p on active_docs using (true)")
+        .unwrap();
+    owner
+        .execute(&db, "alter table active_docs enable row level security")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut owner, &db, "select row_security_active('active_docs')",),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    tenant
+        .execute(&db, "set session authorization rls_tenant")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut tenant,
+            &db,
+            "select row_security_active('active_docs')",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn pg_policies_exposes_public_and_named_role_policies() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -47788,7 +49718,7 @@ fn pg_policies_exposes_public_and_named_role_policies() {
                     crate::include::catalog::NAME_TYPE_OID,
                 ),
                 Value::Text("SELECT".into()),
-                Value::Text("a > 0".into()),
+                Value::Text("(a > 0)".into()),
                 Value::Null,
             ],
             vec![
@@ -47799,7 +49729,7 @@ fn pg_policies_exposes_public_and_named_role_policies() {
                 typed_text_array_value(&["public"], crate::include::catalog::NAME_TYPE_OID),
                 Value::Text("INSERT".into()),
                 Value::Null,
-                Value::Text("a > 1".into()),
+                Value::Text("(a > 1)".into()),
             ],
         ]
     );

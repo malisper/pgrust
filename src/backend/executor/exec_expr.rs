@@ -2063,6 +2063,172 @@ fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
     Value::Tid(tid)
 }
 
+fn eval_tablesample_bernoulli(values: &[Value]) -> Result<Value, ExecError> {
+    let [ctid, Value::Float64(percent), Value::Float64(repeatable)] = values else {
+        return Err(malformed_expr_error("TABLESAMPLE BERNOULLI"));
+    };
+    if matches!(ctid, Value::Null) {
+        return Ok(Value::Bool(false));
+    }
+    if !(0.0..=100.0).contains(percent) || percent.is_nan() {
+        return Err(ExecError::DetailedError {
+            message: "sample percentage must be between 0 and 100".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "2202H",
+        });
+    }
+    let (block, offset) = match ctid {
+        Value::Tid(tid) => (tid.block_number, u32::from(tid.offset_number)),
+        other => {
+            let Some((block, offset)) = other.as_text().and_then(parse_ctid_text) else {
+                return Err(malformed_expr_error("TABLESAMPLE BERNOULLI ctid"));
+            };
+            (block, offset)
+        }
+    };
+    let cutoff = ((u64::from(u32::MAX) + 1) as f64 * *percent / 100.0).round() as u64;
+    let seed = hashfloat8_for_tablesample(*repeatable);
+    Ok(Value::Bool(
+        u64::from(pg_hash_three_u32(block, offset, seed)) < cutoff,
+    ))
+}
+
+fn parse_ctid_text(text: &str) -> Option<(u32, u32)> {
+    let inner = text.strip_prefix('(')?.strip_suffix(')')?;
+    let (block, offset) = inner.split_once(',')?;
+    Some((block.parse().ok()?, offset.parse().ok()?))
+}
+
+fn hashfloat8_for_tablesample(value: f64) -> u32 {
+    if value == 0.0 {
+        return 0;
+    }
+    pg_hash_bytes(&value.to_le_bytes())
+}
+
+fn pg_hash_three_u32(first: u32, second: u32, third: u32) -> u32 {
+    let mut bytes = Vec::with_capacity(12);
+    bytes.extend_from_slice(&first.to_le_bytes());
+    bytes.extend_from_slice(&second.to_le_bytes());
+    bytes.extend_from_slice(&third.to_le_bytes());
+    pg_hash_bytes(&bytes)
+}
+
+fn pg_hash_bytes(bytes: &[u8]) -> u32 {
+    let mut len = bytes.len() as u32;
+    let mut a = 0x9e37_79b9u32.wrapping_add(len).wrapping_add(3_923_095);
+    let mut b = a;
+    let mut c = a;
+    let mut offset = 0usize;
+
+    while len >= 12 {
+        a = a.wrapping_add(u32::from_le_bytes(
+            bytes[offset..offset + 4].try_into().expect("slice len"),
+        ));
+        b = b.wrapping_add(u32::from_le_bytes(
+            bytes[offset + 4..offset + 8].try_into().expect("slice len"),
+        ));
+        c = c.wrapping_add(u32::from_le_bytes(
+            bytes[offset + 8..offset + 12]
+                .try_into()
+                .expect("slice len"),
+        ));
+        (a, b, c) = pg_hash_mix(a, b, c);
+        offset += 12;
+        len -= 12;
+    }
+
+    let tail = &bytes[offset..];
+    match tail.len() {
+        11 => c = c.wrapping_add((tail[10] as u32) << 24),
+        _ => {}
+    }
+    match tail.len() {
+        10 | 11 => c = c.wrapping_add((tail[9] as u32) << 16),
+        _ => {}
+    }
+    match tail.len() {
+        9..=11 => c = c.wrapping_add((tail[8] as u32) << 8),
+        _ => {}
+    }
+    match tail.len() {
+        8..=11 => b = b.wrapping_add((tail[7] as u32) << 24),
+        _ => {}
+    }
+    match tail.len() {
+        7..=11 => b = b.wrapping_add((tail[6] as u32) << 16),
+        _ => {}
+    }
+    match tail.len() {
+        6..=11 => b = b.wrapping_add((tail[5] as u32) << 8),
+        _ => {}
+    }
+    match tail.len() {
+        5..=11 => b = b.wrapping_add(tail[4] as u32),
+        _ => {}
+    }
+    match tail.len() {
+        4..=11 => a = a.wrapping_add((tail[3] as u32) << 24),
+        _ => {}
+    }
+    match tail.len() {
+        3..=11 => a = a.wrapping_add((tail[2] as u32) << 16),
+        _ => {}
+    }
+    match tail.len() {
+        2..=11 => a = a.wrapping_add((tail[1] as u32) << 8),
+        _ => {}
+    }
+    match tail.len() {
+        1..=11 => a = a.wrapping_add(tail[0] as u32),
+        _ => {}
+    }
+
+    let (_, _, c) = pg_hash_final(a, b, c);
+    c
+}
+
+fn pg_hash_mix(mut a: u32, mut b: u32, mut c: u32) -> (u32, u32, u32) {
+    a = a.wrapping_sub(c);
+    a ^= c.rotate_left(4);
+    c = c.wrapping_add(b);
+    b = b.wrapping_sub(a);
+    b ^= a.rotate_left(6);
+    a = a.wrapping_add(c);
+    c = c.wrapping_sub(b);
+    c ^= b.rotate_left(8);
+    b = b.wrapping_add(a);
+    a = a.wrapping_sub(c);
+    a ^= c.rotate_left(16);
+    c = c.wrapping_add(b);
+    b = b.wrapping_sub(a);
+    b ^= a.rotate_left(19);
+    a = a.wrapping_add(c);
+    c = c.wrapping_sub(b);
+    c ^= b.rotate_left(4);
+    b = b.wrapping_add(a);
+    (a, b, c)
+}
+
+fn pg_hash_final(mut a: u32, mut b: u32, mut c: u32) -> (u32, u32, u32) {
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(14));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(11));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(25));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(16));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(4));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(14));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(24));
+    (a, b, c)
+}
+
 fn lookup_ctid_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
@@ -2212,6 +2378,84 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
     Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
         name,
     )))
+}
+
+fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+    let (name, new_value, _is_local) = match values {
+        [Value::Null, _, _] => {
+            return Err(ExecError::DetailedError {
+                message: "SET requires parameter name".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22004",
+            });
+        }
+        [Value::Text(name), Value::Null, Value::Bool(is_local)] => {
+            (normalize_guc_name(name), None, *is_local)
+        }
+        [Value::Text(name), Value::Null, Value::Null] => (normalize_guc_name(name), None, false),
+        [Value::Text(name), Value::Text(value), Value::Bool(is_local)] => {
+            (normalize_guc_name(name), Some(value.to_string()), *is_local)
+        }
+        [Value::Text(name), Value::Text(value), Value::Null] => {
+            (normalize_guc_name(name), Some(value.to_string()), false)
+        }
+        [Value::Text(_), other, _] => {
+            return Err(ExecError::TypeMismatch {
+                op: "set_config",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+        [other, _, _] => {
+            return Err(ExecError::TypeMismatch {
+                op: "set_config",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "set_config(name, value, is_local)",
+                actual: format!("SetConfig({} args)", values.len()),
+            }));
+        }
+    };
+
+    match new_value {
+        Some(value) => {
+            let stored_value = normalize_set_config_value(&name, &value)?;
+            ctx.gucs.insert(name.clone(), stored_value.clone());
+            if name == "row_security"
+                && let Some(db) = &ctx.database
+            {
+                db.install_row_security_enabled(ctx.client_id, stored_value == "on");
+                db.plan_cache.invalidate_all();
+            }
+            Ok(Value::Text(stored_value.into()))
+        }
+        None => {
+            ctx.gucs.remove(&name);
+            Ok(Value::Text(String::new().into()))
+        }
+    }
+}
+
+fn normalize_set_config_value(name: &str, value: &str) -> Result<String, ExecError> {
+    match name {
+        "row_security" => parse_bool_config_value(value)
+            .map(|enabled| if enabled { "on" } else { "off" }.to_string())
+            .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))),
+        _ => Ok(value.to_string()),
+    }
+}
+
+fn parse_bool_config_value(value: &str) -> Option<bool> {
+    match normalize_guc_name(value).as_str() {
+        "on" | "true" | "yes" | "1" | "t" => Some(true),
+        "off" | "false" | "no" | "0" | "f" => Some(false),
+        _ => None,
+    }
 }
 
 fn eval_pg_settings_get_flags(values: &[Value]) -> Result<Value, ExecError> {
@@ -2437,6 +2681,54 @@ fn eval_text_to_regclass_function(
     Ok(Value::Int64(i64::from(relation.relation_oid)))
 }
 
+fn eval_row_security_active(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let relation_oid = if value.as_text().is_some()
+        && !value
+            .as_text()
+            .expect("guarded above")
+            .trim()
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-'))
+    {
+        match eval_text_to_regclass_function(values, Some(ctx))? {
+            Value::Int64(oid) => u32::try_from(oid).map_err(|_| ExecError::OidOutOfRange)?,
+            Value::Int32(oid) => u32::try_from(oid).map_err(|_| ExecError::OidOutOfRange)?,
+            Value::Null => return Ok(Value::Null),
+            other => {
+                return Err(ExecError::TypeMismatch {
+                    op: "row_security_active",
+                    left: other,
+                    right: Value::Int64(i64::from(crate::include::catalog::REGCLASS_TYPE_OID)),
+                });
+            }
+        }
+    } else {
+        oid_arg_to_u32(value, "row_security_active")?
+    };
+    let catalog = ctx
+        .catalog
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "row_security_active requires a visible catalog".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let active = crate::backend::rewrite::relation_row_security_is_enabled_for_user(
+        relation_oid,
+        ctx.current_user_oid,
+        catalog,
+    )
+    .map_err(ExecError::Parse)?;
+    Ok(Value::Bool(active))
+}
+
 fn eval_to_reg_object_function(
     values: &[Value],
     kind: SqlTypeKind,
@@ -2637,6 +2929,7 @@ fn ensure_builtin_side_effects_allowed(
         func,
         BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::SetVal
+            | BuiltinScalarFunction::SetConfig
             | BuiltinScalarFunction::PgNotify
             | BuiltinScalarFunction::LoCreate
             | BuiltinScalarFunction::LoUnlink
@@ -2663,6 +2956,7 @@ fn ensure_builtin_side_effects_allowed(
                 match func {
                     BuiltinScalarFunction::NextVal => "nextval",
                     BuiltinScalarFunction::SetVal => "setval",
+                    BuiltinScalarFunction::SetConfig => "set_config",
                     BuiltinScalarFunction::PgNotify => "pg_notify",
                     BuiltinScalarFunction::LoCreate => "lo_create",
                     BuiltinScalarFunction::LoUnlink => "lo_unlink",
@@ -8986,6 +9280,12 @@ fn eval_plpgsql_builtin_function(
             execute_builtin_scalar_function_value_call(func, &values)
         }
         BuiltinScalarFunction::CurrentSetting => eval_current_setting_without_context(&values),
+        BuiltinScalarFunction::SetConfig => Err(ExecError::DetailedError {
+            message: "set_config requires executor context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }),
         BuiltinScalarFunction::PgSettingsGetFlags => eval_pg_settings_get_flags(&values),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgColumnToastChunkId => {
@@ -10590,6 +10890,7 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
             eval_has_largeobject_privilege(values, ctx)
         }
         BuiltinScalarFunction::PgHasRole => eval_pg_has_role(values, ctx),
+        BuiltinScalarFunction::RowSecurityActive => eval_row_security_active(values, ctx),
         BuiltinScalarFunction::PgCurrentLogfile => eval_pg_current_logfile(values),
         BuiltinScalarFunction::PgReadFile => eval_pg_read_file(values, ctx, false),
         BuiltinScalarFunction::PgReadBinaryFile => eval_pg_read_file(values, ctx, true),
@@ -10751,6 +11052,9 @@ pub(crate) fn eval_builtin_function(
     }
     if matches!(func, BuiltinScalarFunction::PgRustDomainCheckUpperLessThan) {
         return eval_domain_check_upper_less_than(&values);
+    }
+    if matches!(func, BuiltinScalarFunction::PgRustTablesampleBernoulli) {
+        return eval_tablesample_bernoulli(&values);
     }
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;
@@ -11082,6 +11386,7 @@ pub(crate) fn eval_builtin_function(
             Ok(Value::Bool(true))
         }
         BuiltinScalarFunction::CurrentSetting => eval_current_setting(&values, ctx),
+        BuiltinScalarFunction::SetConfig => eval_set_config(&values, ctx),
         BuiltinScalarFunction::PgSettingsGetFlags => eval_pg_settings_get_flags(&values),
         BuiltinScalarFunction::PgNotify => unreachable!("pg_notify handled earlier"),
         BuiltinScalarFunction::PgNotificationQueueUsage => {
@@ -11434,6 +11739,7 @@ pub(crate) fn eval_builtin_function(
             eval_has_largeobject_privilege(&values, ctx)
         }
         BuiltinScalarFunction::PgHasRole => eval_pg_has_role(&values, ctx),
+        BuiltinScalarFunction::RowSecurityActive => eval_row_security_active(&values, ctx),
         BuiltinScalarFunction::PgCurrentLogfile => eval_pg_current_logfile(&values),
         BuiltinScalarFunction::PgReadFile => eval_pg_read_file(&values, ctx, false),
         BuiltinScalarFunction::PgReadBinaryFile => eval_pg_read_file(&values, ctx, true),

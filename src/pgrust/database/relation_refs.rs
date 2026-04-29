@@ -539,6 +539,18 @@ pub(super) fn collect_rels_from_planned_stmt(
     }
 }
 
+pub(crate) fn collect_direct_relation_oids_from_sql_exprs<'a>(
+    exprs: impl IntoIterator<Item = &'a SqlExpr>,
+    catalog: &dyn CatalogLookup,
+) -> BTreeSet<u32> {
+    let mut rels = BTreeSet::new();
+    let mut visible_ctes = Vec::new();
+    for expr in exprs {
+        collect_direct_relation_oids_from_sql_expr(expr, catalog, &mut visible_ctes, &mut rels);
+    }
+    rels
+}
+
 pub(super) fn collect_direct_relation_oids_from_select(
     select: &crate::backend::parser::SelectStatement,
     catalog: &dyn CatalogLookup,
@@ -622,6 +634,9 @@ fn collect_direct_relation_oids_from_cte_body(
         crate::backend::parser::CteBody::Insert(insert) => {
             collect_direct_relation_oids_from_insert(insert, catalog, visible_ctes, rels);
         }
+        crate::backend::parser::CteBody::Update(update) => {
+            collect_direct_relation_oids_from_update(update, catalog, visible_ctes, rels);
+        }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -684,6 +699,35 @@ fn collect_direct_relation_oids_from_insert(
     visible_ctes.truncate(cte_base);
 }
 
+fn collect_direct_relation_oids_from_update(
+    update: &crate::backend::parser::UpdateStatement,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    let cte_base = visible_ctes.len();
+    for cte in &update.with {
+        collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
+        visible_ctes.push(cte.name.to_ascii_lowercase());
+    }
+    if let Some(entry) = catalog.lookup_any_relation(&update.table_name) {
+        rels.insert(entry.relation_oid);
+    }
+    if let Some(from) = &update.from {
+        collect_direct_relation_oids_from_from_item(from, catalog, visible_ctes, rels);
+    }
+    for assignment in &update.assignments {
+        collect_direct_relation_oids_from_sql_expr(&assignment.expr, catalog, visible_ctes, rels);
+    }
+    if let Some(where_clause) = &update.where_clause {
+        collect_direct_relation_oids_from_sql_expr(where_clause, catalog, visible_ctes, rels);
+    }
+    for item in &update.returning {
+        collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
+    }
+    visible_ctes.truncate(cte_base);
+}
+
 fn collect_direct_relation_oids_from_from_item(
     from: &FromItem,
     catalog: &dyn CatalogLookup,
@@ -715,6 +759,15 @@ fn collect_direct_relation_oids_from_from_item(
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }
         }
+        FromItem::TableSample { source, sample } => {
+            collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
+            for arg in &sample.args {
+                collect_direct_relation_oids_from_sql_expr(arg, catalog, visible_ctes, rels);
+            }
+            if let Some(repeatable) = &sample.repeatable {
+                collect_direct_relation_oids_from_sql_expr(repeatable, catalog, visible_ctes, rels);
+            }
+        }
         FromItem::RowsFrom { functions, .. } => {
             for function in functions {
                 for arg in &function.args {
@@ -733,7 +786,7 @@ fn collect_direct_relation_oids_from_from_item(
         FromItem::XmlTable(table) => {
             collect_direct_relation_oids_from_xml_table(table, catalog, visible_ctes, rels);
         }
-        FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
+        FromItem::Lateral(source) => {
             collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
         }
         FromItem::DerivedTable(select) => {

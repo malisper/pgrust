@@ -1686,6 +1686,7 @@ pub enum CteBody {
     Select(Box<SelectStatement>),
     Values(ValuesStatement),
     Insert(Box<InsertStatement>),
+    Update(Box<UpdateStatement>),
     RecursiveUnion {
         all: bool,
         anchor: Box<CteBody>,

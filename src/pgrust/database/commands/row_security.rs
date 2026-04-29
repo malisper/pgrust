@@ -1,6 +1,8 @@
 use super::super::*;
 use crate::backend::parser::{AlterTableRowSecurityAction, AlterTableSetRowSecurityStatement};
-use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_heap_relation_for_alter_table};
+use crate::pgrust::database::ddl::{
+    ensure_relation_owner, lookup_table_or_partitioned_table_for_alter_table,
+};
 
 impl Database {
     pub(crate) fn execute_alter_table_set_row_security_stmt_with_search_path(
@@ -11,7 +13,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -54,7 +56,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,

@@ -22,8 +22,9 @@ use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate, PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
-    Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
-    Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var, WindowFrameBound, user_attrno,
+    Aggref, AttrNumber, BoolExprType, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind,
+    OrderByEntry, Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var, WindowFrameBound,
+    user_attrno,
 };
 
 fn int4() -> SqlType {
@@ -121,6 +122,37 @@ fn is_special_user_var(expr: &Expr, varno: usize, index: usize) -> bool {
 
 fn restrict(clause: Expr) -> crate::include::nodes::pathnodes::RestrictInfo {
     super::make_restrict_info(clause)
+}
+
+#[test]
+fn base_restrict_expr_order_respects_security_levels_and_leakproof() {
+    let catalog = Catalog::default();
+    let expensive_security = Expr::bool_expr(
+        BoolExprType::And,
+        vec![
+            gt(var(1, 1), Expr::Const(Value::Int32(0))),
+            gt(var(1, 1), Expr::Const(Value::Int32(1))),
+        ],
+    );
+    let cheap_leakproof = gt(var(1, 1), Expr::Const(Value::Int32(2)));
+    let cheap_nonleakproof = Expr::func(999_999, Some(bool_ty()), false, vec![var(1, 1)]);
+    let mut rel = RelOptInfo::new(
+        vec![1],
+        RelOptKind::BaseRel,
+        PathTarget::new(vec![var(1, 1)]),
+    );
+    rel.baserestrictinfo = vec![
+        super::joininfo::make_restrict_info_with_security(expensive_security.clone(), 0, &catalog),
+        super::joininfo::make_restrict_info_with_security(cheap_nonleakproof.clone(), 1, &catalog),
+        super::joininfo::make_restrict_info_with_security(cheap_leakproof.clone(), 1, &catalog),
+    ];
+
+    assert!(!rel.baserestrictinfo[1].leakproof);
+    assert!(rel.baserestrictinfo[2].leakproof);
+    assert_eq!(
+        super::path::ordered_base_restrict_exprs(&rel),
+        vec![cheap_leakproof, expensive_security, cheap_nonleakproof]
+    );
 }
 
 fn values_output_columns() -> Vec<QueryColumn> {
@@ -815,6 +847,34 @@ fn catalog_with_indexed_items() -> Catalog {
         .expect("create test catalog relation");
     let index = catalog
         .create_index("items_id_idx", "items", false, &["id".into()])
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed test catalog index stats");
+    catalog
+}
+
+fn catalog_with_indexed_user_names() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "users",
+            RelationDesc {
+                columns: vec![
+                    column_desc("pguser", SqlType::new(SqlTypeKind::Name), false),
+                    column_desc("seclv", int4(), false),
+                ],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index("users_pguser_idx", "users", true, &["pguser".into()])
         .expect("create test catalog index");
     catalog
         .set_index_ready_valid(index.relation_oid, true, true)
@@ -4071,6 +4131,113 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
 }
 
 #[test]
+fn explain_names_materialized_cte_scan_and_producer() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "with cte1 as materialized (select id from items where id > 1) select * from cte1",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines.iter().any(|line| line.trim() == "CTE Scan on cte1"),
+        "expected named CTE scan, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.trim() == "CTE cte1"),
+        "expected CTE producer label, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_indents_scan_filter_details_under_append_children() {
+    let catalog = catalog_with_inherited_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select id from items where id > 0 for share",
+        &catalog,
+        PlannerConfig {
+            enable_indexscan: false,
+            enable_bitmapscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("              Filter:")),
+        "expected deeply indented child scan filter, got {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("          Filter:")),
+        "child scan filter was indented too shallowly: {lines:?}"
+    );
+}
+
+#[test]
+fn explain_hash_child_uses_one_level_of_indentation() {
+    let mut catalog = Catalog::default();
+    let desc = RelationDesc {
+        columns: vec![column_desc("id", int4(), false)],
+    };
+    let left = catalog
+        .create_table("hash_left", desc.clone())
+        .expect("create left table");
+    let right = catalog
+        .create_table("hash_right", desc)
+        .expect("create right table");
+    catalog
+        .set_relation_stats(left.relation_oid, 128, 10_000.0)
+        .expect("seed left stats");
+    catalog
+        .set_relation_stats(right.relation_oid, 128, 10_000.0)
+        .expect("seed right stats");
+
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from hash_left join hash_right on hash_left.id = hash_right.id",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("        ->  Seq Scan on hash_right")),
+        "expected hash input one level below Hash, got {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("                    ->  Seq Scan on hash_right")),
+        "hash input was indented too deeply: {lines:?}"
+    );
+}
+
+#[test]
+fn planner_pushes_varless_quals_to_single_base_scan() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select id from items where random() < 2::float8",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("Filter: (random() <")),
+        "expected random() predicate as scan filter, got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.trim() == "Filter"),
+        "expected no separate upper Filter node, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     let catalog = catalog_with_inherited_indexed_items();
     let planned =
@@ -4260,6 +4427,31 @@ fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
     assert!(
         has_runtime_index || has_parameterized_memoize,
         "expected OR join clause to use a runtime index scan or memoized parameterized path: {planned:#?}"
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
+fn planner_uses_runtime_index_key_for_current_user() {
+    let catalog = catalog_with_indexed_user_names();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from users where pguser = current_user",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Scan using users_pguser_idx on users")),
+        "expected current_user predicate to use pguser index, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Cond: (pguser = CURRENT_USER)")
+                || line.contains("Index Cond: (pguser = (CURRENT_USER))")),
+        "expected current_user index condition, got {lines:?}"
     );
     validate_planned_stmt_for_tests(&planned);
 }

@@ -5207,6 +5207,7 @@ fn set_append_references(
     plan_info: PlanEstimate,
     source_id: usize,
     desc: crate::include::nodes::primnodes::RelationDesc,
+    relids: Vec<usize>,
     child_roots: Vec<Option<PlannerSubroot>>,
     partition_prune: Option<PartitionPrunePlan>,
     children: Vec<Path>,
@@ -5217,9 +5218,10 @@ fn set_append_references(
         child_roots.len(),
         children.len()
     );
-    let single_child_root_alias = (children.len() == 1)
+    let relation_append_alias = (relids.as_slice() == [source_id])
         .then(|| append_source_alias(ctx, source_id))
         .flatten();
+    let child_count = children.len();
     let children = children
         .into_iter()
         .enumerate()
@@ -5230,8 +5232,13 @@ fn set_append_references(
                 .map(PlannerSubroot::as_ref)
                 .or(ctx.root);
             let mut child_plan = recurse_with_root(ctx, child_root, child);
-            if let Some(alias) = single_child_root_alias.as_deref() {
-                apply_single_append_scan_alias(&mut child_plan, alias);
+            if let Some(alias) = relation_append_alias.as_deref() {
+                let child_alias = if child_count == 1 {
+                    alias.to_string()
+                } else {
+                    format!("{}_{}", alias, index + 1)
+                };
+                apply_single_append_scan_alias(&mut child_plan, &child_alias);
             }
             child_plan
         })
@@ -5239,7 +5246,7 @@ fn set_append_references(
     let (partition_prune, mut children) =
         flatten_partition_append_children(partition_prune, children);
     if partition_prune.is_some()
-        && let Some(alias) = append_source_alias(ctx, source_id)
+        && let Some(alias) = relation_append_alias.as_deref()
     {
         for (index, child) in children.iter_mut().enumerate() {
             apply_single_append_scan_alias(child, &format!("{alias}_{}", index + 1));
@@ -6946,6 +6953,7 @@ fn set_cte_scan_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     cte_id: usize,
+    cte_name: String,
     subroot: PlannerSubroot,
     cte_plan: Box<Path>,
     output_columns: Vec<QueryColumn>,
@@ -6953,6 +6961,7 @@ fn set_cte_scan_references(
     Plan::CteScan {
         plan_info,
         cte_id,
+        cte_name,
         cte_plan: Box::new(recurse_with_root(ctx, Some(subroot.as_ref()), *cte_plan)),
         output_columns,
     }
@@ -7142,6 +7151,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             source_id,
             desc,
+            relids,
             child_roots,
             partition_prune,
             children,
@@ -7151,6 +7161,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             source_id,
             desc,
+            relids,
             child_roots,
             partition_prune,
             children,
@@ -7526,6 +7537,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         Path::CteScan {
             plan_info,
             cte_id,
+            cte_name,
             subroot,
             query,
             cte_plan,
@@ -7533,7 +7545,15 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             ..
         } => {
             let _ = query;
-            set_cte_scan_references(ctx, plan_info, cte_id, subroot, cte_plan, output_columns)
+            set_cte_scan_references(
+                ctx,
+                plan_info,
+                cte_id,
+                cte_name,
+                subroot,
+                cte_plan,
+                output_columns,
+            )
         }
         Path::WorkTableScan {
             plan_info,

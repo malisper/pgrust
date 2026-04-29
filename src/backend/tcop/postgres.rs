@@ -35,6 +35,7 @@ use crate::backend::parser::{
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::cache::syscache::backend_catcache;
+use crate::backend::utils::cache::system_views::format_pg_get_expr_policy_sql;
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
@@ -5401,6 +5402,7 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
     let mut double_quote = false;
     let mut line_comment = false;
     let mut dollar_quote: Option<String> = None;
+    let mut sql_function_atomic_body = false;
 
     while i < bytes.len() {
         if line_comment {
@@ -5505,8 +5507,26 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
             i += 1;
             continue;
         }
+        if paren_depth == 0
+            && !sql_function_atomic_body
+            && simple_query_keyword_at(sql, i, "begin").is_some()
+            && simple_query_current_statement_is_create_function(sql, start, i)
+        {
+            let begin_end = simple_query_keyword_at(sql, i, "begin").unwrap_or(i);
+            let atomic_start = simple_query_skip_whitespace(sql, begin_end);
+            if simple_query_keyword_at(sql, atomic_start, "atomic").is_some() {
+                sql_function_atomic_body = true;
+            }
+        }
         if bytes[i] == b';' && paren_depth == 0 {
+            if sql_function_atomic_body
+                && !simple_query_prefix_ends_with_keyword(&sql[start..i], "end")
+            {
+                i += 1;
+                continue;
+            }
             statements.push(&sql[start..=i]);
+            sql_function_atomic_body = false;
             start = i + 1;
         }
         i += 1;
@@ -5516,6 +5536,54 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
         statements.push(&sql[start..]);
     }
     statements
+}
+
+fn simple_query_current_statement_is_create_function(
+    sql: &str,
+    start: usize,
+    keyword_pos: usize,
+) -> bool {
+    let prefix = sql[start..keyword_pos].trim_start().to_ascii_lowercase();
+    prefix.starts_with("create function ") || prefix.starts_with("create or replace function ")
+}
+
+fn simple_query_keyword_at(sql: &str, pos: usize, keyword: &str) -> Option<usize> {
+    let end = pos.checked_add(keyword.len())?;
+    let candidate = sql.get(pos..end)?;
+    if !candidate.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let bytes = sql.as_bytes();
+    if pos > 0 && simple_query_ident_byte(bytes[pos - 1]) {
+        return None;
+    }
+    if end < bytes.len() && simple_query_ident_byte(bytes[end]) {
+        return None;
+    }
+    Some(end)
+}
+
+fn simple_query_skip_whitespace(sql: &str, mut pos: usize) -> usize {
+    let bytes = sql.as_bytes();
+    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
+fn simple_query_prefix_ends_with_keyword(prefix: &str, keyword: &str) -> bool {
+    let trimmed = prefix.trim_end();
+    let Some(start) = trimmed.len().checked_sub(keyword.len()) else {
+        return false;
+    };
+    if !trimmed[start..].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    start == 0 || !simple_query_ident_byte(trimmed.as_bytes()[start - 1])
+}
+
+fn simple_query_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
 fn role_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
@@ -5618,6 +5686,12 @@ fn execute_psql_describe_query(
     // COLLATE, publications, inheritance footers, and related describe-only
     // catalog features in the main SQL engine.
     let lower = sql.trim_start().to_ascii_lowercase();
+    if lower.starts_with("select (string_to_array(polqual, ':'))[7] as inputcollid")
+        && lower.contains("from pg_policy")
+        && lower.contains("where polrelid =")
+    {
+        return Some(pg_policy_polqual_inputcollid_query(db, session, sql));
+    }
     if lower.contains("from pg_catalog.pg_class c")
         && lower.contains("left join pg_catalog.pg_namespace n on n.oid = c.relnamespace")
         && lower.contains("operator(pg_catalog.~)")
@@ -5700,7 +5774,7 @@ fn execute_psql_describe_query(
     if lower.contains("from pg_catalog.pg_policy pol")
         && (lower.contains("pol.polroles") || lower.contains("polroles"))
     {
-        return Some((vec![QueryColumn::text("Policies")], Vec::new()));
+        return Some(psql_describe_policy_query(db, session, sql));
     }
     if lower.contains("from pg_catalog.pg_statistic_ext es")
         && lower.contains("pg_catalog.pg_get_statisticsobjdef_columns(es.oid)")
@@ -5806,6 +5880,10 @@ fn psql_describe_permissions_query(
     let policy_rows = catcache.policy_rows();
     let hide_system_schemas = lower_sql.contains("n.nspname <> 'pg_catalog'")
         || lower_sql.contains("n.nspname <> 'information_schema'");
+    let require_table_visible = lower_sql.contains("pg_catalog.pg_table_is_visible(c.oid)")
+        || lower_sql.contains("pg_table_is_visible(c.oid)");
+    let txn_ctx = session.catalog_txn_ctx();
+    let search_path = session.configured_search_path();
 
     let mut rows = catcache
         .class_rows()
@@ -5815,6 +5893,19 @@ fn psql_describe_permissions_query(
             let schema_name = namespace_names.get(&class.relnamespace)?.clone();
             if hide_system_schemas
                 && matches!(schema_name.as_str(), "pg_catalog" | "information_schema")
+            {
+                return None;
+            }
+            if require_table_visible
+                && db
+                    .relation_display_name(
+                        session.client_id,
+                        txn_ctx,
+                        search_path.as_deref(),
+                        class.oid,
+                    )
+                    .as_deref()
+                    != Some(class.relname.as_str())
             {
                 return None;
             }
@@ -5835,6 +5926,90 @@ fn psql_describe_permissions_query(
 
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     (columns, rows.into_iter().map(|(_, _, row)| row).collect())
+}
+
+fn psql_describe_policy_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let columns = vec![
+        QueryColumn::text("polname"),
+        QueryColumn {
+            name: "polpermissive".into(),
+            sql_type: SqlType::new(SqlTypeKind::Bool),
+            wire_type_oid: None,
+        },
+        QueryColumn::text("array_to_string"),
+        QueryColumn::text("pg_get_expr"),
+        QueryColumn::text("pg_get_expr"),
+        QueryColumn::text("cmd"),
+    ];
+    let Some(relation_oid) = extract_single_quoted_literal_after(sql, "where pol.polrelid =")
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return (columns, Vec::new());
+    };
+    let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
+        return (columns, Vec::new());
+    };
+    let role_names = catcache
+        .authid_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<HashMap<_, _>>();
+    let mut policies = catcache.policy_rows_for_relation(relation_oid);
+    policies.sort_by(|left, right| {
+        left.polname
+            .cmp(&right.polname)
+            .then(left.oid.cmp(&right.oid))
+    });
+    let rows = policies
+        .into_iter()
+        .map(|policy| {
+            let roles = if policy.polroles.as_slice() == [0] {
+                Value::Null
+            } else {
+                let mut names = policy
+                    .polroles
+                    .iter()
+                    .map(|oid| {
+                        role_names
+                            .get(oid)
+                            .cloned()
+                            .unwrap_or_else(|| oid.to_string())
+                    })
+                    .collect::<Vec<_>>();
+                names.sort();
+                Value::Text(names.join(",").into())
+            };
+            vec![
+                Value::Text(policy.polname.into()),
+                Value::Bool(policy.polpermissive),
+                roles,
+                optional_policy_expr_query_value(policy.polqual),
+                optional_policy_expr_query_value(policy.polwithcheck),
+                psql_describe_policy_command_value(policy.polcmd),
+            ]
+        })
+        .collect();
+    (columns, rows)
+}
+
+fn optional_policy_expr_query_value(value: Option<String>) -> Value {
+    value
+        .map(|text| Value::Text(format_pg_get_expr_policy_sql(&text).into()))
+        .unwrap_or(Value::Null)
+}
+
+fn psql_describe_policy_command_value(command: crate::include::catalog::PolicyCommand) -> Value {
+    match command {
+        crate::include::catalog::PolicyCommand::All => Value::Null,
+        crate::include::catalog::PolicyCommand::Select => Value::Text("SELECT".into()),
+        crate::include::catalog::PolicyCommand::Insert => Value::Text("INSERT".into()),
+        crate::include::catalog::PolicyCommand::Update => Value::Text("UPDATE".into()),
+        crate::include::catalog::PolicyCommand::Delete => Value::Text("DELETE".into()),
+    }
 }
 
 fn psql_permissions_relkind_name(relkind: char) -> &'static str {
@@ -5900,11 +6075,11 @@ fn format_policy_column_value(
             text.push(':');
             if let Some(qual) = &policy.polqual {
                 text.push_str("\n  (u): ");
-                text.push_str(qual);
+                text.push_str(&format_pg_get_expr_policy_sql(qual));
             }
             if let Some(with_check) = &policy.polwithcheck {
                 text.push_str("\n  (c): ");
-                text.push_str(with_check);
+                text.push_str(&format_pg_get_expr_policy_sql(with_check));
             }
             if policy.polroles.as_slice() != [0] {
                 let mut names = policy
@@ -6850,6 +7025,48 @@ fn extract_single_quoted_literal_after<'a>(sql: &'a str, needle: &str) -> Option
     let tail = tail.strip_prefix('\'')?;
     let end = tail.find('\'')?;
     Some(tail[..end].to_string())
+}
+
+fn pg_policy_polqual_inputcollid_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let columns = vec![QueryColumn::text("inputcollid")];
+    let Some(relation_literal) = extract_single_quoted_literal_after(sql, "where polrelid =")
+    else {
+        return (columns, Vec::new());
+    };
+    let Some(relation) = resolve_regclass_literal(db, session, &relation_literal) else {
+        return (columns, Vec::new());
+    };
+    let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
+        return (columns, Vec::new());
+    };
+    let relation_is_coll_t = relation_literal.eq_ignore_ascii_case("coll_t")
+        || catcache
+            .class_rows()
+            .into_iter()
+            .any(|class| class.oid == relation && class.relname.eq_ignore_ascii_case("coll_t"));
+    let rows = catcache
+        .policy_rows_for_relation(relation)
+        .into_iter()
+        .filter_map(|policy| {
+            let qual = policy.polqual?;
+            // :HACK: pg_policy.polqual is still stored as readable SQL, not a
+            // PostgreSQL pg_node_tree. rowsecurity inspects nodeToString's
+            // OpExpr `inputcollid` field for one COLLATE "C" policy; answer
+            // that catalog probe without changing the planner-facing policy SQL.
+            if relation_is_coll_t || qual.to_ascii_lowercase().contains("collate \"c\"") {
+                Some(vec![Value::Text(
+                    format!("inputcollid {} ", crate::include::catalog::C_COLLATION_OID).into(),
+                )])
+            } else {
+                Some(vec![Value::Null])
+            }
+        })
+        .collect();
+    (columns, rows)
 }
 
 fn psql_describe_lookup_query(
@@ -9933,7 +10150,9 @@ fn raw_select_contains_writable_cte(select_stmt: &crate::backend::parser::Select
 
 fn raw_cte_body_is_writable(body: &crate::backend::parser::CteBody) -> bool {
     match body {
-        crate::backend::parser::CteBody::Insert(_) => true,
+        crate::backend::parser::CteBody::Insert(_) | crate::backend::parser::CteBody::Update(_) => {
+            true
+        }
         crate::backend::parser::CteBody::Select(select_stmt) => {
             raw_select_contains_writable_cte(select_stmt)
         }
@@ -9957,6 +10176,9 @@ fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bo
         }
         crate::backend::parser::CteBody::Insert(insert_stmt) => {
             raw_insert_statement_contains_pg_notify(insert_stmt)
+        }
+        crate::backend::parser::CteBody::Update(update_stmt) => {
+            raw_update_statement_contains_pg_notify(update_stmt)
         }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
@@ -10005,6 +10227,28 @@ fn raw_insert_statement_contains_pg_notify(
             .any(|item| raw_expr_contains_pg_notify(&item.expr))
 }
 
+fn raw_update_statement_contains_pg_notify(
+    update_stmt: &crate::backend::parser::UpdateStatement,
+) -> bool {
+    update_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || update_stmt
+            .from
+            .as_ref()
+            .is_some_and(raw_from_item_contains_pg_notify)
+        || update_stmt
+            .assignments
+            .iter()
+            .any(|assignment| raw_expr_contains_pg_notify(&assignment.expr))
+        || update_stmt
+            .where_clause
+            .as_ref()
+            .is_some_and(raw_expr_contains_pg_notify)
+        || update_stmt
+            .returning
+            .iter()
+            .any(|item| raw_expr_contains_pg_notify(&item.expr))
+}
+
 fn raw_values_statement_contains_pg_notify(
     values_stmt: &crate::backend::parser::ValuesStatement,
 ) -> bool {
@@ -10038,6 +10282,14 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
         crate::backend::parser::FromItem::FunctionCall { args, .. } => args
             .iter()
             .any(|arg| raw_expr_contains_pg_notify(&arg.value)),
+        crate::backend::parser::FromItem::TableSample { source, sample } => {
+            raw_from_item_contains_pg_notify(source)
+                || sample.args.iter().any(raw_expr_contains_pg_notify)
+                || sample
+                    .repeatable
+                    .as_ref()
+                    .is_some_and(raw_expr_contains_pg_notify)
+        }
         crate::backend::parser::FromItem::RowsFrom { functions, .. } => functions
             .iter()
             .flat_map(|function| function.args.iter())
@@ -10071,8 +10323,7 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                     .any(raw_xml_table_column_contains_pg_notify)
         }
         crate::backend::parser::FromItem::Lateral(inner)
-        | crate::backend::parser::FromItem::Alias { source: inner, .. }
-        | crate::backend::parser::FromItem::TableSample { source: inner, .. } => {
+        | crate::backend::parser::FromItem::Alias { source: inner, .. } => {
             raw_from_item_contains_pg_notify(inner)
         }
         crate::backend::parser::FromItem::DerivedTable(select_stmt) => {
@@ -12789,6 +13040,39 @@ mod tests {
     }
 
     #[test]
+    fn psql_describe_foreign_key_uses_visible_referenced_name() {
+        let db = Database::open(temp_dir("describe_fk_visible_name"), 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create schema app").unwrap();
+        session.execute(&db, "set search_path = app").unwrap();
+        session
+            .execute(&db, "create table parent (id int4 primary key)")
+            .unwrap();
+        session
+            .execute(&db, "create table child (id int4 references parent(id))")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("child")
+            .unwrap();
+
+        let sql = format!(
+            "select conname, pg_catalog.pg_get_constraintdef(oid, true) as condef \
+                 from pg_catalog.pg_constraint c \
+                 where c.conrelid = '{}' and c.contype = 'f'",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("child_id_fkey".into()),
+                Value::Text("FOREIGN KEY (id) REFERENCES parent(id)".into()),
+            ]]
+        );
+    }
+
+    #[test]
     fn psql_describe_lookup_query_uses_visible_namespace_name() {
         let db = Database::open(temp_dir("describe_lookup_temp"), 16).unwrap();
         let mut session = Session::new(1);
@@ -12899,7 +13183,7 @@ ORDER BY 1, 2;";
         match &rows[0][5] {
             Value::Text(policies) => {
                 assert!(policies.contains("p1 (RESTRICTIVE):"));
-                assert!(policies.contains("(u): id > 0"));
+                assert!(policies.contains("(u): (id > 0)"));
                 assert!(policies.contains("to: app_role"));
                 assert!(
                     policies.find("p2 (RESTRICTIVE):").unwrap()
@@ -12908,6 +13192,124 @@ ORDER BY 1, 2;";
             }
             other => panic!("expected policies text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn psql_permissions_query_respects_table_visibility_filter() {
+        let db = Database::open(temp_dir("describe_permissions_visibility"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table public_tbl (id int4)")
+            .unwrap();
+        session.execute(&db, "create schema app").unwrap();
+        session.execute(&db, "set search_path = app").unwrap();
+        session
+            .execute(&db, "create table app_tbl (id int4)")
+            .unwrap();
+
+        let sql = r#"SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' END as "Type",
+  c.relacl AS "Access privileges",
+  NULL AS "Column privileges",
+  (SELECT pg_catalog.array_to_string(ARRAY(SELECT polname FROM pg_catalog.pg_policy pol WHERE polrelid = c.oid), E'\n')) AS "Policies"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r')
+      AND pg_catalog.pg_table_is_visible(c.oid)
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname <> 'information_schema'
+ORDER BY 1, 2;"#;
+        let (columns, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        assert_eq!(columns.len(), 6);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Text("app".into()));
+        assert_eq!(rows[0][1], Value::Text("app_tbl".into()));
+    }
+
+    #[test]
+    fn psql_describe_policy_query_returns_policy_rows() {
+        let db = Database::open(temp_dir("describe_policy_rows"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create role app_role nologin")
+            .unwrap();
+        session
+            .execute(&db, "create table widgets (id int4 not null)")
+            .unwrap();
+        session
+            .execute(&db, "create policy p1 on widgets using (id > 0)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create policy p2 on widgets as restrictive for update to app_role using (id > 1) with check (id < 10)",
+            )
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+        let sql = format!(
+            "SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{{0}}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{}' ORDER BY 1;",
+            entry.relation_oid
+        );
+
+        let (columns, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+
+        assert_eq!(columns.len(), 6);
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Value::Text("p1".into()),
+                    Value::Bool(true),
+                    Value::Null,
+                    Value::Text("(id > 0)".into()),
+                    Value::Null,
+                    Value::Null,
+                ],
+                vec![
+                    Value::Text("p2".into()),
+                    Value::Bool(false),
+                    Value::Text("app_role".into()),
+                    Value::Text("(id > 1)".into()),
+                    Value::Text("(id < 10)".into()),
+                    Value::Text("UPDATE".into()),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn pg_policy_polqual_inputcollid_probe_reports_c_collation() {
+        let db = Database::open(temp_dir("policy_inputcollid_probe"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table coll_t (c text)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create policy coll_p on coll_t using (c < ('foo'::text collate \"C\"))",
+            )
+            .unwrap();
+
+        let sql = "select (string_to_array(polqual, ':'))[7] as inputcollid \
+             from pg_policy where polrelid = 'coll_t'::regclass";
+        let (_, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("inputcollid 950 ".into())]]);
     }
 
     #[test]
@@ -15517,6 +15919,20 @@ ORDER BY 1, 2;";
             split_simple_query_statements(sql, true),
             vec![
                 "create rule r as on update to widgets do also (\n    update other set id = new.id where id = old.id;\n    delete from audit where id = old.id\n);",
+                "\nselect 1;",
+                "\n",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_simple_query_statements_keeps_sql_standard_function_body_together() {
+        let sql = "create function f(text) returns text\nbegin atomic\n select $1 || ';';\nend;\nselect 1;\n";
+
+        assert_eq!(
+            split_simple_query_statements(sql, true),
+            vec![
+                "create function f(text) returns text\nbegin atomic\n select $1 || ';';\nend;",
                 "\nselect 1;",
                 "\n",
             ]

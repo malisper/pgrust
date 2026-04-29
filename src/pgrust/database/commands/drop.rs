@@ -8,12 +8,13 @@ use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::syscache::{
     SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
+    search_sys_cache1_db,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PgCastRow,
-    PgConstraintRow, PgProcRow, PgRewriteRow,
+    PG_CONSTRAINT_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_REWRITE_RELATION_OID, PgCastRow, PgConstraintRow, PgPolicyRow, PgProcRow, PgRewriteRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -35,6 +36,13 @@ struct DropForeignKeyConstraintPlan {
 #[derive(Debug, Clone)]
 struct DropRulePlan {
     rewrite_oid: u32,
+}
+
+#[derive(Debug, Clone)]
+struct DropPolicyPlan {
+    policy_oid: u32,
+    relation_oid: u32,
+    policy_name: String,
 }
 
 fn domain_has_range_dependents_error(type_name: &str, dependent_name: &str) -> ExecError {
@@ -244,6 +252,11 @@ enum DropTableDependency {
         rule: DropRulePlan,
         rule_name: String,
     },
+    Policy {
+        relation_oid: u32,
+        relation_display_name: String,
+        policy: DropPolicyPlan,
+    },
 }
 
 impl DropTableDependency {
@@ -273,6 +286,14 @@ impl DropTableDependency {
             } => format!(
                 "rule {rule_name} on {} {relation_display_name} depends on {referenced_kind} {referenced_name}",
                 drop_table_relation_kind_name(*relation_kind)
+            ),
+            Self::Policy {
+                relation_display_name,
+                policy,
+                ..
+            } => format!(
+                "policy {} on table {relation_display_name} depends on {referenced_kind} {referenced_name}",
+                policy.policy_name
             ),
         }
     }
@@ -304,6 +325,14 @@ impl DropTableDependency {
                 "drop cascades to rule {rule_name} on {} {relation_display_name}",
                 drop_table_relation_kind_name(*relation_kind)
             ),
+            Self::Policy {
+                relation_display_name,
+                policy,
+                ..
+            } => format!(
+                "drop cascades to policy {} on table {relation_display_name}",
+                policy.policy_name
+            ),
         }
     }
 
@@ -333,6 +362,15 @@ impl DropTableDependency {
                 rule.rewrite_oid,
                 format!("{relation_display_name}:{rule_name}"),
             ),
+            Self::Policy {
+                policy,
+                relation_display_name,
+                ..
+            } => (
+                3,
+                0,
+                format!("{relation_display_name}:{}", policy.policy_name),
+            ),
         }
     }
 }
@@ -345,6 +383,8 @@ struct DropTablePlan {
     constraint_drops: Vec<DropForeignKeyConstraintPlan>,
     rule_drop_oids: BTreeSet<u32>,
     rule_drops: Vec<DropRulePlan>,
+    policy_drop_oids: BTreeSet<u32>,
+    policy_drops: Vec<DropPolicyPlan>,
     blocker_details: Vec<String>,
     blocker_source: Option<(char, String)>,
     notices: Vec<String>,
@@ -355,6 +395,7 @@ struct DropTableDependencyContext<'a> {
     graph: &'a CatalogDependencyGraph,
     constraints_by_oid: BTreeMap<u32, PgConstraintRow>,
     rewrites_by_oid: BTreeMap<u32, PgRewriteRow>,
+    policies_by_oid: BTreeMap<u32, PgPolicyRow>,
     search_path: &'a [String],
 }
 
@@ -536,6 +577,27 @@ fn drop_rewrite_row_by_oid(
     })
 }
 
+fn drop_policy_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    oid: u32,
+) -> Option<PgPolicyRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PolicyOid,
+        drop_oid_key(oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Policy(row) => Some(row),
+        _ => None,
+    })
+}
+
 fn build_drop_table_dependency_graph(
     db: &Database,
     client_id: ClientId,
@@ -545,6 +607,7 @@ fn build_drop_table_dependency_graph(
     CatalogDependencyGraph,
     BTreeMap<u32, PgConstraintRow>,
     BTreeMap<u32, PgRewriteRow>,
+    BTreeMap<u32, PgPolicyRow>,
 ) {
     let mut queue = relation_oids
         .iter()
@@ -556,6 +619,7 @@ fn build_drop_table_dependency_graph(
     let mut inherit_rows = Vec::new();
     let mut constraints_by_oid = BTreeMap::new();
     let mut rewrites_by_oid = BTreeMap::new();
+    let mut policies_by_oid = BTreeMap::new();
 
     while let Some(address) = queue.pop() {
         if !visited.insert(address) {
@@ -582,6 +646,12 @@ fn build_drop_table_dependency_graph(
                     queue.push(ObjectAddress::relation(rewrite.ev_class));
                     entry.insert(rewrite);
                 }
+            } else if row.classid == PG_POLICY_RELATION_OID
+                && let std::collections::btree_map::Entry::Vacant(entry) =
+                    policies_by_oid.entry(row.objid)
+                && let Some(policy) = drop_policy_row_by_oid(db, client_id, txn_ctx, row.objid)
+            {
+                entry.insert(policy);
             }
             depend_rows.push(row);
         }
@@ -598,6 +668,7 @@ fn build_drop_table_dependency_graph(
         CatalogDependencyGraph::from_rows(depend_rows, inherit_rows),
         constraints_by_oid,
         rewrites_by_oid,
+        policies_by_oid,
     )
 }
 
@@ -864,6 +935,7 @@ fn drop_table_direct_dependencies(
     let mut relation_oids = BTreeSet::new();
     let mut constraint_oids = BTreeSet::new();
     let mut rule_oids = BTreeSet::new();
+    let mut policy_oids = BTreeSet::new();
     let mut deps = Vec::new();
 
     for row in ctx.graph.dependents(ObjectAddress::relation(relation_oid)) {
@@ -951,6 +1023,27 @@ fn drop_table_direct_dependencies(
                         rule_name: rewrite.rulename.clone(),
                     });
                 }
+            }
+            PG_POLICY_RELATION_OID if row.deptype == DEPENDENCY_NORMAL => {
+                let Some(policy) = ctx.policies_by_oid.get(&row.objid) else {
+                    continue;
+                };
+                if !policy_oids.insert(policy.oid) {
+                    continue;
+                }
+                deps.push(DropTableDependency::Policy {
+                    relation_oid: policy.polrelid,
+                    relation_display_name: drop_table_display_relation_name(
+                        ctx.catalog,
+                        policy.polrelid,
+                        ctx.search_path,
+                    ),
+                    policy: DropPolicyPlan {
+                        policy_oid: policy.oid,
+                        relation_oid: policy.polrelid,
+                        policy_name: policy.polname.clone(),
+                    },
+                });
             }
             _ => {}
         }
@@ -1074,6 +1167,10 @@ fn collect_drop_table_restrict_blockers(
                 ..
             }
             | DropTableDependency::Rule {
+                relation_oid: dependent_relation_oid,
+                ..
+            }
+            | DropTableDependency::Policy {
                 relation_oid: dependent_relation_oid,
                 ..
             } => {
@@ -1212,10 +1309,62 @@ fn plan_drop_table_relation(
                     );
                 }
             }
+            DropTableDependency::Policy {
+                relation_oid: dependent_relation_oid,
+                ref policy,
+                ..
+            } => {
+                if explicit_relation_oids.contains(&dependent_relation_oid)
+                    || plan.relation_drop_oids.contains(&dependent_relation_oid)
+                    || !plan.policy_drop_oids.insert(policy.policy_oid)
+                {
+                    continue;
+                }
+                if behavior.is_cascade() {
+                    plan.notices.push(dep.cascade_notice());
+                    plan.policy_drops.push(policy.clone());
+                } else {
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                }
+            }
         }
     }
 
     plan.relation_drop_order.push(relation_oid);
+}
+
+fn sort_policy_cascade_notices(ctx: &DropTableDependencyContext<'_>, plan: &mut DropTablePlan) {
+    if plan.policy_drops.len() < 2 {
+        return;
+    }
+
+    plan.policy_drops.sort_by_key(|policy| policy.policy_oid);
+    let mut sorted_policy_notices = plan
+        .policy_drops
+        .iter()
+        .map(|policy| {
+            let relation_display_name =
+                drop_table_display_relation_name(ctx.catalog, policy.relation_oid, ctx.search_path);
+            format!(
+                "drop cascades to policy {} on table {relation_display_name}",
+                policy.policy_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
+
+    for notice in &mut plan.notices {
+        if notice.starts_with("drop cascades to policy ")
+            && let Some(sorted_notice) = sorted_policy_notices.next()
+        {
+            *notice = sorted_notice;
+        }
+    }
 }
 
 impl Database {
@@ -1871,14 +2020,6 @@ impl Database {
             if dropped_relation_oids.contains(&relation.oid) {
                 continue;
             }
-            if self
-                .backend_catcache(client_id, Some((xid, next_cid)))
-                .map_err(map_catalog_error)?
-                .class_by_oid(relation.oid)
-                .is_none()
-            {
-                continue;
-            }
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -2050,6 +2191,7 @@ impl Database {
         let mut rels = Vec::new();
         let mut dropped = 0usize;
         let mut explicit_relation_oids = BTreeSet::new();
+        let mut explicit_relation_order = Vec::new();
 
         for relation_name in &drop_stmt.table_names {
             let relation = match catalog.lookup_any_relation(relation_name) {
@@ -2089,7 +2231,9 @@ impl Database {
             };
 
             ensure_relation_owner(self, client_id, &relation, relation_name)?;
-            explicit_relation_oids.insert(relation.relation_oid);
+            if explicit_relation_oids.insert(relation.relation_oid) {
+                explicit_relation_order.push(relation.relation_oid);
+            }
             rels.push(relation.rel);
             dropped += 1;
         }
@@ -2107,22 +2251,24 @@ impl Database {
         )?;
 
         let result = (|| {
-            let (graph, constraints_by_oid, rewrites_by_oid) = build_drop_table_dependency_graph(
-                self,
-                client_id,
-                Some((xid, cid)),
-                &explicit_relation_oids,
-            );
+            let (graph, constraints_by_oid, rewrites_by_oid, policies_by_oid) =
+                build_drop_table_dependency_graph(
+                    self,
+                    client_id,
+                    Some((xid, cid)),
+                    &explicit_relation_oids,
+                );
             let behavior = DropBehavior::from_cascade(drop_stmt.cascade);
             let dependency_ctx = DropTableDependencyContext {
                 catalog: &catalog,
                 graph: &graph,
                 constraints_by_oid,
                 rewrites_by_oid,
+                policies_by_oid,
                 search_path: &search_path,
             };
             let mut plan = DropTablePlan::default();
-            for &relation_oid in &explicit_relation_oids {
+            for &relation_oid in &explicit_relation_order {
                 plan_drop_table_relation(
                     &dependency_ctx,
                     relation_oid,
@@ -2131,6 +2277,7 @@ impl Database {
                     &mut plan,
                 );
             }
+            sort_policy_cascade_notices(&dependency_ctx, &mut plan);
 
             if !drop_stmt.cascade && !plan.blocker_details.is_empty() {
                 let (_, source_name) = plan.blocker_source.unwrap_or(('r', "table".to_string()));
@@ -2154,6 +2301,25 @@ impl Database {
             }
 
             let mut next_cid = cid;
+
+            for policy in &plan.policy_drops {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let (_removed, effect) = self
+                    .catalog
+                    .write()
+                    .drop_policy_mvcc(policy.relation_oid, &policy.policy_name, &ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
 
             for rule in &plan.rule_drops {
                 let ctx = CatalogWriteContext {
@@ -3104,6 +3270,7 @@ impl Database {
             .map_err(map_catalog_error)?;
         let mut rels = Vec::new();
         let mut explicit_relation_oids = BTreeSet::new();
+        let mut explicit_relation_order = Vec::new();
         let mut dropped = 0usize;
 
         for relation_name in relation_names {
@@ -3126,7 +3293,9 @@ impl Database {
                 }
             };
             ensure_relation_owner(self, client_id, &relation, relation_name)?;
-            explicit_relation_oids.insert(relation.relation_oid);
+            if explicit_relation_oids.insert(relation.relation_oid) {
+                explicit_relation_order.push(relation.relation_oid);
+            }
             rels.push(relation.rel);
             dropped += 1;
         }
@@ -3154,11 +3323,16 @@ impl Database {
                     .into_iter()
                     .map(|row| (row.oid, row))
                     .collect(),
+                policies_by_oid: catcache
+                    .policy_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row))
+                    .collect(),
                 search_path: &search_path,
             };
             let mut plan = DropTablePlan::default();
             let behavior = DropBehavior::from_cascade(cascade);
-            for &relation_oid in &explicit_relation_oids {
+            for &relation_oid in &explicit_relation_order {
                 plan_drop_table_relation(
                     &dependency_ctx,
                     relation_oid,
@@ -3167,6 +3341,7 @@ impl Database {
                     &mut plan,
                 );
             }
+            sort_policy_cascade_notices(&dependency_ctx, &mut plan);
 
             if !cascade && !plan.blocker_details.is_empty() {
                 let (_, source_name) = plan
@@ -3194,6 +3369,25 @@ impl Database {
             }
 
             let mut next_cid = cid;
+            for policy in &plan.policy_drops {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let (_removed, effect) = self
+                    .catalog
+                    .write()
+                    .drop_policy_mvcc(policy.relation_oid, &policy.policy_name, &ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+
             for rule in &plan.rule_drops {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),

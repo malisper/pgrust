@@ -2,6 +2,7 @@ use crate::backend::executor::eval_expr;
 use crate::backend::executor::value_io::format_failing_row_detail_for_columns;
 use crate::backend::parser::BoundRelationConstraints;
 use crate::backend::rewrite::RlsWriteCheck;
+use crate::include::access::htup::ItemPointerData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::primnodes::RelationDesc;
@@ -87,15 +88,33 @@ pub(crate) fn enforce_row_security_write_checks(
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    enforce_row_security_write_checks_with_tid(
+        relation_name,
+        desc,
+        checks,
+        values,
+        Some(row_security_new_row_tid()),
+        ctx,
+    )
+}
+
+pub(crate) fn enforce_row_security_write_checks_with_tid(
+    relation_name: &str,
+    desc: &RelationDesc,
+    checks: &[RlsWriteCheck],
+    values: &[Value],
+    row_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
     if checks.is_empty() {
         return Ok(());
     }
 
-    let mut slot = TupleSlot::virtual_row(values.to_vec());
+    let mut slot = TupleSlot::virtual_row_with_metadata(values.to_vec(), row_tid, None);
     for check in checks {
         match eval_expr(&check.expr, &mut slot, ctx)? {
-            Value::Null | Value::Bool(true) => {}
-            Value::Bool(false) => {
+            Value::Bool(true) => {}
+            Value::Null | Value::Bool(false) => {
                 if let crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(view_name) =
                     &check.source
                 {
@@ -108,6 +127,33 @@ pub(crate) fn enforce_row_security_write_checks(
                         )),
                         hint: None,
                         sqlstate: "44000",
+                    });
+                }
+                if matches!(
+                    check.source,
+                    crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility
+                ) {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "new row violates row-level security policy (USING expression) for table \"{relation_name}\""
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42501",
+                    });
+                }
+                if matches!(
+                    check.source,
+                    crate::backend::rewrite::RlsWriteCheckSource::MergeUpdateVisibility
+                        | crate::backend::rewrite::RlsWriteCheckSource::MergeDeleteVisibility
+                ) {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "target row violates row-level security policy (USING expression) for table \"{relation_name}\""
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42501",
                     });
                 }
                 return Err(ExecError::DetailedError {
@@ -167,4 +213,11 @@ pub(crate) fn enforce_row_security_write_checks(
     }
 
     Ok(())
+}
+
+fn row_security_new_row_tid() -> ItemPointerData {
+    ItemPointerData {
+        block_number: u32::MAX,
+        offset_number: 0,
+    }
 }

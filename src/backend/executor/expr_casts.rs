@@ -809,7 +809,9 @@ fn parse_numeric_input_value(
     parse_numeric_text(text).ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))
 }
 
-fn canonicalize_tid_text(text: &str) -> Result<String, ExecError> {
+fn parse_tid_text(
+    text: &str,
+) -> Result<crate::include::access::itemptr::ItemPointerData, ExecError> {
     let trimmed = text.trim();
     let inner = trimmed
         .strip_prefix('(')
@@ -846,7 +848,10 @@ fn canonicalize_tid_text(text: &str) -> Result<String, ExecError> {
             hint: None,
             sqlstate: "22P02",
         })?;
-    Ok(format!("({block_number},{offset_number})"))
+    Ok(crate::include::access::itemptr::ItemPointerData {
+        block_number,
+        offset_number,
+    })
 }
 
 pub(crate) fn invalid_interval_text_error(text: &str) -> ExecError {
@@ -6233,9 +6238,7 @@ pub(crate) fn cast_text_value_with_config(
         | SqlTypeKind::RegCollation
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary => cast_text_to_oid(text),
-        SqlTypeKind::Tid => Ok(Value::Text(CompactString::from_owned(
-            canonicalize_tid_text(text)?,
-        ))),
+        SqlTypeKind::Tid => Ok(Value::Tid(parse_tid_text(text)?)),
         SqlTypeKind::Xid => cast_text_to_xid(text),
         SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(
             CompactString::from_owned(coerce_character_string(text, ty, explicit)?),

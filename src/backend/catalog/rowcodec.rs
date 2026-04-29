@@ -15,9 +15,9 @@ use crate::include::catalog::{
     PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
     PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
+    PgShdependRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
 };
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
@@ -174,9 +174,14 @@ pub(crate) fn catalog_row_values_for_kind(
         | BootstrapCatalogKind::PgTransform
         | BootstrapCatalogKind::PgSubscription
         | BootstrapCatalogKind::PgParameterAcl
-        | BootstrapCatalogKind::PgShdepend
         | BootstrapCatalogKind::PgShdescription
         | BootstrapCatalogKind::PgReplicationOrigin => Vec::new(),
+        BootstrapCatalogKind::PgShdepend => rows
+            .shdepends
+            .iter()
+            .cloned()
+            .map(pg_shdepend_row_values)
+            .collect(),
         BootstrapCatalogKind::PgInherits => rows
             .inherits
             .iter()
@@ -1159,6 +1164,20 @@ pub(crate) fn pg_depend_row_from_values(values: Vec<Value>) -> Result<PgDependRo
         refclassid: expect_oid(&values[3])?,
         refobjid: expect_oid(&values[4])?,
         refobjsubid: expect_int32(&values[5])?,
+        deptype: expect_char(&values[6], "deptype")?,
+    })
+}
+
+pub(crate) fn pg_shdepend_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgShdependRow, CatalogError> {
+    Ok(PgShdependRow {
+        dbid: expect_oid(&values[0])?,
+        classid: expect_oid(&values[1])?,
+        objid: expect_oid(&values[2])?,
+        objsubid: expect_int32(&values[3])?,
+        refclassid: expect_oid(&values[4])?,
+        refobjid: expect_oid(&values[5])?,
         deptype: expect_char(&values[6], "deptype")?,
     })
 }
@@ -2268,6 +2287,18 @@ fn pg_depend_row_values(row: PgDependRow) -> Vec<Value> {
         Value::Int32(row.refclassid as i32),
         Value::Int32(row.refobjid as i32),
         Value::Int32(row.refobjsubid),
+        Value::Text(row.deptype.to_string().into()),
+    ]
+}
+
+fn pg_shdepend_row_values(row: PgShdependRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.dbid as i32),
+        Value::Int32(row.classid as i32),
+        Value::Int32(row.objid as i32),
+        Value::Int32(row.objsubid),
+        Value::Int32(row.refclassid as i32),
+        Value::Int32(row.refobjid as i32),
         Value::Text(row.deptype.to_string().into()),
     ]
 }

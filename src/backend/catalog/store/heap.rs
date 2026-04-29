@@ -14,11 +14,11 @@ use crate::backend::catalog::pg_depend::{
     foreign_data_wrapper_depend_rows, foreign_key_constraint_depend_rows,
     foreign_server_depend_rows, index_backed_constraint_depend_rows, inheritance_depend_rows,
     language_depend_rows, opclass_depend_rows, operator_depend_rows, opfamily_depend_rows,
-    primary_key_owned_not_null_depend_rows, proc_depend_rows, publication_namespace_depend_rows,
-    publication_rel_depend_rows, relation_constraint_depend_rows, relation_rule_depend_rows,
-    sequence_owned_by_depend_row, sort_pg_depend_rows, statistic_ext_depend_rows,
-    trigger_depend_rows, ts_config_depend_rows, ts_dict_depend_rows, ts_parser_depend_rows,
-    ts_template_depend_rows, view_rewrite_depend_rows,
+    policy_depend_rows, primary_key_owned_not_null_depend_rows, proc_depend_rows,
+    publication_namespace_depend_rows, publication_rel_depend_rows,
+    relation_constraint_depend_rows, relation_rule_depend_rows, sequence_owned_by_depend_row,
+    sort_pg_depend_rows, statistic_ext_depend_rows, trigger_depend_rows, ts_config_depend_rows,
+    ts_dict_depend_rows, ts_parser_depend_rows, ts_template_depend_rows, view_rewrite_depend_rows,
 };
 use crate::backend::catalog::rowcodec::{
     pg_cast_row_from_values, pg_description_row_from_values, pg_foreign_table_row_from_values,
@@ -62,7 +62,7 @@ use crate::include::catalog::{
     PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
     PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    PgUserMappingRow, relkind_has_storage,
+    PgUserMappingRow, policy_shdepend_rows, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -3319,6 +3319,7 @@ impl CatalogStore {
     pub fn create_policy_mvcc(
         &mut self,
         mut row: PgPolicyRow,
+        referenced_relation_oids: &[u32],
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         if relation_policies_mvcc(self, ctx, row.polrelid)?
@@ -3338,19 +3339,34 @@ impl CatalogStore {
         }
         control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let depends = policy_depend_rows(row.oid, row.polrelid, referenced_relation_oids);
+        let shdepends = policy_shdepend_rows(self.scope_db_oid(), row.oid, &row.polroles);
         insert_catalog_rows_subset_mvcc(
             ctx,
             &PhysicalCatalogRows {
                 policies: vec![row.clone()],
+                depends,
+                shdepends,
                 ..PhysicalCatalogRows::default()
             },
             self.scope_db_oid(),
-            &[BootstrapCatalogKind::PgPolicy],
+            &[
+                BootstrapCatalogKind::PgPolicy,
+                BootstrapCatalogKind::PgDepend,
+                BootstrapCatalogKind::PgShdepend,
+            ],
         )?;
         self.control = control;
 
         let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgPolicy]);
+        effect_record_catalog_kinds(
+            &mut effect,
+            &[
+                BootstrapCatalogKind::PgPolicy,
+                BootstrapCatalogKind::PgDepend,
+                BootstrapCatalogKind::PgShdepend,
+            ],
+        );
         effect_record_oid(&mut effect.relation_oids, row.polrelid);
         Ok((row.oid, effect))
     }
@@ -3359,6 +3375,7 @@ impl CatalogStore {
         &mut self,
         old_row: &PgPolicyRow,
         mut row: PgPolicyRow,
+        referenced_relation_oids: &[u32],
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         let old_visible = policy_row_mvcc(self, ctx, old_row.polrelid, &old_row.polname)?;
@@ -3374,27 +3391,52 @@ impl CatalogStore {
             ));
         }
         row.oid = old_visible.oid;
+        let old_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_POLICY_RELATION_OID, old_visible.oid)?;
+        let old_shdepends =
+            policy_shdepend_rows(self.scope_db_oid(), old_visible.oid, &old_visible.polroles);
+        let new_depends = policy_depend_rows(row.oid, row.polrelid, referenced_relation_oids);
+        let new_shdepends = policy_shdepend_rows(self.scope_db_oid(), row.oid, &row.polroles);
         delete_catalog_rows_subset_mvcc(
             ctx,
             &PhysicalCatalogRows {
                 policies: vec![old_visible.clone()],
+                depends: old_depends,
+                shdepends: old_shdepends,
                 ..PhysicalCatalogRows::default()
             },
             self.scope_db_oid(),
-            &[BootstrapCatalogKind::PgPolicy],
+            &[
+                BootstrapCatalogKind::PgPolicy,
+                BootstrapCatalogKind::PgDepend,
+                BootstrapCatalogKind::PgShdepend,
+            ],
         )?;
         insert_catalog_rows_subset_mvcc(
             ctx,
             &PhysicalCatalogRows {
                 policies: vec![row.clone()],
+                depends: new_depends,
+                shdepends: new_shdepends,
                 ..PhysicalCatalogRows::default()
             },
             self.scope_db_oid(),
-            &[BootstrapCatalogKind::PgPolicy],
+            &[
+                BootstrapCatalogKind::PgPolicy,
+                BootstrapCatalogKind::PgDepend,
+                BootstrapCatalogKind::PgShdepend,
+            ],
         )?;
 
         let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgPolicy]);
+        effect_record_catalog_kinds(
+            &mut effect,
+            &[
+                BootstrapCatalogKind::PgPolicy,
+                BootstrapCatalogKind::PgDepend,
+                BootstrapCatalogKind::PgShdepend,
+            ],
+        );
         effect_record_oid(&mut effect.relation_oids, row.polrelid);
         Ok((row.oid, effect))
     }
@@ -3406,17 +3448,34 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(PgPolicyRow, CatalogMutationEffect), CatalogError> {
         let old_policy = policy_row_mvcc(self, ctx, relation_oid, policy_name)?;
+        let old_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_POLICY_RELATION_OID, old_policy.oid)?;
+        let old_shdepends =
+            policy_shdepend_rows(self.scope_db_oid(), old_policy.oid, &old_policy.polroles);
         delete_catalog_rows_subset_mvcc(
             ctx,
             &PhysicalCatalogRows {
                 policies: vec![old_policy.clone()],
+                depends: old_depends,
+                shdepends: old_shdepends,
                 ..PhysicalCatalogRows::default()
             },
             self.scope_db_oid(),
-            &[BootstrapCatalogKind::PgPolicy],
+            &[
+                BootstrapCatalogKind::PgPolicy,
+                BootstrapCatalogKind::PgDepend,
+                BootstrapCatalogKind::PgShdepend,
+            ],
         )?;
         let mut effect = CatalogMutationEffect::default();
-        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgPolicy]);
+        effect_record_catalog_kinds(
+            &mut effect,
+            &[
+                BootstrapCatalogKind::PgPolicy,
+                BootstrapCatalogKind::PgDepend,
+                BootstrapCatalogKind::PgShdepend,
+            ],
+        );
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         Ok((old_policy, effect))
     }
@@ -11749,6 +11808,19 @@ fn rows_for_drop_relation_entry_mvcc(
 
     rows.policies
         .extend(relation_policies_mvcc(store, ctx, entry.relation_oid)?);
+    for policy in &rows.policies {
+        rows.depends.extend(depend_rows_for_object_mvcc(
+            store,
+            ctx,
+            PG_POLICY_RELATION_OID,
+            policy.oid,
+        )?);
+        rows.shdepends.extend(policy_shdepend_rows(
+            store.scope_db_oid(),
+            policy.oid,
+            &policy.polroles,
+        ));
+    }
     rows.statistics
         .extend(relation_statistics_mvcc(store, ctx, entry.relation_oid)?);
 

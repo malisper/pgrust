@@ -789,6 +789,54 @@ fn row_security_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
     entry
 }
 
+fn row_security_role(oid: u32, name: &str) -> PgAuthIdRow {
+    PgAuthIdRow {
+        oid,
+        rolname: name.into(),
+        rolsuper: false,
+        rolinherit: true,
+        rolcreaterole: false,
+        rolcreatedb: false,
+        rolcanlogin: true,
+        rolreplication: false,
+        rolbypassrls: false,
+        rolconnlimit: -1,
+        rolpassword: None,
+        rolvaliduntil: None,
+    }
+}
+
+fn op_rhs_int(expr: &Expr) -> Option<i32> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    match op.args.get(1) {
+        Some(Expr::Const(Value::Int32(value))) => Some(*value),
+        _ => None,
+    }
+}
+
+fn collect_op_rhs_ints(expr: &Expr, values: &mut Vec<i32>) {
+    match expr {
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_op_rhs_ints(arg, values);
+            }
+        }
+        other => {
+            if let Some(value) = op_rhs_int(other) {
+                values.push(value);
+            }
+        }
+    }
+}
+
+fn collected_op_rhs_ints(expr: &Expr) -> Vec<i32> {
+    let mut values = Vec::new();
+    collect_op_rhs_ints(expr, &mut values);
+    values
+}
+
 struct OverrideFunctionCatalog {
     base: Catalog,
     proc_rows: Vec<PgProcRow>,
@@ -2069,6 +2117,323 @@ fn rewrite_query_expands_view_relation_rtes_inside_set_operations() {
         set_operation.inputs[1].rtable[0].kind,
         RangeTblEntryKind::Subquery { .. }
     ));
+}
+
+#[test]
+fn rewrite_row_security_orders_restrictive_before_permissive_and_dedupes() {
+    let mut base = Catalog::default();
+    base.insert(
+        "rls_items",
+        row_security_entry(
+            15120,
+            RelationDesc {
+                columns: vec![column_desc("a", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        ),
+    );
+    let relation_oid = base.get("rls_items").unwrap().relation_oid;
+    base.add_policy_row(PgPolicyRow {
+        oid: 71100,
+        polname: "z_restrict".into(),
+        polrelid: relation_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: false,
+        polroles: vec![0],
+        polqual: Some("a > 2".into()),
+        polwithcheck: None,
+    });
+    base.add_policy_row(PgPolicyRow {
+        oid: 71101,
+        polname: "a_restrict".into(),
+        polrelid: relation_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: false,
+        polroles: vec![0],
+        polqual: Some("a > 1".into()),
+        polwithcheck: None,
+    });
+    base.add_policy_row(PgPolicyRow {
+        oid: 71102,
+        polname: "permissive".into(),
+        polrelid: relation_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: true,
+        polroles: vec![0],
+        polqual: Some("a > 3".into()),
+        polwithcheck: None,
+    });
+    base.add_policy_row(PgPolicyRow {
+        oid: 71103,
+        polname: "same_as_permissive".into(),
+        polrelid: relation_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: false,
+        polroles: vec![0],
+        polqual: Some("a > 3".into()),
+        polwithcheck: None,
+    });
+    let catalog = row_security_test_catalog(base, 71110);
+
+    let stmt = parse_select("select a from rls_items").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let quals = &rewritten.rtable[0].security_quals;
+
+    assert_eq!(quals.len(), 3);
+    assert_eq!(
+        quals.iter().map(op_rhs_int).collect::<Vec<_>>(),
+        vec![Some(1), Some(3), Some(2)]
+    );
+}
+
+#[test]
+fn rewrite_row_security_orders_permissive_or_by_descending_name() {
+    let mut base = Catalog::default();
+    base.insert(
+        "rls_items",
+        row_security_entry(
+            15121,
+            RelationDesc {
+                columns: vec![column_desc("a", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        ),
+    );
+    let relation_oid = base.get("rls_items").unwrap().relation_oid;
+    for (oid, name, qual) in [
+        (71104, "p1", "a > 2"),
+        (71105, "p2", "a > 3"),
+        (71106, "p3", "a > 4"),
+    ] {
+        base.add_policy_row(PgPolicyRow {
+            oid,
+            polname: name.into(),
+            polrelid: relation_oid,
+            polcmd: PolicyCommand::Select,
+            polpermissive: true,
+            polroles: vec![0],
+            polqual: Some(qual.into()),
+            polwithcheck: None,
+        });
+    }
+    let catalog = row_security_test_catalog(base, 71111);
+
+    let stmt = parse_select("select a from rls_items").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let quals = &rewritten.rtable[0].security_quals;
+
+    assert_eq!(quals.len(), 1);
+    assert_eq!(collected_op_rhs_ints(&quals[0]), vec![4, 3, 2]);
+}
+
+#[test]
+fn rewrite_row_security_applies_once_to_nested_query_nodes() {
+    let mut base = Catalog::default();
+    base.insert(
+        "rls_once",
+        row_security_entry(
+            15121,
+            RelationDesc {
+                columns: vec![column_desc("a", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        ),
+    );
+    let relation_oid = base.get("rls_once").unwrap().relation_oid;
+    base.add_policy_row(PgPolicyRow {
+        oid: 71110,
+        polname: "visible".into(),
+        polrelid: relation_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: true,
+        polroles: vec![0],
+        polqual: Some("a > 0".into()),
+        polwithcheck: None,
+    });
+    let catalog = row_security_test_catalog(base, 71111);
+
+    let stmt = parse_select("select a from (select a from rls_once) s").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let inner = match &rewritten.rtable[0].kind {
+        RangeTblEntryKind::Subquery { query } => query,
+        other => panic!("expected subquery RTE, got {other:?}"),
+    };
+    assert_eq!(inner.rtable[0].security_quals.len(), 1);
+
+    let stmt = parse_select("select a from rls_once union all select a from rls_once").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let set_operation = rewritten.set_operation.as_ref().expect("set operation");
+    assert_eq!(set_operation.inputs.len(), 2);
+    for input in &set_operation.inputs {
+        assert_eq!(input.rtable[0].security_quals.len(), 1);
+    }
+}
+
+#[test]
+fn bind_update_prepends_and_dedupes_target_rls_visibility_quals() {
+    let mut base = Catalog::default();
+    base.insert(
+        "rls_update",
+        row_security_entry(
+            15122,
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("value", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        ),
+    );
+    let relation_oid = base.get("rls_update").unwrap().relation_oid;
+    base.add_policy_row(PgPolicyRow {
+        oid: 71120,
+        polname: "all_visible".into(),
+        polrelid: relation_oid,
+        polcmd: PolicyCommand::All,
+        polpermissive: true,
+        polroles: vec![0],
+        polqual: Some("id > 0".into()),
+        polwithcheck: None,
+    });
+    let catalog = row_security_test_catalog(base, 71112);
+    let stmt = match parse_statement("update rls_update set value = 5 where id > 10").unwrap() {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
+    let bound = bind_update(&stmt, &catalog).unwrap();
+    let predicate = bound.targets[0]
+        .predicate
+        .as_ref()
+        .expect("update predicate");
+
+    assert_eq!(collected_op_rhs_ints(predicate), vec![0, 10]);
+}
+
+#[test]
+fn rewrite_row_security_uses_view_owner_unless_security_invoker() {
+    const CURRENT_USER: u32 = 71130;
+    const VIEW_OWNER: u32 = 71131;
+
+    fn one_column_view(rel_number: u32, relation_oid: u32, owner_oid: u32) -> CatalogEntry {
+        let mut entry = test_catalog_entry(
+            rel_number,
+            RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        );
+        entry.relation_oid = relation_oid;
+        entry.owner_oid = owner_oid;
+        entry.relkind = 'v';
+        entry.am_oid = crate::include::catalog::relam_for_relkind('v');
+        entry
+    }
+
+    fn view_rhs(catalog: &RowSecurityTestCatalog, view_name: &str) -> i32 {
+        let stmt = parse_select(&format!("select id from {view_name}")).unwrap();
+        let (query, _) =
+            analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[]).unwrap();
+        let rewritten = crate::backend::rewrite::pg_rewrite_query(query, catalog)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let view_query = match &rewritten.rtable[0].kind {
+            RangeTblEntryKind::Subquery { query } => query,
+            other => panic!("expected rewritten view subquery, got {other:?}"),
+        };
+        op_rhs_int(
+            view_query.rtable[0]
+                .security_quals
+                .first()
+                .expect("view base RLS qual"),
+        )
+        .expect("integer RLS qual")
+    }
+
+    let mut base = Catalog::default();
+    base.authids
+        .push(row_security_role(VIEW_OWNER, "view_owner"));
+    base.insert(
+        "docs",
+        row_security_entry(
+            15123,
+            RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        ),
+    );
+    let docs_oid = base.get("docs").unwrap().relation_oid;
+    let owner_view = one_column_view(15124, 71140, VIEW_OWNER);
+    let mut invoker_view = one_column_view(15125, 71141, VIEW_OWNER);
+    invoker_view.reloptions = Some(vec!["security_invoker=true".into()]);
+    base.insert("owner_docs", owner_view.clone());
+    base.insert("invoker_docs", invoker_view.clone());
+    base.rewrites.push(PgRewriteRow {
+        oid: 71140,
+        rulename: "_RETURN".into(),
+        ev_class: owner_view.relation_oid,
+        ev_type: '1',
+        ev_enabled: 'O',
+        is_instead: true,
+        ev_qual: String::new(),
+        ev_action: "select id from docs".into(),
+    });
+    base.rewrites.push(PgRewriteRow {
+        oid: 71141,
+        rulename: "_RETURN".into(),
+        ev_class: invoker_view.relation_oid,
+        ev_type: '1',
+        ev_enabled: 'O',
+        is_instead: true,
+        ev_qual: String::new(),
+        ev_action: "select id from docs".into(),
+    });
+    sort_pg_rewrite_rows(&mut base.rewrites);
+    base.add_policy_row(PgPolicyRow {
+        oid: 71142,
+        polname: "current_user_policy".into(),
+        polrelid: docs_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: true,
+        polroles: vec![CURRENT_USER],
+        polqual: Some("id > 7".into()),
+        polwithcheck: None,
+    });
+    base.add_policy_row(PgPolicyRow {
+        oid: 71143,
+        polname: "view_owner_policy".into(),
+        polrelid: docs_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: true,
+        polroles: vec![VIEW_OWNER],
+        polqual: Some("id > 42".into()),
+        polwithcheck: None,
+    });
+    let catalog = row_security_test_catalog(base, CURRENT_USER);
+
+    assert_eq!(view_rhs(&catalog, "owner_docs"), 42);
+    assert_eq!(view_rhs(&catalog, "invoker_docs"), 7);
 }
 
 #[test]
@@ -7466,6 +7831,27 @@ fn parse_insert_with_writable_insert_cte() {
 }
 
 #[test]
+fn parse_select_with_writable_update_cte() {
+    let stmt = parse_statement(
+        "with moved as (update src set id = id + 1 returning id) select id from moved",
+    )
+    .unwrap();
+    match stmt {
+        Statement::Select(select) => {
+            assert_eq!(select.with.len(), 1);
+            match &select.with[0].body {
+                CteBody::Update(update) => {
+                    assert_eq!(update.table_name, "src");
+                    assert_eq!(update.returning.len(), 1);
+                }
+                other => panic!("expected writable update CTE, got {other:?}"),
+            }
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_select_with_writable_insert_cte_returning_tableoid_and_star() {
     let stmt = parse_statement(
         "with ins (a, b, c) as \
@@ -7839,6 +8225,26 @@ fn parse_table_sample_system_repeatable() {
                 method: "system".into(),
                 args: vec![SqlExpr::Column("t1.a".into())],
                 repeatable: Some(SqlExpr::Column("t1.b".into())),
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_table_sample_without_alias() {
+    let stmt =
+        parse_select("select id from people tablesample bernoulli (50) repeatable (0)").unwrap();
+    assert_eq!(
+        stmt.from,
+        Some(FromItem::TableSample {
+            source: Box::new(FromItem::Table {
+                name: "people".into(),
+                only: false,
+            }),
+            sample: RawTableSampleClause {
+                method: "bernoulli".into(),
+                args: vec![SqlExpr::IntegerLiteral("50".into())],
+                repeatable: Some(SqlExpr::IntegerLiteral("0".into())),
             },
         })
     );
@@ -16038,6 +16444,39 @@ fn parse_prepare_and_execute_statements() {
         Statement::Explain(ExplainStatement { statement, .. })
             if matches!(statement.as_ref(), Statement::Execute(ExecuteStatement { name, args_sql }) if name == "foo" && args_sql.len() == 1)
     ));
+}
+
+#[test]
+fn parse_prepare_execute_with_parameters() {
+    let stmt = parse_statement("prepare foo(int) as select id from people where id <= $1").unwrap();
+    match stmt {
+        Statement::Prepare(PrepareStatement {
+            name,
+            parameter_types,
+            query_sql,
+            ..
+        }) => {
+            assert_eq!(name, "foo");
+            assert_eq!(
+                parameter_types,
+                vec![RawTypeName::builtin(SqlTypeKind::Int4)]
+            );
+            assert_eq!(query_sql, "select id from people where id <= $1");
+        }
+        other => panic!("expected PREPARE statement, got {other:?}"),
+    }
+
+    let stmt = parse_statement("explain (costs off) execute foo(2)").unwrap();
+    match stmt {
+        Statement::Explain(explain) => match *explain.statement {
+            Statement::Execute(ExecuteStatement { name, args_sql }) => {
+                assert_eq!(name, "foo");
+                assert_eq!(args_sql, vec!["2"]);
+            }
+            other => panic!("expected EXECUTE inside EXPLAIN, got {other:?}"),
+        },
+        other => panic!("expected EXPLAIN statement, got {other:?}"),
+    }
 }
 
 #[test]

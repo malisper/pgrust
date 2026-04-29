@@ -28,12 +28,13 @@ use crate::backend::parser::{
     BoundRelationConstraints, BoundRuleAction, BoundTemporalConstraint, BoundUpdateStatement,
     BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement, DeleteStatement,
     DomainConstraintLookupKind, DropTableStatement, ExplainFormat, ExplainStatement,
-    ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent,
-    SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement,
-    UpdateStatement, VacuumStatement, bind_create_table, bind_delete,
-    bind_expr_with_outer_and_ctes, bind_generated_expr, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update,
-    parse_expr, scope_for_relation,
+    ForeignKeyAction, InsertStatement, MaintenanceTarget, MergeStatement, OverridingKind,
+    ParseError, RuleEvent, SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType,
+    TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table, bind_delete,
+    bind_expr_with_outer_and_ctes, bind_generated_expr, bind_insert,
+    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_rule_action_statement,
+    bind_scalar_expr_in_scope, bind_update, parse_expr, rewrite_bound_delete_auto_view_target,
+    scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -51,8 +52,9 @@ use super::explain::{
     apply_runtime_pruning_for_explain_plan, format_buffer_usage,
     format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
     format_explain_lines_with_options, format_explain_plan_with_subplans,
-    format_explain_plan_with_subplans_and_catalog, format_verbose_explain_plan_json_with_catalog,
-    format_verbose_explain_plan_with_catalog, push_explain_line,
+    format_explain_plan_with_subplans_and_catalog, format_verbose_explain_child_plan_with_catalog,
+    format_verbose_explain_plan_json_with_catalog, format_verbose_explain_plan_with_catalog,
+    push_explain_line,
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
@@ -81,11 +83,18 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
-    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID,
-    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow,
-    PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
+    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID,
+    PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_MAINTAIN_OID,
+    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
+    PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PG_WRITE_ALL_DATA_OID,
+    PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow, PgPublicationRow,
+    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -203,6 +212,8 @@ fn finalize_bound_insert(
                     BoundOnConflictAction::Update {
                         assignments,
                         predicate,
+                        conflict_visibility_checks,
+                        update_write_checks,
                     } => BoundOnConflictAction::Update {
                         assignments: assignments
                             .into_iter()
@@ -237,6 +248,20 @@ fn finalize_bound_insert(
                             .collect(),
                         predicate: predicate
                             .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+                        conflict_visibility_checks: conflict_visibility_checks
+                            .into_iter()
+                            .map(|check| RlsWriteCheck {
+                                expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+                                ..check
+                            })
+                            .collect(),
+                        update_write_checks: update_write_checks
+                            .into_iter()
+                            .map(|check| RlsWriteCheck {
+                                expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+                                ..check
+                            })
+                            .collect(),
                     },
                 },
             });
@@ -356,6 +381,11 @@ fn finalize_bound_delete(
             predicate: target
                 .predicate
                 .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+            parent_visible_exprs: target
+                .parent_visible_exprs
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans))
+                .collect(),
             ..target
         })
         .collect();
@@ -434,6 +464,38 @@ fn finalize_bound_merge(
             ..target
         })
         .collect();
+    stmt.merge_update_visibility_checks = stmt
+        .merge_update_visibility_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
+    stmt.merge_delete_visibility_checks = stmt
+        .merge_delete_visibility_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
+    stmt.merge_update_write_checks = stmt
+        .merge_update_write_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
+    stmt.merge_insert_write_checks = stmt
+        .merge_insert_write_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
     stmt.input_plan.subplans = subplans;
     stmt
 }
@@ -461,15 +523,21 @@ pub(crate) fn execute_explain(
     if let Statement::Delete(delete) = statement {
         return execute_explain_delete(delete, analyze, costs, verbose, catalog, planner_config);
     }
+    if let Statement::Insert(insert) = statement {
+        return execute_explain_insert(
+            insert,
+            analyze,
+            costs,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        );
+    }
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
         Statement::DeclareCursor(declare) => EitherExplainTarget::Select(declare.query),
-        Statement::Insert(_) => {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "EXPLAIN INSERT".into(),
-            )));
-        }
         Statement::Merge(merge) => EitherExplainTarget::Merge(merge),
         Statement::Delete(_) => unreachable!("DELETE handled above"),
         Statement::CreateTableAs(create_table_as) => {
@@ -484,7 +552,7 @@ pub(crate) fn execute_explain(
         }
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "SELECT, UPDATE, MERGE, or DECLARE CURSOR statement after EXPLAIN",
+                expected: "SELECT, INSERT, UPDATE, DELETE, MERGE, or DECLARE CURSOR statement after EXPLAIN",
                 actual: "unsupported statement".into(),
             }));
         }
@@ -500,7 +568,7 @@ pub(crate) fn execute_explain(
     } else {
         None
     };
-    let (query_desc, merge_target_name) = match explain_target {
+    let (query_desc, merge_target_name, check_select_privileges) = match explain_target {
         EitherExplainTarget::Select(select) => (
             create_query_desc(
                 crate::backend::parser::pg_plan_query_with_config(
@@ -511,12 +579,14 @@ pub(crate) fn execute_explain(
                 None,
             ),
             None,
+            true,
         ),
         EitherExplainTarget::Merge(merge) => {
             let bound = crate::backend::parser::plan_merge(&merge, catalog)?;
             (
                 create_query_desc(bound.input_plan, None),
                 Some(bound.explain_target_name),
+                false,
             )
         }
         EitherExplainTarget::CreateTableAs(create_table_as) => (
@@ -544,8 +614,12 @@ pub(crate) fn execute_explain(
                 None,
             ),
             None,
+            true,
         ),
     };
+    if check_select_privileges {
+        check_planned_stmt_select_privileges(&query_desc.planned_stmt, ctx)?;
+    }
     let planning_elapsed = plan_start.elapsed();
     let planning_buffer_stats = ctx.pool.usage_stats();
     let mut lines = Vec::new();
@@ -765,8 +839,77 @@ fn execute_explain_delete(
         )));
     }
 
-    let bound = finalize_bound_delete_stmt(bind_delete(&stmt, catalog)?, catalog);
+    let bound = bind_delete(&stmt, catalog)?;
+    let bound = rewrite_bound_delete_auto_view_target(bound, catalog)
+        .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
+    let bound = finalize_bound_delete_stmt(bound, catalog);
     let lines = explain_delete_lines(&stmt, &bound, catalog, costs, verbose)?;
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn execute_explain_insert(
+    stmt: InsertStatement,
+    analyze: bool,
+    costs: bool,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    if analyze {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXPLAIN ANALYZE INSERT".into(),
+        )));
+    }
+
+    let bound = bind_insert(&stmt, catalog)?;
+    check_relation_privilege_requirements(ctx, &bound.required_privileges)?;
+    let target_name = explain_insert_target_name(&bound, verbose, catalog);
+    let BoundInsertSource::Select(query) = bound.source else {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXPLAIN INSERT".into(),
+        )));
+    };
+    let [query] = pg_rewrite_query(*query, catalog)
+        .map_err(ExecError::Parse)?
+        .try_into()
+        .expect("insert-select rewrite should return a single query");
+    let query = crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
+    let planned = crate::backend::optimizer::planner_with_config(query, catalog, planner_config)?;
+    check_planned_stmt_select_privileges(&planned, ctx)?;
+
+    let mut lines = Vec::new();
+    push_explain_line(
+        &format!("Insert on {target_name}"),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        costs,
+        &mut lines,
+    );
+    if verbose {
+        format_verbose_explain_child_plan_with_catalog(
+            &planned.plan_tree,
+            &planned.subplans,
+            1,
+            costs,
+            catalog,
+            &mut lines,
+        );
+    } else {
+        format_explain_child_plan_with_subplans(
+            &planned.plan_tree,
+            &planned.subplans,
+            1,
+            costs,
+            &mut lines,
+        );
+    }
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
@@ -855,7 +998,7 @@ fn explain_delete_base_lines(
     push_explain_line(
         &format!(
             "Delete on {}",
-            explain_update_target_name(&stmt.table_name, verbose)
+            explain_delete_target_name(stmt, bound, verbose)
         ),
         crate::include::nodes::plannodes::PlanEstimate::default(),
         show_costs,
@@ -864,32 +1007,35 @@ fn explain_delete_base_lines(
     if verbose && !bound.returning.is_empty() {
         lines.push(format!(
             "  Output: {}",
-            render_update_returning_targets(&stmt.table_name, &bound.returning)
+            render_delete_returning_targets(
+                &explain_delete_target_name(stmt, bound, false),
+                &bound.returning
+            )
         ));
-    }
-    let child_targets = bound
-        .targets
-        .iter()
-        .filter(|target| target.relation_name != stmt.table_name && delete_target_is_live(target))
-        .collect::<Vec<_>>();
-    for (index, target) in child_targets.iter().enumerate() {
-        push_explain_line(
-            &format!(
-                "  Delete on {} {}_{}",
-                target.relation_name,
-                stmt.table_name.trim_matches('"'),
-                index + 1
-            ),
-            crate::include::nodes::plannodes::PlanEstimate::default(),
-            show_costs,
-            &mut lines,
-        );
     }
     let live_targets = bound
         .targets
         .iter()
         .filter(|target| delete_target_is_live(target))
         .collect::<Vec<_>>();
+    let labeled_targets = if live_targets.len() > 1 {
+        live_targets.clone()
+    } else {
+        live_targets
+            .iter()
+            .copied()
+            .filter(|target| target.relation_name != stmt.table_name)
+            .collect::<Vec<_>>()
+    };
+    for (index, target) in labeled_targets.iter().enumerate() {
+        let alias = delete_explain_target_alias(stmt, index);
+        push_explain_line(
+            &format!("  Delete on {} {alias}", target.relation_name),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+    }
     let has_subplans = !bound.subplans.is_empty();
     if has_subplans {
         let lateral_subquery_alias = delete_explain_lateral_subquery_alias(stmt);
@@ -922,6 +1068,31 @@ fn explain_delete_base_lines(
         push_delete_target_scan_lines(stmt, &live_targets, show_costs, 2, &mut lines);
     }
     lines
+}
+
+fn explain_delete_target_name(
+    stmt: &DeleteStatement,
+    bound: &BoundDeleteStatement,
+    verbose: bool,
+) -> String {
+    let name = if bound.targets.len() == 1 {
+        bound
+            .targets
+            .first()
+            .map(|target| target.relation_name.as_str())
+            .unwrap_or(stmt.table_name.as_str())
+    } else {
+        stmt.table_name.as_str()
+    };
+    explain_update_target_name(name, verbose)
+}
+
+fn render_delete_returning_targets(target_name: &str, returning: &[TargetEntry]) -> String {
+    returning
+        .iter()
+        .map(|target| format!("{target_name}.{}", target.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn load_explain_delete_rules(
@@ -1198,11 +1369,14 @@ fn push_delete_target_scan_lines(
             lines,
         );
         for (index, target) in targets.iter().enumerate() {
-            let alias = target
-                .relation_name
-                .ne(&stmt.table_name)
-                .then(|| format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1));
-            push_delete_single_target_scan(target, alias.as_deref(), show_costs, indent + 6, lines);
+            let alias = delete_explain_target_alias(stmt, index);
+            push_delete_single_target_scan(
+                target,
+                Some(alias.as_str()),
+                show_costs,
+                indent + 6,
+                lines,
+            );
         }
     } else {
         let alias = targets[0]
@@ -1211,6 +1385,10 @@ fn push_delete_target_scan_lines(
             .then(|| format!("{}_1", stmt.table_name.trim_matches('"')));
         push_delete_single_target_scan(targets[0], alias.as_deref(), show_costs, indent, lines);
     }
+}
+
+fn delete_explain_target_alias(stmt: &DeleteStatement, index: usize) -> String {
+    format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1)
 }
 
 fn push_delete_single_target_scan(
@@ -1387,6 +1565,23 @@ fn delete_target_filter_expr(expr: &Expr) -> Option<Expr> {
         }
         other => Some(other.clone()),
     }
+}
+
+fn explain_insert_target_name(
+    bound: &BoundInsertStatement,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    if !verbose || bound.relation_name.contains('.') {
+        return bound.relation_name.clone();
+    }
+    let Some(class_row) = catalog.class_row_by_oid(bound.relation_oid) else {
+        return bound.relation_name.clone();
+    };
+    let Some(namespace) = catalog.namespace_row_by_oid(class_row.relnamespace) else {
+        return bound.relation_name.clone();
+    };
+    format!("{}.{}", namespace.nspname, class_row.relname)
 }
 
 fn explain_update_lines(
@@ -2556,6 +2751,7 @@ pub(crate) fn cleanup_toast_attempt(
 
 pub(crate) fn write_insert_heap_row(
     relation_name: &str,
+    rls_relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
@@ -2568,7 +2764,7 @@ pub(crate) fn write_insert_heap_row(
     cid: CommandId,
 ) -> Result<ItemPointerData, ExecError> {
     crate::backend::executor::enforce_row_security_write_checks(
-        relation_name,
+        rls_relation_name,
         desc,
         rls_write_checks,
         values,
@@ -2791,6 +2987,7 @@ fn move_updated_row_to_partition(
 
     let destination = destination;
     let inserted_tid = write_insert_heap_row(
+        &destination.relation_info.relation_name,
         &destination.relation_info.relation_name,
         destination.relation_info.relation.rel,
         destination.relation_info.relation.toast,
@@ -6412,6 +6609,7 @@ fn execute_insert_rows_with_routing(
     let Some(target_relation) = catalog.relation_by_oid(relation_oid) else {
         return execute_insert_rows(
             relation_name,
+            relation_name,
             relation_oid,
             rel,
             toast,
@@ -6429,6 +6627,7 @@ fn execute_insert_rows_with_routing(
     };
     if target_relation.relkind != 'p' && !target_relation.relispartition {
         return execute_insert_rows(
+            relation_name,
             relation_name,
             relation_oid,
             rel,
@@ -6502,6 +6701,7 @@ fn execute_insert_rows_with_routing(
             {
                 let leaf_inserted_rows = execute_insert_rows(
                     &result_rel_info.relation_name,
+                    relation_name,
                     result_rel_info.relation.relation_oid,
                     result_rel_info.relation.rel,
                     result_rel_info.relation.toast,
@@ -6782,10 +6982,7 @@ fn relation_acl_allows_as(
     {
         return Ok(true);
     }
-    if relation_oid == PG_AUTH_MEMBERS_RELATION_OID && privilege == 'r' {
-        // PostgreSQL exposes role membership rows through pg_auth_members to
-        // ordinary users while still protecting writes through system catalog
-        // update checks.
+    if catalog_relation_readable_by_public(relation_oid, privilege) {
         return Ok(true);
     }
     if predefined_role_grants_relation_privilege(&class_row, &auth, &auth_catalog, privilege) {
@@ -6859,10 +7056,7 @@ fn relation_or_all_column_acls_allow_as(
     {
         return Ok(true);
     }
-    if relation_oid == PG_AUTH_MEMBERS_RELATION_OID && privilege == 'r' {
-        // PostgreSQL exposes role membership rows through pg_auth_members to
-        // ordinary users while still protecting writes through system catalog
-        // update checks.
+    if catalog_relation_readable_by_public(relation_oid, privilege) {
         return Ok(true);
     }
     if predefined_role_grants_relation_privilege(&class_row, &auth, &auth_catalog, privilege) {
@@ -6892,6 +7086,36 @@ fn relation_or_all_column_acls_allow_as(
         }
     }
     Ok(true)
+}
+
+fn catalog_relation_readable_by_public(relation_oid: u32, privilege: char) -> bool {
+    privilege == 'r'
+        && matches!(
+            relation_oid,
+            PG_AM_RELATION_OID
+                | PG_ATTRIBUTE_RELATION_OID
+                | PG_ATTRDEF_RELATION_OID
+                | PG_AUTH_MEMBERS_RELATION_OID
+                | PG_CLASS_RELATION_OID
+                | PG_COLLATION_RELATION_OID
+                | PG_CONSTRAINT_RELATION_OID
+                | PG_DESCRIPTION_RELATION_OID
+                | PG_INDEX_RELATION_OID
+                | PG_INHERITS_RELATION_OID
+                | PG_LANGUAGE_RELATION_OID
+                | PG_NAMESPACE_RELATION_OID
+                | PG_OPCLASS_RELATION_OID
+                | PG_OPERATOR_RELATION_OID
+                | PG_PARTITIONED_TABLE_RELATION_OID
+                | PG_POLICY_RELATION_OID
+                | PG_PROC_RELATION_OID
+                | PG_PUBLICATION_RELATION_OID
+                | PG_PUBLICATION_REL_RELATION_OID
+                | PG_PUBLICATION_NAMESPACE_RELATION_OID
+                | PG_REWRITE_RELATION_OID
+                | PG_TRIGGER_RELATION_OID
+                | PG_TYPE_RELATION_OID
+        )
 }
 
 pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u32) -> ExecError {
@@ -7238,7 +7462,7 @@ fn execute_merge_insert_action(
         stmt.toast_index.as_ref(),
         &stmt.desc,
         &stmt.relation_constraints,
-        &[],
+        &stmt.merge_insert_write_checks,
         &stmt.indexes,
         &[row_values],
         None,
@@ -7270,6 +7494,14 @@ fn execute_merge_update_row(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<Option<Vec<Value>>, ExecError> {
+    crate::backend::executor::enforce_row_security_write_checks_with_tid(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_update_visibility_checks,
+        original_values,
+        Some(target_tid),
+        ctx,
+    )?;
     let mut updated_values = original_values.to_vec();
     for assignment in assignments {
         let value = eval_expr(&assignment.expr, slot, ctx)?;
@@ -7306,6 +7538,13 @@ fn execute_merge_update_row(
         )?;
     }
     let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, target_tid)?;
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_update_write_checks,
+        &updated_values,
+        ctx,
+    )?;
     crate::backend::executor::enforce_relation_constraints(
         &stmt.relation_name,
         &stmt.desc,
@@ -7453,6 +7692,14 @@ fn execute_merge_delete_row(
             true,
         )?;
     }
+    crate::backend::executor::enforce_row_security_write_checks_with_tid(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_delete_visibility_checks,
+        original_values,
+        Some(target_tid),
+        ctx,
+    )?;
     apply_inbound_foreign_key_actions_on_delete(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
@@ -9452,6 +9699,7 @@ fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> S
 
 pub(crate) fn execute_insert_rows(
     relation_name: &str,
+    rls_relation_name: &str,
     relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
@@ -9518,6 +9766,7 @@ pub(crate) fn execute_insert_rows(
             )?;
             let heap_tid = write_insert_heap_row(
                 relation_name,
+                rls_relation_name,
                 rel,
                 toast,
                 toast_index,
@@ -9692,6 +9941,7 @@ pub(crate) fn execute_insert_values(
     }
     Ok(execute_insert_rows(
         relation_name,
+        relation_name,
         relation_oid,
         rel,
         toast,
@@ -9764,6 +10014,7 @@ pub fn execute_prepared_insert_row(
     };
     materialize_generated_columns(&prepared.desc, &mut values, ctx)?;
     let heap_tid = write_insert_heap_row(
+        &prepared.relation_name,
         &prepared.relation_name,
         prepared.rel,
         prepared.toast,
@@ -10192,6 +10443,9 @@ fn project_update_target_visible_values(
     tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    if target.parent_visible_exprs.is_empty() {
+        return Ok(row_values.to_vec());
+    }
     let mut slot = TupleSlot::virtual_row_with_metadata(
         row_values.to_vec(),
         Some(tid),
@@ -10590,6 +10844,9 @@ fn project_delete_target_visible_values(
     tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    if target.parent_visible_exprs.is_empty() {
+        return Ok(row_values.to_vec());
+    }
     let mut slot = TupleSlot::virtual_row_with_metadata(
         row_values.to_vec(),
         Some(tid),
@@ -10959,6 +11216,11 @@ pub fn execute_delete_with_waiter(
         }
         let mut affected_rows = 0;
         let mut returned_rows = Vec::new();
+        let joined_delete_events = if stmt.input_plan.is_some() {
+            Some(materialize_delete_row_events(&stmt, ctx)?)
+        } else {
+            None
+        };
         for target in &stmt.targets {
             let triggers = ctx
                 .catalog
@@ -11005,6 +11267,19 @@ pub fn execute_delete_with_waiter(
                 .as_ref()
                 .map(|p| compile_predicate_with_decoder(p, &decoder));
             let targets = match &target.row_source {
+                _ if joined_delete_events.is_some() => joined_delete_events
+                    .as_ref()
+                    .expect("checked above")
+                    .iter()
+                    .filter(|event| event.target.relation_oid == target.relation_oid)
+                    .map(|event| {
+                        (
+                            event.tid,
+                            event.old_values.clone(),
+                            Some(event.returning_values.clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
                 BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                     target.rel,
                     &target.desc,
@@ -11012,7 +11287,10 @@ pub fn execute_delete_with_waiter(
                     Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
-                )?,
+                )?
+                .into_iter()
+                .map(|(tid, values)| (tid, values, None))
+                .collect(),
                 BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
                     target.rel,
                     &target.desc,
@@ -11022,12 +11300,15 @@ pub fn execute_delete_with_waiter(
                     Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
-                )?,
+                )?
+                .into_iter()
+                .map(|(tid, values)| (tid, values, None))
+                .collect(),
             };
             let snapshot = ctx.snapshot.clone();
             let mut pending_no_action_checks = Vec::new();
 
-            for (tid, values) in &targets {
+            for (tid, values, joined_returning_values) in &targets {
                 let mut current_tid = *tid;
                 let mut current_values = values.clone();
                 loop {
@@ -11119,12 +11400,23 @@ pub fn execute_delete_with_waiter(
                                 .write()
                                 .note_relation_delete(target.relation_oid);
                             if !stmt.returning.is_empty() {
+                                let returned_values =
+                                    if let Some(values) = joined_returning_values.clone() {
+                                        values
+                                    } else {
+                                        project_delete_target_visible_values(
+                                            target,
+                                            &current_values,
+                                            current_tid,
+                                            ctx,
+                                        )?
+                                    };
                                 let row = project_returning_row_with_old_new(
                                     &stmt.returning,
-                                    &current_values,
-                                    None,
-                                    None,
-                                    Some(&current_values),
+                                    &returned_values,
+                                    Some(current_tid),
+                                    Some(target.relation_oid),
+                                    Some(&returned_values),
                                     None,
                                     ctx,
                                 )?;
@@ -11212,6 +11504,7 @@ pub(crate) struct DeleteRowEvent {
     pub target: BoundDeleteTarget,
     pub tid: ItemPointerData,
     pub old_values: Vec<Value>,
+    pub returning_values: Vec<Value>,
 }
 
 pub(crate) fn materialize_update_row_events(
@@ -11588,10 +11881,13 @@ pub(crate) fn materialize_delete_row_events(
             )?,
         };
         for (tid, old_values) in rows {
+            let returning_values =
+                project_delete_target_visible_values(target, &old_values, tid, ctx)?;
             events.push(DeleteRowEvent {
                 target: target.clone(),
                 tid,
                 old_values,
+                returning_values,
             });
         }
     }
@@ -11660,6 +11956,7 @@ fn materialize_delete_from_joined_input_events(
             target: target.clone(),
             tid,
             old_values,
+            returning_values: row_values[..stmt.visible_column_count].to_vec(),
         });
     }
     Ok(events)

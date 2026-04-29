@@ -2281,6 +2281,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
             BuiltinScalarFunction::PgRustDomainCheckUpperLessThan => args.len() == 3,
+            BuiltinScalarFunction::PgRustTablesampleBernoulli => args.len() == 3,
             BuiltinScalarFunction::PgRustTestOpclassOptionsFunc => args.len() == 1,
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
@@ -2292,6 +2293,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgRustTestInt44Out => args.len() == 1,
             BuiltinScalarFunction::PgRustTestPtInWidget => args.len() == 2,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::SetConfig => args.len() == 3,
             BuiltinScalarFunction::PgSettingsGetFlags => args.len() == 1,
             BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
                 args.len() == 1
@@ -2318,6 +2320,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::HasAnyColumnPrivilege
             | BuiltinScalarFunction::HasLargeObjectPrivilege
             | BuiltinScalarFunction::PgHasRole => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::RowSecurityActive => args.len() == 1,
             BuiltinScalarFunction::HasColumnPrivilege => matches!(args.len(), 3 | 4),
             BuiltinScalarFunction::PgCurrentLogfile => matches!(args.len(), 0 | 1),
             BuiltinScalarFunction::PgReadFile | BuiltinScalarFunction::PgReadBinaryFile => {
@@ -2984,7 +2987,7 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TsRank | BuiltinScalarFunction::TsRankCd => {
             return Some(SqlType::new(SqlTypeKind::Float4));
         }
-        BuiltinScalarFunction::CurrentSetting => {
+        BuiltinScalarFunction::CurrentSetting | BuiltinScalarFunction::SetConfig => {
             return Some(SqlType::new(SqlTypeKind::Text));
         }
         BuiltinScalarFunction::CurrentSchemas => {
@@ -3726,6 +3729,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgNotificationQueueUsage,
         ),
         ("current_setting", BuiltinScalarFunction::CurrentSetting),
+        ("set_config", BuiltinScalarFunction::SetConfig),
         (
             "pg_column_compression",
             BuiltinScalarFunction::PgColumnCompression,
@@ -3800,6 +3804,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "has_table_privilege_id",
             BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "row_security_active",
+            BuiltinScalarFunction::RowSecurityActive,
         ),
         (
             "has_sequence_privilege",
@@ -5279,6 +5287,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         }
         if by_func
             .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::RowSecurityActive)
+        {
+            by_func.push((
+                BuiltinScalarFunction::RowSecurityActive,
+                SqlType::new(SqlTypeKind::Bool),
+            ));
+        }
+        if by_func
+            .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgGetUserById)
         {
             by_func.push((
@@ -5500,6 +5517,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
             | BuiltinScalarFunction::PgStatisticsObjIsVisible
             | BuiltinScalarFunction::PgFunctionIsVisible
+            | BuiltinScalarFunction::RowSecurityActive
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationSize
             | BuiltinScalarFunction::PgTableSize

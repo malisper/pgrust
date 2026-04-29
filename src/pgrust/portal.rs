@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use crate::backend::executor::{ExecError, QueryColumn, Value, exec_next};
 use crate::backend::parser::ParseError;
+use crate::include::access::htup::ItemPointerData;
+use crate::include::nodes::execnodes::SystemVarBinding;
 use crate::pgrust::session::SelectGuard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +66,7 @@ pub struct PortalRunResult {
     pub processed: usize,
     pub completed: bool,
     pub command_tag: Option<String>,
+    pub current_row: Option<PositionedCursorRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,12 +78,19 @@ pub struct CursorViewRow {
     pub is_scrollable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PositionedCursorRow {
+    pub table_oid: u32,
+    pub tid: ItemPointerData,
+}
+
 pub enum PortalExecution {
     Streaming(SelectGuard),
     Materialized {
         columns: Vec<QueryColumn>,
         column_names: Vec<String>,
         rows: Vec<Vec<Value>>,
+        row_positions: Vec<Option<PositionedCursorRow>>,
         pos: usize,
     },
     PendingSql {
@@ -102,6 +112,7 @@ pub struct Portal {
     pub result_formats: Vec<i16>,
     pub created_in_transaction: bool,
     pub execution: PortalExecution,
+    current_row: Option<PositionedCursorRow>,
 }
 
 impl Portal {
@@ -125,6 +136,7 @@ impl Portal {
             result_formats,
             created_in_transaction,
             execution: PortalExecution::Streaming(guard),
+            current_row: None,
         }
     }
 
@@ -139,6 +151,7 @@ impl Portal {
         column_names: Vec<String>,
         rows: Vec<Vec<Value>>,
     ) -> Self {
+        let row_positions = vec![None; rows.len()];
         Self {
             name,
             prep_stmt_name,
@@ -153,8 +166,10 @@ impl Portal {
                 columns,
                 column_names,
                 rows,
+                row_positions,
                 pos: 0,
             },
+            current_row: None,
         }
     }
 
@@ -186,6 +201,7 @@ impl Portal {
                 columns,
                 column_names,
             },
+            current_row: None,
         }
     }
 
@@ -214,19 +230,29 @@ impl Portal {
         let columns = guard.columns.clone();
         let column_names = guard.column_names.clone();
         let mut rows = Vec::new();
+        let mut row_positions = Vec::new();
         while let Some(slot) = exec_next(&mut guard.state, &mut guard.ctx)? {
+            let tid = slot.tid();
+            let table_oid = slot.table_oid;
             let mut values = slot.values()?.to_vec();
             Value::materialize_all(&mut values);
             rows.push(values);
+            row_positions.push(positioned_row_from_metadata(
+                tid,
+                table_oid,
+                guard.state.current_system_bindings(),
+            ));
         }
         self.execution = PortalExecution::Materialized {
             columns,
             column_names,
             rows,
+            row_positions,
             // PostgreSQL cursor positions are 0 before the first row,
             // 1..=N on a row, and N+1 after the last row.
             pos: 0,
         };
+        self.current_row = None;
         self.status = PortalStatus::Ready;
         Ok(())
     }
@@ -239,11 +265,13 @@ impl Portal {
                 columns,
                 column_names,
                 rows,
+                row_positions,
                 pos,
             } => Ok(fetch_materialized_forward(
                 columns,
                 column_names,
                 rows,
+                row_positions,
                 pos,
                 limit,
             )),
@@ -255,6 +283,7 @@ impl Portal {
                     processed: 0,
                     completed: true,
                     command_tag: None,
+                    current_row: None,
                 })
             }
         };
@@ -269,6 +298,11 @@ impl Portal {
             && self.command_tag != "SELECT"
         {
             result.command_tag = Some(self.command_tag.clone());
+        }
+        if let Ok(result) = &result {
+            self.current_row = result.current_row;
+        } else {
+            self.current_row = None;
         }
         result
     }
@@ -313,6 +347,7 @@ impl Portal {
         if move_only {
             result.rows.clear();
         }
+        self.current_row = result.current_row;
         Ok(result)
     }
 
@@ -324,6 +359,7 @@ impl Portal {
             columns,
             column_names,
             rows,
+            row_positions,
             pos,
         } = &mut self.execution
         else {
@@ -352,6 +388,12 @@ impl Portal {
             .rev()
             .cloned()
             .collect::<Vec<_>>();
+        let current_row = row_positions[start_idx..end_idx]
+            .iter()
+            .rev()
+            .flatten()
+            .next()
+            .copied();
         *pos = if count == 0 {
             *pos
         } else if count == start_row {
@@ -366,6 +408,7 @@ impl Portal {
             rows: out,
             completed: *pos == 0,
             command_tag: None,
+            current_row,
         })
     }
 
@@ -462,6 +505,7 @@ impl Portal {
             processed: 0,
             completed: true,
             command_tag: None,
+            current_row: None,
         })
     }
 
@@ -474,6 +518,30 @@ impl Portal {
             is_scrollable: self.options.scroll,
         })
     }
+
+    pub fn current_positioned_row(&self) -> Option<PositionedCursorRow> {
+        self.current_row
+    }
+
+    pub fn replace_current_positioned_row(
+        &mut self,
+        old: PositionedCursorRow,
+        new: PositionedCursorRow,
+    ) {
+        if self.current_row == Some(old) {
+            self.current_row = Some(new);
+        }
+        if let PortalExecution::Materialized {
+            row_positions, pos, ..
+        } = &mut self.execution
+            && *pos > 0
+        {
+            let index = *pos - 1;
+            if row_positions.get(index).copied().flatten() == Some(old) {
+                row_positions[index] = Some(new);
+            }
+        }
+    }
 }
 
 fn fetch_streaming_forward(
@@ -481,6 +549,7 @@ fn fetch_streaming_forward(
     limit: PortalFetchLimit,
 ) -> Result<PortalRunResult, ExecError> {
     let mut rows = Vec::new();
+    let mut current_row = None;
     let max_rows = match limit {
         PortalFetchLimit::All => usize::MAX,
         PortalFetchLimit::Count(count) => count,
@@ -489,9 +558,16 @@ fn fetch_streaming_forward(
     while rows.len() < max_rows {
         match exec_next(&mut guard.state, &mut guard.ctx)? {
             Some(slot) => {
+                let tid = slot.tid();
+                let table_oid = slot.table_oid;
                 let mut values = slot.values()?.to_vec();
                 Value::materialize_all(&mut values);
                 rows.push(values);
+                current_row = positioned_row_from_metadata(
+                    tid,
+                    table_oid,
+                    guard.state.current_system_bindings(),
+                );
             }
             None => {
                 completed = true;
@@ -509,6 +585,7 @@ fn fetch_streaming_forward(
         rows,
         completed,
         command_tag: None,
+        current_row,
     })
 }
 
@@ -516,6 +593,7 @@ fn fetch_materialized_forward(
     columns: &[QueryColumn],
     column_names: &[String],
     rows: &[Vec<Value>],
+    row_positions: &[Option<PositionedCursorRow>],
     pos: &mut usize,
     limit: PortalFetchLimit,
 ) -> PortalRunResult {
@@ -527,6 +605,12 @@ fn fetch_materialized_forward(
     };
     let end = start + count;
     let out = rows[start..end].to_vec();
+    let current_row = row_positions[start..end]
+        .iter()
+        .rev()
+        .flatten()
+        .next()
+        .copied();
     *pos = match limit {
         PortalFetchLimit::All => rows.len().saturating_add(1),
         PortalFetchLimit::Count(requested) if requested > remaining => rows.len().saturating_add(1),
@@ -542,7 +626,26 @@ fn fetch_materialized_forward(
         rows: out,
         completed: *pos >= rows.len(),
         command_tag: None,
+        current_row,
     }
+}
+
+fn positioned_row_from_metadata(
+    tid: Option<ItemPointerData>,
+    table_oid: Option<u32>,
+    bindings: &[SystemVarBinding],
+) -> Option<PositionedCursorRow> {
+    if let (Some(tid), Some(table_oid)) = (tid, table_oid) {
+        return Some(PositionedCursorRow { table_oid, tid });
+    }
+    let mut positioned = bindings.iter().filter_map(|binding| {
+        binding.tid.map(|tid| PositionedCursorRow {
+            table_oid: binding.table_oid,
+            tid,
+        })
+    });
+    let first = positioned.next()?;
+    positioned.next().is_none().then_some(first)
 }
 
 #[derive(Default)]
