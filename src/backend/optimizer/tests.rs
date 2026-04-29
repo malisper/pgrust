@@ -828,6 +828,39 @@ fn catalog_with_indexed_items() -> Catalog {
     catalog
 }
 
+fn catalog_with_expr_key() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "expr_key",
+            RelationDesc {
+                columns: vec![
+                    column_desc("x", SqlType::new(SqlTypeKind::Numeric), false),
+                    column_desc("t", SqlType::new(SqlTypeKind::Text), false),
+                ],
+            },
+        )
+        .expect("create expr_key");
+    let index = catalog
+        .create_index(
+            "expr_key_idx_x_t",
+            "expr_key",
+            false,
+            &["x".into(), "t".into()],
+        )
+        .expect("create expr_key index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark expr_key index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 64, 40.0)
+        .expect("seed expr_key table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 40.0)
+        .expect("seed expr_key index stats");
+    catalog
+}
+
 fn catalog_with_indexed_later_column() -> Catalog {
     let mut catalog = Catalog::default();
     let table = catalog
@@ -2163,6 +2196,21 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             recursive: right,
             ..
         } => plan_contains(left, predicate) || plan_contains(right, predicate),
+    }
+}
+
+fn contains_exec_param_for_tests(expr: &Expr) -> bool {
+    match expr {
+        Expr::Param(Param {
+            paramkind: ParamKind::Exec,
+            ..
+        }) => true,
+        Expr::Op(op) => op.args.iter().any(contains_exec_param_for_tests),
+        Expr::Func(func) => func.args.iter().any(contains_exec_param_for_tests),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            contains_exec_param_for_tests(inner)
+        }
+        _ => false,
     }
 }
 
@@ -4129,6 +4177,42 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
 }
 
 #[test]
+fn planner_memoizes_expression_key_nested_loop() {
+    let catalog = catalog_with_expr_key();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select * from expr_key t1 inner join expr_key t2 on t1.x = t2.t::numeric and t1.t::numeric = t2.x",
+        &catalog,
+        PlannerConfig {
+            enable_hashjoin: false,
+            enable_mergejoin: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Memoize { .. }
+        )),
+        "expected Memoize in expression-key join plan: {:#?}",
+        planned.plan_tree
+    );
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            match plan {
+            Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => keys.iter().any(
+                |key| matches!(&key.argument, IndexScanKeyArgument::Runtime(expr) if contains_exec_param_for_tests(expr))
+            ),
+            _ => false,
+        }
+        }),
+        "expected runtime index probe in expression-key join plan: {:#?}",
+        planned.plan_tree
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
 fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
     fn contains_exec_param(expr: &Expr) -> bool {
         match expr {
@@ -4144,24 +4228,38 @@ fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
     }
 
     let catalog = catalog_with_indexed_items();
-    let planned = planned_stmt_for_sql_with_catalog(
-        "select count(*) from items o, items i where i.id = o.id or i.id = o.id + 1 or i.id = o.id + 2",
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select count(*) from items o join lateral (select i.id from items i where i.id = o.id or i.id = o.id + 1 or i.id = o.id + 2) i on true where o.id < 10",
         &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            enable_material: false,
+            ..PlannerConfig::default()
+        },
     );
 
-    assert!(
-        plan_contains(&planned.plan_tree, |plan| match plan {
-            Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
-                keys.iter().any(|key| {
-                    matches!(
-                        &key.argument,
-                        IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
-                    )
-                })
-            }
-            _ => false,
+    let has_runtime_index = plan_contains(&planned.plan_tree, |plan| match plan {
+        Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => keys.iter().any(|key| {
+            matches!(
+                &key.argument,
+                IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
+            )
         }),
-        "expected OR join clause to use runtime scalar-array index scan: {planned:#?}"
+        _ => false,
+    });
+    let has_parameterized_memoize = plan_contains(&planned.plan_tree, |plan| {
+        matches!(
+            plan,
+            Plan::Memoize {
+                key_paramids,
+                dependent_paramids,
+                ..
+            } if !key_paramids.is_empty() && !dependent_paramids.is_empty()
+        )
+    });
+    assert!(
+        has_runtime_index || has_parameterized_memoize,
+        "expected OR join clause to use a runtime index scan or memoized parameterized path: {planned:#?}"
     );
     validate_planned_stmt_for_tests(&planned);
 }

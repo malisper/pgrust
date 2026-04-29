@@ -1166,15 +1166,17 @@ fn push_explain_state_line(
         let actual = if stats.loops == 0 {
             "never executed".to_string()
         } else if show_timing {
+            let actual_rows = stats.rows as f64 / stats.loops as f64;
             format!(
                 "actual time={:.3}..{:.3} rows={:.2} loops={}",
                 stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
                 stats.total_time.as_secs_f64() * 1000.0,
-                stats.rows as f64,
+                actual_rows,
                 stats.loops,
             )
         } else {
-            format!("actual rows={:.2} loops={}", stats.rows as f64, stats.loops)
+            let actual_rows = stats.rows as f64 / stats.loops as f64;
+            format!("actual rows={actual_rows:.2} loops={}", stats.loops)
         };
         if show_costs {
             lines.push(format!(
@@ -1305,18 +1307,6 @@ fn push_nonverbose_plan_details(
             }
             true
         }
-        Plan::Memoize { cache_keys, .. } => {
-            if !cache_keys.is_empty() {
-                let rendered = cache_keys
-                    .iter()
-                    .map(|expr| render_verbose_expr(expr, &[], ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                lines.push(format!("{prefix}Cache Key: {rendered}"));
-            }
-            lines.push(format!("{prefix}Cache Mode: logical"));
-            true
-        }
         Plan::Gather {
             workers_planned,
             single_copy,
@@ -1399,6 +1389,30 @@ fn push_nonverbose_plan_details(
                 let rendered = normalize_aggregate_operand_parens(rendered);
                 lines.push(format!("{prefix}Filter: {}", rendered));
             }
+            true
+        }
+        Plan::Memoize {
+            cache_keys,
+            cache_key_labels,
+            binary_mode,
+            ..
+        } => {
+            if !cache_keys.is_empty() || !cache_key_labels.is_empty() {
+                let rendered = if !cache_key_labels.is_empty() {
+                    cache_key_labels.join(", ")
+                } else {
+                    cache_keys
+                        .iter()
+                        .map(|expr| render_verbose_expr(expr, &[], ctx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                lines.push(format!("{prefix}Cache Key: {rendered}"));
+            }
+            lines.push(format!(
+                "{prefix}Cache Mode: {}",
+                if *binary_mode { "binary" } else { "logical" }
+            ));
             true
         }
         Plan::NestedLoopJoin {
@@ -3716,16 +3730,28 @@ fn push_verbose_plan_details(
                 render_verbose_set_returning_call(call, ctx)
             ));
         }
-        Plan::Memoize { cache_keys, .. } => {
-            if !cache_keys.is_empty() {
-                let rendered = cache_keys
-                    .iter()
-                    .map(|expr| render_verbose_expr(expr, &[], ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+        Plan::Memoize {
+            cache_keys,
+            cache_key_labels,
+            binary_mode,
+            ..
+        } => {
+            if !cache_keys.is_empty() || !cache_key_labels.is_empty() {
+                let rendered = if !cache_key_labels.is_empty() {
+                    cache_key_labels.join(", ")
+                } else {
+                    cache_keys
+                        .iter()
+                        .map(|expr| render_verbose_expr(expr, &[], ctx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 lines.push(format!("{prefix}Cache Key: {rendered}"));
             }
-            lines.push(format!("{prefix}Cache Mode: logical"));
+            lines.push(format!(
+                "{prefix}Cache Mode: {}",
+                if *binary_mode { "binary" } else { "logical" }
+            ));
         }
         Plan::Gather {
             workers_planned,

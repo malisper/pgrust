@@ -12,7 +12,7 @@ use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -203,6 +203,7 @@ pub struct NodeExecStats {
     pub first_tuple_time: Option<Duration>,
     pub rows_removed_by_filter: u64,
     pub index_searches: u64,
+    pub heap_fetches: u64,
     pub stack_depth_checked: bool,
     pub buffer_usage: BufferUsageStats,
     pub buffer_usage_start: Option<BufferUsageStats>,
@@ -219,6 +220,10 @@ pub trait PlanNode: std::fmt::Debug {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError>;
+
+    fn rescan(&mut self, _ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        Ok(())
+    }
 
     /// Re-borrow the slot from the last exec_proc_node call.
     /// Used by filter to return a reference to the child's slot
@@ -603,6 +608,43 @@ pub struct NestedLoopJoinState {
     pub(crate) stats: NodeExecStats,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemoizeCacheKey(pub(crate) Vec<Value>);
+
+#[derive(Debug, Default)]
+pub struct MemoizeInstrumentation {
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
+    pub(crate) evictions: u64,
+    pub(crate) overflows: u64,
+    pub(crate) memory_usage_bytes: usize,
+}
+
+#[derive(Debug)]
+pub struct MemoizeState {
+    pub(crate) input_plan: Plan,
+    pub(crate) input: PlanState,
+    pub(crate) cache_keys: Vec<Expr>,
+    pub(crate) cache_key_labels: Vec<String>,
+    pub(crate) key_paramids: Vec<usize>,
+    pub(crate) dependent_paramids: Vec<usize>,
+    pub(crate) binary_mode: bool,
+    pub(crate) single_row: bool,
+    pub(crate) est_entries: usize,
+    pub(crate) cache: HashMap<MemoizeCacheKey, Vec<MaterializedRow>>,
+    pub(crate) lru: VecDeque<MemoizeCacheKey>,
+    pub(crate) active_rows: Vec<MaterializedRow>,
+    pub(crate) active_index: usize,
+    pub(crate) scan_prepared: bool,
+    pub(crate) last_nonkey_dependents: Option<Vec<Value>>,
+    pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+    pub(crate) memoize_stats: MemoizeInstrumentation,
+}
+
 #[derive(Debug)]
 pub struct HashState {
     pub(crate) input: PlanState,
@@ -617,14 +659,6 @@ pub struct HashState {
 #[derive(Debug)]
 pub struct MaterializeState {
     pub(crate) input: PlanState,
-    pub(crate) plan_info: PlanEstimate,
-    pub(crate) stats: NodeExecStats,
-}
-
-#[derive(Debug)]
-pub struct MemoizeState {
-    pub(crate) input: PlanState,
-    pub(crate) cache_keys: Vec<Expr>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }

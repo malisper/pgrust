@@ -599,7 +599,7 @@ pub struct Query {
     pub sort_clause: Vec<SortGroupClause>,
     pub constraint_deps: Vec<u32>,
     pub limit_count: Option<usize>,
-    pub limit_offset: usize,
+    pub limit_offset: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
     pub locking_targets: Vec<String>,
     pub row_marks: Vec<QueryRowMark>,
