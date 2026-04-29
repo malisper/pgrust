@@ -4,9 +4,7 @@ use super::pathnodes::{
     slot_output_target,
 };
 use super::plan::append_planned_subquery;
-use super::{
-    expand_join_rte_vars, expr_relids, flatten_join_alias_vars, planner_with_param_base_and_config,
-};
+use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base_and_config};
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
@@ -19,10 +17,10 @@ use crate::include::nodes::plannodes::{
     ExecParamSource, IndexScanKey, IndexScanKeyArgument, Plan, PlanEstimate, PlanRowMark,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
-    OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
-    WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index, is_executor_special_varno,
-    is_system_attr, set_returning_call_exprs, user_attrno,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR,
+    OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry,
+    Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+    is_executor_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1520,6 +1518,7 @@ fn path_single_relid(path: &Path) -> Option<usize> {
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
+        Path::Values { slot_id, .. } => rte_slot_varno(*slot_id),
         Path::BitmapOr { .. } => None,
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
@@ -1774,6 +1773,90 @@ fn rewrite_appendrel_expr_for_input_path(root: &PlannerInfo, expr: Expr, path: &
         .unwrap_or(expr)
 }
 
+fn fix_executor_join_var_for_input(expr: &Expr, input: &Path) -> Option<Expr> {
+    let Expr::Var(var) = expr else {
+        return None;
+    };
+    if var.varlevelsup > 0 || !is_executor_special_varno(var.varno) || is_system_attr(var.varattno)
+    {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    match input {
+        Path::NestedLoopJoin { left, kind, .. }
+        | Path::HashJoin { left, kind, .. }
+        | Path::MergeJoin { left, kind, .. } => {
+            let left_width = left.output_vars().len();
+            let physical_index = if var.varno == OUTER_VAR {
+                index
+            } else if matches!(kind, JoinType::Semi | JoinType::Anti) {
+                return None;
+            } else {
+                left_width + index
+            };
+            (physical_index < input.output_vars().len())
+                .then(|| special_slot_var(OUTER_VAR, physical_index, var.vartype))
+        }
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. } => fix_executor_join_var_for_input(expr, input),
+        _ => None,
+    }
+}
+
+fn fix_semantic_output_expr_for_input(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+) -> Option<Expr> {
+    input
+        .semantic_output_target()
+        .exprs
+        .iter()
+        .enumerate()
+        .find_map(|(index, candidate)| {
+            let direct = exprs_equivalent(root, candidate, expr);
+            let flattened = root.is_some_and(|root| {
+                exprs_equivalent(
+                    Some(root),
+                    &flatten_join_alias_vars(root, candidate.clone()),
+                    &flatten_join_alias_vars(root, expr.clone()),
+                )
+            });
+            (direct || flattened).then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(expr)))
+        })
+}
+
+fn fix_join_rte_var_for_input(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+) -> Option<Expr> {
+    let (Some(root), Expr::Var(var)) = (root, expr) else {
+        return None;
+    };
+    if var.varlevelsup > 0 || is_executor_special_varno(var.varno) || is_system_attr(var.varattno) {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    if path_single_relid(input) == Some(var.varno) {
+        return (index < input.output_vars().len())
+            .then(|| special_slot_var(OUTER_VAR, index, var.vartype));
+    }
+    if !root
+        .parse
+        .rtable
+        .get(var.varno.saturating_sub(1))
+        .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. }))
+    {
+        return None;
+    }
+    (index < input.output_vars().len()).then(|| special_slot_var(OUTER_VAR, index, var.vartype))
+}
+
 fn fix_upper_expr_for_input(
     root: Option<&PlannerInfo>,
     expr: Expr,
@@ -1782,6 +1865,9 @@ fn fix_upper_expr_for_input(
 ) -> Expr {
     let rewritten = fix_upper_expr(root, expr.clone(), input_tlist);
     if rewritten != expr {
+        if let Some(fixed) = fix_executor_join_var_for_input(&rewritten, input) {
+            return fixed;
+        }
         return rewritten;
     }
     if let Some(root) = root {
@@ -1789,11 +1875,23 @@ fn fix_upper_expr_for_input(
         if translated != expr {
             let translated_rewritten = fix_upper_expr(Some(root), translated.clone(), input_tlist);
             if translated_rewritten != translated {
+                if let Some(fixed) = fix_executor_join_var_for_input(&translated_rewritten, input) {
+                    return fixed;
+                }
                 return translated_rewritten;
             }
         }
     }
     if let Some(rewritten) = fix_immediate_subquery_output_expr(root, &expr, input, input_tlist) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_executor_join_var_for_input(&expr, input) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_join_rte_var_for_input(root, &expr, input) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_semantic_output_expr_for_input(root, &expr, input) {
         return rewritten;
     }
     expr
@@ -2096,6 +2194,14 @@ fn param_label_type_name(ty: crate::backend::parser::SqlType) -> String {
     } else {
         rendered
     }
+}
+
+fn can_bind_as_nest_param(rebased_expr: &Expr, fixed_expr: &Expr) -> bool {
+    let fixed_is_system_var = expr_is_local_system_var(fixed_expr);
+    expr_contains_local_semantic_var(rebased_expr)
+        && (fixed_expr != rebased_expr || fixed_is_system_var)
+        && expr_sql_type(fixed_expr) == expr_sql_type(rebased_expr)
+        && (!expr_contains_local_semantic_var(fixed_expr) || fixed_is_system_var)
 }
 
 fn decrement_outer_expr_levels(expr: Expr) -> Expr {
@@ -2766,6 +2872,7 @@ fn lower_sublink(
         .target_list
         .first()
         .map(|target| target.sql_type);
+    let target_width = sublink.subselect.target_list.len();
     let config = ctx.root.map(|root| root.config).unwrap_or_default();
     let (planned_stmt, next_param_id) =
         planner_with_param_base_and_config(*sublink.subselect, catalog, ctx.next_param_id, config)
@@ -2819,6 +2926,7 @@ fn lower_sublink(
             .testexpr
             .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
         first_col_type,
+        target_width,
         plan_id,
         par_param,
         args,
@@ -2831,7 +2939,17 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
     }
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_expr(ctx, Expr::Var(var)),
-        Expr::Var(var) if is_executor_special_varno(var.varno) => Expr::Var(var),
+        Expr::Var(var) if is_executor_special_varno(var.varno) => {
+            let expr = Expr::Var(var);
+            if let LowerMode::Input {
+                path: Some(input), ..
+            } = mode
+                && let Some(rewritten) = fix_executor_join_var_for_input(&expr, input)
+            {
+                return rewritten;
+            }
+            expr
+        }
         Expr::Var(var) => {
             if is_system_attr(var.varattno) {
                 Expr::Var(var)
@@ -2919,6 +3037,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
                 .testexpr
                 .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
             first_col_type: subplan.first_col_type,
+            target_width: subplan.target_width,
             plan_id: subplan.plan_id,
             par_param: subplan.par_param,
             args: subplan
@@ -3265,6 +3384,82 @@ fn collect_index_scan_key_exec_paramids(keys: &[IndexScanKey], out: &mut BTreeSe
     }
 }
 
+fn collect_order_by_exec_paramids(item: &OrderByEntry, out: &mut BTreeSet<usize>) {
+    collect_expr_exec_paramids(&item.expr, out);
+}
+
+fn collect_aggref_exec_paramids(aggref: &Aggref, out: &mut BTreeSet<usize>) {
+    aggref
+        .direct_args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    aggref
+        .args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    aggref
+        .aggorder
+        .iter()
+        .for_each(|item| collect_order_by_exec_paramids(item, out));
+    if let Some(filter) = &aggref.aggfilter {
+        collect_expr_exec_paramids(filter, out);
+    }
+}
+
+fn collect_agg_accum_exec_paramids(accum: &AggAccum, out: &mut BTreeSet<usize>) {
+    accum
+        .direct_args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    accum
+        .args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    accum
+        .order_by
+        .iter()
+        .for_each(|item| collect_order_by_exec_paramids(item, out));
+    if let Some(filter) = &accum.filter {
+        collect_expr_exec_paramids(filter, out);
+    }
+}
+
+fn collect_window_func_exec_paramids(window_func: &WindowFuncExpr, out: &mut BTreeSet<usize>) {
+    window_func
+        .args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    if let WindowFuncKind::Aggregate(aggref) = &window_func.kind {
+        collect_aggref_exec_paramids(aggref, out);
+    }
+}
+
+fn collect_window_clause_exec_paramids(clause: &WindowClause, out: &mut BTreeSet<usize>) {
+    clause
+        .spec
+        .partition_by
+        .iter()
+        .for_each(|expr| collect_expr_exec_paramids(expr, out));
+    clause
+        .spec
+        .order_by
+        .iter()
+        .for_each(|item| collect_order_by_exec_paramids(item, out));
+    clause
+        .functions
+        .iter()
+        .for_each(|func| collect_window_func_exec_paramids(func, out));
+}
+
+fn collect_set_returning_call_exec_paramids(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+    out: &mut BTreeSet<usize>,
+) {
+    set_returning_call_exprs(call)
+        .into_iter()
+        .for_each(|expr| collect_expr_exec_paramids(expr, out));
+}
+
 fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
     match expr {
         Expr::Param(Param {
@@ -3274,25 +3469,8 @@ fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
         }) => {
             out.insert(*paramid);
         }
-        Expr::Aggref(aggref) => {
-            aggref
-                .args
-                .iter()
-                .for_each(|arg| collect_expr_exec_paramids(arg, out));
-            aggref
-                .aggorder
-                .iter()
-                .for_each(|item| collect_expr_exec_paramids(&item.expr, out));
-            if let Some(filter) = &aggref.aggfilter {
-                collect_expr_exec_paramids(filter, out);
-            }
-        }
-        Expr::WindowFunc(window_func) => {
-            window_func
-                .args
-                .iter()
-                .for_each(|arg| collect_expr_exec_paramids(arg, out));
-        }
+        Expr::Aggref(aggref) => collect_aggref_exec_paramids(aggref, out),
+        Expr::WindowFunc(window_func) => collect_window_func_exec_paramids(window_func, out),
         Expr::Op(op) => op
             .args
             .iter()
@@ -3315,7 +3493,18 @@ fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
             .args
             .iter()
             .for_each(|arg| collect_expr_exec_paramids(arg, out)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+        Expr::SetReturning(srf) => collect_set_returning_call_exec_paramids(&srf.call, out),
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_expr_exec_paramids(testexpr, out);
+            }
+        }
         Expr::SubPlan(subplan) => {
+            out.extend(subplan.par_param.iter().copied());
             if let Some(testexpr) = &subplan.testexpr {
                 collect_expr_exec_paramids(testexpr, out);
             }
@@ -3328,6 +3517,9 @@ fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
             collect_expr_exec_paramids(&saop.left, out);
             collect_expr_exec_paramids(&saop.right, out);
         }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
         Expr::Cast(inner, _)
         | Expr::IsNull(inner)
         | Expr::IsNotNull(inner)
@@ -3374,13 +3566,6 @@ fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
                 }
             }
         }
-        Expr::SqlJsonQueryFunction(func) => func
-            .child_exprs()
-            .into_iter()
-            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
-        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
-            .into_iter()
-            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
         _ => {}
     }
 }
@@ -3421,13 +3606,24 @@ fn collect_plan_external_exec_paramids(
 ) {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => {}
-        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+        Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::SetOp { children, .. } => {
+            children
+                .iter()
+                .for_each(|child| collect_plan_external_exec_paramids(child, bound, out));
+        }
+        Plan::MergeAppend {
+            items, children, ..
+        } => {
+            items
+                .iter()
+                .for_each(|item| collect_external_expr_exec_paramids(&item.expr, bound, out));
             children
                 .iter()
                 .for_each(|child| collect_plan_external_exec_paramids(child, bound, out));
         }
         Plan::Unique { input, .. }
-        | Plan::IncrementalSort { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Gather { input, .. }
         | Plan::Limit { input, .. }
@@ -3435,7 +3631,7 @@ fn collect_plan_external_exec_paramids(
         | Plan::CteScan {
             cte_plan: input, ..
         } => collect_plan_external_exec_paramids(input, bound, out),
-        Plan::OrderBy { input, items, .. } => {
+        Plan::OrderBy { input, items, .. } | Plan::IncrementalSort { input, items, .. } => {
             collect_plan_external_exec_paramids(input, bound, out);
             items
                 .iter()
@@ -3467,9 +3663,9 @@ fn collect_plan_external_exec_paramids(
                     ProjectSetTarget::Scalar(entry) => {
                         collect_external_expr_exec_paramids(&entry.expr, bound, out)
                     }
-                    ProjectSetTarget::Set { call, .. } => set_returning_call_exprs(call)
-                        .into_iter()
-                        .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out)),
+                    ProjectSetTarget::Set { call, .. } => {
+                        collect_set_returning_call_exec_paramids(call, out)
+                    }
                 }
             });
         }
@@ -3493,11 +3689,6 @@ fn collect_plan_external_exec_paramids(
             index_quals
                 .iter()
                 .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
-        }
-        Plan::BitmapOr { children, .. } | Plan::SetOp { children, .. } => {
-            children
-                .iter()
-                .for_each(|child| collect_plan_external_exec_paramids(child, bound, out));
         }
         Plan::BitmapHeapScan {
             bitmapqual,
@@ -3615,34 +3806,18 @@ fn collect_plan_external_exec_paramids(
             passthrough_exprs
                 .iter()
                 .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
-            accumulators.iter().for_each(|accum| {
-                accum
-                    .args
-                    .iter()
-                    .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out))
-            });
+            accumulators
+                .iter()
+                .for_each(|accum| collect_agg_accum_exec_paramids(accum, out));
             if let Some(having) = having {
                 collect_external_expr_exec_paramids(having, bound, out);
             }
         }
         Plan::WindowAgg { input, clause, .. } => {
             collect_plan_external_exec_paramids(input, bound, out);
-            clause
-                .spec
-                .partition_by
-                .iter()
-                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
-            clause
-                .spec
-                .order_by
-                .iter()
-                .for_each(|item| collect_external_expr_exec_paramids(&item.expr, bound, out));
+            collect_window_clause_exec_paramids(clause, out);
         }
-        Plan::FunctionScan { call, .. } => {
-            set_returning_call_exprs(call)
-                .into_iter()
-                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
-        }
+        Plan::FunctionScan { call, .. } => collect_set_returning_call_exec_paramids(call, out),
         Plan::Values { rows, .. } => rows
             .iter()
             .flatten()
@@ -3658,6 +3833,12 @@ fn collect_plan_external_exec_paramids(
 
 fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
     collect_plan_external_exec_paramids(plan, &BTreeSet::new(), out);
+}
+
+fn plan_contains_exec_param_id(plan: &Plan, target_paramid: usize) -> bool {
+    let mut params = BTreeSet::new();
+    collect_plan_exec_paramids(plan, &mut params);
+    params.contains(&target_paramid)
 }
 
 fn validate_executable_index_scan_keys(
@@ -5142,7 +5323,7 @@ fn set_nested_loop_join_references(
         split_join_restrict_clauses(kind, &restrict_clauses);
     let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
     let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
-    let (right_plan, nest_params) = {
+    let (mut right_plan, nest_params) = {
         let mut right_ctx = SetRefsContext {
             root: ctx.root,
             catalog: ctx.catalog,
@@ -5176,10 +5357,7 @@ fn set_nested_loop_join_references(
                 );
                 let fixed_expr =
                     fix_upper_expr_for_input(ctx.root, rebased_expr.clone(), &left, &left_tlist);
-                if !expr_relids(&rebased_expr).is_empty()
-                    && (!expr_contains_local_semantic_var(&fixed_expr)
-                        || expr_is_local_system_var(&fixed_expr))
-                {
+                if can_bind_as_nest_param(&rebased_expr, &fixed_expr) {
                     consumed_parent_params.extend(param_consumed_parent_params);
                     let label = label_for_expr(ctx, &rebased_expr).or(param.label.clone());
                     params.push(ExecParamSource {
@@ -5208,9 +5386,42 @@ fn set_nested_loop_join_references(
             (plan, params)
         }
     };
-    let right_plan =
-        maybe_wrap_nested_loop_inner_plan(ctx.root, kind, right_plan, &nest_params, left_rows);
+    let left_for_late_params = left.clone();
     let left_plan = set_plan_refs(ctx, *left);
+    let mut nest_params = nest_params;
+    let mut retained_ext_params = Vec::new();
+    for param in std::mem::take(&mut ctx.ext_params) {
+        if !plan_contains_exec_param_id(&right_plan, param.paramid) {
+            retained_ext_params.push(param);
+            continue;
+        }
+        let fixed_expr = fix_upper_expr_for_input(
+            ctx.root,
+            param.expr.clone(),
+            &left_for_late_params,
+            &left_tlist,
+        );
+        if can_bind_as_nest_param(&param.expr, &fixed_expr) {
+            let label = label_for_expr(ctx, &param.expr).or(param.label.clone());
+            nest_params.push(ExecParamSource {
+                paramid: param.paramid,
+                expr: lower_expr(
+                    ctx,
+                    fixed_expr,
+                    LowerMode::Input {
+                        path: Some(&left_for_late_params),
+                        tlist: &left_tlist,
+                    },
+                ),
+                label,
+            });
+        } else {
+            retained_ext_params.push(param);
+        }
+    }
+    ctx.ext_params = retained_ext_params;
+    right_plan =
+        maybe_wrap_nested_loop_inner_plan(ctx.root, kind, right_plan, &nest_params, left_rows);
     Plan::NestedLoopJoin {
         plan_info,
         left: Box::new(left_plan),
@@ -5229,11 +5440,14 @@ fn maybe_wrap_nested_loop_inner_plan(
     nest_params: &[ExecParamSource],
     _outer_rows: f64,
 ) -> Plan {
-    if matches!(
-        kind,
-        crate::include::nodes::primnodes::JoinType::Inner
-            | crate::include::nodes::primnodes::JoinType::Cross
-    ) && nest_params.is_empty()
+    let enable_material = root.is_none_or(|root| root.config.enable_material);
+    if enable_material
+        && matches!(
+            kind,
+            crate::include::nodes::primnodes::JoinType::Inner
+                | crate::include::nodes::primnodes::JoinType::Cross
+        )
+        && nest_params.is_empty()
         && plan_is_plain_seq_scan(&right_plan)
     {
         return Plan::Materialize {
@@ -5669,6 +5883,7 @@ fn set_merge_join_references(
     merge_clauses: Vec<RestrictInfo>,
     outer_merge_keys: Vec<Expr>,
     inner_merge_keys: Vec<Expr>,
+    merge_key_descending: Vec<bool>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Plan {
     let left_tlist = build_path_tlist(ctx.root, &left);
@@ -5748,6 +5963,7 @@ fn set_merge_join_references(
         merge_clauses: lowered_merge_clauses,
         outer_merge_keys,
         inner_merge_keys,
+        merge_key_descending,
         join_qual,
         qual,
     }
@@ -6584,6 +6800,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             restrict_clauses,
             ..
         } => set_merge_join_references(
@@ -6595,6 +6812,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             restrict_clauses,
         ),
         Path::Projection {

@@ -71,6 +71,7 @@ pub use driver::{
     exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement,
     execute_readonly_statement_with_config, execute_sql, execute_statement,
 };
+pub(crate) use exec_expr::clear_subquery_eval_cache;
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_agg_support::build_aggregate_runtime;
 pub(crate) use expr_agg_support::execute_scalar_function_value_call;
@@ -121,8 +122,9 @@ pub(crate) use expr_txid::{
 pub(crate) use expr_xml::{render_xml_output_text, strip_xml_declaration, validate_xml_input};
 pub use fmgr::ScalarFunctionCallInfo;
 pub(crate) use nodes::{
-    render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
-    render_index_order_by, render_index_scan_condition_with_key_names,
+    pg_sql_sort_by, render_explain_expr, render_explain_join_expr,
+    render_explain_projection_expr_with_qualifier, render_index_order_by,
+    render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
     render_verbose_range_support_expr,
 };

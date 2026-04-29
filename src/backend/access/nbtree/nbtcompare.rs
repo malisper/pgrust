@@ -26,6 +26,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         (Value::Int64(a), Value::Int32(b)) => a.cmp(&i64::from(*b)),
         (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
         (Value::Xid8(a), Value::Xid8(b)) => a.cmp(b),
+        (Value::Tid(a), Value::Tid(b)) => a.cmp(b),
         (Value::Int16(a), Value::Float64(b)) => pg_float_cmp(f64::from(*a), *b),
         (Value::Int32(a), Value::Float64(b)) => pg_float_cmp(f64::from(*a), *b),
         (Value::Int64(a), Value::Float64(b)) => pg_float_cmp(*a as f64, *b),

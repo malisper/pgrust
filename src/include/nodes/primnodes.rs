@@ -384,6 +384,19 @@ impl HypotheticalAggFunc {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderedSetAggFunc {
+    PercentileDisc,
+}
+
+impl OrderedSetAggFunc {
+    pub fn name(&self) -> &'static str {
+        match self {
+            OrderedSetAggFunc::PercentileDisc => "percentile_disc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinWindowFunction {
     RowNumber,
     Rank,
@@ -2358,6 +2371,7 @@ pub struct SubPlan {
     pub sublink_type: SubLinkType,
     pub testexpr: Option<Box<Expr>>,
     pub first_col_type: Option<SqlType>,
+    pub target_width: usize,
     pub plan_id: usize,
     pub par_param: Vec<usize>,
     pub args: Vec<Expr>,

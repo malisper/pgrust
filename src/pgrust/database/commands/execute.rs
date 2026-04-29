@@ -58,6 +58,7 @@ fn direct_guc_default(name: &str) -> Option<&'static str> {
         | "enable_hashjoin"
         | "enable_mergejoin"
         | "enable_memoize"
+        | "enable_material"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
@@ -102,6 +103,7 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
         enable_hashjoin: direct_bool_config(gucs, "enable_hashjoin", true),
         enable_mergejoin: direct_bool_config(gucs, "enable_mergejoin", true),
         enable_memoize: direct_bool_config(gucs, "enable_memoize", true),
+        enable_material: direct_bool_config(gucs, "enable_material", true),
         retain_partial_index_filters: false,
         enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
         enable_sort: direct_bool_config(gucs, "enable_sort", true),
@@ -2638,6 +2640,11 @@ impl Database {
                     0,
                     configured_search_path,
                 ),
+            Statement::Cluster(ref cluster_stmt) => self.execute_cluster_stmt_with_search_path(
+                client_id,
+                cluster_stmt,
+                configured_search_path,
+            ),
             Statement::DropTable(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard =

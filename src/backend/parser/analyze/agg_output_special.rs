@@ -2,7 +2,7 @@ use super::agg_output::{
     bind_agg_output_expr, current_grouped_agg_visible_ctes, grouped_infer_common_scalar_expr_type,
     grouped_infer_sql_expr_type,
 };
-use super::expr::catalog_backed_explicit_cast_allowed;
+use super::expr::{catalog_backed_explicit_cast_allowed, exists_subquery_query};
 use super::functions::{
     fixed_scalar_return_type, resolve_function_cast_type, resolve_scalar_function,
     validate_scalar_function_arity,
@@ -114,13 +114,13 @@ pub(super) fn bind_grouped_exists_subquery(
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::ExistsSubLink,
         testexpr: None,
-        subselect: Box::new(build_grouped_subquery_plan(
+        subselect: Box::new(exists_subquery_query(build_grouped_subquery_plan(
             select,
             group_by_exprs,
             input_scope,
             catalog,
             outer_scopes,
-        )?),
+        )?)),
     })))
 }
 

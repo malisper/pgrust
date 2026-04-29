@@ -858,6 +858,7 @@ mod tests {
             recursive_union: None,
             set_operation: None,
             locking_clause: None,
+            locking_targets: Vec::new(),
             row_marks: Vec::new(),
         }
     }
@@ -947,6 +948,7 @@ mod tests {
                 recursive_union: None,
                 set_operation: None,
                 locking_clause: None,
+                locking_targets: Vec::new(),
                 row_marks: Vec::new(),
             }),
         }))

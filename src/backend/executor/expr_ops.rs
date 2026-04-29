@@ -122,6 +122,7 @@ pub(crate) fn compare_order_values(
         (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a.cmp(b)),
         (Value::TimestampTz(a), Value::TimestampTz(b)) => Ok(a.cmp(b)),
         (Value::Interval(a), Value::Interval(b)) => Ok(a.cmp_key().cmp(&b.cmp_key())),
+        (Value::Tid(a), Value::Tid(b)) => Ok(a.cmp(b)),
         (Value::Bit(a), Value::Bit(b)) => Ok(compare_bit_strings(a, b)),
         (Value::Bytea(a), Value::Bytea(b)) => Ok(a.cmp(b)),
         (Value::Uuid(a), Value::Uuid(b)) => Ok(a.cmp(b)),
@@ -1489,6 +1490,7 @@ pub(crate) fn order_values(
         ))),
         (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Tid(l), Value::Tid(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Bit(l), Value::Bit(r)) => {
             let ordering = compare_bit_strings(l, r);

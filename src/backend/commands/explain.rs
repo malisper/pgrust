@@ -1110,6 +1110,7 @@ fn push_nonverbose_plan_details(
                         rendered = rendered.replace(&format!("{base}."), &format!("{qualifier}."));
                     }
                 }
+                let rendered = normalize_aggregate_operand_parens(rendered);
                 lines.push(format!("{prefix}Filter: {}", rendered));
             }
             true
@@ -1221,6 +1222,8 @@ fn push_nonverbose_plan_details(
             left,
             right,
             merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
             ..
@@ -1233,6 +1236,19 @@ fn push_nonverbose_plan_details(
                     .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
                     .collect::<Vec<_>>()
                     .join(" AND ");
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            } else if !outer_merge_keys.is_empty() {
+                let rendered = render_merge_key_conditions(
+                    outer_merge_keys,
+                    inner_merge_keys,
+                    &left_names,
+                    &right_names,
+                    ctx,
+                );
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            } else if let Some(rendered) =
+                render_merge_condition_from_child_sorts(left, right, &left_names, &right_names, ctx)
+            {
                 lines.push(format!("{prefix}Merge Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -2926,10 +2942,12 @@ fn push_verbose_plan_details(
                 }
             }
             if let Some(having) = having {
-                lines.push(format!(
-                    "{prefix}Filter: {}",
-                    render_verbose_expr(having, &verbose_plan_output_exprs(plan, ctx, true), ctx,)
+                let rendered = normalize_aggregate_operand_parens(render_verbose_expr(
+                    having,
+                    &verbose_plan_output_exprs(plan, ctx, true),
+                    ctx,
                 ));
+                lines.push(format!("{prefix}Filter: {}", rendered));
             }
         }
         Plan::FunctionScan { call, .. } => {
@@ -3101,6 +3119,8 @@ fn push_verbose_plan_details(
             left,
             right,
             merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
             ..
@@ -3113,6 +3133,19 @@ fn push_verbose_plan_details(
                     .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
                     .collect::<Vec<_>>()
                     .join(" AND ");
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            } else if !outer_merge_keys.is_empty() {
+                let rendered = render_merge_key_conditions(
+                    outer_merge_keys,
+                    inner_merge_keys,
+                    &left_names,
+                    &right_names,
+                    ctx,
+                );
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            } else if let Some(rendered) =
+                render_merge_condition_from_child_sorts(left, right, &left_names, &right_names, ctx)
+            {
                 lines.push(format!("{prefix}Merge Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -4967,6 +5000,102 @@ fn render_verbose_expr(
         Expr::ScalarArrayOp(_) => render_explain_expr(expr, column_names),
         _ => strip_outer_parens(&render_explain_expr(expr, column_names)),
     }
+}
+
+fn render_merge_key_conditions(
+    outer_merge_keys: &[Expr],
+    inner_merge_keys: &[Expr],
+    left_names: &[String],
+    right_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = outer_merge_keys
+        .iter()
+        .zip(inner_merge_keys.iter())
+        .map(|(outer_key, inner_key)| {
+            format!(
+                "{} = {}",
+                strip_outer_parens(&render_verbose_expr(outer_key, left_names, ctx)),
+                strip_outer_parens(&render_verbose_expr(inner_key, right_names, ctx))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!("({rendered})")
+}
+
+fn render_merge_condition_from_child_sorts(
+    left: &Plan,
+    right: &Plan,
+    left_names: &[String],
+    right_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let left_expr = first_sort_expr(left)?;
+    let right_expr = first_sort_expr(right)?;
+    Some(format!(
+        "({} = {})",
+        strip_outer_parens(&render_verbose_expr(left_expr, left_names, ctx)),
+        strip_outer_parens(&render_verbose_expr(right_expr, right_names, ctx))
+    ))
+}
+
+fn first_sort_expr(plan: &Plan) -> Option<&Expr> {
+    match plan {
+        Plan::OrderBy { items, .. } | Plan::IncrementalSort { items, .. } => {
+            items.first().map(|item| &item.expr)
+        }
+        _ => None,
+    }
+}
+
+fn normalize_aggregate_operand_parens(rendered: String) -> String {
+    let mut chars = rendered.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '(' || !aggregate_call_starts_at(&chars, index + 1) {
+            index += 1;
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut end = index;
+        while end < chars.len() {
+            match chars[end] {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        if index > 0
+            && end < chars.len()
+            && chars[index - 1] == '('
+            && chars.get(end + 1).is_some_and(|ch| ch.is_whitespace())
+        {
+            chars.remove(end);
+            chars.remove(index);
+            index = index.saturating_sub(1);
+        } else {
+            index = end.saturating_add(1);
+        }
+    }
+    chars.into_iter().collect()
+}
+
+fn aggregate_call_starts_at(chars: &[char], index: usize) -> bool {
+    ["avg(", "count(", "max(", "min(", "sum("]
+        .iter()
+        .any(|prefix| {
+            let prefix = prefix.chars().collect::<Vec<_>>();
+            chars
+                .get(index..index.saturating_add(prefix.len()))
+                .is_some_and(|candidate| candidate == prefix.as_slice())
+        })
 }
 
 fn render_verbose_op_arg(

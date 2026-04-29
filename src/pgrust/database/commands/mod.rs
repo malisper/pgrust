@@ -7,6 +7,7 @@ mod alter_column_storage;
 mod alter_column_type;
 mod alter_table_work_queue;
 mod cast;
+mod cluster;
 mod collation;
 mod constraint;
 mod conversion;

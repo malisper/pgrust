@@ -45,6 +45,7 @@ pub struct PlannerConfig {
     pub enable_hashjoin: bool,
     pub enable_mergejoin: bool,
     pub enable_memoize: bool,
+    pub enable_material: bool,
     pub retain_partial_index_filters: bool,
     pub enable_hashagg: bool,
     pub enable_sort: bool,
@@ -65,6 +66,7 @@ impl Default for PlannerConfig {
             enable_hashjoin: true,
             enable_mergejoin: true,
             enable_memoize: true,
+            enable_material: true,
             retain_partial_index_filters: false,
             enable_hashagg: true,
             enable_sort: true,
@@ -585,6 +587,7 @@ pub enum Path {
         merge_clauses: Vec<RestrictInfo>,
         outer_merge_keys: Vec<Expr>,
         inner_merge_keys: Vec<Expr>,
+        merge_key_descending: Vec<bool>,
         restrict_clauses: Vec<RestrictInfo>,
     },
     Projection {

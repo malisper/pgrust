@@ -3107,6 +3107,7 @@ fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerC
         enable_hashjoin: bool_executor_guc(gucs, "enable_hashjoin", true),
         enable_mergejoin: bool_executor_guc(gucs, "enable_mergejoin", true),
         enable_memoize: bool_executor_guc(gucs, "enable_memoize", true),
+        enable_material: bool_executor_guc(gucs, "enable_material", true),
         retain_partial_index_filters: false,
         enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
         enable_sort: bool_executor_guc(gucs, "enable_sort", true),
@@ -3576,6 +3577,7 @@ fn render_dynamic_query_param_base_sql(
         Value::Int64(v) => v.to_string(),
         Value::Xid8(v) => v.to_string(),
         Value::PgLsn(v) => quote_sql_string(&crate::backend::executor::render_pg_lsn_text(*v)),
+        Value::Tid(v) => quote_sql_string(&crate::backend::executor::value_io::render_tid_text(v)),
         Value::Money(v) => v.to_string(),
         Value::Float64(v) => {
             if v.is_finite() {
@@ -4152,6 +4154,7 @@ fn render_raise_value(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Xid8(v) => v.to_string(),
         Value::PgLsn(v) => crate::backend::executor::render_pg_lsn_text(*v),
+        Value::Tid(v) => crate::backend::executor::value_io::render_tid_text(v),
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
