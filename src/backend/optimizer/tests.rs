@@ -868,6 +868,34 @@ fn catalog_with_indexed_items() -> Catalog {
     catalog
 }
 
+fn catalog_with_indexed_user_names() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "users",
+            RelationDesc {
+                columns: vec![
+                    column_desc("pguser", SqlType::new(SqlTypeKind::Name), false),
+                    column_desc("seclv", int4(), false),
+                ],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index("users_pguser_idx", "users", true, &["pguser".into()])
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed test catalog index stats");
+    catalog
+}
+
 fn catalog_with_indexed_later_column() -> Catalog {
     let mut catalog = Catalog::default();
     let table = catalog
@@ -4100,6 +4128,30 @@ fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
             _ => false,
         }),
         "expected OR join clause to use runtime scalar-array index scan: {planned:#?}"
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
+fn planner_uses_runtime_index_key_for_current_user() {
+    let catalog = catalog_with_indexed_user_names();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from users where pguser = current_user",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Scan using users_pguser_idx on users")),
+        "expected current_user predicate to use pguser index, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Cond: (pguser = CURRENT_USER)")),
+        "expected current_user index condition, got {lines:?}"
     );
     validate_planned_stmt_for_tests(&planned);
 }

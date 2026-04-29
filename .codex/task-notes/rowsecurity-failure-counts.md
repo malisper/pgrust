@@ -669,3 +669,21 @@ Policy expression display bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `725/774` matched, `49` mismatches, `860` diff lines, `46` hunks. New diff
   copied to `/tmp/diffs/rowsecurity.diff`.
+
+Runtime current-user index key bucket:
+- B-tree index planning now treats `CURRENT_USER`, `SESSION_USER`, and
+  `CURRENT_ROLE` as runtime index-key arguments, so policy subqueries like
+  `uaccount.pguser = CURRENT_USER` can use the primary-key index instead of a
+  sequential scan.
+- Added focused optimizer coverage for `pguser = current_user` using a `name`
+  index and rendering `Index Cond: (pguser = CURRENT_USER)`.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  planner_uses_runtime_index_key_for_current_user` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `729/774` matched, `45` mismatches, `831` diff lines, `43` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.
+- Remaining in this InitPlan area is mostly subplan placement/reuse display:
+  partitioned scans still duplicate the policy InitPlan per child where
+  PostgreSQL hoists one InitPlan above the Append.
