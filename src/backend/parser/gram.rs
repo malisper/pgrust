@@ -24374,67 +24374,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         expr
                     })
                 }
-                Rule::between_suffix => {
-                    let mut negated = false;
-                    let mut symmetric = false;
-                    let mut bounds = Vec::new();
-                    for part in next.into_inner() {
-                        match part.as_rule() {
-                            Rule::kw_not => negated = true,
-                            Rule::kw_symmetric => symmetric = true,
-                            Rule::concat_expr => bounds.push(build_expr(part)?),
-                            _ => {}
-                        }
-                    }
-                    let low = bounds.first().cloned().ok_or(ParseError::UnexpectedEof)?;
-                    let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
-                    let between = if symmetric && negated {
-                        SqlExpr::And(
-                            Box::new(SqlExpr::Or(
-                                Box::new(SqlExpr::Lt(
-                                    Box::new(left.clone()),
-                                    Box::new(low.clone()),
-                                )),
-                                Box::new(SqlExpr::Gt(
-                                    Box::new(left.clone()),
-                                    Box::new(high.clone()),
-                                )),
-                            )),
-                            Box::new(SqlExpr::Or(
-                                Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(high))),
-                                Box::new(SqlExpr::Gt(Box::new(left), Box::new(low))),
-                            )),
-                        )
-                    } else if symmetric {
-                        SqlExpr::Or(
-                            Box::new(SqlExpr::And(
-                                Box::new(SqlExpr::GtEq(
-                                    Box::new(left.clone()),
-                                    Box::new(low.clone()),
-                                )),
-                                Box::new(SqlExpr::LtEq(
-                                    Box::new(left.clone()),
-                                    Box::new(high.clone()),
-                                )),
-                            )),
-                            Box::new(SqlExpr::And(
-                                Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(high))),
-                                Box::new(SqlExpr::LtEq(Box::new(left), Box::new(low))),
-                            )),
-                        )
-                    } else if negated {
-                        SqlExpr::Or(
-                            Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(low))),
-                            Box::new(SqlExpr::Gt(Box::new(left), Box::new(high))),
-                        )
-                    } else {
-                        SqlExpr::And(
-                            Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
-                            Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
-                        )
-                    };
-                    Ok(between)
-                }
+                Rule::between_suffix => build_between_predicate(left, next),
                 Rule::overlaps_suffix => {
                     let right = next
                         .into_inner()
@@ -24572,6 +24512,15 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     expected: "comparison",
                     actual: next.as_str().into(),
                 }),
+            }
+        }
+        Rule::comparison_rhs_expr => {
+            let mut inner = pair.into_inner();
+            let left = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            if let Some(next) = inner.next() {
+                build_between_predicate(left, next)
+            } else {
+                Ok(left)
             }
         }
         Rule::primary_expr => {
@@ -25695,6 +25644,58 @@ fn build_comparison_expr(left: SqlExpr, op: &str, right: SqlExpr) -> Result<SqlE
             Box::new(right),
         ))),
         _ => unreachable!(),
+    })
+}
+
+fn build_between_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut negated = false;
+    let mut symmetric = false;
+    let mut bounds = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_not => negated = true,
+            Rule::kw_symmetric => symmetric = true,
+            Rule::concat_expr => bounds.push(build_expr(part)?),
+            _ => {}
+        }
+    }
+    let low = bounds.first().cloned().ok_or(ParseError::UnexpectedEof)?;
+    let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
+    Ok(if symmetric && negated {
+        SqlExpr::And(
+            Box::new(SqlExpr::Or(
+                Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(low.clone()))),
+                Box::new(SqlExpr::Gt(Box::new(left.clone()), Box::new(high.clone()))),
+            )),
+            Box::new(SqlExpr::Or(
+                Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(high))),
+                Box::new(SqlExpr::Gt(Box::new(left), Box::new(low))),
+            )),
+        )
+    } else if symmetric {
+        SqlExpr::Or(
+            Box::new(SqlExpr::And(
+                Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low.clone()))),
+                Box::new(SqlExpr::LtEq(
+                    Box::new(left.clone()),
+                    Box::new(high.clone()),
+                )),
+            )),
+            Box::new(SqlExpr::And(
+                Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(high))),
+                Box::new(SqlExpr::LtEq(Box::new(left), Box::new(low))),
+            )),
+        )
+    } else if negated {
+        SqlExpr::Or(
+            Box::new(SqlExpr::Lt(Box::new(left.clone()), Box::new(low))),
+            Box::new(SqlExpr::Gt(Box::new(left), Box::new(high))),
+        )
+    } else {
+        SqlExpr::And(
+            Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
+            Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
+        )
     })
 }
 

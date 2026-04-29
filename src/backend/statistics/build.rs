@@ -139,6 +139,7 @@ fn build_mcv_payload(
             .then_with(|| left.1.1.cmp(&right.1.1))
             .then_with(|| left.0.cmp(&right.0))
     });
+    let has_repeated_group = ranked.iter().any(|(_, (count, _))| *count > 1);
     let target = if statistics_target <= 0 {
         100
     } else {
@@ -151,7 +152,7 @@ fn build_mcv_payload(
         });
         let frequency = rounded_stat_frequency(count as f64 / sample_total as f64);
         let base_frequency = rounded_stat_frequency(base_frequency);
-        if count == 1 && sample_total > target {
+        if count == 1 && has_repeated_group {
             continue;
         }
         items.push(PgMcvItem {
