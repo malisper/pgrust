@@ -34,7 +34,18 @@ scripts/cargo_isolated.sh test --lib --quiet planner_memoizes_expression_key_nes
 scripts/run_regression.sh --test memoize --timeout 60 --port 55445
 
 Remaining:
-Latest memoize regression after the current pass: FAIL, 76/88 queries matched, 325 diff lines at /tmp/pgrust_memoize_after_textdecode/diff/memoize.diff.
-No timeouts remain.
-Fixed/mostly fixed: broad unique range scans now keep PostgreSQL's Seq Scan outer side, the first tenk memoize index-only hunks match, cache key labels for simple outer keys, expression key display for (t1.two + 1) and (t1.t)::numeric, runtime index cond labels, Heap Fetches lines, memoize eviction accounting, and float -0/+0 row counts.
-Remaining hunks are planner-shape mismatches: explicit OFFSET 0 still leaves visible SubqueryScan/Limit wrappers in EXPLAIN, LEFT JOIN LATERAL strict quals are not reduced/pushed like PostgreSQL, expr_key still renders a non-index residual param as $0, partitionwise and union-all Append paths still pick the global Append/nested-loop orientation, join orientation differs for float and EXISTS cases, text inequality scan still reports too few child rows for the long text case, and the final parallel Gather/partial aggregate hunk remains out of scope.
+PR health follow-up fixed the cargo-test failures seen after the memoize work:
+system-column outer refs now become immediate nested-loop params, memoized child dependency collection ignores params bound inside the child, disabled seq scans lose to usable index/bitmap alternatives, cross/unqualified nested-loop outers no longer drive runtime index probes, anchored regex btree scans are exempt from the broad range penalty, and direct Database::execute SET/RESET/SHOW now carries planner enable_* GUCs per client.
+
+Tests run in the follow-up:
+cargo fmt
+git diff --check
+scripts/cargo_isolated.sh check
+scripts/cargo_isolated.sh test --lib --quiet unique_array_column_supports_duplicates_and_index_quals -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet create_gin_array_index_uses_bitmap_scan_and_rechecks -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet spgist_index_supports_null_and_bitmap_scans -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet explain_bootstrap_anchored_regex_uses_proname_index_range -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet inherited_scan_tableoid_tracks_physical_child_relation -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet create_index_catalog_paths_and_alter_table_set_parallel_workers -- --nocapture
+
+Remaining known memoize regression residual: the parallel Gather/partial aggregate mismatch is still out of scope.

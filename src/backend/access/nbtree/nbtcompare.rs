@@ -240,6 +240,18 @@ mod tests {
             compare_bt_values(&with_null, &without_null),
             Ordering::Greater
         );
+
+        let array_ten = Value::PgArray(ArrayValue::from_1d(vec![
+            Value::Int32(1),
+            Value::Int32(2),
+            Value::Int32(10),
+        ]));
+        let array_five = Value::PgArray(ArrayValue::from_1d(vec![
+            Value::Int32(1),
+            Value::Int32(5),
+            Value::Int32(3),
+        ]));
+        assert_eq!(compare_bt_values(&array_ten, &array_five), Ordering::Less);
     }
 
     #[test]

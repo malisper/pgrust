@@ -4,7 +4,9 @@ use super::pathnodes::{
     slot_output_target,
 };
 use super::plan::append_planned_subquery;
-use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base_and_config};
+use super::{
+    expand_join_rte_vars, expr_relids, flatten_join_alias_vars, planner_with_param_base_and_config,
+};
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
@@ -3087,13 +3089,46 @@ fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
     }
 }
 
-fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
+fn collect_external_expr_exec_paramids(
+    expr: &Expr,
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    let mut params = BTreeSet::new();
+    collect_expr_exec_paramids(expr, &mut params);
+    out.extend(
+        params
+            .into_iter()
+            .filter(|paramid| !bound.contains(paramid)),
+    );
+}
+
+fn collect_index_scan_key_external_exec_paramids(
+    keys: &[IndexScanKey],
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    for key in keys {
+        if let IndexScanKeyArgument::Runtime(expr) = &key.argument {
+            collect_external_expr_exec_paramids(expr, bound, out);
+        }
+        if let Some(display_expr) = &key.display_expr {
+            collect_external_expr_exec_paramids(display_expr, bound, out);
+        }
+    }
+}
+
+fn collect_plan_external_exec_paramids(
+    plan: &Plan,
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => {}
         Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
             children
                 .iter()
-                .for_each(|child| collect_plan_exec_paramids(child, out));
+                .for_each(|child| collect_plan_external_exec_paramids(child, bound, out));
         }
         Plan::Unique { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -3101,40 +3136,42 @@ fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
         | Plan::LockRows { input, .. }
         | Plan::CteScan {
             cte_plan: input, ..
-        } => collect_plan_exec_paramids(input, out),
+        } => collect_plan_external_exec_paramids(input, bound, out),
         Plan::OrderBy { input, items, .. } => {
-            collect_plan_exec_paramids(input, out);
+            collect_plan_external_exec_paramids(input, bound, out);
             items
                 .iter()
-                .for_each(|item| collect_expr_exec_paramids(&item.expr, out));
+                .for_each(|item| collect_external_expr_exec_paramids(&item.expr, bound, out));
         }
         Plan::SubqueryScan { input, filter, .. } => {
-            collect_plan_exec_paramids(input, out);
+            collect_plan_external_exec_paramids(input, bound, out);
             if let Some(filter) = filter {
-                collect_expr_exec_paramids(filter, out);
+                collect_external_expr_exec_paramids(filter, bound, out);
             }
         }
         Plan::Filter {
             input, predicate, ..
         } => {
-            collect_plan_exec_paramids(input, out);
-            collect_expr_exec_paramids(predicate, out);
+            collect_plan_external_exec_paramids(input, bound, out);
+            collect_external_expr_exec_paramids(predicate, bound, out);
         }
         Plan::Projection { input, targets, .. } => {
-            collect_plan_exec_paramids(input, out);
+            collect_plan_external_exec_paramids(input, bound, out);
             targets
                 .iter()
-                .for_each(|target| collect_expr_exec_paramids(&target.expr, out));
+                .for_each(|target| collect_external_expr_exec_paramids(&target.expr, bound, out));
         }
         Plan::ProjectSet { input, targets, .. } => {
-            collect_plan_exec_paramids(input, out);
+            collect_plan_external_exec_paramids(input, bound, out);
             targets.iter().for_each(|target| {
                 use crate::include::nodes::primnodes::ProjectSetTarget;
                 match target {
-                    ProjectSetTarget::Scalar(entry) => collect_expr_exec_paramids(&entry.expr, out),
+                    ProjectSetTarget::Scalar(entry) => {
+                        collect_external_expr_exec_paramids(&entry.expr, bound, out)
+                    }
                     ProjectSetTarget::Set { call, .. } => set_returning_call_exprs(call)
                         .into_iter()
-                        .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+                        .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out)),
                 }
             });
         }
@@ -3148,21 +3185,21 @@ fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
             order_by_keys,
             ..
         } => {
-            collect_index_scan_key_exec_paramids(keys, out);
-            collect_index_scan_key_exec_paramids(order_by_keys, out);
+            collect_index_scan_key_external_exec_paramids(keys, bound, out);
+            collect_index_scan_key_external_exec_paramids(order_by_keys, bound, out);
         }
         Plan::BitmapIndexScan {
             keys, index_quals, ..
         } => {
-            collect_index_scan_key_exec_paramids(keys, out);
+            collect_index_scan_key_external_exec_paramids(keys, bound, out);
             index_quals
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
         }
         Plan::BitmapOr { children, .. } | Plan::SetOp { children, .. } => {
             children
                 .iter()
-                .for_each(|child| collect_plan_exec_paramids(child, out));
+                .for_each(|child| collect_plan_external_exec_paramids(child, bound, out));
         }
         Plan::BitmapHeapScan {
             bitmapqual,
@@ -3170,29 +3207,29 @@ fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
             filter_qual,
             ..
         } => {
-            collect_plan_exec_paramids(bitmapqual, out);
+            collect_plan_external_exec_paramids(bitmapqual, bound, out);
             recheck_qual
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             filter_qual
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
         }
         Plan::Hash {
             input, hash_keys, ..
         } => {
-            collect_plan_exec_paramids(input, out);
+            collect_plan_external_exec_paramids(input, bound, out);
             hash_keys
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
         }
         Plan::Memoize {
             input, cache_keys, ..
         } => {
-            collect_plan_exec_paramids(input, out);
+            collect_plan_external_exec_paramids(input, bound, out);
             cache_keys
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
         }
         Plan::NestedLoopJoin {
             left,
@@ -3202,16 +3239,18 @@ fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
             qual,
             ..
         } => {
-            collect_plan_exec_paramids(left, out);
-            collect_plan_exec_paramids(right, out);
+            collect_plan_external_exec_paramids(left, bound, out);
             nest_params
                 .iter()
-                .for_each(|param| collect_expr_exec_paramids(&param.expr, out));
+                .for_each(|param| collect_external_expr_exec_paramids(&param.expr, bound, out));
             join_qual
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             qual.iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            let mut right_bound = bound.clone();
+            right_bound.extend(nest_params.iter().map(|param| param.paramid));
+            collect_plan_external_exec_paramids(right, &right_bound, out);
         }
         Plan::HashJoin {
             left,
@@ -3222,19 +3261,19 @@ fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
             qual,
             ..
         } => {
-            collect_plan_exec_paramids(left, out);
-            collect_plan_exec_paramids(right, out);
+            collect_plan_external_exec_paramids(left, bound, out);
+            collect_plan_external_exec_paramids(right, bound, out);
             hash_clauses
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             hash_keys
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             join_qual
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             qual.iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
         }
         Plan::MergeJoin {
             left,
@@ -3246,22 +3285,22 @@ fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
             qual,
             ..
         } => {
-            collect_plan_exec_paramids(left, out);
-            collect_plan_exec_paramids(right, out);
+            collect_plan_external_exec_paramids(left, bound, out);
+            collect_plan_external_exec_paramids(right, bound, out);
             merge_clauses
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             outer_merge_keys
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             inner_merge_keys
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             join_qual
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             qual.iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
         }
         Plan::Aggregate {
             input,
@@ -3271,52 +3310,56 @@ fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
             having,
             ..
         } => {
-            collect_plan_exec_paramids(input, out);
+            collect_plan_external_exec_paramids(input, bound, out);
             group_by
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             passthrough_exprs
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             accumulators.iter().for_each(|accum| {
                 accum
                     .args
                     .iter()
-                    .for_each(|expr| collect_expr_exec_paramids(expr, out))
+                    .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out))
             });
             if let Some(having) = having {
-                collect_expr_exec_paramids(having, out);
+                collect_external_expr_exec_paramids(having, bound, out);
             }
         }
         Plan::WindowAgg { input, clause, .. } => {
-            collect_plan_exec_paramids(input, out);
+            collect_plan_external_exec_paramids(input, bound, out);
             clause
                 .spec
                 .partition_by
                 .iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             clause
                 .spec
                 .order_by
                 .iter()
-                .for_each(|item| collect_expr_exec_paramids(&item.expr, out));
+                .for_each(|item| collect_external_expr_exec_paramids(&item.expr, bound, out));
         }
         Plan::FunctionScan { call, .. } => {
             set_returning_call_exprs(call)
                 .into_iter()
-                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
         }
         Plan::Values { rows, .. } => rows
             .iter()
             .flatten()
-            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+            .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out)),
         Plan::RecursiveUnion {
             anchor, recursive, ..
         } => {
-            collect_plan_exec_paramids(anchor, out);
-            collect_plan_exec_paramids(recursive, out);
+            collect_plan_external_exec_paramids(anchor, bound, out);
+            collect_plan_external_exec_paramids(recursive, bound, out);
         }
     }
+}
+
+fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
+    collect_plan_external_exec_paramids(plan, &BTreeSet::new(), out);
 }
 
 fn validate_executable_index_scan_keys(
@@ -4815,7 +4858,7 @@ fn set_nested_loop_join_references(
                 );
                 let fixed_expr =
                     fix_upper_expr_for_input(ctx.root, rebased_expr.clone(), &left, &left_tlist);
-                if expr_contains_local_semantic_var(&rebased_expr)
+                if !expr_relids(&rebased_expr).is_empty()
                     && !expr_contains_local_semantic_var(&fixed_expr)
                 {
                     consumed_parent_params.extend(param_consumed_parent_params);

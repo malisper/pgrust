@@ -220,6 +220,7 @@ pub struct Database {
     pub(crate) session_plpgsql_function_caches:
         Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub(crate) session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
+    pub(crate) session_guc_states: Arc<RwLock<HashMap<ClientId, HashMap<String, String>>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,

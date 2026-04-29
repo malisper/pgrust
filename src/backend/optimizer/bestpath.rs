@@ -85,6 +85,11 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
     {
         return candidate_left_relids > current_left_relids;
     }
+    let candidate_disabled = contains_disabled_seq_scan(candidate);
+    let current_disabled = contains_disabled_seq_scan(current);
+    if candidate_disabled != current_disabled {
+        return !candidate_disabled;
+    }
     if matches!(cost, CostSelector::Total) {
         if preferred_partitionwise_join_append(candidate)
             && !preferred_partitionwise_join_append(current)
@@ -427,6 +432,48 @@ fn contains_seq_scan(path: &Path) -> bool {
         Path::RecursiveUnion {
             anchor, recursive, ..
         } => contains_seq_scan(anchor) || contains_seq_scan(recursive),
+        Path::Result { .. }
+        | Path::IndexOnlyScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
+        | Path::Values { .. }
+        | Path::FunctionScan { .. }
+        | Path::WorkTableScan { .. } => false,
+    }
+}
+
+fn contains_disabled_seq_scan(path: &Path) -> bool {
+    match path {
+        Path::SeqScan { disabled, .. } => *disabled,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => contains_disabled_seq_scan(input),
+        Path::Append { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(contains_disabled_seq_scan),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
+            contains_disabled_seq_scan(left) || contains_disabled_seq_scan(right)
+        }
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => contains_disabled_seq_scan(anchor) || contains_disabled_seq_scan(recursive),
         Path::Result { .. }
         | Path::IndexOnlyScan { .. }
         | Path::IndexScan { .. }

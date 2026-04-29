@@ -44,6 +44,7 @@ use crate::include::nodes::primnodes::{
     Var, attrno_index, set_returning_call_exprs, user_attrno,
 };
 
+use super::super::joininfo;
 use super::super::pathnodes::{expr_sql_type, rte_slot_varno, slot_output_target};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
@@ -2206,12 +2207,33 @@ fn unordered_btree_range_probe_needs_heap_penalty(
 ) -> bool {
     spec.index.index_meta.am_oid == BTREE_AM_OID
         && !spec.removes_order
+        && !spec.filter_quals.iter().any(expr_is_regex_match_filter)
         && scan_sel.max(btree_range_key_histogram_selectivity(spec, stats).unwrap_or(0.0)) >= 0.01
         && btree_ordering_equality_prefix(&spec.keys) == 0
         && spec
             .keys
             .iter()
             .any(|key| key.attribute_number > 0 && key.strategy != 3)
+}
+
+fn expr_is_regex_match_filter(expr: &Expr) -> bool {
+    match expr {
+        Expr::Op(op) => {
+            matches!(op.op, OpExprKind::RegexMatch)
+                || op.args.iter().any(expr_is_regex_match_filter)
+        }
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_is_regex_match_filter),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_is_regex_match_filter(inner),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            expr_is_regex_match_filter(left) || expr_is_regex_match_filter(right)
+        }
+        _ => false,
+    }
 }
 
 fn btree_range_key_histogram_selectivity(
@@ -2427,7 +2449,14 @@ fn build_join_paths_internal(
         && (!right_uses_immediate_outer || !lateral_orientation_locked)
         || allow_base_cross_swap;
 
+    let whole_row_targeted = root.is_some_and(|root| {
+        query_targets_whole_row_rel(root, left_relids)
+            || query_targets_whole_row_rel(root, right_relids)
+    });
     let mut paths = Vec::new();
+    let allow_parameterized_default_orientation =
+        !whole_row_targeted && !matches!(kind, JoinType::Right | JoinType::Full);
+
     if config.enable_nestloop && allow_default_orientation {
         paths.push(estimate_nested_loop_join_internal(
             root,
@@ -2438,15 +2467,18 @@ fn build_join_paths_internal(
             pathtarget.clone(),
             output_columns.clone(),
         ));
-        if let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
-            root,
-            catalog,
-            &right,
-            left_relids,
-            right_relids,
-            &restrict_clauses,
-            &pathtarget,
-        ) {
+        if allow_parameterized_default_orientation
+            && parameterized_outer_can_drive_runtime_index(&left)
+            && let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
+                root,
+                catalog,
+                &right,
+                left_relids,
+                right_relids,
+                &restrict_clauses,
+                &pathtarget,
+            )
+        {
             paths.push(estimate_nested_loop_join_internal(
                 root,
                 left.clone(),
@@ -2469,15 +2501,17 @@ fn build_join_paths_internal(
             pathtarget.clone(),
             output_columns.clone(),
         ));
-        if let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
-            root,
-            catalog,
-            &left,
-            right_relids,
-            left_relids,
-            &restrict_clauses,
-            &pathtarget,
-        ) {
+        if parameterized_outer_can_drive_runtime_index(&right)
+            && let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
+                root,
+                catalog,
+                &left,
+                right_relids,
+                left_relids,
+                &restrict_clauses,
+                &pathtarget,
+            )
+        {
             paths.push(estimate_nested_loop_join_internal(
                 root,
                 right.clone(),
@@ -2575,6 +2609,70 @@ fn build_join_paths_internal(
     }
 
     paths
+}
+
+fn parameterized_outer_can_drive_runtime_index(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin {
+            kind: JoinType::Cross,
+            ..
+        } => false,
+        Path::NestedLoopJoin {
+            kind: JoinType::Inner,
+            restrict_clauses,
+            ..
+        } if restrict_clauses.is_empty() => false,
+        _ => true,
+    }
+}
+
+fn query_targets_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> bool {
+    root.parse.target_list.iter().any(|target| {
+        let expr = joininfo::flatten_join_alias_vars_query(&root.parse, target.expr.clone());
+        expr_is_whole_row_rel(root, &expr, relids)
+    })
+}
+
+fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> bool {
+    match expr {
+        Expr::Row { fields, .. } => relids.iter().any(|relid| {
+            let Some(rte) = root.parse.rtable.get(relid.saturating_sub(1)) else {
+                return false;
+            };
+            fields.len() == rte.desc.columns.len()
+                && fields.iter().enumerate().all(|(index, (_, expr))| {
+                    matches!(
+                        expr,
+                        Expr::Var(var)
+                            if var.varno == *relid
+                                && var.varlevelsup == 0
+                                && var.varattno == user_attrno(index)
+                    )
+                })
+        }),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| expr_is_whole_row_rel(root, arg, relids)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_is_whole_row_rel(root, arg, relids)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_is_whole_row_rel(root, arg, relids)),
+        Expr::Cast(inner, _)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::Collate { expr: inner, .. } => expr_is_whole_row_rel(root, inner, relids),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            expr_is_whole_row_rel(root, left, relids) || expr_is_whole_row_rel(root, right, relids)
+        }
+        _ => false,
+    }
 }
 
 fn parameterized_inner_index_path(
@@ -2789,44 +2887,26 @@ fn parameterized_inner_index_path(
             relation_name,
             relation_oid,
             relkind,
-            relispopulated,
             toast,
             desc,
             ..
-        } => (*relkind == 'r')
-            .then(|| {
-                parameterized_base_index_path(
-                    root,
-                    catalog,
-                    *source_id,
-                    *rel,
-                    relation_name,
-                    *relation_oid,
-                    *toast,
-                    desc,
-                    &filter,
-                    required_pathtarget,
-                )
-            })
-            .flatten()
-            .unwrap_or_else(|| {
-                wrap_parameterized_filter(
-                    Path::SeqScan {
-                        plan_info: inner.plan_info(),
-                        pathtarget: inner.semantic_output_target(),
-                        source_id: *source_id,
-                        rel: *rel,
-                        relation_name: relation_name.clone(),
-                        relation_oid: *relation_oid,
-                        relkind: *relkind,
-                        relispopulated: *relispopulated,
-                        toast: *toast,
-                        desc: desc.clone(),
-                        disabled: false,
-                    },
-                    filter,
-                )
-            }),
+        } => {
+            if *relkind != 'r' {
+                return None;
+            }
+            parameterized_base_index_path(
+                root,
+                catalog,
+                *source_id,
+                *rel,
+                relation_name,
+                *relation_oid,
+                *toast,
+                desc,
+                &filter,
+                required_pathtarget,
+            )?
+        }
         Path::IndexOnlyScan {
             source_id,
             rel,
@@ -2855,9 +2935,8 @@ fn parameterized_inner_index_path(
             desc,
             &filter,
             required_pathtarget,
-        )
-        .unwrap_or_else(|| wrap_parameterized_filter(inner.clone(), filter)),
-        _ => wrap_parameterized_filter(inner.clone(), filter),
+        )?,
+        _ => return None,
     };
     Some((plan, remaining))
 }
@@ -3235,24 +3314,6 @@ fn parameterized_inner_clause(
         return Some(restrict.clause.clone());
     }
     None
-}
-
-fn wrap_parameterized_filter(input: Path, predicate: Expr) -> Path {
-    let input_info = input.plan_info();
-    let rows = clamp_rows(input_info.plan_rows.as_f64() * DEFAULT_EQ_SEL);
-    let total_cost = input_info.total_cost.as_f64()
-        + input_info.plan_rows.as_f64() * predicate_cost(&predicate) * CPU_OPERATOR_COST;
-    Path::Filter {
-        plan_info: PlanEstimate::new(
-            input_info.startup_cost.as_f64(),
-            total_cost,
-            rows,
-            input_info.plan_width,
-        ),
-        pathtarget: input.semantic_output_target(),
-        input: Box::new(input),
-        predicate,
-    }
 }
 
 fn rewrite_parameterized_subquery_filter(
