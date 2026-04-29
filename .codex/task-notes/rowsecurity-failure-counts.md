@@ -583,3 +583,19 @@ pg_stats RLS filtering bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `721/774` matched, `53` mismatches, `987` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+EXPLAIN const-false RLS filter bucket:
+- EXPLAIN now treats scan filters with an `AND` tree containing a constant
+  false predicate as PostgreSQL's one-time false `Result`, even when RLS
+  security ordering leaves unsafe user predicates attached to the same filter.
+- Added focused coverage for a `false AND a < 1000` scan filter rendering as
+  `Result` / `One-Time Filter: false` without exposing the scan.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  explain_const_false_and_scan_filter_uses_one_time_filter` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `721/774` matched, `53` mismatches. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`; the previous `false AND proc_...` EXPLAIN hunk
+  is gone, but this run still timed out at the same match point and the diff
+  includes a timeout tail instead of the normal cleanup section.

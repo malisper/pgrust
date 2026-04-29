@@ -14,7 +14,7 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, BuiltinScalarFunction, Expr, INNER_VAR, JoinType, OUTER_VAR, ParamKind,
+    AggAccum, BoolExprType, BuiltinScalarFunction, Expr, INNER_VAR, JoinType, OUTER_VAR, ParamKind,
     ProjectSetTarget, QueryColumn, ScalarFunctionImpl, SetReturningCall, SqlJsonTable,
     SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePlan,
     SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind, SubPlan,
@@ -5307,8 +5307,12 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
         Plan::Filter {
             plan_info,
             input,
-            predicate: Expr::Const(Value::Bool(false)),
-        } if const_false_filter_input_can_render_as_result(input) => Some(*plan_info),
+            predicate,
+        } if const_false_filter_predicate(predicate)
+            && const_false_filter_input_can_render_as_result(input) =>
+        {
+            Some(*plan_info)
+        }
         Plan::Append {
             plan_info,
             children,
@@ -5365,6 +5369,16 @@ fn join_with_const_false_side_can_render_as_result(
         JoinType::Left | JoinType::Semi | JoinType::Anti => left_false,
         JoinType::Right => right_false,
         JoinType::Full => left_false && right_false,
+    }
+}
+
+fn const_false_filter_predicate(predicate: &Expr) -> bool {
+    match predicate {
+        Expr::Const(Value::Bool(false)) => true,
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            bool_expr.args.iter().any(const_false_filter_predicate)
+        }
+        _ => false,
     }
 }
 
