@@ -48907,6 +48907,7 @@ fn plpgsql_partitioned_table_percent_type_signatures() {
         "insert into pl_percent_parted values (1, 'Row 1'), (2, 'Row 2')",
     )
     .unwrap();
+    clear_backend_notices();
     db.execute(
         1,
         "create function pl_percent_get(pl_percent_parted.a%type)
@@ -48923,10 +48924,17 @@ fn plpgsql_partitioned_table_percent_type_signatures() {
     )
     .unwrap();
     assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "type reference pl_percent_parted.a%TYPE converted to integer"
+        )]
+    );
+    assert_eq!(
         query_rows(&db, 1, "select * from pl_percent_get(1) as t"),
         vec![vec![Value::Int32(1), Value::Text("Row 1".into())]]
     );
 
+    clear_backend_notices();
     db.execute(
         1,
         "create function pl_percent_list()
@@ -48944,6 +48952,12 @@ fn plpgsql_partitioned_table_percent_type_signatures() {
          $$",
     )
     .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "type reference public.pl_percent_parted.a%TYPE converted to integer"
+        )]
+    );
     assert_eq!(
         query_rows(&db, 1, "select * from pl_percent_list() as t"),
         vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]

@@ -1573,6 +1573,24 @@ fn notice_name_for_type(raw: &RawTypeName, sql_type: SqlType) -> String {
         .unwrap_or_else(|| format!("{sql_type:?}"))
 }
 
+fn percent_type_signature_notice(raw: &RawTypeName, sql_type: SqlType) -> Option<String> {
+    let RawTypeName::Named {
+        name,
+        array_bounds: 0,
+    } = raw
+    else {
+        return None;
+    };
+    let lower = name.to_ascii_lowercase();
+    let prefix = lower.strip_suffix("%type")?;
+    let original_prefix = &name[..prefix.len()];
+    original_prefix.trim().rsplit_once('.')?;
+    Some(format!(
+        "type reference {original_prefix}%TYPE converted to {}",
+        format_sql_type_name(sql_type)
+    ))
+}
+
 fn split_proc_name(name: &str) -> (Option<&str>, &str) {
     name.rsplit_once('.')
         .map(|(schema, proc_name)| (Some(schema), proc_name))
@@ -3415,10 +3433,14 @@ impl Database {
         let mut all_arg_names = Vec::new();
         let mut output_args = Vec::new();
         let mut plpgsql_arg_types = Vec::new();
+        let mut percent_type_notices = std::collections::BTreeSet::new();
         let mut provariadic = 0;
 
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
+            if let Some(notice) = percent_type_signature_notice(&arg.ty, sql_type) {
+                percent_type_notices.insert(notice);
+            }
             plpgsql_arg_types.push((arg.name.clone().unwrap_or_default(), sql_type));
             if matches!(sql_type.kind, SqlTypeKind::Shell) {
                 push_backend_notice(
@@ -3505,6 +3527,9 @@ impl Database {
                     }
                     Err(err) => return Err(ExecError::Parse(err)),
                 };
+                if let Some(notice) = percent_type_signature_notice(ty, sql_type) {
+                    percent_type_notices.insert(notice);
+                }
                 proretset = *setof;
                 prorettype = create_function_type_oid(&catalog, sql_type, format!("{sql_type:?}"))?;
                 if !output_args.is_empty() {
@@ -3549,6 +3574,9 @@ impl Database {
                 for column in columns {
                     let sql_type =
                         resolve_raw_type_name(&column.ty, &catalog).map_err(ExecError::Parse)?;
+                    if let Some(notice) = percent_type_signature_notice(&column.ty, sql_type) {
+                        percent_type_notices.insert(notice);
+                    }
                     if matches!(sql_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
                         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                             "record and composite RETURNS TABLE columns are not supported yet"
@@ -3682,6 +3710,9 @@ impl Database {
             for notice in validation_notices {
                 push_backend_notice(notice.severity, notice.sqlstate, notice.message, None, None);
             }
+        }
+        for notice in percent_type_notices {
+            push_notice(notice);
         }
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)
