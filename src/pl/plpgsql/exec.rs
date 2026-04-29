@@ -2372,7 +2372,6 @@ fn exec_function_stmt(
             };
             Err(assert_failure(message))
         }
-        CompiledStmt::Continue => Ok(FunctionControl::LoopContinue),
         CompiledStmt::Return { expr, .. } => {
             exec_function_return(expr.as_ref(), compiled, expected_record_shape, state, ctx)
         }
@@ -2663,7 +2662,7 @@ fn exec_function_return(
                         &compiled.return_contract,
                         expected_record_shape,
                     )?;
-                    state.rows.push(coerce_row_to_columns(row, shape)?);
+                    state.rows.push(coerce_row_to_columns(row, shape, ctx)?);
                 } else {
                     state.rows.push(TupleSlot::virtual_row(vec![value]));
                 }

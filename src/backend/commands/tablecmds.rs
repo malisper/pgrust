@@ -26,14 +26,12 @@ use crate::backend::parser::{
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundRuleAction, BoundTemporalConstraint, BoundUpdateStatement,
     BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement, DeleteStatement,
-    DomainConstraintLookupKind, DropTableStatement, ExplainFormat, ExplainStatement,
-    ForeignKeyAction, InsertStatement, MaintenanceTarget, MergeStatement, OverridingKind,
-    ParseError, RuleEvent, SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType,
-    TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table, bind_delete,
-    bind_expr_with_outer_and_ctes, bind_generated_expr, bind_insert,
+    DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction, InsertStatement,
+    MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent, SelectStatement,
+    SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement, UpdateStatement,
+    VacuumStatement, bind_create_table, bind_delete, bind_generated_expr, bind_insert,
     bind_referenced_by_foreign_keys, bind_relation_constraints, bind_rule_action_statement,
     bind_scalar_expr_in_scope, bind_update, parse_expr, rewrite_bound_delete_auto_view_target,
-    scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;

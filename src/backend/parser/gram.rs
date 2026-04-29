@@ -16698,7 +16698,7 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
     Ok(PrepareStatement {
         name: name.ok_or(ParseError::UnexpectedEof)?,
         parameter_types,
-        query,
+        query: query.ok_or(ParseError::UnexpectedEof)?,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
     })
 }

@@ -945,7 +945,7 @@ fn domain_ddl_error_position(sql: &str, message: &str) -> Option<usize> {
         "specifying constraint enforceability not supported for domains"
         | "CHECK constraints cannot be marked ENFORCED"
         | "CHECK constraints cannot be marked NOT ENFORCED" => {
-            find_constraint_enforcement_attribute_position(sql)
+            find_conflicting_constraint_enforcement_attribute_position(sql)
         }
         "redundant NOT NULL constraint definition" => {
             find_last_case_insensitive_token_position(sql, "CONSTRAINT")

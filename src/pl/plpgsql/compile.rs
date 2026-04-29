@@ -5588,23 +5588,25 @@ fn subscripted_assignment_target_type(
     subscript_count: usize,
     catalog: &dyn CatalogLookup,
 ) -> Result<SqlType, ParseError> {
-    let mut ty = root_ty;
-    for _ in 0..subscript_count {
-        ty = plpgsql_assignment_navigation_sql_type(ty, catalog);
-        if !ty.is_array {
-            return Err(ParseError::DetailedError {
-                message: format!(
-                    "cannot subscript type {} because it does not support subscripting",
-                    crate::backend::parser::analyze::sql_type_name(ty)
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42804",
-            });
-        }
-        ty = ty.element_type();
+    let ty = plpgsql_assignment_navigation_sql_type(root_ty, catalog);
+    if subscript_count == 0 {
+        return Ok(ty);
     }
-    Ok(plpgsql_assignment_navigation_sql_type(ty, catalog))
+    if !ty.is_array {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot subscript type {} because it does not support subscripting",
+                crate::backend::parser::analyze::sql_type_name(ty)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    Ok(plpgsql_assignment_navigation_sql_type(
+        ty.element_type(),
+        catalog,
+    ))
 }
 
 fn plpgsql_assignment_navigation_sql_type(mut ty: SqlType, catalog: &dyn CatalogLookup) -> SqlType {

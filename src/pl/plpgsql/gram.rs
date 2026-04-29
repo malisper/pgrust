@@ -2310,7 +2310,7 @@ mod tests {
         )
         .unwrap();
 
-        let Stmt::Assign { target, expr, line } = &block.statements[0] else {
+        let Stmt::Assign { target, expr, line } = unline(&block.statements[0]) else {
             panic!("expected assignment statement");
         };
         assert_eq!(
@@ -2453,37 +2453,12 @@ mod tests {
         )
         .unwrap();
 
-        let Stmt::Assign { target, expr } = unline(&block.statements[0]) else {
+        let Stmt::Assign { target, expr, .. } = unline(&block.statements[0]) else {
             panic!("expected assignment statement");
         };
         assert_eq!(target, &AssignTarget::Name("return".into()));
         assert_eq!(expr, "return + 1");
         assert!(matches!(unline(&block.statements[1]), Stmt::Return { .. }));
-    }
-
-    #[test]
-    fn parse_subscripted_assignment_target() {
-        let block = parse_block(
-            "
-            begin
-                x[1] := $1;
-            end
-            ",
-        )
-        .unwrap();
-
-        let Stmt::Assign { target, expr, line } = &block.statements[0] else {
-            panic!("expected assignment statement");
-        };
-        assert_eq!(
-            target,
-            &AssignTarget::Subscript {
-                name: "x".into(),
-                subscripts: vec!["1".into()]
-            }
-        );
-        assert_eq!(expr, "$1");
-        assert_eq!(*line, 3);
     }
 
     #[test]

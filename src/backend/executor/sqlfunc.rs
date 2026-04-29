@@ -118,7 +118,7 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values_with_arg_type_oids
 fn coerce_sql_function_value_to_type(
     value: Value,
     target_type: SqlType,
-    catalog: &dyn CatalogLookup,
+    _catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     let coerced = if let Value::Record(record) = value {

@@ -477,19 +477,19 @@ fn validate_return_stmt_in_stmt(
             returns_set,
             allows_bare_return,
         ),
-        Stmt::Return { expr: Some(_) } if has_output_args => Err(ParseError::DetailedError {
+        Stmt::Return { expr: Some(_), .. } if has_output_args => Err(ParseError::DetailedError {
             message: "RETURN cannot have a parameter in function with OUT parameters".into(),
             detail: None,
             hint: None,
             sqlstate: "42804",
         }),
-        Stmt::Return { expr: Some(_) } if returns_void => Err(ParseError::DetailedError {
+        Stmt::Return { expr: Some(_), .. } if returns_void => Err(ParseError::DetailedError {
             message: "RETURN cannot have a parameter in function returning void".into(),
             detail: None,
             hint: None,
             sqlstate: "42804",
         }),
-        Stmt::Return { expr: None }
+        Stmt::Return { expr: None, .. }
             if !has_output_args && !returns_void && !returns_set && !allows_bare_return =>
         {
             Err(ParseError::DetailedError {

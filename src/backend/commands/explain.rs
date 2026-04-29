@@ -3385,7 +3385,7 @@ fn push_verbose_scan_details(
 
 fn verbose_scan_plan_label(input: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
     match input {
-        Plan::Filter { input, .. } => verbose_scan_plan_label(input),
+        Plan::Filter { input, .. } => verbose_scan_plan_label(input, ctx),
         Plan::SeqScan { relation_name, .. } => Some(format!(
             "Seq Scan on {}",
             verbose_relation_name_with_alias(
