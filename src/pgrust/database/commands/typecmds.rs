@@ -2623,7 +2623,7 @@ impl Database {
         }
         let lookup_name = qualified_type_lookup_name(stmt.schema_name.as_deref(), &stmt.type_name);
         let (domain_key, _, _) =
-            self.normalize_domain_name_for_create(&lookup_name, configured_search_path)?;
+            self.normalize_domain_name_for_create(client_id, &lookup_name, configured_search_path)?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let visible_type_rows = catalog.type_rows();
         {

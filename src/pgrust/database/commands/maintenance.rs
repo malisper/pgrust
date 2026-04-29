@@ -2872,8 +2872,11 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         if let Some(domain_name) = &comment_stmt.domain_name {
-            let (normalized, _, _) =
-                self.normalize_domain_name_for_create(domain_name, configured_search_path)?;
+            let (normalized, _, _) = self.normalize_domain_name_for_create(
+                client_id,
+                domain_name,
+                configured_search_path,
+            )?;
             let domain = self
                 .domains
                 .read()
