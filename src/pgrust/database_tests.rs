@@ -49029,6 +49029,30 @@ fn plpgsql_where_current_of_updates_cursor_row() {
 }
 
 #[test]
+fn plpgsql_record_function_returns_scalar_record_value() {
+    let dir = temp_dir("plpgsql_record_scalar_return");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function pl_record_scalar() returns record language plpgsql as $$
+         begin
+           return (1, 'hello');
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select pl_record_scalar()"),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("f1".into(), Value::Int32(1)),
+            ("f2".into(), Value::Text("hello".into())),
+        ]))]]
+    );
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();

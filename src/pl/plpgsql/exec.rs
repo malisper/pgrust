@@ -473,14 +473,9 @@ pub fn execute_user_defined_scalar_function(
                 "0A000",
             ));
         }
-        FunctionReturnContract::AnonymousRecord { setof: false } => {
-            return Err(function_runtime_error(
-                "record-returning function called in scalar context",
-                None,
-                "0A000",
-            ));
-        }
-        FunctionReturnContract::Scalar { .. } | FunctionReturnContract::FixedRow { .. } => {}
+        FunctionReturnContract::Scalar { .. }
+        | FunctionReturnContract::FixedRow { .. }
+        | FunctionReturnContract::AnonymousRecord { setof: false } => {}
     }
 
     let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
@@ -515,10 +510,21 @@ pub fn execute_user_defined_scalar_function(
                 values.to_vec(),
             )))
         }
-        FunctionReturnContract::AnonymousRecord { .. }
-        | FunctionReturnContract::Trigger { .. }
-        | FunctionReturnContract::EventTrigger { .. } => Err(function_runtime_error(
-            "record-returning function called in scalar context",
+        FunctionReturnContract::AnonymousRecord { .. } => match values {
+            [value] => Ok(value.clone()),
+            other => Err(function_runtime_error(
+                "record function returned an unexpected row shape",
+                Some(format!("expected 1 column, got {}", other.len())),
+                "42804",
+            )),
+        },
+        FunctionReturnContract::Trigger { .. } => Err(function_runtime_error(
+            "trigger function called in scalar context",
+            None,
+            "0A000",
+        )),
+        FunctionReturnContract::EventTrigger { .. } => Err(function_runtime_error(
+            "event trigger function called in scalar context",
             None,
             "0A000",
         )),
@@ -2567,8 +2573,7 @@ fn exec_function_return(
         FunctionReturnContract::Scalar { setof: true, .. }
         | FunctionReturnContract::FixedRow { setof: true, .. }
         | FunctionReturnContract::AnonymousRecord { setof: true } => Ok(FunctionControl::Return),
-        FunctionReturnContract::FixedRow { setof: false, .. }
-        | FunctionReturnContract::AnonymousRecord { setof: false } => {
+        FunctionReturnContract::FixedRow { setof: false, .. } => {
             if let Some(expr) = expr {
                 let value = eval_function_expr(expr, &state.values, ctx)?;
                 let row = match value {
@@ -2581,6 +2586,22 @@ fn exec_function_return(
                     &compiled.return_contract,
                     expected_record_shape,
                 )?);
+            }
+            Ok(FunctionControl::Return)
+        }
+        FunctionReturnContract::AnonymousRecord { setof: false } => {
+            if let Some(expr) = expr {
+                let value = eval_function_expr(expr, &state.values, ctx)?;
+                state.rows.clear();
+                if let Some(shape) = expected_record_shape {
+                    let row = match value {
+                        Value::Record(record) => record.fields,
+                        other => vec![other],
+                    };
+                    state.rows.push(coerce_row_to_columns(row, shape)?);
+                } else {
+                    state.rows.push(TupleSlot::virtual_row(vec![value]));
+                }
             }
             Ok(FunctionControl::Return)
         }
