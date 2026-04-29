@@ -66,6 +66,6 @@ pub fn not_null_constraint_name(relation_name: &str, column_name: &str) -> Strin
     format!("{relation_name}_{column_name}_not_null")
 }
 
-fn synthetic_not_null_constraint_oid(relation_oid: u32, attnum: i16) -> u32 {
+pub(crate) fn synthetic_not_null_constraint_oid(relation_oid: u32, attnum: i16) -> u32 {
     0x4e4e_0000 ^ relation_oid.rotate_left(7) ^ u32::from(attnum as u16)
 }

@@ -110,6 +110,7 @@ pub(super) fn optimize_path_with_config(
             }
             Path::Append {
                 pathtarget,
+                pathkeys,
                 relids,
                 source_id,
                 desc,
@@ -143,6 +144,7 @@ pub(super) fn optimize_path_with_config(
                 Path::Append {
                     plan_info: PlanEstimate::new(startup_cost, total_cost, rows, width),
                     pathtarget,
+                    pathkeys,
                     relids,
                     source_id,
                     desc,
@@ -655,6 +657,8 @@ pub(super) fn optimize_path_with_config(
                 output_columns,
                 slot_id,
                 strategy,
+                phase,
+                semantic_accumulators,
                 disabled,
                 pathkeys,
                 ..
@@ -680,6 +684,8 @@ pub(super) fn optimize_path_with_config(
                     pathtarget,
                     slot_id,
                     strategy,
+                    phase,
+                    semantic_accumulators,
                     disabled,
                     pathkeys,
                     input: Box::new(input),
@@ -2715,6 +2721,7 @@ fn parameterized_inner_index_path(
     if let Path::Append {
         plan_info,
         pathtarget,
+        pathkeys,
         relids,
         source_id,
         desc,
@@ -2755,6 +2762,7 @@ fn parameterized_inner_index_path(
             Path::Append {
                 plan_info: *plan_info,
                 pathtarget: pathtarget.clone(),
+                pathkeys: pathkeys.clone(),
                 relids: relids.clone(),
                 source_id: *source_id,
                 desc: desc.clone(),
@@ -6761,6 +6769,12 @@ fn index_expression_matches_qual(index_expr: &Expr, qual_expr: &Expr) -> bool {
         return true;
     }
     match (index_expr, qual_expr) {
+        (Expr::Var(left), Expr::Var(right)) => {
+            left.varlevelsup == 0
+                && right.varlevelsup == 0
+                && left.varattno == right.varattno
+                && left.vartype == right.vartype
+        }
         (Expr::Op(left), Expr::Op(right)) => {
             left.op == right.op
                 && left.args.len() == right.args.len()

@@ -779,15 +779,27 @@ pub(super) fn bind_from_item_with_ctes(
         ),
         FromItem::DerivedTable(select) => {
             let visible_agg_scope = current_visible_aggregate_scope();
-            let (plan, _) = analyze_select_query_with_outer(
-                select,
-                catalog,
-                &[],
-                None,
-                visible_agg_scope.as_ref(),
-                ctes,
-                expanded_views,
-            )?;
+            let (plan, _) = if select.set_operation.is_some() {
+                analyze_select_query_with_outer(
+                    select,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.cloned(),
+                    visible_agg_scope.as_ref(),
+                    ctes,
+                    expanded_views,
+                )?
+            } else {
+                analyze_select_query_with_outer(
+                    select,
+                    catalog,
+                    &[],
+                    None,
+                    visible_agg_scope.as_ref(),
+                    ctes,
+                    expanded_views,
+                )?
+            };
             let bound = AnalyzedFrom::subquery(plan);
             let desc = synthetic_desc_from_analyzed_from(&bound);
             Ok((
@@ -2147,7 +2159,7 @@ fn bind_function_from_item_with_ctes(
     let actual_types = args
         .iter()
         .map(|arg| {
-            infer_sql_expr_type_with_ctes(
+            super::infer::infer_sql_expr_function_arg_type_with_ctes(
                 arg,
                 &call_scope,
                 catalog,
@@ -3335,7 +3347,7 @@ fn try_bind_user_defined_function_from_item_with_arg_defaults(
     let actual_types = args
         .iter()
         .map(|arg| {
-            infer_sql_expr_type_with_ctes(
+            super::infer::infer_sql_expr_function_arg_type_with_ctes(
                 &arg.value,
                 &call_scope,
                 catalog,
@@ -3512,6 +3524,15 @@ fn bind_single_row_function_from_item_with_ctes(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
+    if resolved_row_columns.is_none() && matches!(resolved.result_type.kind, SqlTypeKind::AnyArray)
+    {
+        return Err(ParseError::DetailedError {
+            message: format!("function \"{name}\" in FROM has unsupported return type anyarray"),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
     if let Some(mut output_columns) = resolved_row_columns {
         let bound_args = bind_resolved_user_defined_table_function_args(
             args,
@@ -3710,7 +3731,7 @@ fn bind_json_record_from_item(
     let actual_types = args
         .iter()
         .map(|arg| {
-            infer_sql_expr_type_with_ctes(
+            super::infer::infer_sql_expr_function_arg_type_with_ctes(
                 arg,
                 &call_scope,
                 catalog,

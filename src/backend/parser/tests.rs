@@ -1963,6 +1963,27 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
 }
 
 #[test]
+fn analyze_pg_typeof_unknown_literals_preserves_unknown() {
+    for sql in ["select pg_typeof(null)", "select pg_typeof('x')"] {
+        let stmt = parse_select(sql).unwrap();
+        let (query, _) =
+            analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+        match &query.target_list[0].expr {
+            Expr::Cast(inner, ty) => {
+                assert_eq!(*ty, SqlType::new(SqlTypeKind::RegType));
+                assert_eq!(
+                    inner.as_ref(),
+                    &Expr::Const(Value::Int64(
+                        crate::include::catalog::UNKNOWN_TYPE_OID as i64
+                    ))
+                );
+            }
+            other => panic!("expected pg_typeof({sql}) to bind to unknown regtype, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn analyze_from_alias_updates_rte_alias() {
     let stmt = parse_select("select t.id from people t").unwrap();
     let (query, _) =
@@ -4118,6 +4139,21 @@ fn parse_alter_table_inherit_statement() {
             only: true,
             table_name: "child_items".into(),
             parent_name: "parent_items".into(),
+            additional_parent_names: Vec::new(),
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table child_items inherit parent_items, inherit archive_items")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableInherit(AlterTableInheritStatement {
+            if_exists: false,
+            only: false,
+            table_name: "child_items".into(),
+            parent_name: "parent_items".into(),
+            additional_parent_names: vec!["archive_items".into()],
         })
     );
 }
@@ -4133,6 +4169,22 @@ fn parse_alter_table_no_inherit_statement() {
             only: true,
             table_name: "child_items".into(),
             parent_name: "parent_items".into(),
+            additional_parent_names: Vec::new(),
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table child_items no inherit parent_items, no inherit archive_items",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableNoInherit(AlterTableNoInheritStatement {
+            if_exists: false,
+            only: false,
+            table_name: "child_items".into(),
+            parent_name: "parent_items".into(),
+            additional_parent_names: vec!["archive_items".into()],
         })
     );
 }
@@ -16298,6 +16350,23 @@ fn parse_named_function_args_in_select() {
     assert_eq!(args.args()[0].name.as_deref(), Some("target"));
     assert_eq!(args.args()[1].name.as_deref(), Some("path"));
     assert_eq!(args.args()[2].name.as_deref(), Some("silent"));
+}
+
+#[test]
+fn parse_named_function_args_with_adjacent_signed_values() {
+    for (sql, expected_name) in [
+        ("select dfunc(a =>-1)", "a"),
+        ("select dfunc(a =>+1)", "a"),
+        ("select dfunc(a =>/**/1)", "a"),
+        ("select dfunc(a =>-- comment\n 1)", "a"),
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        let SqlExpr::FuncCall { args, .. } = &stmt.targets[0].expr else {
+            panic!("expected function call for {sql}");
+        };
+        assert_eq!(args.args().len(), 1);
+        assert_eq!(args.args()[0].name.as_deref(), Some(expected_name));
+    }
 }
 
 #[test]

@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::sql_deparse::{
-    normalize_index_expression_sql, normalize_index_predicate_sql,
+    normalize_check_expr_sql, normalize_index_expression_sql, normalize_index_predicate_sql,
 };
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
@@ -29,6 +29,7 @@ use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_bo
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
     cast_value_with_source_type_catalog_and_config, parse_interval_text_value,
+    parse_text_array_literal_with_catalog_and_op, parse_text_array_literal_with_op,
     soft_input_error_info_with_catalog_and_config,
 };
 pub(crate) use super::expr_compile::{
@@ -86,13 +87,14 @@ use super::expr_partition::eval_satisfies_hash_partition;
 use super::expr_range::eval_range_function;
 use super::expr_reg;
 use super::expr_string::{
-    eval_ascii_function, eval_bit_count_bytes, eval_bpchar_to_text_function, eval_bytea_overlay,
-    eval_bytea_position_function, eval_bytea_substring, eval_chr_function, eval_concat_function,
-    eval_concat_ws_function, eval_convert_from_function, eval_convert_to_function,
-    eval_crc32_function, eval_crc32c_function, eval_decode_function, eval_encode_function,
-    eval_format_function, eval_get_bit_bytes, eval_get_byte, eval_initcap_function,
-    eval_left_function, eval_length_function, eval_like, eval_lower_function, eval_lpad_function,
-    eval_md5_function, eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
+    eval_ascii_function, eval_bit_count_bytes, eval_bit_length_function,
+    eval_bpchar_to_text_function, eval_bytea_overlay, eval_bytea_position_function,
+    eval_bytea_substring, eval_chr_function, eval_concat_function, eval_concat_ws_function,
+    eval_convert_from_function, eval_convert_to_function, eval_crc32_function,
+    eval_crc32c_function, eval_decode_function, eval_encode_function, eval_format_function,
+    eval_get_bit_bytes, eval_get_byte, eval_initcap_function, eval_left_function,
+    eval_length_function, eval_like, eval_lower_function, eval_lpad_function, eval_md5_function,
+    eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
     eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
     eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
@@ -124,6 +126,10 @@ pub(crate) use super::value_io::{format_array_text, format_array_value_text};
 use super::{ExecError, ExecutorContext, TypedFunctionArg, exec_next, executor_start};
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
+use crate::backend::catalog::object_address::{
+    ObjectAddress, ObjectAddressError, get_object_address, identify_object,
+    identify_object_as_address,
+};
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
@@ -152,24 +158,26 @@ use crate::include::catalog::{
     BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
     DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID,
-    GLOBAL_TABLESPACE_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
-    NAME_TYPE_OID, PG_AUTHID_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_DATABASE_OWNER_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
-    PG_EVENT_TRIGGER_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    GLOBAL_TABLESPACE_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, INT4_TYPE_OID,
+    KD_POINT_SPGIST_OPCLASS_OID, NAME_TYPE_OID, OID_TYPE_OID, PG_AUTHID_RELATION_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
+    PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID,
     PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
     POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
     PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow,
     PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID,
-    TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
+    TEXT_ARRAY_TYPE_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
     builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
     default_hash_opclass_oid,
 };
-use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, RecordValue};
+use crate::include::nodes::datum::{
+    ArrayDimension, ArrayValue, NumericValue, RecordDescriptor, RecordValue,
+};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
     OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
-    attrno_index, is_executor_special_varno,
+    attrno_index, is_executor_special_varno, is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pl::plpgsql::current_event_trigger_table_rewrite;
@@ -360,6 +368,73 @@ fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
             left: value.clone(),
             right: Value::Int64(i64::from(crate::include::catalog::OID_TYPE_OID)),
         }),
+    }
+}
+
+fn eval_array_in_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let [raw, element_oid, _typmod] = values else {
+        return Err(ExecError::DetailedError {
+            message: "array_in expects exactly three arguments".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        });
+    };
+    if matches!(raw, Value::Null) || matches!(element_oid, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let raw = raw.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "array_in",
+        left: raw.clone(),
+        right: Value::Text("{}".into()),
+    })?;
+    let element_oid = oid_arg_to_u32(element_oid, "array_in")?;
+    let catalog = catalog_lookup(ctx).ok_or_else(|| ExecError::DetailedError {
+        message: "array_in requires executor catalog context".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })?;
+    let element_type = catalog
+        .type_by_oid(element_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("cache lookup failed for type {element_oid}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?
+        .sql_type;
+    parse_text_array_literal_with_catalog_and_op(raw, element_type, "array_in", Some(catalog))
+}
+
+fn anyrange_input_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot accept a value of type anyrange".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn eval_array_larger_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [left, right] = values else {
+        return Err(ExecError::DetailedError {
+            message: "array_larger expects exactly two arguments".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        });
+    };
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if compare_order_values(left, right, None, None, false)? == Ordering::Less {
+        Ok(right.clone())
+    } else {
+        Ok(left.clone())
     }
 }
 
@@ -1008,7 +1083,7 @@ fn format_function_arg(
     parts.push(type_identity_text(catalog, type_oid));
     if let Some(default) = default {
         parts.push("DEFAULT".into());
-        parts.push(default.into());
+        parts.push(format_function_default_text(default, type_oid, catalog));
     }
     parts.join(" ")
 }
@@ -1026,6 +1101,21 @@ fn function_result_text(
     } else {
         result
     })
+}
+
+fn format_function_default_text(
+    default: &str,
+    type_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let compact = default
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if compact.starts_with("array[]::") && compact.ends_with("[]") {
+        return format!("ARRAY[]::{}", type_identity_text(catalog, type_oid));
+    }
+    default.to_string()
 }
 
 fn function_definition_text(
@@ -2855,6 +2945,7 @@ pub(crate) fn eval_pg_describe_object(
             let Some(class_row) = catalog.class_row_by_oid(classid) else {
                 return Ok(Value::Null);
             };
+            let objsubid = i32::try_from(objsubid).map_err(|_| ExecError::OidOutOfRange)?;
             if objsubid != 0 {
                 return Ok(Value::Null);
             }
@@ -2897,8 +2988,26 @@ pub(crate) fn eval_pg_describe_object(
                 }),
                 _ => None,
             };
-            Ok(description
-                .map(|text| Value::Text(text.into()))
+            if let Some(text) = description {
+                return Ok(Value::Text(text.into()));
+            }
+            let state_guard = ctx
+                .database
+                .as_ref()
+                .map(|database| database.object_addresses.read());
+            let state = state_guard.as_deref();
+            let identity = identify_object(
+                catalog,
+                state,
+                ObjectAddress {
+                    classid,
+                    objid,
+                    objsubid,
+                },
+            );
+            Ok(identity
+                .identity
+                .map(|text| Value::Text(format!("{} {text}", identity.objtype).into()))
                 .unwrap_or(Value::Null))
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -2908,24 +3017,68 @@ pub(crate) fn eval_pg_describe_object(
     }
 }
 
+pub(crate) fn eval_pg_get_object_address(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => {
+            Ok(pg_get_object_address_record(None))
+        }
+        [objtype, names, args] => {
+            let objtype = text_arg(objtype, "pg_get_object_address")?;
+            let names = text_array_arg(names, "pg_get_object_address")?;
+            let args = text_array_arg(args, "pg_get_object_address")?;
+            let catalog = executor_catalog(ctx)?;
+            let state_guard = ctx
+                .database
+                .as_ref()
+                .map(|database| database.object_addresses.read());
+            let state = state_guard.as_deref();
+            let address = get_object_address(catalog, state, objtype, &names, &args)
+                .map_err(object_address_exec_error)?;
+            Ok(pg_get_object_address_record(Some(address)))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_object_address(type, object_names, object_args)",
+            actual: format!("PgGetObjectAddress({} args)", values.len()),
+        })),
+    }
+}
+
 pub(crate) fn eval_pg_identify_object(
     values: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     match values {
-        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => {
+            Ok(pg_identify_object_record(None, None, None, None))
+        }
         [classid, objid, objsubid] => {
-            let address = object_address_args(classid, objid, objsubid, "pg_identify_object")?;
+            let classid = oid_arg_to_u32(classid, "pg_identify_object")?;
+            let objid = oid_arg_to_u32(objid, "pg_identify_object")?;
+            let objsubid = int32_arg(objsubid, "pg_identify_object")?;
             let catalog = executor_catalog(ctx)?;
-            if let Some(evtname) = event_trigger_name_for_address(catalog, address) {
-                return Ok(Value::Record(RecordValue::anonymous(vec![
-                    ("type".into(), Value::Text("event trigger".into())),
-                    ("schema".into(), Value::Null),
-                    ("name".into(), Value::Text(evtname.clone().into())),
-                    ("identity".into(), Value::Text(evtname.into())),
-                ])));
-            }
-            Ok(Value::Null)
+            let state_guard = ctx
+                .database
+                .as_ref()
+                .map(|database| database.object_addresses.read());
+            let state = state_guard.as_deref();
+            let identity = identify_object(
+                catalog,
+                state,
+                ObjectAddress {
+                    classid,
+                    objid,
+                    objsubid,
+                },
+            );
+            Ok(pg_identify_object_record(
+                Some(identity.objtype),
+                identity.schema,
+                identity.name,
+                identity.identity,
+            ))
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_identify_object(classid, objid, objsubid)",
@@ -2939,22 +3092,33 @@ pub(crate) fn eval_pg_identify_object_as_address(
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     match values {
-        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => {
+            Ok(pg_identify_object_as_address_record(None, None, None))
+        }
         [classid, objid, objsubid] => {
-            let address =
-                object_address_args(classid, objid, objsubid, "pg_identify_object_as_address")?;
+            let classid = oid_arg_to_u32(classid, "pg_identify_object_as_address")?;
+            let objid = oid_arg_to_u32(objid, "pg_identify_object_as_address")?;
+            let objsubid = int32_arg(objsubid, "pg_identify_object_as_address")?;
             let catalog = executor_catalog(ctx)?;
-            if let Some(evtname) = event_trigger_name_for_address(catalog, address) {
-                return Ok(Value::Record(RecordValue::anonymous(vec![
-                    ("type".into(), Value::Text("event trigger".into())),
-                    (
-                        "object_names".into(),
-                        Value::Array(vec![Value::Text(evtname.into())]),
-                    ),
-                    ("object_args".into(), Value::Array(Vec::new())),
-                ])));
-            }
-            Ok(Value::Null)
+            let state_guard = ctx
+                .database
+                .as_ref()
+                .map(|database| database.object_addresses.read());
+            let state = state_guard.as_deref();
+            let parts = identify_object_as_address(
+                catalog,
+                state,
+                ObjectAddress {
+                    classid,
+                    objid,
+                    objsubid,
+                },
+            );
+            Ok(pg_identify_object_as_address_record(
+                Some(parts.objtype),
+                parts.object_names,
+                parts.object_args,
+            ))
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_identify_object_as_address(classid, objid, objsubid)",
@@ -2963,84 +3127,173 @@ pub(crate) fn eval_pg_identify_object_as_address(
     }
 }
 
-pub(crate) fn eval_pg_get_object_address(
-    values: &[Value],
-    ctx: &ExecutorContext,
-) -> Result<Value, ExecError> {
-    match values {
-        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
-        [object_type, object_names, object_args] => {
-            let object_type = object_type.as_text().unwrap_or_default();
-            let object_names = text_array_values(object_names);
-            let object_args = text_array_values(object_args);
-            let catalog = executor_catalog(ctx)?;
-            // :HACK: This covers the event_trigger regression's object-address
-            // round trip. The long-term shape should route through a shared
-            // PostgreSQL-like object-address resolver for all catalog classes.
-            if object_type.eq_ignore_ascii_case("event trigger")
-                && object_names.len() == 1
-                && object_args.is_empty()
-                && let Some(row) = catalog.event_trigger_row_by_name(&object_names[0])
-            {
-                return Ok(Value::Record(RecordValue::anonymous(vec![
-                    (
-                        "classid".into(),
-                        Value::Int64(i64::from(PG_EVENT_TRIGGER_RELATION_OID)),
-                    ),
-                    ("objid".into(), Value::Int64(i64::from(row.oid))),
-                    ("objsubid".into(), Value::Int32(0)),
-                ])));
-            }
-            Ok(Value::Null)
-        }
-        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "pg_get_object_address(type, object_names, object_args)",
-            actual: format!("PgGetObjectAddress({} args)", values.len()),
-        })),
+fn object_address_exec_error(err: ObjectAddressError) -> ExecError {
+    ExecError::DetailedError {
+        message: err.message,
+        detail: None,
+        hint: None,
+        sqlstate: err.sqlstate,
     }
 }
 
-fn object_address_args(
-    classid: &Value,
-    objid: &Value,
-    objsubid: &Value,
-    func_name: &'static str,
-) -> Result<(u32, u32, u32), ExecError> {
-    Ok((
-        oid_arg_to_u32(classid, func_name)?,
-        oid_arg_to_u32(objid, func_name)?,
-        oid_arg_to_u32(objsubid, func_name)?,
+fn text_arg<'a>(value: &'a Value, op: &'static str) -> Result<&'a str, ExecError> {
+    value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: value.clone(),
+        right: Value::Text("".into()),
+    })
+}
+
+fn text_array_arg(value: &Value, op: &'static str) -> Result<Vec<String>, ExecError> {
+    let elements = match value {
+        Value::Array(elements) => elements.clone(),
+        Value::PgArray(array) => array.elements.clone(),
+        value if value.as_text().is_some() => {
+            let text = value.as_text().expect("guarded above");
+            let parsed = parse_text_array_literal_with_op(
+                text,
+                SqlType::new(SqlTypeKind::Text).with_identity(TEXT_TYPE_OID, 0),
+                op,
+            )?;
+            return text_array_arg(&parsed, op);
+        }
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op,
+                left: value.clone(),
+                right: Value::PgArray(ArrayValue::empty().with_element_type_oid(TEXT_TYPE_OID)),
+            });
+        }
+    };
+    elements
+        .iter()
+        .map(|element| match element {
+            Value::Null => Err(object_address_exec_error(
+                crate::backend::catalog::object_address::invalid_parameter(
+                    "name or argument lists may not contain nulls",
+                ),
+            )),
+            value => text_arg(value, op).map(str::to_string),
+        })
+        .collect()
+}
+
+fn pg_get_object_address_record(address: Option<ObjectAddress>) -> Value {
+    let descriptor = RecordDescriptor::anonymous(
+        vec![
+            (
+                "classid".into(),
+                SqlType::new(SqlTypeKind::Oid).with_identity(OID_TYPE_OID, 0),
+            ),
+            (
+                "objid".into(),
+                SqlType::new(SqlTypeKind::Oid).with_identity(OID_TYPE_OID, 0),
+            ),
+            (
+                "objsubid".into(),
+                SqlType::new(SqlTypeKind::Int4).with_identity(INT4_TYPE_OID, 0),
+            ),
+        ],
+        -1,
+    );
+    let fields = address
+        .map(|address| {
+            vec![
+                Value::Int64(i64::from(address.classid)),
+                Value::Int64(i64::from(address.objid)),
+                Value::Int32(address.objsubid),
+            ]
+        })
+        .unwrap_or_else(|| vec![Value::Null, Value::Null, Value::Null]);
+    Value::Record(RecordValue::from_descriptor(descriptor, fields))
+}
+
+fn pg_identify_object_record(
+    objtype: Option<String>,
+    schema: Option<String>,
+    name: Option<String>,
+    identity: Option<String>,
+) -> Value {
+    let descriptor = RecordDescriptor::anonymous(
+        vec![
+            (
+                "type".into(),
+                SqlType::new(SqlTypeKind::Text).with_identity(TEXT_TYPE_OID, 0),
+            ),
+            (
+                "schema".into(),
+                SqlType::new(SqlTypeKind::Text).with_identity(TEXT_TYPE_OID, 0),
+            ),
+            (
+                "name".into(),
+                SqlType::new(SqlTypeKind::Text).with_identity(TEXT_TYPE_OID, 0),
+            ),
+            (
+                "identity".into(),
+                SqlType::new(SqlTypeKind::Text).with_identity(TEXT_TYPE_OID, 0),
+            ),
+        ],
+        -1,
+    );
+    Value::Record(RecordValue::from_descriptor(
+        descriptor,
+        vec![
+            option_text_value(objtype),
+            option_text_value(schema),
+            option_text_value(name),
+            option_text_value(identity),
+        ],
     ))
 }
 
-fn event_trigger_name_for_address(
-    catalog: &dyn CatalogLookup,
-    address: (u32, u32, u32),
-) -> Option<String> {
-    let (classid, objid, objsubid) = address;
-    if classid != PG_EVENT_TRIGGER_RELATION_OID || objsubid != 0 {
-        return None;
-    }
-    catalog
-        .event_trigger_row_by_oid(objid)
-        .map(|row| row.evtname)
+fn pg_identify_object_as_address_record(
+    objtype: Option<String>,
+    object_names: Option<Vec<String>>,
+    object_args: Option<Vec<String>>,
+) -> Value {
+    let text_array_type =
+        SqlType::array_of(SqlType::new(SqlTypeKind::Text)).with_identity(TEXT_ARRAY_TYPE_OID, 0);
+    let descriptor = RecordDescriptor::anonymous(
+        vec![
+            (
+                "type".into(),
+                SqlType::new(SqlTypeKind::Text).with_identity(TEXT_TYPE_OID, 0),
+            ),
+            ("object_names".into(), text_array_type),
+            ("object_args".into(), text_array_type),
+        ],
+        -1,
+    );
+    Value::Record(RecordValue::from_descriptor(
+        descriptor,
+        vec![
+            option_text_value(objtype),
+            option_text_array_value(object_names),
+            option_text_array_value(object_args),
+        ],
+    ))
 }
 
-fn text_array_values(value: &Value) -> Vec<String> {
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .filter_map(Value::as_text)
-            .map(str::to_string)
-            .collect(),
-        Value::PgArray(array) => array
-            .elements
-            .iter()
-            .filter_map(Value::as_text)
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
+fn option_text_value(value: Option<String>) -> Value {
+    value
+        .map(|value| Value::Text(value.into()))
+        .unwrap_or(Value::Null)
+}
+
+fn option_text_array_value(value: Option<Vec<String>>) -> Value {
+    value
+        .map(|items| {
+            Value::PgArray(
+                ArrayValue::from_1d(
+                    items
+                        .into_iter()
+                        .map(|item| Value::Text(item.into()))
+                        .collect(),
+                )
+                .with_element_type_oid(TEXT_TYPE_OID),
+            )
+        })
+        .unwrap_or(Value::Null)
 }
 
 fn eval_pg_event_trigger_table_rewrite_oid() -> Result<Value, ExecError> {
@@ -3283,6 +3536,13 @@ fn eval_pg_get_expr_text(
         }
     }
     let catalog = executor_catalog(ctx)?;
+    if catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| row.contype == CONSTRAINT_CHECK && row.conbin.as_deref() == Some(text))
+    {
+        return Ok(Value::Text(normalize_check_expr_sql(text).into()));
+    }
     Ok(Value::Text(
         canonicalize_catalog_expr_sql(text, relation_oid, catalog)
             .unwrap_or_else(|| text.to_string())
@@ -3946,7 +4206,7 @@ fn partition_spec_for_relation_best_effort(
 }
 
 fn partition_key_collation_display_name(
-    catalog: &dyn CatalogLookup,
+    _catalog: &dyn CatalogLookup,
     row: &crate::include::catalog::PgPartitionedTableRow,
     index: usize,
 ) -> Option<String> {
@@ -3954,8 +4214,7 @@ fn partition_key_collation_display_name(
     if matches!(collation_oid, 0 | DEFAULT_COLLATION_OID) {
         return None;
     }
-    catalog
-        .collation_rows()
+    crate::include::catalog::bootstrap_pg_collation_rows()
         .into_iter()
         .find(|row| row.oid == collation_oid)
         .map(|row| quote_identifier_if_needed(&row.collname))
@@ -4023,9 +4282,11 @@ fn format_constraintdef_for_catalog(
     match row.contype {
         CONSTRAINT_NOTNULL => Some("NOT NULL".into()),
         CONSTRAINT_CHECK => row.conbin.as_deref().map(|expr_sql| {
-            let expr_sql = canonicalize_catalog_expr_sql(expr_sql, row.conrelid, catalog)
-                .unwrap_or_else(|| expr_sql.to_string());
-            format!("CHECK ({expr_sql})")
+            let mut def = format!("CHECK {}", normalize_check_expr_sql(expr_sql));
+            if row.connoinherit {
+                def.push_str(" NO INHERIT");
+            }
+            def
         }),
         CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
             format_index_backed_constraintdef_for_catalog(catalog, row)
@@ -4045,7 +4306,11 @@ fn format_index_backed_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let all_columns = index_display_names_for_heap(
+        &relation.desc,
+        &index.index_meta,
+        IndexExpressionDisplay::IndexDefinition,
+    )?;
     let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
     let mut columns = all_columns
         .iter()
@@ -4086,7 +4351,11 @@ fn format_exclusion_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let all_columns = index_display_names_for_heap(
+        &relation.desc,
+        &index.index_meta,
+        IndexExpressionDisplay::ConstraintDefinition,
+    )?;
     let operators = row
         .conexclop
         .as_ref()?
@@ -4298,7 +4567,7 @@ fn format_indexdef_for_catalog(
         .find(|row| row.oid == index.index_meta.am_oid)
         .map(|row| row.amname)
         .unwrap_or_else(|| "btree".into());
-    let all_columns = index_definition_columns(relation, index);
+    let all_columns = index_definition_columns(catalog, relation, index);
     let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
     let key_columns = all_columns
         .iter()
@@ -4315,8 +4584,9 @@ fn format_indexdef_for_catalog(
     } else {
         ""
     };
+    let only = if index.relkind == 'I' { " ONLY" } else { "" };
     let mut definition = format!(
-        "CREATE {unique}INDEX {} ON {} USING {} ({})",
+        "CREATE {unique}INDEX {} ON{only} {} USING {} ({})",
         index.name,
         table_name,
         amname,
@@ -4345,6 +4615,7 @@ fn format_indexdef_for_catalog(
 }
 
 fn index_definition_columns(
+    catalog: &dyn CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
     index: &crate::backend::parser::BoundIndexRelation,
 ) -> Vec<String> {
@@ -4362,11 +4633,27 @@ fn index_definition_columns(
         .enumerate()
         .map(|(index_column, attnum)| {
             if *attnum > 0 {
-                return relation
+                let Some(column) = relation
                     .desc
                     .columns
                     .get((*attnum as usize).saturating_sub(1))
-                    .map(|column| column.name.clone())
+                else {
+                    return index
+                        .desc
+                        .columns
+                        .get(index_column)
+                        .map(|column| column.name.clone())
+                        .unwrap_or_else(|| format!("column{}", index_column + 1));
+                };
+                let name = index_column_definition_with_metadata(
+                    catalog,
+                    index,
+                    index_column,
+                    column.name.clone(),
+                    column.sql_type,
+                    column.collation_oid,
+                );
+                return Some(name)
                     .or_else(|| {
                         index
                             .desc
@@ -4393,16 +4680,119 @@ fn index_definition_columns(
         .collect()
 }
 
+fn index_column_definition_with_metadata(
+    catalog: &dyn CatalogLookup,
+    index: &crate::backend::parser::BoundIndexRelation,
+    index_column: usize,
+    mut base: String,
+    sql_type: SqlType,
+    column_collation_oid: u32,
+) -> String {
+    if let Some(collation) =
+        index_column_collation_display_name(catalog, index, index_column, column_collation_oid)
+    {
+        base.push_str(" COLLATE ");
+        base.push_str(&collation);
+    }
+    if let Some(opclass) = index_column_opclass_display_name(catalog, index, index_column, sql_type)
+    {
+        base.push(' ');
+        base.push_str(&opclass);
+    }
+    if let Some(options) = index_column_opclass_options_display(index, index_column) {
+        base.push(' ');
+        base.push_str(&options);
+    }
+    base
+}
+
+fn index_column_collation_display_name(
+    _catalog: &dyn CatalogLookup,
+    index: &crate::backend::parser::BoundIndexRelation,
+    index_column: usize,
+    column_collation_oid: u32,
+) -> Option<String> {
+    let collation_oid = *index.index_meta.indcollation.get(index_column)?;
+    if collation_oid == 0
+        || collation_oid == crate::include::catalog::DEFAULT_COLLATION_OID
+        || collation_oid == column_collation_oid
+    {
+        return None;
+    }
+    crate::include::catalog::bootstrap_pg_collation_rows()
+        .into_iter()
+        .find(|row| row.oid == collation_oid)
+        .map(|row| quote_identifier_if_needed(&row.collname))
+}
+
+fn index_column_opclass_display_name(
+    _catalog: &dyn CatalogLookup,
+    index: &crate::backend::parser::BoundIndexRelation,
+    index_column: usize,
+    sql_type: SqlType,
+) -> Option<String> {
+    let opclass_oid = *index.index_meta.indclass.get(index_column)?;
+    if opclass_oid == 0 {
+        return None;
+    }
+    let type_oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
+    if crate::include::catalog::index_opclass_is_implicit_for_definition(
+        index.index_meta.am_oid,
+        type_oid,
+        sql_type,
+        opclass_oid,
+        index.index_meta.indisexclusion,
+    ) && index
+        .index_meta
+        .indclass_options
+        .get(index_column)
+        .is_none_or(Vec::is_empty)
+    {
+        return None;
+    }
+    crate::include::catalog::bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| row.oid == opclass_oid)
+        .map(|row| quote_identifier_if_needed(&row.opcname))
+}
+
+fn index_column_opclass_options_display(
+    index: &crate::backend::parser::BoundIndexRelation,
+    index_column: usize,
+) -> Option<String> {
+    let options = index
+        .index_meta
+        .indclass_options
+        .get(index_column)
+        .filter(|options| !options.is_empty())?;
+    let rendered = options
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}='{}'",
+                name.to_ascii_lowercase(),
+                sql_quote_literal(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("({rendered})"))
+}
+
+fn sql_quote_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
 fn parenthesized_index_expression(expr_sql: &str) -> String {
     let trimmed = expr_sql.trim();
     if let Some(function_call) = normalized_function_call_expression(trimmed) {
         return function_call;
     }
-    if (trimmed.starts_with('(') && trimmed.ends_with(')')) || looks_like_function_call(trimmed) {
-        trimmed.to_string()
-    } else {
-        format!("({trimmed})")
+    if looks_like_function_call(trimmed) {
+        return trimmed.to_string();
     }
+    let inner = strip_outer_parens_once(trimmed);
+    format!("(({inner}))")
 }
 
 fn normalized_function_call_expression(expr_sql: &str) -> Option<String> {
@@ -4449,6 +4839,62 @@ fn index_column_names_for_heap(desc: &RelationDesc, attnums: &[i16]) -> Option<V
                 .then(|| desc.columns.get((*attnum as usize).saturating_sub(1)))
                 .flatten()
                 .map(|column| column.name.clone())
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum IndexExpressionDisplay {
+    IndexDefinition,
+    ConstraintDefinition,
+}
+
+fn parenthesized_constraint_expression(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
+}
+
+fn index_display_names_for_heap(
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    expression_display: IndexExpressionDisplay,
+) -> Option<Vec<String>> {
+    let expression_sqls = index_meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    index_meta
+        .indkey
+        .iter()
+        .map(|attnum| {
+            if *attnum > 0 {
+                return desc
+                    .columns
+                    .get((*attnum as usize).saturating_sub(1))
+                    .map(|column| column.name.clone());
+            }
+            let rendered = expression_sqls
+                .get(expression_index)
+                .map(|expr| {
+                    let normalized = normalize_index_expression_sql(expr);
+                    match expression_display {
+                        IndexExpressionDisplay::IndexDefinition => {
+                            parenthesized_index_expression(&normalized)
+                        }
+                        IndexExpressionDisplay::ConstraintDefinition => {
+                            parenthesized_constraint_expression(&normalized)
+                        }
+                    }
+                })
+                .unwrap_or_else(|| format!("expr{}", expression_index + 1));
+            expression_index += 1;
+            Some(rendered)
         })
         .collect()
 }
@@ -7159,6 +7605,17 @@ fn eval_bound_tuple_var(
         })
 }
 
+fn eval_bound_system_var(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    var: &crate::include::nodes::primnodes::Var,
+) -> Option<Value> {
+    match var.varattno {
+        TABLE_OID_ATTR_NO => lookup_system_binding(bindings, var.varno),
+        SELF_ITEM_POINTER_ATTR_NO => lookup_ctid_binding(bindings, var.varno),
+        _ => None,
+    }
+}
+
 fn expr_requires_stack_check(expr: &Expr) -> bool {
     !matches!(
         expr,
@@ -7247,16 +7704,41 @@ pub fn eval_expr(
             }),
         Expr::Var(var) => {
             if var.varno == OUTER_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.outer_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var)
+                }
             } else if var.varno == INNER_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.inner_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
+                }
             } else if var.varno == INDEX_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.index_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
+                }
             } else if var.varlevelsup == 1 {
                 let mut outer_var = var.clone();
                 outer_var.varno = OUTER_VAR;
                 outer_var.varlevelsup = 0;
-                eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var)
+                if is_system_attr(outer_var.varattno) {
+                    Ok(
+                        eval_bound_system_var(
+                            &ctx.expr_bindings.outer_system_bindings,
+                            &outer_var,
+                        )
+                        .unwrap_or(Value::Null),
+                    )
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var)
+                }
             } else if var.varlevelsup > 0 {
                 Err(ExecError::DetailedError {
                     message: "unlowered outer Var reached executor".into(),
@@ -7939,7 +8421,49 @@ fn cast_record_value_for_target(
         _ => return Ok(Value::Record(record)),
     };
 
-    if descriptor.fields.len() != record.fields.len() {
+    let source_fields = if descriptor.fields.len() == record.fields.len() {
+        record
+            .fields
+            .into_iter()
+            .map(|value| (value, None))
+            .collect::<Vec<_>>()
+    } else if descriptor.typrelid != 0 {
+        let mut projected = Vec::with_capacity(descriptor.fields.len());
+        for target_field in &descriptor.fields {
+            let Some((source_index, source_field)) = record
+                .descriptor
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, source_field)| {
+                    source_field.name.eq_ignore_ascii_case(&target_field.name)
+                })
+            else {
+                return Err(ExecError::DetailedError {
+                    message: "cannot cast record to target composite type".into(),
+                    detail: Some(format!(
+                        "target expects field \"{}\" but source record does not provide it",
+                        target_field.name
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            };
+            let value = record.fields.get(source_index).cloned().ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: "cannot cast record to target composite type".into(),
+                    detail: Some(format!(
+                        "source record is missing value for field \"{}\"",
+                        source_field.name
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                }
+            })?;
+            projected.push((value, Some(source_field.sql_type)));
+        }
+        projected
+    } else {
         return Err(ExecError::DetailedError {
             message: "cannot cast record to target composite type".into(),
             detail: Some(format!(
@@ -7950,16 +8474,15 @@ fn cast_record_value_for_target(
             hint: None,
             sqlstate: "42804",
         });
-    }
+    };
 
-    let fields = record
-        .fields
+    let fields = source_fields
         .into_iter()
         .zip(descriptor.fields.iter())
-        .map(|(value, field)| {
+        .map(|((value, source_type), field)| {
             cast_value_with_source_type_catalog_and_config(
                 value,
-                None,
+                source_type,
                 field.sql_type,
                 ctx.catalog.as_deref(),
                 &ctx.datetime_config,
@@ -8243,6 +8766,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
+        },
+        BuiltinScalarFunction::BitLength => match values.first() {
+            Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
+            _ => eval_bit_length_function(&values),
         },
         BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
         BuiltinScalarFunction::PgSleep => eval_pg_sleep_function(&values),
@@ -8566,6 +9093,9 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),
         BuiltinScalarFunction::ArrayLength => eval_array_length_function(&values),
         BuiltinScalarFunction::Cardinality => eval_cardinality_function(&values),
+        BuiltinScalarFunction::ArrayIn => eval_array_in_function(&values, None),
+        BuiltinScalarFunction::AnyRangeIn => Err(anyrange_input_error()),
+        BuiltinScalarFunction::ArrayLarger => eval_array_larger_function(&values),
         BuiltinScalarFunction::ArrayAppend => eval_array_append_function(&values),
         BuiltinScalarFunction::ArrayPrepend => eval_array_prepend_function(&values),
         BuiltinScalarFunction::ArrayCat => eval_array_cat_function(&values),
@@ -8686,6 +9216,9 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgGetUserById
         | BuiltinScalarFunction::ObjDescription
         | BuiltinScalarFunction::PgDescribeObject
+        | BuiltinScalarFunction::PgIdentifyObject
+        | BuiltinScalarFunction::PgIdentifyObjectAsAddress
+        | BuiltinScalarFunction::PgGetObjectAddress
         | BuiltinScalarFunction::PgGetFunctionArguments
         | BuiltinScalarFunction::PgGetFunctionDef
         | BuiltinScalarFunction::PgGetFunctionResult
@@ -9980,10 +10513,15 @@ pub(crate) fn eval_builtin_function(
         };
     }
     if matches!(func, BuiltinScalarFunction::PgTypeof) {
-        let ty = args
-            .first()
-            .and_then(expr_sql_type_hint)
-            .unwrap_or(SqlType::new(SqlTypeKind::Text));
+        let ty = match args.first() {
+            Some(Expr::Const(Value::Null | Value::Text(_) | Value::TextRef(_, _))) => {
+                SqlType::new(SqlTypeKind::Text)
+                    .with_identity(crate::include::catalog::UNKNOWN_TYPE_OID, 0)
+            }
+            arg => arg
+                .and_then(expr_sql_type_hint)
+                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        };
         return Ok(Value::Text(sql_type_name(ty).into()));
     }
     let values = args
@@ -10630,6 +11168,9 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),
         BuiltinScalarFunction::ArrayLength => eval_array_length_function(&values),
         BuiltinScalarFunction::Cardinality => eval_cardinality_function(&values),
+        BuiltinScalarFunction::ArrayIn => eval_array_in_function(&values, Some(ctx)),
+        BuiltinScalarFunction::AnyRangeIn => Err(anyrange_input_error()),
+        BuiltinScalarFunction::ArrayLarger => eval_array_larger_function(&values),
         BuiltinScalarFunction::ArrayAppend => eval_array_append_function(&values),
         BuiltinScalarFunction::ArrayPrepend => eval_array_prepend_function(&values),
         BuiltinScalarFunction::ArrayCat => eval_array_cat_function(&values),
@@ -10895,6 +11436,10 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
+        },
+        BuiltinScalarFunction::BitLength => match values.first() {
+            Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
+            _ => eval_bit_length_function(&values),
         },
         BuiltinScalarFunction::Concat => {
             eval_concat_function(&values, func_variadic, &ctx.datetime_config)

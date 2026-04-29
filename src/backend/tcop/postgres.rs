@@ -18,11 +18,11 @@ use crate::backend::libpq::pqformat::{
     infer_command_tag, infer_dml_returning_command_tag, send_auth_ok, send_backend_key_data,
     send_bind_complete, send_close_complete, send_command_complete, send_copy_data, send_copy_done,
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
-    send_error_with_fields, send_error_with_hint, send_no_data, send_notice, send_notice_with_hint,
-    send_notice_with_severity, send_notification_response, send_parameter_description,
-    send_parameter_status, send_parse_complete, send_portal_suspended, send_query_result,
-    send_ready_for_query, send_row_description, send_row_description_with_formats,
-    send_typed_data_row, validate_binary_result_formats,
+    send_error_with_hint, send_error_with_internal_fields, send_no_data, send_notice,
+    send_notice_with_hint, send_notice_with_severity, send_notification_response,
+    send_parameter_description, send_parameter_status, send_parse_complete, send_portal_suspended,
+    send_query_result, send_ready_for_query, send_row_description,
+    send_row_description_with_formats, send_typed_data_row, validate_binary_result_formats,
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
@@ -40,10 +40,12 @@ use crate::backend::utils::misc::notices::{
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::sql_deparse::{
-    normalize_index_expression_sql, normalize_index_predicate_sql,
+    normalize_check_expr_sql, normalize_index_expression_sql, normalize_index_predicate_sql,
 };
 use crate::include::access::htup::TupleError;
-use crate::include::catalog::{ANYELEMENTOID, PG_CLASS_RELATION_OID, RECORD_TYPE_OID};
+use crate::include::catalog::{
+    ANYELEMENTOID, PG_CLASS_RELATION_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
+};
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
@@ -56,7 +58,8 @@ use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices}
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
-        ExecError::WithContext { source, .. } => exec_error_sqlstate(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_error_sqlstate(source),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_sqlstate(&ExecError::Parse((**source).clone()))
         }
@@ -190,7 +193,8 @@ fn protocol_copy_io_error(err: io::Error) -> ExecError {
 
 fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
-        ExecError::WithContext { source, .. } => exec_error_detail(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_error_detail(source),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_detail_parse(source)
         }
@@ -231,7 +235,8 @@ fn exec_error_detail_parse(e: &crate::backend::parser::ParseError) -> Option<&st
 
 fn exec_error_hint(e: &ExecError) -> Option<&str> {
     match e {
-        ExecError::WithContext { source, .. } => exec_error_hint(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_error_hint(source),
         ExecError::Regex(err) => err.hint.as_deref(),
         ExecError::DetailedError { hint, .. } => hint.as_deref(),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
@@ -257,9 +262,31 @@ fn exec_error_context(e: &ExecError) -> Option<String> {
             Some(inner) => Some(format!("{inner}\n{context}")),
             None => Some(context.clone()),
         },
+        ExecError::WithInternalQueryContext {
+            source, context, ..
+        } => match exec_error_context(source) {
+            Some(inner) => Some(format!("{inner}\n{context}")),
+            None => Some(context.clone()),
+        },
         ExecError::JsonInput { context, .. } => context.clone(),
         ExecError::XmlInput { context, .. } => context.clone(),
         ExecError::Regex(err) => err.context.clone(),
+        _ => None,
+    }
+}
+
+fn exec_error_internal_query(e: &ExecError) -> Option<String> {
+    match e {
+        ExecError::WithInternalQueryContext { query, .. } => Some(query.clone()),
+        ExecError::WithContext { source, .. } => exec_error_internal_query(source),
+        _ => None,
+    }
+}
+
+fn exec_error_internal_position(e: &ExecError) -> Option<usize> {
+    match e {
+        ExecError::WithInternalQueryContext { position, .. } => *position,
+        ExecError::WithContext { source, .. } => exec_error_internal_position(source),
         _ => None,
     }
 }
@@ -272,6 +299,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return Some(position);
         }
         return exec_error_position(sql, source);
+    }
+    if let ExecError::WithInternalQueryContext { .. } = e {
+        return None;
     }
     if let ExecError::Parse(parse_error) = e
         && let Some(position) = parse_error.position()
@@ -334,6 +364,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         {
             return extract_at_or_near_token(actual)
                 .and_then(|value| find_error_value_position(sql, value));
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            actual, ..
+        }) if actual == "positional argument cannot follow named argument" => {
+            return find_positional_after_named_arg_position(sql);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(name)) => {
             return find_case_insensitive_token_position(sql, name);
@@ -490,6 +525,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
             if let Some(position) = find_routine_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = function_from_return_type_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = duplicate_argument_name_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
@@ -651,6 +692,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("invalid input syntax for type numeric time zone: ") {
                 return None;
             }
+            if message.starts_with("invalid input syntax for type oid: ")
+                && sql.to_ascii_lowercase().contains("pg_get_object_address")
+            {
+                return None;
+            }
             if message.starts_with("invalid value for parameter \"") {
                 return None;
             }
@@ -708,6 +754,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
             if let Some(position) = find_routine_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = function_from_return_type_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = duplicate_argument_name_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
@@ -2064,11 +2116,39 @@ fn find_routine_error_position(sql: &str, message: &str) -> Option<usize> {
     find_case_insensitive_token_position(sql, name)
 }
 
+fn select_function_call_name(sql: &str) -> Option<String> {
+    let lower = sql.trim_start().to_ascii_lowercase();
+    if !lower.starts_with("select ") {
+        return None;
+    }
+    let select_offset = sql.len() - sql.trim_start().len();
+    let mut index = select_offset + "select".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let start = index;
+    while index < bytes.len() && is_sql_identifier_byte(bytes[index]) {
+        index += 1;
+    }
+    if start == index || bytes.get(index) != Some(&b'(') {
+        return None;
+    }
+    Some(sql[start..index].to_string())
+}
+
 fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> {
     match message {
         "invalid attribute in procedure definition" => {
             find_case_insensitive_token_position(sql, "WINDOW")
                 .or_else(|| find_case_insensitive_token_position(sql, "STRICT"))
+        }
+        "input parameters after one with a default value must also have defaults" => {
+            find_parameter_after_keyword_position(sql, "DEFAULT")
+                .or_else(|| find_parameter_after_default_marker_position(sql))
+        }
+        "only input parameters can have default values" => {
+            find_case_insensitive_token_position(sql, "OUT")
         }
         "VARIADIC parameter must be the last parameter" => {
             find_parameter_after_keyword_position(sql, "VARIADIC")
@@ -2080,10 +2160,79 @@ fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> 
     }
 }
 
+fn function_from_return_type_error_position(sql: &str, message: &str) -> Option<usize> {
+    let name = message
+        .strip_prefix("function \"")?
+        .split_once("\" in FROM has unsupported return type")?
+        .0;
+    find_case_insensitive_token_position(sql, name)
+}
+
+fn duplicate_argument_name_error_position(sql: &str, message: &str) -> Option<usize> {
+    let name = message
+        .strip_prefix("argument name \"")
+        .or_else(|| message.strip_prefix("parameter name \""))?
+        .split_once("\" used more than once")?
+        .0;
+    find_nth_identifier_position(sql, name, 2)
+}
+
+fn find_positional_after_named_arg_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let named_operator = lower.find(":=").or_else(|| lower.find("=>"))?;
+    let comma = sql[named_operator..].find(',')? + named_operator;
+    let mut index = comma + 1;
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len()).then_some(index + 1)
+}
+
+fn find_nth_identifier_position(sql: &str, ident: &str, nth: usize) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let ident = ident.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let ident_bytes = ident.as_bytes();
+    let mut index = 0usize;
+    let mut seen = 0usize;
+    while index + ident_bytes.len() <= bytes.len() {
+        if bytes[index..].starts_with(ident_bytes)
+            && (index == 0 || !is_identifier_byte(bytes[index - 1]))
+            && (index + ident_bytes.len() == bytes.len()
+                || !is_identifier_byte(bytes[index + ident_bytes.len()]))
+        {
+            seen += 1;
+            if seen == nth {
+                return Some(index + 1);
+            }
+            index += ident_bytes.len();
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 fn find_parameter_after_keyword_position(sql: &str, keyword: &str) -> Option<usize> {
     let lower = sql.to_ascii_lowercase();
     let keyword_position = lower.find(&keyword.to_ascii_lowercase())?;
     let comma_position = sql[keyword_position..].find(',')? + keyword_position;
+    let after_comma = &sql[comma_position + 1..];
+    let whitespace = after_comma
+        .bytes()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count();
+    Some(comma_position + 1 + whitespace + 1)
+}
+
+fn find_parameter_after_default_marker_position(sql: &str) -> Option<usize> {
+    let marker = sql.find('=')?;
+    let comma_position = sql[marker..].find(',')? + marker;
     let after_comma = &sql[comma_position + 1..];
     let whitespace = after_comma
         .bytes()
@@ -2381,6 +2530,8 @@ struct ExecErrorResponse {
     hint: Option<String>,
     context: Option<String>,
     position: Option<usize>,
+    internal_query: Option<String>,
+    internal_position: Option<usize>,
 }
 
 struct SessionActivityGuard<'a> {
@@ -2416,6 +2567,8 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
         hint: None,
         context: exec_error_context(e),
         position: exec_error_position(sql, e),
+        internal_query: exec_error_internal_query(e),
+        internal_position: exec_error_internal_position(e),
     };
     if sql.to_ascii_lowercase().contains("pg_input_is_valid(")
         && response
@@ -2423,6 +2576,12 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
             .starts_with("invalid input syntax for type ")
     {
         response.position = None;
+    }
+    if response.message == "return type anyarray is not supported for SQL functions"
+        && response.context.is_none()
+        && let Some(function_name) = select_function_call_name(sql)
+    {
+        response.context = Some(format!("SQL function \"{function_name}\" during inlining"));
     }
     apply_errors_regression_syntax_compat(sql, &mut response);
 
@@ -2498,7 +2657,10 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
 
 fn invalid_from_clause_reference_table(e: &ExecError) -> Option<&str> {
     match e {
-        ExecError::WithContext { source, .. } => invalid_from_clause_reference_table(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
+            invalid_from_clause_reference_table(source)
+        }
         ExecError::Parse(parse_error) => match parse_error.unpositioned() {
             crate::backend::parser::ParseError::InvalidFromClauseReference(name) => Some(name),
             _ => None,
@@ -2881,7 +3043,7 @@ fn send_exec_error(stream: &mut impl Write, sql: &str, e: &ExecError) -> io::Res
     if response.hint.is_none() {
         response.hint = format_exec_error_hint(e);
     }
-    send_error_with_fields(
+    send_error_with_internal_fields(
         stream,
         exec_error_sqlstate(e),
         &response.message,
@@ -2889,6 +3051,8 @@ fn send_exec_error(stream: &mut impl Write, sql: &str, e: &ExecError) -> io::Res
         response.hint.as_deref(),
         response.context.as_deref(),
         response.position,
+        response.internal_query.as_deref(),
+        response.internal_position,
     )
 }
 
@@ -4792,15 +4956,20 @@ fn execute_psql_describe_query(
         && lower.contains("::pg_catalog.regclass")
     {
         let include_relkind = psql_describe_inherits_query_includes_relkind(&lower);
+        let regclass_column = || QueryColumn {
+            name: "regclass".into(),
+            sql_type: SqlType::new(SqlTypeKind::RegClass),
+            wire_type_oid: Some(REGCLASS_TYPE_OID),
+        };
         let columns = if include_relkind {
             vec![
-                QueryColumn::text("regclass"),
+                regclass_column(),
                 QueryColumn::text("relkind"),
                 QueryColumn::text("inhdetachpending"),
                 QueryColumn::text("pg_get_expr"),
             ]
         } else {
-            vec![QueryColumn::text("regclass")]
+            vec![regclass_column()]
         };
         return Some((
             columns,
@@ -4811,9 +4980,14 @@ fn execute_psql_describe_query(
         && lower.contains("join pg_catalog.pg_inherits i")
         && lower.contains("pg_get_expr(c.relpartbound")
     {
+        let regclass_column = QueryColumn {
+            name: "regclass".into(),
+            sql_type: SqlType::new(SqlTypeKind::RegClass),
+            wire_type_oid: Some(REGCLASS_TYPE_OID),
+        };
         return Some((
             vec![
-                QueryColumn::text("regclass"),
+                regclass_column,
                 QueryColumn::text("pg_get_expr"),
                 QueryColumn::text("inhdetachpending"),
                 QueryColumn::text("pg_get_partition_constraintdef"),
@@ -5138,18 +5312,19 @@ fn psql_describe_inherits_query_rows(
             let name = db
                 .relation_display_name(session.client_id, txn_ctx, search_path.as_deref(), oid)
                 .unwrap_or_else(|| oid.to_string());
+            let name = name.trim_end().to_string();
             if include_relkind {
                 let bound = catalog
                     .relation_by_oid(row.inhrelid)
                     .and_then(|child| child.relpartbound)
                     .and_then(|text| deserialize_partition_bound(&text).ok())
-                    .map(|bound| psql_partition_bound_text(&bound))
-                    .unwrap_or_default();
+                    .map(|bound| Value::Text(psql_partition_bound_text(&bound).into()))
+                    .unwrap_or(Value::Null);
                 Some(vec![
                     Value::Text(name.into()),
                     Value::InternalChar(relation.relkind as u8),
                     Value::Bool(row.inhdetachpending),
-                    Value::Text(bound.into()),
+                    bound,
                 ])
             } else {
                 Some(vec![Value::Text(name.into())])
@@ -5613,32 +5788,46 @@ fn psql_describe_lookup_query(
     let search_path = session.configured_search_path();
     let relation_name = extract_psql_pattern_name(sql);
     let rows = relation_name
-        .and_then(|name| catalog.lookup_any_relation(name).map(|entry| (name, entry)))
-        .map(|(name, entry)| {
-            let nspname = db
-                .relation_namespace_name(session.client_id, txn_ctx, entry.relation_oid)
-                .or_else(|| name.split_once('.').map(|(schema, _)| schema.to_string()))
-                .unwrap_or_else(|| "public".to_string());
-            let relname = db
-                .relation_display_name(
-                    session.client_id,
-                    txn_ctx,
-                    search_path.as_deref(),
-                    entry.relation_oid,
-                )
-                .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name).to_string());
-            vec![vec![
-                Value::Int32(entry.relation_oid as i32),
-                Value::Text(nspname.into()),
-                Value::Text(
-                    relname
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or(relname.as_str())
-                        .to_string()
-                        .into(),
-                ),
-            ]]
+        .map(|pattern| {
+            if psql_describe_pattern_is_plain(pattern) {
+                catalog
+                    .lookup_any_relation(pattern)
+                    .map(|entry| {
+                        let nspname = db
+                            .relation_namespace_name(session.client_id, txn_ctx, entry.relation_oid)
+                            .or_else(|| {
+                                pattern
+                                    .split_once('.')
+                                    .map(|(schema, _)| schema.to_string())
+                            })
+                            .unwrap_or_else(|| "public".to_string());
+                        let relname = db
+                            .relation_display_name(
+                                session.client_id,
+                                txn_ctx,
+                                search_path.as_deref(),
+                                entry.relation_oid,
+                            )
+                            .unwrap_or_else(|| {
+                                pattern.rsplit('.').next().unwrap_or(pattern).to_string()
+                            });
+                        vec![vec![
+                            Value::Int32(entry.relation_oid as i32),
+                            Value::Text(nspname.into()),
+                            Value::Text(
+                                relname
+                                    .rsplit('.')
+                                    .next()
+                                    .unwrap_or(relname.as_str())
+                                    .to_string()
+                                    .into(),
+                            ),
+                        ]]
+                    })
+                    .unwrap_or_default()
+            } else {
+                psql_describe_lookup_regex_rows(db, session, &catalog, pattern)
+            }
         })
         .unwrap_or_default();
     (
@@ -5653,6 +5842,75 @@ fn psql_describe_lookup_query(
         ],
         rows,
     )
+}
+
+fn psql_describe_pattern_is_plain(pattern: &str) -> bool {
+    !pattern.chars().any(|ch| {
+        matches!(
+            ch,
+            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
+        )
+    })
+}
+
+fn psql_describe_lookup_regex_rows(
+    db: &Database,
+    session: &Session,
+    catalog: &dyn CatalogLookup,
+    pattern: &str,
+) -> Vec<Vec<Value>> {
+    let Ok(regex) = regex::Regex::new(&format!("^(?:{pattern})$")) else {
+        return Vec::new();
+    };
+    let txn_ctx = session.catalog_txn_ctx();
+    let namespaces = catalog
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<HashMap<_, _>>();
+    let search_path = session.configured_search_path();
+    let mut rows = catalog
+        .class_rows()
+        .into_iter()
+        .filter(|class| regex.is_match(&class.relname))
+        .filter_map(|class| {
+            let entry = catalog.relation_by_oid(class.oid)?;
+            let nspname = namespaces
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            let relname = db
+                .relation_display_name(
+                    session.client_id,
+                    txn_ctx,
+                    search_path.as_deref(),
+                    entry.relation_oid,
+                )
+                .unwrap_or(class.relname);
+            Some(vec![
+                Value::Int32(entry.relation_oid as i32),
+                Value::Text(nspname.into()),
+                Value::Text(
+                    relname
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(relname.as_str())
+                        .to_string()
+                        .into(),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        let left_nsp = left.get(1).and_then(value_as_text).unwrap_or_default();
+        let right_nsp = right.get(1).and_then(value_as_text).unwrap_or_default();
+        let left_rel = left.get(2).and_then(value_as_text).unwrap_or_default();
+        let right_rel = right.get(2).and_then(value_as_text).unwrap_or_default();
+        left_nsp
+            .cmp(&right_nsp)
+            .then_with(|| left_rel.cmp(&right_rel))
+    });
+    rows
 }
 
 fn psql_describe_tableinfo_query(
@@ -6132,10 +6390,25 @@ fn psql_index_display_columns(
                             .map(|column| column.name.clone())
                     })
                     .unwrap_or_else(|| format!("column{}", index + 1));
+                let sql_type = base_relation
+                    .as_ref()
+                    .and_then(|relation| {
+                        relation
+                            .desc
+                            .columns
+                            .get((*attnum as usize).saturating_sub(1))
+                            .map(|column| (column.sql_type, column.collation_oid))
+                    })
+                    .or_else(|| {
+                        index_desc
+                            .columns
+                            .get(index)
+                            .map(|column| (column.sql_type, column.collation_oid))
+                    });
                 return PsqlIndexDisplayColumn {
                     display_name: name.clone(),
-                    definition: psql_index_column_definition_with_opclass_options(
-                        index_meta, index, name,
+                    definition: psql_index_column_definition_with_metadata(
+                        db, session, index_meta, index, name, sql_type,
                     ),
                 };
             }
@@ -6162,10 +6435,16 @@ fn psql_index_display_columns(
             }
             PsqlIndexDisplayColumn {
                 display_name: "expr".into(),
-                definition: psql_index_column_definition_with_opclass_options(
+                definition: psql_index_column_definition_with_metadata(
+                    db,
+                    session,
                     index_meta,
                     index,
                     parenthesized_index_expression(&expression_sql),
+                    index_desc
+                        .columns
+                        .get(index)
+                        .map(|column| (column.sql_type, column.collation_oid)),
                 ),
             }
         })
@@ -6312,25 +6591,105 @@ fn split_top_level_commas(input: &str) -> Vec<&str> {
     parts
 }
 
-fn psql_index_column_definition_with_opclass_options(
+fn psql_index_column_definition_with_metadata(
+    db: &Database,
+    session: &Session,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     index: usize,
-    base: String,
+    mut base: String,
+    column_type_and_collation: Option<(SqlType, u32)>,
 ) -> String {
-    let Some(options) = index_meta
+    if let Some(collation) = psql_index_column_collation_display_name(
+        db,
+        session,
+        index_meta,
+        index,
+        column_type_and_collation,
+    ) {
+        base.push_str(" COLLATE ");
+        base.push_str(&collation);
+    }
+    if let Some(opclass) = psql_index_column_opclass_display_name(
+        db,
+        session,
+        index_meta,
+        index,
+        column_type_and_collation,
+    ) {
+        base.push(' ');
+        base.push_str(&opclass);
+    }
+    if let Some(options) = psql_index_column_opclass_options_display(index_meta, index) {
+        base.push(' ');
+        base.push_str(&options);
+    }
+    base
+}
+
+fn psql_index_column_collation_display_name(
+    db: &Database,
+    session: &Session,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index: usize,
+    column_type_and_collation: Option<(SqlType, u32)>,
+) -> Option<String> {
+    let collation_oid = *index_meta.indcollation.get(index)?;
+    let column_collation_oid = column_type_and_collation.map(|(_, oid)| oid).unwrap_or(0);
+    if collation_oid == 0
+        || collation_oid == crate::include::catalog::DEFAULT_COLLATION_OID
+        || collation_oid == column_collation_oid
+    {
+        return None;
+    }
+    let _ = (db, session);
+    crate::include::catalog::bootstrap_pg_collation_rows()
+        .into_iter()
+        .find(|row| row.oid == collation_oid)
+        .map(|row| psql_quote_ident_if_needed(&row.collname))
+}
+
+fn psql_index_column_opclass_display_name(
+    db: &Database,
+    session: &Session,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index: usize,
+    column_type_and_collation: Option<(SqlType, u32)>,
+) -> Option<String> {
+    let opclass_oid = *index_meta.indclass.get(index)?;
+    if opclass_oid == 0 {
+        return None;
+    }
+    if let Some((sql_type, _)) = column_type_and_collation {
+        let type_oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
+        if crate::include::catalog::index_opclass_is_implicit_for_definition(
+            index_meta.am_oid,
+            type_oid,
+            sql_type,
+            opclass_oid,
+            index_meta.indisexclusion,
+        ) && index_meta
+            .indclass_options
+            .get(index)
+            .is_none_or(Vec::is_empty)
+        {
+            return None;
+        }
+    }
+    let _ = (db, session);
+    crate::include::catalog::bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| row.oid == opclass_oid)
+        .map(|row| psql_quote_ident_if_needed(&row.opcname))
+}
+
+fn psql_index_column_opclass_options_display(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index: usize,
+) -> Option<String> {
+    let options = index_meta
         .indclass_options
         .get(index)
-        .filter(|options| !options.is_empty())
-    else {
-        return base;
-    };
-    let Some(opclass_oid) = index_meta.indclass.get(index) else {
-        return base;
-    };
-    let opclass_name = match *opclass_oid {
-        crate::include::catalog::TSVECTOR_GIST_OPCLASS_OID => "tsvector_ops",
-        _ => return base,
-    };
+        .filter(|options| !options.is_empty())?;
     let rendered_options = options
         .iter()
         .map(|(name, value)| {
@@ -6342,7 +6701,7 @@ fn psql_index_column_definition_with_opclass_options(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{base} {opclass_name} ({rendered_options})")
+    Some(format!("({rendered_options})"))
 }
 
 fn parenthesized_index_expression(expr_sql: &str) -> String {
@@ -6574,10 +6933,13 @@ fn constraint_def_for_row(
 ) -> Option<String> {
     match row.contype {
         crate::include::catalog::CONSTRAINT_NOTNULL => Some("NOT NULL".to_string()),
-        crate::include::catalog::CONSTRAINT_CHECK => row
-            .conbin
-            .as_deref()
-            .map(|expr_sql| format!("CHECK ({expr_sql})")),
+        crate::include::catalog::CONSTRAINT_CHECK => row.conbin.as_deref().map(|expr_sql| {
+            let mut def = format!("CHECK {}", normalize_check_expr_sql(expr_sql));
+            if row.connoinherit {
+                def.push_str(" NO INHERIT");
+            }
+            def
+        }),
         crate::include::catalog::CONSTRAINT_PRIMARY
         | crate::include::catalog::CONSTRAINT_UNIQUE => {
             let relation = relation.cloned().or_else(|| {
@@ -6666,19 +7028,31 @@ fn exclusion_constraint_def(
     let index = db
         .describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), row.conindid)?
         .index?;
+    let expression_sqls = index
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
     let all_columns = index
         .indkey
         .iter()
         .map(|attnum| {
-            (*attnum > 0)
-                .then(|| {
-                    relation
-                        .desc
-                        .columns
-                        .get((*attnum as usize).saturating_sub(1))
-                })
-                .flatten()
-                .map(|column| column.name.clone())
+            if *attnum > 0 {
+                return relation
+                    .desc
+                    .columns
+                    .get((*attnum as usize).saturating_sub(1))
+                    .map(|column| column.name.clone());
+            }
+            let rendered = expression_sqls
+                .get(expression_index)
+                .cloned()
+                .unwrap_or_else(|| format!("expr{}", expression_index + 1));
+            expression_index += 1;
+            Some(parenthesized_index_expression(
+                &normalize_index_expression_sql(&rendered),
+            ))
         })
         .collect::<Option<Vec<_>>>()?;
     let operator_oids = row.conexclop.as_ref()?;
@@ -8169,14 +8543,25 @@ fn send_queued_notices_with_sql(stream: &mut impl Write, sql: Option<&str>) -> i
         let position = notice
             .position
             .or_else(|| sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message)));
-        send_notice_with_severity(
-            stream,
-            notice.severity,
-            notice.sqlstate,
-            &notice.message,
-            notice.detail.as_deref(),
-            position,
-        )?;
+        if notice.hint.is_some() {
+            send_notice_with_hint(
+                stream,
+                notice.severity,
+                notice.sqlstate,
+                &notice.message,
+                notice.hint.as_deref(),
+                position,
+            )?;
+        } else {
+            send_notice_with_severity(
+                stream,
+                notice.severity,
+                notice.sqlstate,
+                &notice.message,
+                notice.detail.as_deref(),
+                position,
+            )?;
+        }
     }
     send_plpgsql_notices(stream, &take_notices())
 }
@@ -11105,6 +11490,30 @@ mod tests {
     }
 
     #[test]
+    fn psql_describe_lookup_query_matches_wildcard_pattern() {
+        let db = Database::open(temp_dir("describe_lookup_wildcard"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table inh_nn_parent (a int4)")
+            .unwrap();
+        db.execute(1, "create table inh_nn_child () inherits (inh_nn_parent)")
+            .unwrap();
+        db.execute(1, "create table other_child (a int4)").unwrap();
+
+        let sql = "select c.oid, n.nspname, c.relname \
+             from pg_catalog.pg_class c \
+             left join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
+             where c.relkind in ('r','p','v','m','S','f','') \
+             and pg_catalog.pg_table_is_visible(c.oid) \
+             and c.relname operator(pg_catalog.~) '^(inh_nn.*)$'";
+        let (_, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        let relnames = rows
+            .iter()
+            .filter_map(|row| row.get(2).and_then(value_as_text))
+            .collect::<Vec<_>>();
+        assert_eq!(relnames, vec!["inh_nn_child", "inh_nn_parent"]);
+    }
+
+    #[test]
     fn psql_permissions_query_handles_unqualified_polroles() {
         let db = Database::open(temp_dir("describe_permissions_policies"), 16).unwrap();
         let mut session = Session::new(1);
@@ -12366,6 +12775,32 @@ ORDER BY 1, 2;";
         );
         let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn psql_describe_child_tables_uses_null_bound_for_plain_inheritance() {
+        let db = Database::open(temp_dir("describe_plain_inheritance_children"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table plain_parent (a int4)").unwrap();
+        db.execute(1, "create table plain_child () inherits (plain_parent)")
+            .unwrap();
+        let parent = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("plain_parent")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT c.oid::pg_catalog.regclass, c.relkind, inhdetachpending, \
+                    pg_catalog.pg_get_expr(c.relpartbound, c.oid) \
+             FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i \
+             WHERE c.oid = i.inhrelid AND i.inhparent = '{}' \
+             ORDER BY pg_catalog.pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT', \
+                      c.oid::pg_catalog.regclass::pg_catalog.text;",
+            parent.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][3], Value::Null);
     }
 
     #[test]

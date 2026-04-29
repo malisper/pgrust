@@ -29,6 +29,7 @@ use crate::backend::access::transam::{
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
 use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
 use crate::backend::catalog::namespace::effective_search_path as namespace_effective_search_path;
+use crate::backend::catalog::object_address::ObjectAddressState;
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
 use crate::backend::catalog::toasting::ToastCatalogChanges;
@@ -69,7 +70,7 @@ pub(crate) use crate::backend::utils::activity::{
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
-    CatalogInvalidation, accept_invalidation_messages, catalog_invalidation_from_effect,
+    AcceptInvalidationMessages, CatalogInvalidation, catalog_invalidation_from_effect,
     finalize_aborted_local_catalog_invalidations, finalize_command_end_local_catalog_invalidations,
     finalize_committed_catalog_effects,
 };
@@ -229,6 +230,7 @@ pub struct Database {
     pub(crate) base_types: Arc<RwLock<BTreeMap<u32, BaseTypeEntry>>>,
     pub(crate) conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub(crate) statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
+    pub(crate) object_addresses: Arc<RwLock<ObjectAddressState>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) advisory_locks: Arc<AdvisoryLockManager>,
     pub(crate) row_locks: Arc<RowLockManager>,
@@ -821,37 +823,51 @@ impl Database {
 
     pub(crate) fn normalize_domain_name_for_create(
         &self,
+        client_id: ClientId,
         name: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<(String, String, u32), ParseError> {
         match name.split_once('.') {
             Some((schema, object)) if !object.is_empty() => {
-                let namespace_oid = match schema.to_ascii_lowercase().as_str() {
-                    "public" => PUBLIC_NAMESPACE_OID,
-                    "pg_catalog" => {
-                        return Err(ParseError::UnsupportedQualifiedName(name.to_string()));
-                    }
-                    _ => PUBLIC_NAMESPACE_OID,
+                let schema = schema.to_ascii_lowercase();
+                let object = object.to_ascii_lowercase();
+                if schema == "pg_catalog" {
+                    return Err(ParseError::UnsupportedQualifiedName(name.to_string()));
+                }
+                let namespace_oid = self
+                    .visible_namespace_oid_by_name(client_id, None, &schema)
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "existing schema",
+                        actual: format!("schema \"{schema}\" does not exist"),
+                    })?;
+                let storage_name = if namespace_oid == PUBLIC_NAMESPACE_OID {
+                    format!("public.{object}")
+                } else {
+                    format!("{schema}.{object}")
                 };
-                Ok((
-                    name.to_ascii_lowercase(),
-                    object.to_ascii_lowercase(),
-                    namespace_oid,
-                ))
+                Ok((storage_name, object, namespace_oid))
             }
             Some(_) => Err(ParseError::UnsupportedQualifiedName(name.to_string())),
-            None => Ok((
-                format!("public.{}", name.to_ascii_lowercase()),
-                name.to_ascii_lowercase(),
-                match self
-                    .effective_search_path(0, configured_search_path)
-                    .into_iter()
-                    .find(|schema| schema == "public")
-                {
-                    Some(_) => PUBLIC_NAMESPACE_OID,
-                    None => PUBLIC_NAMESPACE_OID,
-                },
-            )),
+            None => {
+                let object = name.to_ascii_lowercase();
+                let search_path = self.effective_search_path(client_id, configured_search_path);
+                for schema in search_path {
+                    if schema.is_empty() || schema == "$user" || schema == "pg_catalog" {
+                        continue;
+                    }
+                    if let Some(namespace_oid) =
+                        self.visible_namespace_oid_by_name(client_id, None, &schema)
+                    {
+                        let storage_name = if namespace_oid == PUBLIC_NAMESPACE_OID {
+                            format!("public.{object}")
+                        } else {
+                            format!("{schema}.{object}")
+                        };
+                        return Ok((storage_name, object, namespace_oid));
+                    }
+                }
+                Err(ParseError::NoSchemaSelectedForCreate)
+            }
         }
     }
 
@@ -1844,7 +1860,7 @@ impl Database {
     }
 
     pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {
-        accept_invalidation_messages(self, client_id);
+        AcceptInvalidationMessages(self, client_id);
     }
 
     pub(crate) fn current_database_name(&self) -> String {

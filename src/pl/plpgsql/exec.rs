@@ -392,7 +392,33 @@ pub fn execute_user_defined_scalar_function_values(
         .iter()
         .map(Value::sql_type_hint)
         .collect::<Vec<_>>();
-    let compiled = compiled_function_for_proc(proc_oid, None, &arg_types, ctx)?;
+    execute_user_defined_scalar_function_values_with_actual_arg_types(
+        proc_oid, arg_values, &arg_types, ctx,
+    )
+}
+
+pub fn execute_user_defined_scalar_function_values_with_arg_types(
+    proc_oid: u32,
+    arg_values: &[Value],
+    arg_types: &[SqlType],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let actual_arg_types = arg_types.iter().copied().map(Some).collect::<Vec<_>>();
+    execute_user_defined_scalar_function_values_with_actual_arg_types(
+        proc_oid,
+        arg_values,
+        &actual_arg_types,
+        ctx,
+    )
+}
+
+fn execute_user_defined_scalar_function_values_with_actual_arg_types(
+    proc_oid: u32,
+    arg_values: &[Value],
+    actual_arg_types: &[Option<SqlType>],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let compiled = compiled_function_for_proc(proc_oid, None, actual_arg_types, ctx)?;
 
     let FunctionReturnContract::Scalar { setof, ty, .. } = &compiled.return_contract else {
         return Err(function_runtime_error(
@@ -3068,6 +3094,11 @@ fn execute_dynamic_statement(
 fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerConfig {
     PlannerConfig {
         enable_partitionwise_join: bool_executor_guc(gucs, "enable_partitionwise_join", false),
+        enable_partitionwise_aggregate: bool_executor_guc(
+            gucs,
+            "enable_partitionwise_aggregate",
+            false,
+        ),
         enable_seqscan: bool_executor_guc(gucs, "enable_seqscan", true),
         enable_indexscan: bool_executor_guc(gucs, "enable_indexscan", true),
         enable_indexonlyscan: bool_executor_guc(gucs, "enable_indexonlyscan", true),
@@ -3980,7 +4011,8 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
 
 fn exec_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
-        ExecError::WithContext { source, .. } => exec_error_sqlstate(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_error_sqlstate(source),
         ExecError::RaiseException(_) => "P0001",
         ExecError::DivisionByZero(_) => "22012",
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
@@ -4248,6 +4280,9 @@ fn has_plpgsql_context_for(err: &ExecError, function_name: &str) -> bool {
             context.starts_with(&format!("{prefix} "))
                 || context.starts_with(&format!("{prefix}("))
                 || has_plpgsql_context_for(source, function_name)
+        }
+        ExecError::WithInternalQueryContext { source, .. } => {
+            has_plpgsql_context_for(source, function_name)
         }
         _ => false,
     }
