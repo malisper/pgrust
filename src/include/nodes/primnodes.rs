@@ -915,6 +915,7 @@ pub enum BuiltinScalarFunction {
     Power,
     Exp,
     Ln,
+    Sin,
     Sinh,
     Cosh,
     Tanh,
@@ -1233,7 +1234,7 @@ pub enum SqlJsonTableBehavior {
 }
 
 impl SqlJsonTableBehavior {
-    fn map_exprs(self, map: &mut impl FnMut(Expr) -> Expr) -> Self {
+    fn map_exprs(self, map: &mut dyn FnMut(Expr) -> Expr) -> Self {
         match self {
             SqlJsonTableBehavior::Default(expr) => SqlJsonTableBehavior::Default(map(expr)),
             other => other,
@@ -1373,6 +1374,11 @@ pub enum TextSearchTableFunction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetReturningCall {
+    RowsFrom {
+        items: Vec<RowsFromItem>,
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
     GenerateSeries {
         func_oid: u32,
         func_variadic: bool,
@@ -1472,15 +1478,41 @@ pub enum SetReturningCall {
         function_name: String,
         func_variadic: bool,
         args: Vec<Expr>,
+        inlined_expr: Option<Box<Expr>>,
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowsFromItem {
+    pub source: RowsFromSource,
+    pub column_definitions: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowsFromSource {
+    Function(SetReturningCall),
+    Project {
+        output_exprs: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+    },
+}
+
+impl RowsFromItem {
+    pub fn output_columns(&self) -> &[QueryColumn] {
+        match &self.source {
+            RowsFromSource::Function(call) => call.output_columns(),
+            RowsFromSource::Project { output_columns, .. } => output_columns,
+        }
+    }
+}
+
 impl SetReturningCall {
     pub fn output_columns(&self) -> &[QueryColumn] {
         match self {
-            SetReturningCall::GenerateSeries { output_columns, .. }
+            SetReturningCall::RowsFrom { output_columns, .. }
+            | SetReturningCall::GenerateSeries { output_columns, .. }
             | SetReturningCall::GenerateSubscripts { output_columns, .. }
             | SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
@@ -1500,7 +1532,11 @@ impl SetReturningCall {
 
     pub fn set_output_columns(&mut self, output_columns: Vec<QueryColumn>) {
         match self {
-            SetReturningCall::GenerateSeries {
+            SetReturningCall::RowsFrom {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::GenerateSeries {
                 output_columns: existing,
                 ..
             }
@@ -1567,7 +1603,10 @@ impl SetReturningCall {
 
     pub fn with_ordinality(&self) -> bool {
         match self {
-            SetReturningCall::GenerateSeries {
+            SetReturningCall::RowsFrom {
+                with_ordinality, ..
+            }
+            | SetReturningCall::GenerateSeries {
                 with_ordinality, ..
             }
             | SetReturningCall::GenerateSubscripts {
@@ -1611,7 +1650,40 @@ impl SetReturningCall {
     }
 
     pub fn map_exprs(self, mut map: impl FnMut(Expr) -> Expr) -> Self {
+        self.map_exprs_dyn(&mut map)
+    }
+
+    fn map_exprs_dyn(self, map: &mut dyn FnMut(Expr) -> Expr) -> Self {
         match self {
+            SetReturningCall::RowsFrom {
+                items,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::RowsFrom {
+                items: items
+                    .into_iter()
+                    .map(|item| RowsFromItem {
+                        source: match item.source {
+                            RowsFromSource::Function(call) => {
+                                RowsFromSource::Function(call.map_exprs_dyn(map))
+                            }
+                            RowsFromSource::Project {
+                                output_exprs,
+                                output_columns,
+                            } => RowsFromSource::Project {
+                                output_exprs: output_exprs
+                                    .into_iter()
+                                    .map(|expr| map(expr))
+                                    .collect(),
+                                output_columns,
+                            },
+                        },
+                        column_definitions: item.column_definitions,
+                    })
+                    .collect(),
+                output_columns,
+                with_ordinality,
+            },
             SetReturningCall::GenerateSeries {
                 func_oid,
                 func_variadic,
@@ -1627,7 +1699,7 @@ impl SetReturningCall {
                 start: map(start),
                 stop: map(stop),
                 step: map(step),
-                timezone: timezone.map(&mut map),
+                timezone: timezone.map(|timezone| map(timezone)),
                 output_columns,
                 with_ordinality,
             },
@@ -1644,7 +1716,7 @@ impl SetReturningCall {
                 func_variadic,
                 array: map(array),
                 dimension: map(dimension),
-                reverse: reverse.map(&mut map),
+                reverse: reverse.map(|reverse| map(reverse)),
                 output_columns,
                 with_ordinality,
             },
@@ -1707,7 +1779,7 @@ impl SetReturningCall {
             } => SetReturningCall::Unnest {
                 func_oid,
                 func_variadic,
-                args: args.into_iter().map(map).collect(),
+                args: args.into_iter().map(|arg| map(arg)).collect(),
                 output_columns,
                 with_ordinality,
             },
@@ -1722,15 +1794,15 @@ impl SetReturningCall {
                 func_oid,
                 func_variadic,
                 kind,
-                args: args.into_iter().map(map).collect(),
+                args: args.into_iter().map(|arg| map(arg)).collect(),
                 output_columns,
                 with_ordinality,
             },
             SetReturningCall::SqlJsonTable(table) => {
-                SetReturningCall::SqlJsonTable(map_sql_json_table_exprs(table, &mut map))
+                SetReturningCall::SqlJsonTable(map_sql_json_table_exprs(table, map))
             }
             SetReturningCall::SqlXmlTable(table) => {
-                SetReturningCall::SqlXmlTable(map_sql_xml_table_exprs(table, &mut map))
+                SetReturningCall::SqlXmlTable(map_sql_xml_table_exprs(table, map))
             }
             SetReturningCall::JsonRecordFunction {
                 func_oid,
@@ -1744,7 +1816,7 @@ impl SetReturningCall {
                 func_oid,
                 func_variadic,
                 kind,
-                args: args.into_iter().map(map).collect(),
+                args: args.into_iter().map(|arg| map(arg)).collect(),
                 output_columns,
                 record_type,
                 with_ordinality,
@@ -1760,7 +1832,7 @@ impl SetReturningCall {
                 func_oid,
                 func_variadic,
                 kind,
-                args: args.into_iter().map(map).collect(),
+                args: args.into_iter().map(|arg| map(arg)).collect(),
                 output_columns,
                 with_ordinality,
             },
@@ -1775,7 +1847,7 @@ impl SetReturningCall {
                 func_oid,
                 func_variadic,
                 kind,
-                args: args.into_iter().map(map).collect(),
+                args: args.into_iter().map(|arg| map(arg)).collect(),
                 output_columns,
                 with_ordinality,
             },
@@ -1786,7 +1858,7 @@ impl SetReturningCall {
                 with_ordinality,
             } => SetReturningCall::TextSearchTableFunction {
                 kind,
-                args: args.into_iter().map(map).collect(),
+                args: args.into_iter().map(|arg| map(arg)).collect(),
                 output_columns,
                 with_ordinality,
             },
@@ -1795,13 +1867,15 @@ impl SetReturningCall {
                 function_name,
                 func_variadic,
                 args,
+                inlined_expr,
                 output_columns,
                 with_ordinality,
             } => SetReturningCall::UserDefined {
                 proc_oid,
                 function_name,
                 func_variadic,
-                args: args.into_iter().map(map).collect(),
+                args: args.into_iter().map(|arg| map(arg)).collect(),
+                inlined_expr: inlined_expr.map(|expr| Box::new(map(*expr))),
                 output_columns,
                 with_ordinality,
             },
@@ -1809,21 +1883,267 @@ impl SetReturningCall {
     }
 
     pub fn try_map_exprs<E>(self, mut map: impl FnMut(Expr) -> Result<Expr, E>) -> Result<Self, E> {
+        self.try_map_exprs_dyn(&mut map)
+    }
+
+    fn try_map_exprs_dyn<E>(self, map: &mut dyn FnMut(Expr) -> Result<Expr, E>) -> Result<Self, E> {
         Ok(match self {
+            SetReturningCall::RowsFrom {
+                items,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::RowsFrom {
+                items: items
+                    .into_iter()
+                    .map(|item| {
+                        Ok(RowsFromItem {
+                            source: match item.source {
+                                RowsFromSource::Function(call) => {
+                                    RowsFromSource::Function(call.try_map_exprs_dyn(map)?)
+                                }
+                                RowsFromSource::Project {
+                                    output_exprs,
+                                    output_columns,
+                                } => RowsFromSource::Project {
+                                    output_exprs: output_exprs
+                                        .into_iter()
+                                        .map(|expr| map(expr))
+                                        .collect::<Result<Vec<_>, E>>()?,
+                                    output_columns,
+                                },
+                            },
+                            column_definitions: item.column_definitions,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, E>>()?,
+                output_columns,
+                with_ordinality,
+            },
             SetReturningCall::SqlJsonTable(table) => {
-                SetReturningCall::SqlJsonTable(try_map_sql_json_table_exprs(table, &mut map)?)
+                SetReturningCall::SqlJsonTable(try_map_sql_json_table_exprs(table, map)?)
             }
             SetReturningCall::SqlXmlTable(table) => {
-                SetReturningCall::SqlXmlTable(try_map_sql_xml_table_exprs(table, &mut map)?)
+                SetReturningCall::SqlXmlTable(try_map_sql_xml_table_exprs(table, map)?)
             }
-            other => other.map_exprs(|expr| map(expr).ok().expect("fallible mapper failed")),
+            SetReturningCall::GenerateSeries {
+                func_oid,
+                func_variadic,
+                start,
+                stop,
+                step,
+                timezone,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::GenerateSeries {
+                func_oid,
+                func_variadic,
+                start: map(start)?,
+                stop: map(stop)?,
+                step: map(step)?,
+                timezone: timezone.map(|timezone| map(timezone)).transpose()?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::GenerateSubscripts {
+                func_oid,
+                func_variadic,
+                array,
+                dimension,
+                reverse,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::GenerateSubscripts {
+                func_oid,
+                func_variadic,
+                array: map(array)?,
+                dimension: map(dimension)?,
+                reverse: reverse.map(|reverse| map(reverse)).transpose()?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::PartitionTree {
+                func_oid,
+                func_variadic,
+                relid,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::PartitionTree {
+                func_oid,
+                func_variadic,
+                relid: map(relid)?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::PartitionAncestors {
+                func_oid,
+                func_variadic,
+                relid,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::PartitionAncestors {
+                func_oid,
+                func_variadic,
+                relid: map(relid)?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::PgLockStatus {
+                func_oid,
+                func_variadic,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::PgLockStatus {
+                func_oid,
+                func_variadic,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::TxidSnapshotXip {
+                func_oid,
+                func_variadic,
+                arg,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::TxidSnapshotXip {
+                func_oid,
+                func_variadic,
+                arg: map(arg)?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::Unnest {
+                func_oid,
+                func_variadic,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::Unnest {
+                func_oid,
+                func_variadic,
+                args: args
+                    .into_iter()
+                    .map(|arg| map(arg))
+                    .collect::<Result<Vec<_>, E>>()?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::JsonTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::JsonTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args: args
+                    .into_iter()
+                    .map(|arg| map(arg))
+                    .collect::<Result<Vec<_>, E>>()?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::JsonRecordFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args,
+                output_columns,
+                record_type,
+                with_ordinality,
+            } => SetReturningCall::JsonRecordFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args: args
+                    .into_iter()
+                    .map(|arg| map(arg))
+                    .collect::<Result<Vec<_>, E>>()?,
+                output_columns,
+                record_type,
+                with_ordinality,
+            },
+            SetReturningCall::RegexTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::RegexTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args: args
+                    .into_iter()
+                    .map(|arg| map(arg))
+                    .collect::<Result<Vec<_>, E>>()?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::StringTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::StringTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args: args
+                    .into_iter()
+                    .map(|arg| map(arg))
+                    .collect::<Result<Vec<_>, E>>()?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::TextSearchTableFunction {
+                kind,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::TextSearchTableFunction {
+                kind,
+                args: args
+                    .into_iter()
+                    .map(|arg| map(arg))
+                    .collect::<Result<Vec<_>, E>>()?,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::UserDefined {
+                proc_oid,
+                function_name,
+                func_variadic,
+                args,
+                inlined_expr,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::UserDefined {
+                proc_oid,
+                function_name,
+                func_variadic,
+                args: args
+                    .into_iter()
+                    .map(|arg| map(arg))
+                    .collect::<Result<Vec<_>, E>>()?,
+                inlined_expr: inlined_expr
+                    .map(|expr| map(*expr).map(Box::new))
+                    .transpose()?,
+                output_columns,
+                with_ordinality,
+            },
         })
     }
 }
 
 fn try_map_sql_json_table_exprs<E>(
     table: SqlJsonTable,
-    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+    map: &mut dyn FnMut(Expr) -> Result<Expr, E>,
 ) -> Result<SqlJsonTable, E> {
     Ok(SqlJsonTable {
         context: map(table.context)?,
@@ -1858,7 +2178,7 @@ fn try_map_sql_json_table_exprs<E>(
 
 fn try_map_sql_json_table_column_kind<E>(
     kind: SqlJsonTableColumnKind,
-    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+    map: &mut dyn FnMut(Expr) -> Result<Expr, E>,
 ) -> Result<SqlJsonTableColumnKind, E> {
     Ok(match kind {
         SqlJsonTableColumnKind::Ordinality => SqlJsonTableColumnKind::Ordinality,
@@ -1895,7 +2215,7 @@ fn try_map_sql_json_table_column_kind<E>(
 
 fn try_map_sql_json_behavior<E>(
     behavior: SqlJsonTableBehavior,
-    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+    map: &mut dyn FnMut(Expr) -> Result<Expr, E>,
 ) -> Result<SqlJsonTableBehavior, E> {
     Ok(match behavior {
         SqlJsonTableBehavior::Default(expr) => SqlJsonTableBehavior::Default(map(expr)?),
@@ -1905,7 +2225,7 @@ fn try_map_sql_json_behavior<E>(
 
 fn map_sql_json_table_exprs(
     table: SqlJsonTable,
-    map: &mut impl FnMut(Expr) -> Expr,
+    map: &mut dyn FnMut(Expr) -> Expr,
 ) -> SqlJsonTable {
     SqlJsonTable {
         context: map(table.context),
@@ -1936,7 +2256,7 @@ fn map_sql_json_table_exprs(
 
 fn map_sql_json_table_column_kind(
     kind: SqlJsonTableColumnKind,
-    map: &mut impl FnMut(Expr) -> Expr,
+    map: &mut dyn FnMut(Expr) -> Expr,
 ) -> SqlJsonTableColumnKind {
     match kind {
         SqlJsonTableColumnKind::Ordinality => SqlJsonTableColumnKind::Ordinality,
@@ -1973,7 +2293,7 @@ fn map_sql_json_table_column_kind(
 
 fn try_map_sql_xml_table_exprs<E>(
     table: SqlXmlTable,
-    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+    map: &mut dyn FnMut(Expr) -> Result<Expr, E>,
 ) -> Result<SqlXmlTable, E> {
     Ok(SqlXmlTable {
         namespaces: table
@@ -2005,7 +2325,7 @@ fn try_map_sql_xml_table_exprs<E>(
 
 fn try_map_sql_xml_table_column_kind<E>(
     kind: SqlXmlTableColumnKind,
-    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+    map: &mut dyn FnMut(Expr) -> Result<Expr, E>,
 ) -> Result<SqlXmlTableColumnKind, E> {
     Ok(match kind {
         SqlXmlTableColumnKind::Ordinality => SqlXmlTableColumnKind::Ordinality,
@@ -2021,7 +2341,7 @@ fn try_map_sql_xml_table_column_kind<E>(
     })
 }
 
-fn map_sql_xml_table_exprs(table: SqlXmlTable, map: &mut impl FnMut(Expr) -> Expr) -> SqlXmlTable {
+fn map_sql_xml_table_exprs(table: SqlXmlTable, map: &mut dyn FnMut(Expr) -> Expr) -> SqlXmlTable {
     SqlXmlTable {
         namespaces: table
             .namespaces
@@ -2048,7 +2368,7 @@ fn map_sql_xml_table_exprs(table: SqlXmlTable, map: &mut impl FnMut(Expr) -> Exp
 
 fn map_sql_xml_table_column_kind(
     kind: SqlXmlTableColumnKind,
-    map: &mut impl FnMut(Expr) -> Expr,
+    map: &mut dyn FnMut(Expr) -> Expr,
 ) -> SqlXmlTableColumnKind {
     match kind {
         SqlXmlTableColumnKind::Ordinality => SqlXmlTableColumnKind::Ordinality,
@@ -2909,6 +3229,13 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
 
 pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => items
+            .iter()
+            .flat_map(|item| match &item.source {
+                RowsFromSource::Function(call) => set_returning_call_exprs(call),
+                RowsFromSource::Project { output_exprs, .. } => output_exprs.iter().collect(),
+            })
+            .collect(),
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -2943,8 +3270,16 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
         | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
         | SetReturningCall::StringTableFunction { args, .. }
-        | SetReturningCall::TextSearchTableFunction { args, .. }
-        | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
+        | SetReturningCall::TextSearchTableFunction { args, .. } => args.iter().collect(),
+        SetReturningCall::UserDefined {
+            args, inlined_expr, ..
+        } => {
+            let mut exprs = args.iter().collect::<Vec<_>>();
+            if let Some(inlined_expr) = inlined_expr.as_deref() {
+                exprs.push(inlined_expr);
+            }
+            exprs
+        }
         SetReturningCall::SqlJsonTable(table) => {
             let mut exprs = Vec::with_capacity(1 + table.passing.len());
             exprs.push(&table.context);

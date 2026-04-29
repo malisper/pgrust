@@ -182,6 +182,7 @@ fn render_value(value: &Value) -> String {
         Value::Cidr(v) => v.render_cidr(),
         Value::MacAddr(v) => pgrust::backend::executor::render_macaddr_text(v),
         Value::MacAddr8(v) => pgrust::backend::executor::render_macaddr8_text(v),
+        Value::Tid(v) => format!("({},{})", v.block_number, v.offset_number),
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap().to_string(),
         Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),
@@ -265,6 +266,7 @@ fn print_plpgsql_notices() {
     for notice in take_notices() {
         let level = match notice.level {
             RaiseLevel::Info => "INFO",
+            RaiseLevel::Log => "LOG",
             RaiseLevel::Notice => "NOTICE",
             RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => "EXCEPTION",
@@ -508,9 +510,14 @@ fn run_statement(
         | Statement::CommentOnFunction(_)
         | Statement::CommentOnOperator(_)
         | Statement::CreateTrigger(_)
+        | Statement::CreateEventTrigger(_)
         | Statement::DropTrigger(_)
+        | Statement::DropEventTrigger(_)
         | Statement::AlterTableTriggerState(_)
         | Statement::AlterTriggerRename(_)
+        | Statement::AlterEventTrigger(_)
+        | Statement::AlterEventTriggerOwner(_)
+        | Statement::AlterEventTriggerRename(_)
         | Statement::CreateAggregate(_)
         | Statement::AlterAggregateRename(_)
         | Statement::DropAggregate(_)
@@ -518,6 +525,8 @@ fn run_statement(
         | Statement::AlterIndexSet(_)
         | Statement::AlterTableReset(_)
         | Statement::AlterTableSetPersistence(_)
+        | Statement::AlterTableSetTablespace(_)
+        | Statement::AlterMaterializedViewSetAccessMethod(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
         | Statement::DropStatistics(_)
@@ -582,6 +591,8 @@ fn run_statement(
             ))))
         }
         Statement::CommentOnRole(_)
+        | Statement::CommentOnDatabase(_)
+        | Statement::CommentOnEventTrigger(_)
         | Statement::CommentOnConversion(_)
         | Statement::CommentOnForeignDataWrapper(_)
         | Statement::CommentOnForeignServer(_)
@@ -895,6 +906,7 @@ fn run_statement(
                 pending_table_locks: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -957,6 +969,7 @@ fn run_statement(
                 pending_table_locks: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1019,6 +1032,7 @@ fn run_statement(
                 pending_table_locks: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1081,6 +1095,7 @@ fn run_statement(
                 pending_table_locks: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1251,6 +1266,7 @@ fn run_statement(
                 pending_table_locks: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1313,6 +1329,7 @@ fn run_statement(
                 pending_table_locks: Vec::new(),
                 catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                 scalar_function_cache: std::collections::HashMap::new(),
+                srf_rows_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1378,6 +1395,7 @@ fn run_statement(
                     pending_table_locks: Vec::new(),
                     catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1454,6 +1472,7 @@ fn run_statement(
                     pending_table_locks: Vec::new(),
                     catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1530,6 +1549,7 @@ fn run_statement(
                     pending_table_locks: Vec::new(),
                     catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(pgrust::pl::plpgsql::PlpgsqlFunctionCache::default())),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),

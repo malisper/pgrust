@@ -341,6 +341,7 @@ fn value_checksum(value: &Value) -> i64 {
                 field.name.bytes().map(i64::from).sum::<i64>() + value_checksum(value)
             })
             .sum(),
+        Value::Tid(v) => i64::from(v.block_number) + i64::from(v.offset_number),
         Value::Null => 0,
     }
 }

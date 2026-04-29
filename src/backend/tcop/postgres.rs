@@ -65,6 +65,9 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_sqlstate(&ExecError::Parse((**source).clone()))
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, .. }) => {
+            exec_error_sqlstate(&ExecError::Parse((**source).clone()))
+        }
         ExecError::Regex(err) => err.sqlstate,
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::XmlInput { sqlstate, .. } => sqlstate,
@@ -200,6 +203,9 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_detail_parse(source)
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, .. }) => {
+            exec_error_detail_parse(source)
+        }
         ExecError::Parse(
             crate::backend::parser::ParseError::InvalidPublicationParameterValue {
                 parameter, ..
@@ -244,6 +250,9 @@ fn exec_error_hint(e: &ExecError) -> Option<&str> {
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_hint_parse(source)
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, .. }) => {
+            exec_error_hint_parse(source)
+        }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { hint, .. }) => {
             hint.as_deref()
         }
@@ -273,6 +282,12 @@ fn exec_error_context(e: &ExecError) -> Option<String> {
         ExecError::JsonInput { context, .. } => context.clone(),
         ExecError::XmlInput { context, .. } => context.clone(),
         ExecError::Regex(err) => err.context.clone(),
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, context }) => {
+            match exec_error_context(&ExecError::Parse((**source).clone())) {
+                Some(inner) => Some(format!("{inner}\n{context}")),
+                None => Some(context.clone()),
+            }
+        }
         _ => None,
     }
 }
@@ -371,6 +386,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             actual, ..
         }) if actual == "positional argument cannot follow named argument" => {
             return find_positional_after_named_arg_position(sql);
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "function row description in FROM",
+            actual,
+        }) if is_function_coldeflist_error(actual) => {
+            return find_function_coldeflist_error_position(sql, actual);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(name)) => {
             return find_case_insensitive_token_position(sql, name);
@@ -2399,6 +2420,23 @@ fn find_token_after_case_insensitive_phrase(sql: &str, phrase: &str) -> Option<u
 fn find_publication_where_function_position(sql: &str) -> Option<usize> {
     let expression_position = find_publication_where_expression_position(sql)?;
     find_default_expr_identifier_position(sql, expression_position - 1, true)
+}
+
+fn is_function_coldeflist_error(message: &str) -> bool {
+    matches!(
+        message,
+        "a column definition list is required for functions returning \"record\""
+            | "a column definition list is redundant for a function with OUT parameters"
+            | "a column definition list is redundant for a function returning a named composite type"
+            | "a column definition list is only allowed for functions returning \"record\""
+    )
+}
+
+fn find_function_coldeflist_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message == "a column definition list is required for functions returning \"record\"" {
+        return find_token_after_case_insensitive_phrase(sql, "from");
+    }
+    sql.rfind('(').map(|index| index + 2)
 }
 
 fn find_nested_from_function_srf_position(sql: &str) -> Option<usize> {
@@ -9669,6 +9707,10 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
         crate::backend::parser::FromItem::FunctionCall { args, .. } => args
             .iter()
             .any(|arg| raw_expr_contains_pg_notify(&arg.value)),
+        crate::backend::parser::FromItem::RowsFrom { functions, .. } => functions
+            .iter()
+            .flat_map(|function| function.args.iter())
+            .any(|arg| raw_expr_contains_pg_notify(&arg.value)),
         crate::backend::parser::FromItem::JsonTable(table) => {
             raw_expr_contains_pg_notify(&table.context)
                 || table
@@ -9798,6 +9840,7 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
     match expr {
         crate::backend::parser::SqlExpr::Column(_)
         | crate::backend::parser::SqlExpr::Parameter(_)
+        | crate::backend::parser::SqlExpr::ParamRef(_)
         | crate::backend::parser::SqlExpr::Default
         | crate::backend::parser::SqlExpr::Const(_)
         | crate::backend::parser::SqlExpr::IntegerLiteral(_)

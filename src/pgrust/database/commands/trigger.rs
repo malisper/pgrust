@@ -1865,6 +1865,7 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
         }
         SqlExpr::Const(_)
         | SqlExpr::Default
+        | SqlExpr::ParamRef(_)
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::ScalarSubquery(_)

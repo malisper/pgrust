@@ -1172,6 +1172,7 @@ fn bind_select_list_srf_call(
                         function_name: other.to_string(),
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
+                        inlined_expr: None,
                         output_columns,
                         with_ordinality: false,
                     })

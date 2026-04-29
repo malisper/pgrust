@@ -105,6 +105,7 @@ fn render_value(value: &Value) -> String {
         Value::Cidr(v) => v.render_cidr(),
         Value::MacAddr(v) => pgrust::backend::executor::render_macaddr_text(v),
         Value::MacAddr8(v) => pgrust::backend::executor::render_macaddr8_text(v),
+        Value::Tid(v) => format!("({},{})", v.block_number, v.offset_number),
         Value::Text(v) => format!("{:?}", v),
         Value::TextRef(_, _) => format!("{:?}", value.as_text().unwrap()),
         Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),
@@ -231,6 +232,7 @@ fn main() -> Result<(), ExecError> {
         pending_table_locks: Vec::new(),
         catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             pgrust::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -256,6 +258,7 @@ fn main() -> Result<(), ExecError> {
     for notice in take_notices() {
         let level = match notice.level {
             RaiseLevel::Info => "INFO",
+            RaiseLevel::Log => "LOG",
             RaiseLevel::Notice => "NOTICE",
             RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => "EXCEPTION",

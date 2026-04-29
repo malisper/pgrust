@@ -372,6 +372,7 @@ fn ddl_executor_context(
         pending_table_locks: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: db.plpgsql_function_cache(client_id),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),

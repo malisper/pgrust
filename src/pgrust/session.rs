@@ -3161,6 +3161,7 @@ impl Session {
             subplans: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: Arc::clone(&self.plpgsql_function_cache),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -8036,6 +8037,27 @@ impl Session {
                     .map(|arg| Self::substitute_function_arg(arg, subst))
                     .collect::<Result<Vec<_>, _>>()?,
                 func_variadic: *func_variadic,
+                with_ordinality: *with_ordinality,
+            },
+            FromItem::RowsFrom {
+                functions,
+                with_ordinality,
+            } => FromItem::RowsFrom {
+                functions: functions
+                    .iter()
+                    .map(|function| {
+                        Ok(crate::backend::parser::RowsFromFunction {
+                            name: function.name.clone(),
+                            args: function
+                                .args
+                                .iter()
+                                .map(|arg| Self::substitute_function_arg(arg, subst))
+                                .collect::<Result<Vec<_>, _>>()?,
+                            func_variadic: function.func_variadic,
+                            column_definitions: function.column_definitions.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?,
                 with_ordinality: *with_ordinality,
             },
             FromItem::JsonTable(_) | FromItem::XmlTable(_) => from.clone(),

@@ -1150,6 +1150,7 @@ fn first_lateral_derived_table_alias_in_from_item(item: &FromItem) -> Option<&st
         FromItem::DerivedTable(select) => first_lateral_derived_table_alias_in_select(select),
         FromItem::Table { .. }
         | FromItem::Values { .. }
+        | FromItem::RowsFrom { .. }
         | FromItem::FunctionCall { .. }
         | FromItem::JsonTable(_)
         | FromItem::XmlTable(_) => None,
@@ -3551,6 +3552,8 @@ fn eval_exclusion_operator(proc_oid: u32, left: &Value, right: &Value) -> Result
             &[left.clone(), right.clone()],
             None,
             false,
+            None,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         )
     {
         return result;

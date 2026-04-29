@@ -5,6 +5,7 @@ use super::exec_expr::{
     eval_pg_identify_object_as_address,
 };
 use super::expr_casts::cast_value;
+use super::expr_math::eval_abs_function;
 use super::expr_ops::{add_values, compare_order_values, div_values, sub_values};
 use super::sqlfunc::{
     execute_user_defined_sql_scalar_function_values,
@@ -267,6 +268,7 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             [array, element] => append_array_value(array, element, false),
             _ => malformed_aggregate_support_call("array_append"),
         },
+        BuiltinScalarFunction::Abs => eval_abs_function(arg_values),
         BuiltinScalarFunction::ArrayLarger => match arg_values {
             [left, right] => {
                 if matches!(left, Value::Null) || matches!(right, Value::Null) {

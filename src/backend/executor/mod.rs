@@ -567,6 +567,7 @@ pub struct ExecutorContext {
     pub pending_table_locks: Vec<RelFileLocator>,
     pub catalog: Option<ExecutorCatalog>,
     pub scalar_function_cache: HashMap<u32, ScalarFunctionCallInfo>,
+    pub srf_rows_cache: HashMap<String, Vec<TupleSlot>>,
     pub plpgsql_function_cache: Arc<parking_lot::RwLock<PlpgsqlFunctionCache>>,
     pub pinned_cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,

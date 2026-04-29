@@ -10,17 +10,20 @@ use crate::backend::executor::{
     set_returning_call_label,
 };
 use crate::backend::parser::CatalogLookup;
-use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
+use crate::include::catalog::{
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PUBLIC_NAMESPACE_OID,
+    builtin_aggregate_function_for_proc_oid,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, INNER_VAR, JoinType, OUTER_VAR, ParamKind,
-    ProjectSetTarget, QueryColumn, ScalarFunctionImpl, SetReturningCall, SqlJsonTable,
-    SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePlan,
-    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind, SubPlan,
-    TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind, attrno_index,
-    set_returning_call_exprs, user_attrno,
+    ProjectSetTarget, QueryColumn, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
+    SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind,
+    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind,
+    SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind, attrno_index,
+    expr_sql_type_hint, set_returning_call_exprs, user_attrno,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -390,6 +393,7 @@ pub(crate) fn format_verbose_explain_plan_with_catalog(
 ) {
     let ctx = VerboseExplainContext {
         type_names: collect_explain_type_names(plan, subplans, catalog),
+        function_names: collect_explain_function_names(plan, subplans, catalog),
         ..VerboseExplainContext::default()
     };
     format_verbose_explain_plan_with_context(plan, subplans, indent, show_costs, ctx, lines);
@@ -405,6 +409,7 @@ pub(crate) fn format_verbose_explain_plan_json_with_catalog(
     }
     let ctx = VerboseExplainContext {
         type_names: collect_explain_type_names(plan, subplans, catalog),
+        function_names: collect_explain_function_names(plan, subplans, catalog),
         ..VerboseExplainContext::default()
     };
     let mut lines = vec!["[".into(), "  {".into(), "    \"Plan\": {".into()];
@@ -738,7 +743,15 @@ fn format_explain_plan_with_subplans_inner(
 
     let state = executor_start(plan.clone());
     if verbose {
-        push_explain_plan_line(plan, state.as_ref(), indent, is_child, show_costs, lines);
+        push_explain_plan_line(
+            plan,
+            state.as_ref(),
+            indent,
+            is_child,
+            show_costs,
+            ctx,
+            lines,
+        );
         push_verbose_plan_details(plan, indent, ctx, lines);
     } else {
         push_explain_plan_state_line(
@@ -1092,6 +1105,19 @@ fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
 
 fn projection_targets_are_verbose_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
     let input_names = input.column_names();
+    if matches!(input, Plan::Append { .. } | Plan::MergeAppend { .. }) {
+        let input_columns = input.columns();
+        return targets.len() == input_names.len()
+            && targets.len() == input_columns.len()
+            && targets
+                .iter()
+                .zip(input_columns.iter())
+                .all(|(target, column)| {
+                    !target.resjunk
+                        && target.name == column.name
+                        && target.sql_type == column.sql_type
+                });
+    }
     targets.len() == input_names.len() && targets.iter().all(|target| !target.resjunk)
 }
 
@@ -2338,10 +2364,11 @@ fn push_explain_plan_line(
     indent: usize,
     is_child: bool,
     show_costs: bool,
+    ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_node_prefix(indent, is_child);
-    let label = verbose_plan_label(plan).unwrap_or_else(|| state.node_label());
+    let label = verbose_plan_label(plan, ctx).unwrap_or_else(|| state.node_label());
     push_explain_line(
         &format!("{prefix}{label}"),
         state.plan_info(),
@@ -2358,9 +2385,14 @@ fn explain_detail_prefix(indent: usize) -> String {
     }
 }
 
-fn verbose_plan_label(plan: &Plan) -> Option<String> {
+fn verbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
     match plan {
-        Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
+        Plan::Projection { input, .. }
+            if matches!(
+                input.as_ref(),
+                Plan::Result { .. } | Plan::Append { .. } | Plan::MergeAppend { .. }
+            ) =>
+        {
             Some("Result".into())
         }
         Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. } => {
@@ -2376,15 +2408,19 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
             *phase,
             accumulators.is_empty(),
         )),
+        Plan::NestedLoopJoin { .. } => Some("Nested Loop".into()),
+        Plan::HashJoin { .. } => Some("Hash Join".into()),
+        Plan::MergeJoin { .. } => Some("Merge Join".into()),
         Plan::SetOp { op, strategy, .. } => Some(set_op_plan_label(*op, *strategy)),
-        Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
-            Some("Result".into())
-        }
         Plan::FunctionScan {
             call, table_alias, ..
-        } => Some(verbose_function_scan_label(call, table_alias.as_deref())),
+        } => Some(verbose_function_scan_label(
+            call,
+            table_alias.as_deref(),
+            ctx,
+        )),
         Plan::SubqueryScan { scan_name, .. } => Some(match scan_name {
-            Some(scan_name) => format!("Subquery Scan on {scan_name}"),
+            Some(scan_name) => format!("Subquery Scan on {}", quote_explain_identifier(scan_name)),
             None => "Subquery Scan".into(),
         }),
         _ => None,
@@ -2467,7 +2503,7 @@ fn nonverbose_plan_label(
             SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
         ) =>
         {
-            Some(verbose_function_scan_label(call, None))
+            Some(verbose_function_scan_label(call, None, ctx))
         }
         Plan::FunctionScan {
             call,
@@ -2610,7 +2646,11 @@ fn scan_direction_label(direction: crate::include::access::relscan::ScanDirectio
     }
 }
 
-fn verbose_function_scan_label(call: &SetReturningCall, table_alias: Option<&str>) -> String {
+fn verbose_function_scan_label(
+    call: &SetReturningCall,
+    table_alias: Option<&str>,
+    ctx: &VerboseExplainContext,
+) -> String {
     if matches!(
         call,
         SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
@@ -2625,14 +2665,46 @@ fn verbose_function_scan_label(call: &SetReturningCall, table_alias: Option<&str
             None => format!("Table Function Scan on \"{name}\""),
         };
     }
-    let func = set_returning_call_label(call);
-    match table_alias.or_else(|| {
-        call.output_columns()
-            .first()
-            .map(|column| column.name.as_str())
-    }) {
-        Some(alias) => format!("Function Scan on pg_catalog.{func} {alias}"),
-        None => format!("Function Scan on pg_catalog.{func}"),
+    if matches!(
+        call,
+        SetReturningCall::UserDefined {
+            inlined_expr: Some(_),
+            ..
+        }
+    ) && let Some(alias) = table_alias
+    {
+        return format!("Function Scan on {alias}");
+    }
+    let func = verbose_function_scan_name(call, ctx);
+    match table_alias {
+        Some(alias) => format!("Function Scan on {func} {alias}"),
+        None => format!("Function Scan on {func}"),
+    }
+}
+
+fn verbose_function_scan_name(call: &SetReturningCall, ctx: &VerboseExplainContext) -> String {
+    match call {
+        SetReturningCall::UserDefined {
+            function_name,
+            inlined_expr: Some(_),
+            ..
+        } => function_name.clone(),
+        SetReturningCall::UserDefined {
+            proc_oid,
+            function_name,
+            ..
+        } => ctx
+            .function_names
+            .get(proc_oid)
+            .cloned()
+            .unwrap_or_else(|| {
+                if function_name.contains('.') {
+                    function_name.clone()
+                } else {
+                    format!("public.{function_name}")
+                }
+            }),
+        _ => format!("pg_catalog.{}", set_returning_call_label(call)),
     }
 }
 
@@ -2658,7 +2730,14 @@ fn verbose_function_scan_output_exprs(
             })
             .collect();
     }
-    call.output_columns()
+    let output_columns = call.output_columns();
+    if matches!(call, SetReturningCall::UserDefined { .. }) && output_columns.len() > 1 {
+        return output_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+    }
+    output_columns
         .iter()
         .map(|column| match table_alias {
             Some(alias) => format!("{alias}.{}", column.name),
@@ -2715,12 +2794,20 @@ fn push_verbose_projected_scan_plan(
     let output = targets
         .iter()
         .filter(|target| !target.resjunk)
-        .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+        .map(|target| {
+            if matches!(input.as_ref(), Plan::FunctionScan { .. })
+                && let Expr::Cast(inner, _) = &target.expr
+            {
+                render_verbose_expr(inner, &input_names, ctx)
+            } else {
+                render_verbose_expr(&target.expr, &input_names, ctx)
+            }
+        })
         .collect::<Vec<_>>();
     if !output.is_empty() {
         lines.push(format!("{detail_prefix}Output: {}", output.join(", ")));
     }
-    push_verbose_scan_details(input, indent, &input_names, lines);
+    push_verbose_scan_details(input, indent, &input_names, ctx, lines);
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
     true
 }
@@ -2734,22 +2821,84 @@ fn push_verbose_projected_join_plan(
     ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) -> bool {
-    let Some((input, output)) = projected_join_for_explain(plan, ctx) else {
+    let Plan::Projection { input, targets, .. } = plan else {
         return false;
     };
-
-    let state = executor_start((*input).clone());
-    push_explain_plan_line(input, state.as_ref(), indent, is_child, show_costs, lines);
-    if !output.is_empty() {
-        lines.push(format!(
-            "{}Output: {}",
-            explain_detail_prefix(indent),
-            output.join(", ")
-        ));
+    if targets.iter().any(|target| target.resjunk) {
+        return false;
     }
-    push_verbose_join_filter_details(input, indent, ctx, lines);
+
+    if plan_contains_sql_table_function(input) && !projected_join_can_display_as_join(input) {
+        let state = executor_start((**input).clone());
+        push_explain_plan_line(
+            input,
+            state.as_ref(),
+            indent,
+            is_child,
+            show_costs,
+            ctx,
+            lines,
+        );
+        let input_names = plan_join_output_exprs(input, ctx, true);
+        let output = targets
+            .iter()
+            .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+            .collect::<Vec<_>>();
+        if !output.is_empty() {
+            lines.push(format!(
+                "{}Output: {}",
+                explain_detail_prefix(indent),
+                output.join(", ")
+            ));
+        }
+        push_verbose_join_filter_details(input, indent, ctx, lines);
+        push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
+        explain_plan_children_with_context(input, subplans, indent, show_costs, true, ctx, lines);
+        return true;
+    }
+
+    if !projected_join_can_display_as_join(input) {
+        return false;
+    }
+
+    let state = executor_start((**input).clone());
+    let prefix = explain_node_prefix(indent, is_child);
+    let Some(label) = verbose_plan_label(input, ctx) else {
+        return false;
+    };
+    push_explain_line(
+        &format!("{prefix}{label}"),
+        state.plan_info(),
+        show_costs,
+        lines,
+    );
+
+    let detail_prefix = explain_detail_prefix(indent);
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let whole_row_field = projected_join_whole_row_field(input, targets, ctx);
+    let output = if let Some((qualifier, field)) = &whole_row_field {
+        vec![format!("(({}.*).{})", qualifier, field)]
+    } else {
+        targets
+            .iter()
+            .filter(|target| !target.resjunk)
+            .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+            .collect::<Vec<_>>()
+    };
+    if !output.is_empty() {
+        lines.push(format!("{detail_prefix}Output: {}", output.join(", ")));
+    }
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
-    explain_plan_children_with_context(input, subplans, indent, show_costs, true, ctx, lines);
+    let child_ctx = if let Some(whole_row_field) = whole_row_field {
+        let mut child_ctx = ctx.clone();
+        child_ctx.whole_row_field_output = Some(whole_row_field);
+        child_ctx
+    } else {
+        ctx.clone()
+    };
+    explain_plan_children_with_context(
+        input, subplans, indent, show_costs, true, &child_ctx, lines,
+    );
     true
 }
 
@@ -2916,7 +3065,15 @@ fn push_verbose_filtered_function_scan_plan(
     }
 
     let state = executor_start((**input).clone());
-    push_explain_plan_line(input, state.as_ref(), indent, is_child, show_costs, lines);
+    push_explain_plan_line(
+        input,
+        state.as_ref(),
+        indent,
+        is_child,
+        show_costs,
+        ctx,
+        lines,
+    );
     push_verbose_plan_details(input, indent, ctx, lines);
     let input_names = verbose_plan_output_exprs(input, ctx, true);
     lines.push(format!(
@@ -2927,16 +3084,57 @@ fn push_verbose_filtered_function_scan_plan(
     true
 }
 
-fn projection_targets_are_verbose_scan_projection(
+fn projected_join_can_display_as_join(input: &Plan) -> bool {
+    match input {
+        Plan::NestedLoopJoin {
+            join_qual, qual, ..
+        }
+        | Plan::HashJoin {
+            join_qual, qual, ..
+        }
+        | Plan::MergeJoin {
+            join_qual, qual, ..
+        } => join_qual.is_empty() && qual.is_empty(),
+        _ => false,
+    }
+}
+
+fn projected_join_whole_row_field(
     input: &Plan,
     targets: &[TargetEntry],
     ctx: &VerboseExplainContext,
+) -> Option<(String, String)> {
+    let Plan::NestedLoopJoin { right, .. } = input else {
+        return None;
+    };
+    if matches!(right.as_ref(), Plan::FunctionScan { .. }) {
+        return None;
+    }
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let rendered = targets
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+        .collect::<Vec<_>>();
+    let [single] = rendered.as_slice() else {
+        return None;
+    };
+    let (qualifier, field) = single.split_once('.')?;
+    Some((qualifier.to_string(), field.to_string()))
+}
+
+fn projection_targets_are_verbose_scan_projection(
+    input: &Plan,
+    targets: &[TargetEntry],
+    _ctx: &VerboseExplainContext,
 ) -> bool {
     matches!(
         input,
-        Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. }
+        Plan::SeqScan { .. }
+            | Plan::IndexOnlyScan { .. }
+            | Plan::IndexScan { .. }
+            | Plan::FunctionScan { .. }
     ) && targets.iter().all(|target| !target.resjunk)
-        && (ctx.scan_output_override.is_some() || targets.len() > input.column_names().len())
 }
 
 fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {
@@ -2956,6 +3154,9 @@ fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {
             desc,
             ..
         } => qualified_base_scan_output_exprs(relation_name, desc),
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => verbose_function_scan_output_exprs(call, table_alias.as_deref()),
         _ => Vec::new(),
     }
 }
@@ -2964,6 +3165,7 @@ fn push_verbose_scan_details(
     input: &Plan,
     indent: usize,
     key_column_names: &[String],
+    ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_detail_prefix(indent);
@@ -2993,6 +3195,12 @@ fn push_verbose_scan_details(
             if let Some(detail) = render_index_order_by(order_by_keys, desc, index_meta) {
                 lines.push(format!("{prefix}Order By: ({detail})"));
             }
+        }
+        Plan::FunctionScan { call, .. } => {
+            lines.push(format!(
+                "{prefix}Function Call: {}",
+                render_verbose_set_returning_call(call, ctx)
+            ));
         }
         _ => {}
     }
@@ -3048,6 +3256,13 @@ fn verbose_scan_plan_label(input: &Plan) -> Option<String> {
                 verbose_relation_name(relation_name)
             ))
         }
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => Some(verbose_function_scan_label(
+            call,
+            table_alias.as_deref(),
+            &VerboseExplainContext::default(),
+        )),
         _ => None,
     }
 }
@@ -3064,6 +3279,8 @@ fn verbose_relation_name(relation_name: &str) -> String {
 struct VerboseExplainContext {
     exec_params: Vec<VerboseExecParam>,
     scan_output_override: Option<Vec<String>>,
+    whole_row_field_output: Option<(String, String)>,
+    setop_raw_numeric_outputs: bool,
     values_scan_name: Option<String>,
     function_scan_alias: Option<String>,
     relation_scan_alias: Option<String>,
@@ -3071,6 +3288,7 @@ struct VerboseExplainContext {
     preserve_partition_child_aliases: bool,
     alias_through_aggregate_children: bool,
     type_names: BTreeMap<u32, String>,
+    function_names: BTreeMap<u32, String>,
 }
 
 #[derive(Clone)]
@@ -3091,6 +3309,85 @@ fn collect_explain_type_names(
         collect_plan_type_names(subplan, catalog, &mut type_names);
     }
     type_names
+}
+
+fn collect_explain_function_names(
+    plan: &Plan,
+    subplans: &[Plan],
+    catalog: &dyn CatalogLookup,
+) -> BTreeMap<u32, String> {
+    let mut function_names = BTreeMap::new();
+    collect_plan_function_names(plan, catalog, &mut function_names);
+    for subplan in subplans {
+        collect_plan_function_names(subplan, catalog, &mut function_names);
+    }
+    function_names
+}
+
+fn collect_plan_function_names(
+    plan: &Plan,
+    catalog: &dyn CatalogLookup,
+    function_names: &mut BTreeMap<u32, String>,
+) {
+    if let Plan::FunctionScan { call, .. } = plan {
+        collect_call_function_names(call, catalog, function_names);
+    }
+    for child in direct_plan_children(plan) {
+        collect_plan_function_names(child, catalog, function_names);
+    }
+}
+
+fn collect_call_function_names(
+    call: &SetReturningCall,
+    catalog: &dyn CatalogLookup,
+    function_names: &mut BTreeMap<u32, String>,
+) {
+    match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                if let RowsFromSource::Function(call) = &item.source {
+                    collect_call_function_names(call, catalog, function_names);
+                }
+            }
+        }
+        SetReturningCall::UserDefined {
+            proc_oid,
+            function_name,
+            ..
+        } => {
+            let display_name = catalog
+                .proc_row_by_oid(*proc_oid)
+                .map(|row| verbose_user_function_name(catalog, row))
+                .unwrap_or_else(|| function_name.clone());
+            function_names.insert(*proc_oid, display_name);
+        }
+        _ => {}
+    }
+}
+
+fn verbose_user_function_name(
+    catalog: &dyn CatalogLookup,
+    row: crate::include::catalog::PgProcRow,
+) -> String {
+    let namespace_oid = row.pronamespace;
+    let function_name = row.proname;
+    if row.prolang == PG_LANGUAGE_SQL_OID && (row.proisstrict || row.provolatile != 'i') {
+        return format!("public.{function_name}");
+    }
+    if namespace_oid == PG_CATALOG_NAMESPACE_OID {
+        return function_name;
+    }
+    let schema_name = catalog
+        .namespace_row_by_oid(namespace_oid)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| namespace_oid.to_string());
+    if namespace_oid == PUBLIC_NAMESPACE_OID {
+        format!("public.{function_name}")
+    } else if schema_name.starts_with("pg_temp_") {
+        function_name
+    } else {
+        format!("{schema_name}.{function_name}")
+    }
 }
 
 fn collect_plan_type_names(
@@ -3115,6 +3412,9 @@ fn collect_plan_type_names(
         for column in call.output_columns() {
             collect_sql_type_name(column.sql_type, catalog, type_names);
         }
+        for expr in crate::include::nodes::primnodes::set_returning_call_exprs(call) {
+            collect_expr_type_names(expr, catalog, type_names);
+        }
         if let SetReturningCall::SqlJsonTable(table) = call {
             for column in &table.columns {
                 collect_sql_type_name(column.sql_type, catalog, type_names);
@@ -3126,8 +3426,60 @@ fn collect_plan_type_names(
             }
         }
     }
+    if let Plan::Projection { targets, .. } = plan {
+        for target in targets {
+            collect_sql_type_name(target.sql_type, catalog, type_names);
+            collect_expr_type_names(&target.expr, catalog, type_names);
+        }
+    }
     for child in direct_plan_children(plan) {
         collect_plan_type_names(child, catalog, type_names);
+    }
+}
+
+fn collect_expr_type_names(
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+    type_names: &mut BTreeMap<u32, String>,
+) {
+    if let Some(sql_type) = expr_sql_type_hint(expr) {
+        collect_sql_type_name(sql_type, catalog, type_names);
+    }
+    match expr {
+        Expr::Const(Value::Record(record)) => {
+            collect_sql_type_name(record.sql_type(), catalog, type_names);
+        }
+        Expr::Cast(inner, sql_type) => {
+            collect_sql_type_name(*sql_type, catalog, type_names);
+            collect_expr_type_names(inner, catalog, type_names);
+        }
+        Expr::Row { descriptor, fields } => {
+            collect_sql_type_name(descriptor.sql_type(), catalog, type_names);
+            for (_, field) in fields {
+                collect_expr_type_names(field, catalog, type_names);
+            }
+        }
+        Expr::FieldSelect {
+            expr, field_type, ..
+        } => {
+            collect_sql_type_name(*field_type, catalog, type_names);
+            collect_expr_type_names(expr, catalog, type_names);
+        }
+        Expr::Func(func) => {
+            if let Some(result_type) = func.funcresulttype {
+                collect_sql_type_name(result_type, catalog, type_names);
+            }
+            for arg in &func.args {
+                collect_expr_type_names(arg, catalog, type_names);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            collect_sql_type_name(srf.sql_type, catalog, type_names);
+            for expr in crate::include::nodes::primnodes::set_returning_call_exprs(&srf.call) {
+                collect_expr_type_names(expr, catalog, type_names);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3160,12 +3512,20 @@ fn push_verbose_plan_details(
 
     match plan {
         Plan::OrderBy { input, items, .. } => {
-            let input_names = verbose_plan_output_exprs(input, ctx, true);
-            let sort_key = items
-                .iter()
-                .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let sort_key = if let Some(outputs) = setop_constant_child_outputs(plan, ctx) {
+                outputs
+                    .into_iter()
+                    .map(|output| format!("({output})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                let input_names = verbose_plan_output_exprs(input, ctx, true);
+                items
+                    .iter()
+                    .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             if !sort_key.is_empty() {
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
             }
@@ -3456,6 +3816,17 @@ fn explain_plan_children_with_context(
             nest_params,
             ..
         } => {
+            let whole_row_field = ctx
+                .whole_row_field_output
+                .clone()
+                .or_else(|| nested_loop_whole_row_field(plan, ctx));
+            let left_ctx = if let Some((qualifier, _)) = &whole_row_field {
+                let mut left_ctx = ctx.clone();
+                left_ctx.scan_output_override = Some(vec![format!("{qualifier}.*")]);
+                left_ctx
+            } else {
+                ctx.clone()
+            };
             format_explain_plan_with_subplans_inner(
                 left,
                 subplans,
@@ -3464,14 +3835,15 @@ fn explain_plan_children_with_context(
                 verbose,
                 true,
                 false,
-                ctx,
+                &left_ctx,
                 lines,
             );
             let mut right_ctx = ctx.clone();
+            right_ctx.whole_row_field_output = whole_row_field;
             let left_names = if verbose {
-                verbose_plan_output_exprs(left, ctx, true)
+                verbose_plan_output_exprs(left, &left_ctx, true)
             } else {
-                plan_join_output_exprs(left, ctx, true)
+                plan_join_output_exprs(left, &left_ctx, true)
             };
             right_ctx
                 .exec_params
@@ -3598,7 +3970,7 @@ fn explain_plan_children_with_context(
                 matches!(plan, Plan::Append { .. } | Plan::MergeAppend { .. })
                     && !ctx.preserve_partition_child_aliases;
             for child in direct_plan_children(plan) {
-                let child_ctx = context_for_sibling_scan(
+                let mut child_ctx = context_for_sibling_scan(
                     ctx,
                     child,
                     &mut values_seen,
@@ -3606,6 +3978,12 @@ fn explain_plan_children_with_context(
                     &mut relations_seen,
                     reserve_append_parent_alias,
                 );
+                if matches!(plan, Plan::Append { .. } | Plan::MergeAppend { .. })
+                    && let Plan::Append { children, .. } | Plan::MergeAppend { children, .. } = plan
+                    && append_children_are_constant_results(children)
+                {
+                    child_ctx.setop_raw_numeric_outputs = true;
+                }
                 format_explain_plan_with_subplans_inner(
                     child,
                     subplans,
@@ -4383,8 +4761,134 @@ fn verbose_display_output_exprs(
             .scan_output_override
             .clone()
             .unwrap_or_else(|| verbose_plan_output_exprs(plan, ctx, for_parent_ref)),
+        Plan::ProjectSet { input, targets, .. } if !for_parent_ref => {
+            let input_names = verbose_plan_output_exprs(input, ctx, true);
+            targets
+                .iter()
+                .map(|target| match target {
+                    ProjectSetTarget::Scalar(entry) => {
+                        render_verbose_expr(&entry.expr, &input_names, ctx)
+                    }
+                    ProjectSetTarget::Set { source_expr, .. } => {
+                        render_verbose_expr(source_expr, &input_names, ctx)
+                    }
+                })
+                .collect()
+        }
+        Plan::Unique { .. } | Plan::OrderBy { .. }
+            if !for_parent_ref && let Some(outputs) = setop_constant_child_outputs(plan, ctx) =>
+        {
+            outputs
+                .into_iter()
+                .map(|output| format!("({output})"))
+                .collect()
+        }
+        Plan::NestedLoopJoin { .. }
+            if !for_parent_ref
+                && let Some((qualifier, field)) = nested_loop_whole_row_field(plan, ctx) =>
+        {
+            vec![format!("(({}.*).{})", qualifier, field)]
+        }
+        Plan::Projection { input, .. }
+            if !for_parent_ref
+                && matches!(input.as_ref(), Plan::Result { .. })
+                && let Some((qualifier, field)) = &ctx.whole_row_field_output =>
+        {
+            vec![format!("({qualifier}.*).{field}")]
+        }
+        Plan::Projection { input, targets, .. }
+            if !for_parent_ref
+                && matches!(
+                    input.as_ref(),
+                    Plan::Append { .. } | Plan::MergeAppend { .. }
+                ) =>
+        {
+            let output = append_first_child_output(input, ctx).unwrap_or_else(|| {
+                let input_names = verbose_plan_output_exprs(input, ctx, true);
+                targets
+                    .iter()
+                    .filter(|target| !target.resjunk)
+                    .map(|target| render_verbose_target_expr(target, &input_names, ctx))
+                    .collect::<Vec<_>>()
+            });
+            if output.len() == 1 {
+                vec![format!("({})", output[0])]
+            } else {
+                output
+            }
+        }
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. }
+            if !for_parent_ref && append_children_are_constant_results(children) =>
+        {
+            Vec::new()
+        }
         _ => verbose_plan_output_exprs(plan, ctx, for_parent_ref),
     }
+}
+
+fn append_children_are_constant_results(children: &[Plan]) -> bool {
+    !children.is_empty() && children.iter().all(plan_is_constant_result)
+}
+
+fn plan_is_constant_result(plan: &Plan) -> bool {
+    match plan {
+        Plan::Result { .. } => true,
+        Plan::Projection { input, .. } => plan_is_constant_result(input),
+        _ => false,
+    }
+}
+
+fn append_first_child_output(input: &Plan, ctx: &VerboseExplainContext) -> Option<Vec<String>> {
+    match input {
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => children
+            .first()
+            .map(|child| verbose_display_output_exprs(child, ctx, false)),
+        _ => None,
+    }
+}
+
+fn setop_constant_child_outputs(plan: &Plan, ctx: &VerboseExplainContext) -> Option<Vec<String>> {
+    match plan {
+        Plan::Unique { input, .. } | Plan::OrderBy { input, .. } => {
+            setop_constant_child_outputs(input, ctx)
+        }
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            let first = children.first()?;
+            let mut child_ctx = ctx.clone();
+            child_ctx.setop_raw_numeric_outputs = true;
+            let output = verbose_display_output_exprs(first, &child_ctx, false);
+            (!output.is_empty()).then_some(output)
+        }
+        _ => None,
+    }
+}
+
+fn trim_numeric_fraction_zeros(value: &str) -> &str {
+    let Some((whole, fraction)) = value.split_once('.') else {
+        return value;
+    };
+    let trimmed = fraction.trim_end_matches('0');
+    if trimmed.is_empty() {
+        whole
+    } else {
+        let keep = whole.len() + 1 + trimmed.len();
+        &value[..keep]
+    }
+}
+
+fn nested_loop_whole_row_field(
+    plan: &Plan,
+    ctx: &VerboseExplainContext,
+) -> Option<(String, String)> {
+    if !matches!(plan, Plan::NestedLoopJoin { .. }) {
+        return None;
+    }
+    let output = plan_join_output_exprs(plan, ctx, false);
+    let [single] = output.as_slice() else {
+        return None;
+    };
+    let (qualifier, field) = single.split_once('.')?;
+    Some((qualifier.to_string(), field.to_string()))
 }
 
 fn aggregate_child_output_exprs(
@@ -4473,7 +4977,7 @@ fn verbose_plan_output_exprs(
             targets
                 .iter()
                 .filter(|target| !target.resjunk)
-                .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+                .map(|target| render_verbose_target_expr(target, &input_names, ctx))
                 .collect()
         }
         Plan::Aggregate {
@@ -4571,11 +5075,33 @@ fn render_verbose_set_returning_call(
     call: &SetReturningCall,
     ctx: &VerboseExplainContext,
 ) -> String {
+    if let SetReturningCall::RowsFrom { items, .. } = call {
+        let rendered_items = items
+            .iter()
+            .map(|item| match &item.source {
+                RowsFromSource::Function(call) => render_verbose_set_returning_call(call, ctx),
+                RowsFromSource::Project { output_exprs, .. } => output_exprs
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &[], ctx))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("ROWS FROM({rendered_items})");
+    }
     if let SetReturningCall::SqlJsonTable(table) = call {
         return render_verbose_sql_json_table_call(table, ctx);
     }
     if let SetReturningCall::SqlXmlTable(table) = call {
         return render_verbose_sql_xml_table_call(table, ctx);
+    }
+    if let SetReturningCall::UserDefined {
+        inlined_expr: Some(expr),
+        ..
+    } = call
+    {
+        return render_verbose_function_arg(expr, ctx);
     }
     let name = set_returning_call_label(call);
     let args = match call {
@@ -4637,6 +5163,7 @@ fn render_verbose_set_returning_call(
         SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
             unreachable!("handled above")
         }
+        SetReturningCall::RowsFrom { .. } => unreachable!("handled above"),
     };
     format!("{name}({})", args.join(", "))
 }
@@ -4973,12 +5500,49 @@ fn append_verbose_sql_json_table_behavior(
 fn render_verbose_function_arg(expr: &Expr, ctx: &VerboseExplainContext) -> String {
     match expr {
         Expr::Cast(inner, _) => render_verbose_function_arg(inner, ctx),
-        Expr::Const(value) => render_verbose_function_const(value),
+        Expr::Const(value) => render_verbose_function_const(value, ctx),
         _ => render_verbose_expr(expr, &[], ctx),
     }
 }
 
-fn render_verbose_function_const(value: &Value) -> String {
+fn render_verbose_target_expr(
+    target: &TargetEntry,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = render_verbose_expr(&target.expr, column_names, ctx);
+    if ctx.setop_raw_numeric_outputs
+        && target.sql_type.kind == crate::backend::parser::SqlTypeKind::Numeric
+    {
+        return rendered
+            .split_once("::")
+            .map(|(base, _)| trim_numeric_fraction_zeros(base).to_string())
+            .unwrap_or_else(|| trim_numeric_fraction_zeros(&rendered).to_string());
+    }
+    if matches!(target.expr, Expr::Const(_))
+        && target.sql_type.kind == crate::backend::parser::SqlTypeKind::Numeric
+        && target.sql_type.typmod >= crate::backend::parser::SqlType::VARHDRSZ
+    {
+        return format!("{rendered}::{}", render_type_name(target.sql_type, ctx));
+    }
+    rendered
+}
+
+fn render_verbose_record_const(
+    record: &crate::include::nodes::datum::RecordValue,
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered =
+        crate::backend::executor::value_io::format_record_text(record).replace('\'', "''");
+    let record_type = record.sql_type();
+    if record_type.type_oid != crate::include::catalog::RECORD_TYPE_OID {
+        format!("'{rendered}'::{}", render_type_name(record_type, ctx))
+    } else {
+        format!("'{rendered}'::record")
+    }
+}
+
+fn render_verbose_function_const(value: &Value, ctx: &VerboseExplainContext) -> String {
     match value {
         Value::Int16(value) => value.to_string(),
         Value::Int32(value) => value.to_string(),
@@ -4991,8 +5555,51 @@ fn render_verbose_function_const(value: &Value) -> String {
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes)
             .map(|value| format!("'{}'::jsonb", value.replace('\'', "''")))
             .unwrap_or_else(|_| "'null'::jsonb".into()),
+        Value::Record(record) => render_verbose_record_const(record, ctx),
+        Value::Array(items) if items.iter().any(|item| matches!(item, Value::Jsonb(_))) => {
+            format!("'{}'::jsonb[]", render_verbose_jsonb_array(items))
+        }
+        Value::PgArray(array)
+            if array
+                .elements
+                .iter()
+                .any(|item| matches!(item, Value::Jsonb(_))) =>
+        {
+            format!("'{}'::jsonb[]", render_verbose_jsonb_array(&array.elements))
+        }
         _ => strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[])),
     }
+}
+
+fn render_verbose_jsonb_array(items: &[Value]) -> String {
+    let mut out = String::from("{");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let rendered = match item {
+            Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_else(|_| "null".into()),
+            Value::Null => {
+                out.push_str("NULL");
+                continue;
+            }
+            other => strip_outer_parens(&render_explain_expr(&Expr::Const(other.clone()), &[])),
+        };
+        out.push('"');
+        for ch in rendered.chars() {
+            match ch {
+                '"' | '\\' => {
+                    out.push('\\');
+                    out.push(ch);
+                }
+                '\'' => out.push_str("''"),
+                _ => out.push(ch),
+            }
+        }
+        out.push('"');
+    }
+    out.push('}');
+    out
 }
 
 fn render_verbose_agg_accum(
@@ -5069,9 +5676,7 @@ fn render_verbose_join_expr(
         Expr::FieldSelect {
             expr: inner, field, ..
         } => {
-            if let Expr::Row { fields, .. } = inner.as_ref()
-                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
-            {
+            if let Some(value) = field_select_projected_value(inner, field) {
                 return render_verbose_join_expr(value, left_names, right_names, ctx);
             }
             format!("{expr:?}")
@@ -5090,6 +5695,7 @@ fn render_verbose_join_expr(
         Expr::Param(param) if param.paramkind == ParamKind::External => {
             format!("${}", param.paramid)
         }
+        Expr::Const(Value::Record(record)) => render_verbose_record_const(record, ctx),
         Expr::Const(value) => {
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
@@ -5180,6 +5786,35 @@ fn render_verbose_join_expr(
     }
 }
 
+fn field_select_projected_value<'a>(inner: &'a Expr, field: &str) -> Option<&'a Expr> {
+    if let Expr::Row { fields, .. } = inner
+        && let Some((_, value)) = fields
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(field))
+    {
+        return Some(value);
+    }
+    let Expr::Case(case_expr) = inner else {
+        return None;
+    };
+    if case_expr.arg.is_some()
+        || case_expr.args.is_empty()
+        || !case_expr
+            .args
+            .iter()
+            .all(|arm| matches!(arm.result, Expr::Const(Value::Null)))
+    {
+        return None;
+    }
+    let Expr::Row { fields, .. } = case_expr.defresult.as_ref() else {
+        return None;
+    };
+    fields
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(field))
+        .map(|(_, value)| value)
+}
+
 fn render_verbose_expr(
     expr: &Expr,
     column_names: &[String],
@@ -5197,9 +5832,7 @@ fn render_verbose_expr(
         Expr::FieldSelect {
             expr: inner, field, ..
         } => {
-            if let Expr::Row { fields, .. } = inner.as_ref()
-                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
-            {
+            if let Some(value) = field_select_projected_value(inner, field) {
                 return render_verbose_expr(value, column_names, ctx);
             }
             strip_outer_parens(&render_explain_expr(expr, column_names))
@@ -5214,6 +5847,7 @@ fn render_verbose_expr(
         Expr::Param(param) if param.paramkind == ParamKind::External => {
             format!("${}", param.paramid)
         }
+        Expr::Const(Value::Record(record)) => render_verbose_record_const(record, ctx),
         Expr::Const(value) => {
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
@@ -5221,8 +5855,45 @@ fn render_verbose_expr(
             if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
                 return rendered;
             }
+            if let Expr::Const(value @ (Value::Text(_) | Value::TextRef(_, _))) = inner.as_ref()
+                && matches!(
+                    ty.kind,
+                    crate::backend::parser::SqlTypeKind::Varchar
+                        | crate::backend::parser::SqlTypeKind::Char
+                )
+            {
+                let rendered = match value {
+                    Value::Text(value) => format!("'{}'", value.replace('\'', "''")),
+                    Value::TextRef(_, _) => {
+                        format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
+                    }
+                    _ => unreachable!(),
+                };
+                return format!("{rendered}::{}", render_type_name(*ty, ctx));
+            }
             let inner = render_verbose_expr(inner, column_names, ctx);
             format!("({inner})::{}", render_type_name(*ty, ctx))
+        }
+        Expr::ArrayLiteral { .. } => strip_outer_parens(&render_explain_expr(expr, column_names)),
+        Expr::ArraySubscript { array, subscripts } => {
+            let array = render_verbose_expr(array, column_names, ctx);
+            let rendered_subscripts = subscripts
+                .iter()
+                .map(|subscript| match (&subscript.lower, &subscript.upper) {
+                    (Some(lower), Some(upper)) if subscript.is_slice => format!(
+                        "{}:{}",
+                        render_verbose_expr(lower, column_names, ctx),
+                        render_verbose_expr(upper, column_names, ctx)
+                    ),
+                    (Some(lower), _) => render_verbose_expr(lower, column_names, ctx),
+                    (None, Some(upper)) => {
+                        format!(":{}", render_verbose_expr(upper, column_names, ctx))
+                    }
+                    (None, None) => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("][");
+            format!("({array})[{rendered_subscripts}]")
         }
         Expr::Func(func)
             if matches!(
@@ -5280,6 +5951,7 @@ fn render_verbose_expr(
             }
         },
         Expr::Aggref(aggref) => render_verbose_aggref(aggref, column_names, ctx),
+        Expr::SetReturning(srf) => render_verbose_set_returning_call(&srf.call, ctx),
         Expr::ScalarArrayOp(_) => render_explain_expr(expr, column_names),
         _ => strip_outer_parens(&render_explain_expr(expr, column_names)),
     }
@@ -5421,6 +6093,8 @@ fn verbose_op_text(
         crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
+        crate::include::nodes::primnodes::OpExprKind::JsonGet => Some("->"),
+        crate::include::nodes::primnodes::OpExprKind::JsonGetText => Some("->>"),
         _ => None,
     }
 }
@@ -6154,6 +6828,20 @@ fn collect_direct_set_returning_call_subplans<'a>(
     out: &mut Vec<&'a SubPlan>,
 ) {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        collect_direct_set_returning_call_subplans(call, out);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            collect_direct_expr_subplans(expr, out);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,

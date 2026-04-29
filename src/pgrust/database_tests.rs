@@ -231,6 +231,7 @@ fn analyze_executor_context(
         pending_table_locks: Vec::new(),
         catalog: visible_catalog.map(crate::backend::executor::executor_catalog),
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -1026,6 +1027,358 @@ fn sql_set_returning_function_accepts_values_body() {
             vec![Value::Int32(10)],
         ],
     );
+}
+
+#[test]
+fn sql_set_returning_function_with_ordinality_has_declared_width() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table rf_ord(id int4, val int4)")
+        .expect("create table");
+    session
+        .execute(&db, "insert into rf_ord values (1, 11), (1, 111), (2, 22)")
+        .expect("seed table");
+    session
+        .execute(
+            &db,
+            "create function rf_ord_func(int4) returns setof rf_ord as \
+             'select * from rf_ord where id = $1 order by val' language sql",
+        )
+        .expect("create SQL SRF");
+
+    match session
+        .execute(
+            &db,
+            "select * from rf_ord_func(1) with ordinality as z(id, val, ord)",
+        )
+        .expect("execute SQL SRF with ordinality")
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["id", "val", "ord"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(11), Value::Int64(1)],
+                    vec![Value::Int32(1), Value::Int32(111), Value::Int64(2)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn rows_from_uncorrelated_items_are_cached_across_lateral_rescans() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create sequence rf_rows_from_seq")
+        .expect("create sequence");
+    session
+        .execute(
+            &db,
+            "create function rf_rows_from_once(int4, int4) returns setof int8 as \
+             $$ select nextval('rf_rows_from_seq') from generate_series($1, $2) $$ language sql volatile",
+        )
+        .expect("create SQL SRF");
+
+    match session
+        .execute(
+            &db,
+            "select r, a, b
+             from (values (1),(2),(3)) v(r),
+                  lateral rows from(rf_rows_from_once(11, 11), generate_series(10 + r, 13)) as x(a, b)",
+        )
+        .expect("execute mixed ROWS FROM")
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(1), Value::Int32(11)],
+                    vec![Value::Int32(1), Value::Null, Value::Int32(12)],
+                    vec![Value::Int32(1), Value::Null, Value::Int32(13)],
+                    vec![Value::Int32(2), Value::Int64(1), Value::Int32(12)],
+                    vec![Value::Int32(2), Value::Null, Value::Int32(13)],
+                    vec![Value::Int32(3), Value::Int64(1), Value::Int32(13)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn sql_scalar_function_executes_insert_returning_to_completion() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table rf_insert(id int4)")
+        .expect("create table");
+    session
+        .execute(
+            &db,
+            "create function rf_insert_one(int4) returns int4 as \
+             'insert into rf_insert values ($1), ($1 + 1) returning id' language sql",
+        )
+        .expect("create SQL insert function");
+
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select rf_insert_one(10)")
+            .expect("execute SQL insert function"),
+        vec![vec![Value::Int32(10)]],
+    );
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select id from rf_insert order by id")
+            .expect("select inserted rows"),
+        vec![vec![Value::Int32(10)], vec![Value::Int32(11)]],
+    );
+}
+
+#[test]
+fn sql_set_returning_function_executes_insert_returning_before_limit() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table rf_insert_srf(id int4)")
+        .expect("create table");
+    session
+        .execute(
+            &db,
+            "create function rf_insert_many(int4, int4) returns setof int4 as \
+             'insert into rf_insert_srf values ($1), ($2) returning id' language sql",
+        )
+        .expect("create SQL insert SRF");
+
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select rf_insert_many(20, 21) limit 1")
+            .expect("execute SQL insert SRF"),
+        vec![vec![Value::Int32(20)]],
+    );
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select id from rf_insert_srf order by id")
+            .expect("select inserted rows"),
+        vec![vec![Value::Int32(20)], vec![Value::Int32(21)]],
+    );
+}
+
+#[test]
+fn sql_scalar_function_with_multiple_out_parameters_returns_record_value() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function rf_out_pair(in a int4, out b int4, out c text) as \
+             'select $1 + 1, $1::text || ''z''' language sql",
+        )
+        .expect("create SQL OUT function");
+
+    match session
+        .execute(&db, "select rf_out_pair(41)")
+        .expect("execute scalar OUT function")
+    {
+        StatementResult::Query { rows, .. } => {
+            let Value::Record(record) = &rows[0][0] else {
+                panic!("expected record value, got {:?}", rows[0][0]);
+            };
+            assert_eq!(
+                record.fields,
+                vec![Value::Int32(42), Value::Text("41z".into())]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session
+        .execute(&db, "select * from rf_out_pair(41)")
+        .expect("execute OUT function as table")
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["b", "c"]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(42), Value::Text("41z".into())]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn sql_function_out_parameters_unpack_single_row_value() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function rf_out_row(out a integer, out b numeric) as \
+             $$ select (1, 2.1) $$ language sql",
+        )
+        .expect("create SQL OUT row function");
+
+    match session
+        .execute(&db, "select * from rf_out_row()")
+        .expect("execute SQL OUT row function")
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "b"]);
+            assert_eq!(rows[0][0], Value::Int32(1));
+            assert_eq!(rows[0][1], Value::Numeric("2.1".into()));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session
+        .execute(
+            &db,
+            "create or replace function rf_out_row(out a integer, out b numeric) as \
+             $$ select (1, 2) $$ language sql",
+        )
+        .expect("replace SQL OUT row function");
+    let err = session
+        .execute(&db, "select * from rf_out_row()")
+        .unwrap_err();
+    let formatted = crate::backend::libpq::pqformat::format_exec_error(&err);
+    assert_eq!(
+        formatted,
+        "function return row and query-specified return row do not match"
+    );
+}
+
+#[test]
+fn sql_polymorphic_out_function_resolves_anyelement_outputs() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function rf_dup(f1 anyelement, f2 out anyelement, f3 out anyarray) as \
+             'select $1, array[$1,$1]' language sql",
+        )
+        .expect("create polymorphic SQL OUT function");
+
+    match session
+        .execute(&db, "select * from rf_dup('xyz'::text)")
+        .expect("execute polymorphic SQL OUT function")
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["f2", "f3"]);
+            assert_eq!(rows[0][0], Value::Text("xyz".into()));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = session.execute(&db, "select rf_dup('xyz')").unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "could not determine polymorphic type because input has type unknown"
+    );
+
+    let err = session
+        .execute(
+            &db,
+            "create function rf_bad(f1 int4, f2 out anyelement, f3 out anyarray) as \
+             'select $1, array[$1,$1]' language sql",
+        )
+        .unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "cannot determine result data type"
+    );
+
+    session
+        .execute(
+            &db,
+            "create function rf_dup_compatible(
+                 f1 anycompatible,
+                 f2 anycompatiblearray,
+                 f3 out anycompatible,
+                 f4 out anycompatiblearray
+             ) as 'select $1, $2' language sql",
+        )
+        .expect("create anycompatible SQL OUT function");
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_typeof(f3)::text, pg_typeof(f4)::text
+             from rf_dup_compatible(22, array[44::bigint])",
+        ),
+        vec![vec![
+            Value::Text("bigint".into()),
+            Value::Text("bigint[]".into()),
+        ]]
+    );
+}
+
+#[test]
+fn sql_scalar_function_returning_composite_uses_first_row() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table rf_composite(id int4, label text)")
+        .expect("create table");
+    session
+        .execute(
+            &db,
+            "insert into rf_composite values (1, 'one'), (2, 'two')",
+        )
+        .expect("seed table");
+    session
+        .execute(
+            &db,
+            "create function rf_first_composite() returns rf_composite as \
+             'select * from rf_composite order by id' language sql",
+        )
+        .expect("create composite SQL function");
+
+    match session
+        .execute(&db, "select rf_first_composite()")
+        .expect("execute composite SQL function")
+    {
+        StatementResult::Query { rows, .. } => {
+            let Value::Record(record) = &rows[0][0] else {
+                panic!("expected record value, got {:?}", rows[0][0]);
+            };
+            assert_eq!(
+                record.fields,
+                vec![Value::Int32(1), Value::Text("one".into())]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session
+        .execute(&db, "select * from rf_first_composite()")
+        .expect("execute composite SQL function from FROM")
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("one".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
@@ -3356,6 +3709,45 @@ fn sql_cursor_fetch_move_close_and_cleanup() {
 
     session.execute(&db, "close c").unwrap();
     assert!(session.cursor_view_rows().is_empty());
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn scroll_cursor_backward_all_leaves_cursor_before_first() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c scroll cursor for select * from generate_series(1,3)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from c"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)]
+        ]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch backward all from c"),
+        vec![
+            vec![Value::Int32(3)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(1)]
+        ]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from c"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)]
+        ]
+    );
     session.execute(&db, "commit").unwrap();
 }
 
@@ -13024,13 +13416,13 @@ fn nested_views_and_pg_views_work() {
                 Value::Text("public".into()),
                 Value::Text("first_view".into()),
                 Value::Text("postgres".into()),
-                Value::Text("select id\n   from base_items".into()),
+                Value::Text(" SELECT id\n   FROM base_items;".into()),
             ],
             vec![
                 Value::Text("public".into()),
                 Value::Text("second_view".into()),
                 Value::Text("postgres".into()),
-                Value::Text("select id\n   from first_view".into()),
+                Value::Text(" SELECT id\n   FROM first_view;".into()),
             ],
         ]
     );
@@ -16042,6 +16434,116 @@ fn create_view_uses_created_schema_namespace() {
 }
 
 #[test]
+fn rows_from_view_tracks_composite_function_column_dependencies() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(1, "create table rf_dep_users(seq int4, moredrop int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function rf_dep_get_users() returns setof rf_dep_users language sql as \
+         $$ select * from rf_dep_users $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view rf_dep_usersview as \
+         select * from rows from(rf_dep_get_users(), generate_series(10, 11)) with ordinality",
+    )
+    .unwrap();
+    db.execute(1, "insert into rf_dep_users values (1, 2)")
+        .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select refobjsubid
+         from pg_depend
+         where objid = (
+             select oid from pg_rewrite
+             where ev_class = 'rf_dep_usersview'::regclass and rulename = '_RETURN'
+         )
+         and refobjid = 'rf_dep_users'::regclass
+         and refobjsubid > 0
+         order by refobjsubid",
+    );
+    assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+
+    db.execute(1, "alter table rf_dep_users add column junk text")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from rf_dep_usersview order by ordinality"),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(10),
+                Value::Int64(1),
+            ],
+            vec![Value::Null, Value::Null, Value::Int32(11), Value::Int64(2)],
+        ]
+    );
+}
+
+#[test]
+fn rows_from_view_reports_dropped_composite_attribute_after_lost_dependency() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    db.execute(
+        1,
+        "create table rf_drop_users(
+            userid text,
+            seq int4,
+            email text,
+            todrop bool,
+            moredrop int4,
+            enabled bool
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into rf_drop_users values ('id', 1, 'email', true, 11, true)",
+    )
+    .unwrap();
+    db.execute(1, "alter table rf_drop_users drop column todrop")
+        .unwrap();
+    db.execute(
+        1,
+        "create function rf_drop_get_users() returns setof rf_drop_users language sql as \
+         $$ select * from rf_drop_users order by userid $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view rf_drop_usersview as \
+         select * from rows from(rf_drop_get_users(), generate_series(10, 11)) with ordinality",
+    )
+    .unwrap();
+    db.execute(1, "alter table rf_drop_users add column junk text")
+        .unwrap();
+    db.execute(
+        1,
+        "delete from pg_depend where
+             objid = (
+                 select oid from pg_rewrite
+                 where ev_class = 'rf_drop_usersview'::regclass and rulename = '_RETURN'
+             )
+             and refobjid = 'rf_drop_users'::regclass
+             and refobjsubid = 5",
+    )
+    .unwrap();
+    db.execute(1, "alter table rf_drop_users drop column moredrop")
+        .unwrap();
+
+    match db.execute(1, "select * from rf_drop_usersview") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            if message == "attribute 5 of type record has been dropped" => {}
+        other => panic!("expected dropped attribute view error, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_table_upserts_and_clears_pg_description() {
     let base = temp_dir("comment_on_table");
     let db = Database::open(&base, 16).unwrap();
@@ -17439,6 +17941,39 @@ fn insert_rules_support_do_also_and_instead_nothing() {
             vec![Value::Int32(1)],
             vec![Value::Int32(2)],
             vec![Value::Int32(20)],
+        ]
+    );
+}
+
+#[test]
+fn insert_do_also_rule_reevaluates_new_default_expressions() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table items (id serial, name text)")
+        .unwrap();
+    db.execute(1, "create table item_log (id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule item_log_rule as on insert to items do also insert into item_log values (new.*)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items(name) values ('a'), ('b')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from items order by name"),
+        vec![
+            vec![Value::Int32(1), Value::Text("a".into())],
+            vec![Value::Int32(2), Value::Text("b".into())],
+        ]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from item_log order by name"),
+        vec![
+            vec![Value::Int32(3), Value::Text("a".into())],
+            vec![Value::Int32(4), Value::Text("b".into())],
         ]
     );
 }
