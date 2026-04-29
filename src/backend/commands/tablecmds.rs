@@ -1044,7 +1044,11 @@ fn push_delete_target_scan_lines(
             push_delete_single_target_scan(target, alias.as_deref(), show_costs, indent + 6, lines);
         }
     } else {
-        push_delete_single_target_scan(targets[0], None, show_costs, indent, lines);
+        let alias = targets[0]
+            .relation_name
+            .ne(&stmt.table_name)
+            .then(|| format!("{}_1", stmt.table_name.trim_matches('"')));
+        push_delete_single_target_scan(targets[0], alias.as_deref(), show_costs, indent, lines);
     }
 }
 
