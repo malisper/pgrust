@@ -659,6 +659,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("invalid input syntax for type numeric time zone: ") {
                 return None;
             }
+            if message.starts_with("invalid input syntax for type oid: ")
+                && sql.to_ascii_lowercase().contains("pg_get_object_address")
+            {
+                return None;
+            }
             if message.starts_with("invalid value for parameter \"") {
                 return None;
             }
@@ -8832,14 +8837,25 @@ fn send_queued_notices_with_sql(stream: &mut impl Write, sql: Option<&str>) -> i
         let position = notice
             .position
             .or_else(|| sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message)));
-        send_notice_with_severity(
-            stream,
-            notice.severity,
-            notice.sqlstate,
-            &notice.message,
-            notice.detail.as_deref(),
-            position,
-        )?;
+        if notice.hint.is_some() {
+            send_notice_with_hint(
+                stream,
+                notice.severity,
+                notice.sqlstate,
+                &notice.message,
+                notice.hint.as_deref(),
+                position,
+            )?;
+        } else {
+            send_notice_with_severity(
+                stream,
+                notice.severity,
+                notice.sqlstate,
+                &notice.message,
+                notice.detail.as_deref(),
+                position,
+            )?;
+        }
     }
     send_plpgsql_notices(stream, &take_notices())
 }

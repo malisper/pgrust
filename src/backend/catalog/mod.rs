@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod indexing;
 pub mod loader;
 pub mod namespace;
+pub mod object_address;
 pub mod persistence;
 pub mod pg_aggregate;
 pub mod pg_am;

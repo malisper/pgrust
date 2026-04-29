@@ -1430,12 +1430,15 @@ impl Database {
 
     pub(crate) fn execute_comment_on_domain_stmt_with_search_path(
         &self,
-        _client_id: ClientId,
+        client_id: ClientId,
         comment_stmt: &CommentOnDomainStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let (normalized, _, _) = self
-            .normalize_domain_name_for_create(&comment_stmt.domain_name, configured_search_path)?;
+        let (normalized, _, _) = self.normalize_domain_name_for_create(
+            client_id,
+            &comment_stmt.domain_name,
+            configured_search_path,
+        )?;
         let mut domains = self.domains.write();
         let Some(domain) = domains.get_mut(&normalized) else {
             return Err(ExecError::Parse(ParseError::UnsupportedType(

@@ -73,7 +73,7 @@ use crate::include::catalog::{
     XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
     bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows, bootstrap_pg_conversion_rows,
     bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_foreign_server_rows,
     bootstrap_pg_foreign_table_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
     bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
@@ -243,6 +243,8 @@ impl CatCache {
         }
         cache.cast_rows.extend(bootstrap_pg_cast_rows());
         sort_pg_cast_rows(&mut cache.cast_rows);
+        cache.conversion_rows.extend(bootstrap_pg_conversion_rows());
+        sort_pg_conversion_rows(&mut cache.conversion_rows);
         cache.collation_rows.extend(bootstrap_pg_collation_rows());
         sort_pg_collation_rows(&mut cache.collation_rows);
         cache
@@ -719,6 +721,15 @@ impl CatCache {
         cache.cast_rows = cast_rows;
         sort_pg_cast_rows(&mut cache.cast_rows);
         cache.conversion_rows = conversion_rows;
+        for row in bootstrap_pg_conversion_rows() {
+            if !cache
+                .conversion_rows
+                .iter()
+                .any(|existing| existing.oid == row.oid)
+            {
+                cache.conversion_rows.push(row);
+            }
+        }
         sort_pg_conversion_rows(&mut cache.conversion_rows);
         cache.collation_rows = collation_rows;
         sort_pg_collation_rows(&mut cache.collation_rows);
