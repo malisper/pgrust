@@ -5,6 +5,7 @@ use std::collections::HashMap;
 mod bestpath;
 mod constfold;
 mod groupby_rewrite;
+mod grouping_sets;
 mod inherit;
 mod joininfo;
 mod partition_cache;
