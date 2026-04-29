@@ -55,10 +55,12 @@ use crate::include::nodes::execnodes::{
     SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState, ValuesState, WindowAggState,
     WorkTableScanState,
 };
-use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, IndexScanKeyArgument};
+use crate::include::nodes::plannodes::{
+    AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument,
+};
 use crate::include::nodes::primnodes::{
-    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, OrderByEntry,
-    ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var, attrno_index,
+    AggAccum, BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
+    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var, attrno_index,
     is_special_varno,
 };
 use std::cell::RefCell;
@@ -5339,6 +5341,9 @@ impl PlanNode for FilterState {
         self.plan_info
     }
     fn node_label(&self) -> String {
+        if matches!(self.predicate, Expr::Const(Value::Bool(false))) {
+            return "Result".into();
+        }
         "Filter".into()
     }
     fn explain_details(
@@ -5349,6 +5354,10 @@ impl PlanNode for FilterState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
+        if matches!(self.predicate, Expr::Const(Value::Bool(false))) {
+            lines.push(format!("{prefix}One-Time Filter: false"));
+            return;
+        }
         lines.push(format!(
             "{prefix}Filter: {}",
             render_explain_expr(&self.predicate, self.column_names())
@@ -5368,6 +5377,9 @@ impl PlanNode for FilterState {
         timing: bool,
         lines: &mut Vec<String>,
     ) {
+        if matches!(self.predicate, Expr::Const(Value::Bool(false))) {
+            return;
+        }
         format_explain_lines_with_costs(
             &*self.input,
             indent + 1,
@@ -6698,6 +6710,7 @@ fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
 
 fn aggregate_uses_plain_fast_path(state: &AggregateState) -> bool {
     state.strategy == AggregateStrategy::Plain
+        && state.phase == AggregatePhase::Complete
         && !state.disabled
         && state.group_by.is_empty()
         && state.passthrough_exprs.is_empty()
@@ -6870,6 +6883,132 @@ fn execute_plain_aggregate_fast_path(
     )]))
 }
 
+fn new_aggregate_group(
+    key_values: Vec<Value>,
+    passthrough_values: Vec<Value>,
+    runtimes: &[AggregateRuntime],
+    accumulators: &[AggAccum],
+) -> AggGroup {
+    let accum_states = runtimes
+        .iter()
+        .zip(accumulators.iter())
+        .map(|(runtime, accum)| runtime.initialize_state(accum))
+        .collect();
+    AggGroup {
+        key_values,
+        passthrough_values,
+        accum_states,
+        distinct_inputs: accumulators
+            .iter()
+            .map(|accum| accum.distinct.then(HashSet::new))
+            .collect(),
+        direct_arg_values: vec![None; accumulators.len()],
+        ordered_inputs: vec![Vec::new(); accumulators.len()],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_aggregate_group(
+    group: &mut AggGroup,
+    accumulators: &[AggAccum],
+    runtimes: &[AggregateRuntime],
+    phase: AggregatePhase,
+    group_by_len: usize,
+    passthrough_len: usize,
+    outer_values: &[Value],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (i, accum) in accumulators.iter().enumerate() {
+        if phase == AggregatePhase::Finalize {
+            let partial_index = group_by_len + passthrough_len + i;
+            let partial = outer_values
+                .get(partial_index)
+                .cloned()
+                .unwrap_or(Value::Null);
+            runtimes[i].combine_partial(accum, &mut group.accum_states[i], &partial, ctx)?;
+            continue;
+        }
+        if group.direct_arg_values[i].is_none() && !accum.direct_args.is_empty() {
+            group.direct_arg_values[i] = Some(
+                accum
+                    .direct_args
+                    .iter()
+                    .map(|arg| eval_expr(arg, slot, ctx))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+        if let Some(filter) = accum.filter.as_ref() {
+            match eval_expr(filter, slot, ctx)? {
+                Value::Bool(true) => {}
+                Value::Bool(false) | Value::Null => continue,
+                other => return Err(ExecError::NonBoolQual(other)),
+            }
+        }
+        let values = accum
+            .args
+            .iter()
+            .map(|arg| eval_expr(arg, slot, ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(seen_inputs) = group.distinct_inputs[i].as_mut()
+            && !seen_inputs.insert(values.clone())
+        {
+            continue;
+        }
+        if accum.order_by.is_empty() {
+            runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
+        } else {
+            let sort_keys = accum
+                .order_by
+                .iter()
+                .map(|item| eval_expr(&item.expr, slot, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            group.ordered_inputs[i].push(OrderedAggInput {
+                sort_keys,
+                arg_values: values,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn finish_ordered_aggregate_inputs(
+    group: &mut AggGroup,
+    accumulators: &[AggAccum],
+    runtimes: &[AggregateRuntime],
+    phase: AggregatePhase,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if phase == AggregatePhase::Finalize {
+        return Ok(());
+    }
+    for (i, accum) in accumulators.iter().enumerate() {
+        if accum.order_by.is_empty() {
+            continue;
+        }
+        let inputs = &mut group.ordered_inputs[i];
+        let mut sort_error = None;
+        pg_sql_sort_by(inputs, |left, right| {
+            match compare_order_by_keys(&accum.order_by, &left.sort_keys, &right.sort_keys) {
+                Ok(ordering) => ordering,
+                Err(err) => {
+                    if sort_error.is_none() {
+                        sort_error = Some(err);
+                    }
+                    std::cmp::Ordering::Equal
+                }
+            }
+        });
+        if let Some(err) = sort_error {
+            return Err(err);
+        }
+        for input in inputs.iter() {
+            runtimes[i].transition(&mut group.accum_states[i], &input.arg_values, ctx)?;
+        }
+    }
+    Ok(())
+}
+
 impl PlanNode for AggregateState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -6911,12 +7050,20 @@ impl PlanNode for AggregateState {
                 return Ok(Some(&mut rows[idx].slot));
             }
             let mut groups: Vec<AggGroup> = Vec::new();
+            let mut mixed_group = (self.strategy == AggregateStrategy::Mixed).then(|| {
+                new_aggregate_group(
+                    vec![Value::Null; self.group_by.len()],
+                    Vec::new(),
+                    &runtimes,
+                    &self.accumulators,
+                )
+            });
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
                 ctx.check_for_interrupts()?;
                 let outer_values = materialize_slot_values(slot)?;
                 let current_bindings = ctx.system_bindings.clone();
-                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                set_outer_expr_bindings(ctx, outer_values.clone(), &current_bindings);
                 clear_inner_expr_bindings(ctx);
                 self.key_buffer.clear();
                 for expr in &self.group_by {
@@ -6933,127 +7080,72 @@ impl PlanNode for AggregateState {
                         .iter()
                         .map(|expr| eval_expr(expr, slot, ctx))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let accum_states = runtimes
-                        .iter()
-                        .zip(self.accumulators.iter())
-                        .map(|(runtime, accum)| runtime.initialize_state(accum))
-                        .collect();
-                    groups.push(AggGroup {
-                        key_values: self.key_buffer.clone(),
+                    groups.push(new_aggregate_group(
+                        self.key_buffer.clone(),
                         passthrough_values,
-                        accum_states,
-                        distinct_inputs: self
-                            .accumulators
-                            .iter()
-                            .map(|accum| accum.distinct.then(HashSet::new))
-                            .collect(),
-                        direct_arg_values: vec![None; self.accumulators.len()],
-                        ordered_inputs: vec![Vec::new(); self.accumulators.len()],
-                    });
+                        &runtimes,
+                        &self.accumulators,
+                    ));
                     groups.len() - 1
                 };
 
                 let group = &mut groups[group_idx];
-                for (i, accum) in self.accumulators.iter().enumerate() {
-                    if group.direct_arg_values[i].is_none() && !accum.direct_args.is_empty() {
-                        group.direct_arg_values[i] = Some(
-                            accum
-                                .direct_args
-                                .iter()
-                                .map(|arg| eval_expr(arg, slot, ctx))
-                                .collect::<Result<Vec<_>, _>>()?,
-                        );
-                    }
-                    if let Some(filter) = accum.filter.as_ref() {
-                        match eval_expr(filter, slot, ctx)? {
-                            Value::Bool(true) => {}
-                            Value::Bool(false) | Value::Null => continue,
-                            other => return Err(ExecError::NonBoolQual(other)),
-                        }
-                    }
-                    let values = accum
-                        .args
-                        .iter()
-                        .map(|arg| eval_expr(arg, slot, ctx))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if let Some(seen_inputs) = group.distinct_inputs[i].as_mut() {
-                        if !seen_inputs.insert(values.clone()) {
-                            continue;
-                        }
-                    }
-                    if accum.order_by.is_empty() {
-                        runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
-                    } else {
-                        let sort_keys = accum
-                            .order_by
-                            .iter()
-                            .map(|item| eval_expr(&item.expr, slot, ctx))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        group.ordered_inputs[i].push(OrderedAggInput {
-                            sort_keys,
-                            arg_values: values,
-                        });
-                    }
+                advance_aggregate_group(
+                    group,
+                    &self.accumulators,
+                    &runtimes,
+                    self.phase,
+                    self.group_by.len(),
+                    self.passthrough_exprs.len(),
+                    &outer_values,
+                    slot,
+                    ctx,
+                )?;
+                if let Some(group) = mixed_group.as_mut() {
+                    advance_aggregate_group(
+                        group,
+                        &self.accumulators,
+                        &runtimes,
+                        self.phase,
+                        self.group_by.len(),
+                        self.passthrough_exprs.len(),
+                        &outer_values,
+                        slot,
+                        ctx,
+                    )?;
                 }
             }
 
             if groups.is_empty() && self.group_by.is_empty() {
-                let accum_states = runtimes
-                    .iter()
-                    .zip(self.accumulators.iter())
-                    .map(|(runtime, accum)| runtime.initialize_state(accum))
-                    .collect();
-                groups.push(AggGroup {
-                    key_values: Vec::new(),
-                    passthrough_values: Vec::new(),
-                    accum_states,
-                    distinct_inputs: self
-                        .accumulators
-                        .iter()
-                        .map(|accum| accum.distinct.then(HashSet::new))
-                        .collect(),
-                    direct_arg_values: vec![None; self.accumulators.len()],
-                    ordered_inputs: vec![Vec::new(); self.accumulators.len()],
-                });
+                groups.push(new_aggregate_group(
+                    Vec::new(),
+                    Vec::new(),
+                    &runtimes,
+                    &self.accumulators,
+                ));
             }
 
             for group in &mut groups {
-                for (i, accum) in self.accumulators.iter().enumerate() {
-                    if accum.order_by.is_empty() {
-                        continue;
-                    }
-                    let inputs = &mut group.ordered_inputs[i];
-                    let mut sort_error = None;
-                    pg_sql_sort_by(inputs, |left, right| {
-                        match compare_order_by_keys(
-                            &accum.order_by,
-                            &left.sort_keys,
-                            &right.sort_keys,
-                        ) {
-                            Ok(ordering) => ordering,
-                            Err(err) => {
-                                if sort_error.is_none() {
-                                    sort_error = Some(err);
-                                }
-                                std::cmp::Ordering::Equal
-                            }
-                        }
-                    });
-                    if let Some(err) = sort_error {
-                        return Err(err);
-                    }
-                    for input in inputs.iter() {
-                        runtimes[i].transition(
-                            &mut group.accum_states[i],
-                            &input.arg_values,
-                            ctx,
-                        )?;
-                    }
-                }
+                finish_ordered_aggregate_inputs(
+                    group,
+                    &self.accumulators,
+                    &runtimes,
+                    self.phase,
+                    ctx,
+                )?;
+            }
+            if let Some(group) = mixed_group.as_mut() {
+                finish_ordered_aggregate_inputs(
+                    group,
+                    &self.accumulators,
+                    &runtimes,
+                    self.phase,
+                    ctx,
+                )?;
             }
 
             let mut result_rows = Vec::new();
-            for group in &groups {
+            for group in groups.iter().chain(mixed_group.iter()) {
                 ctx.check_for_interrupts()?;
                 let mut row_values = group.key_values.clone();
                 row_values.extend(group.passthrough_values.iter().cloned());
@@ -7063,6 +7155,10 @@ impl PlanNode for AggregateState {
                     .zip(self.accumulators.iter())
                     .enumerate()
                 {
+                    if self.phase == AggregatePhase::Partial {
+                        row_values.push(runtime.partial_value(accum, accum_state)?);
+                        continue;
+                    }
                     let direct_arg_values =
                         if let Some(values) = group.direct_arg_values[i].as_ref() {
                             values.clone()
@@ -7139,10 +7235,19 @@ impl PlanNode for AggregateState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        match self.strategy {
-            crate::include::nodes::plannodes::AggregateStrategy::Plain => "Aggregate".into(),
-            crate::include::nodes::plannodes::AggregateStrategy::Sorted => "GroupAggregate".into(),
-            crate::include::nodes::plannodes::AggregateStrategy::Hashed => "HashAggregate".into(),
+        if self.accumulators.is_empty() && self.strategy == AggregateStrategy::Sorted {
+            return "Group".into();
+        }
+        let base = match self.strategy {
+            crate::include::nodes::plannodes::AggregateStrategy::Plain => "Aggregate",
+            crate::include::nodes::plannodes::AggregateStrategy::Sorted => "GroupAggregate",
+            crate::include::nodes::plannodes::AggregateStrategy::Hashed => "HashAggregate",
+            crate::include::nodes::plannodes::AggregateStrategy::Mixed => "MixedAggregate",
+        };
+        match self.phase {
+            AggregatePhase::Complete => base.to_string(),
+            AggregatePhase::Partial => format!("Partial {base}"),
+            AggregatePhase::Finalize => format!("Finalize {base}"),
         }
     }
     fn explain_details(
@@ -7166,7 +7271,12 @@ impl PlanNode for AggregateState {
                 }
             }
             let group_key = group_items.join(", ");
-            lines.push(format!("{prefix}Group Key: {group_key}"));
+            if self.strategy == AggregateStrategy::Mixed {
+                lines.push(format!("{prefix}Hash Key: {group_key}"));
+                lines.push(format!("{prefix}Group Key: ()"));
+            } else {
+                lines.push(format!("{prefix}Group Key: {group_key}"));
+            }
         }
         if let Some(having) = &self.having {
             lines.push(format!(

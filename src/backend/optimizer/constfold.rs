@@ -65,6 +65,15 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .into_iter()
             .map(|expr| simplify_expr(expr, None))
             .collect::<Result<Vec<_>, _>>()?,
+        grouping_sets: query
+            .grouping_sets
+            .into_iter()
+            .map(|set| {
+                set.into_iter()
+                    .map(|expr| simplify_expr(expr, None))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         accumulators: query
             .accumulators
             .into_iter()

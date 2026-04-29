@@ -71,6 +71,22 @@ fn rewrite_query(
                 rewrite_semantic_expr(expr, catalog, expanded_views, active_policy_relations)
             })
             .collect::<Result<Vec<_>, _>>()?,
+        grouping_sets: query
+            .grouping_sets
+            .into_iter()
+            .map(|set| {
+                set.into_iter()
+                    .map(|expr| {
+                        rewrite_semantic_expr(
+                            expr,
+                            catalog,
+                            expanded_views,
+                            active_policy_relations,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         accumulators: query
             .accumulators
             .into_iter()

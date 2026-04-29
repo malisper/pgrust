@@ -6,7 +6,9 @@ use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
-use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, PlanEstimate};
+use crate::include::nodes::plannodes::{
+    AggregatePhase, AggregateStrategy, IndexScanKey, PlanEstimate,
+};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
@@ -34,6 +36,7 @@ pub struct AppendRelInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannerConfig {
     pub enable_partitionwise_join: bool,
+    pub enable_partitionwise_aggregate: bool,
     pub enable_seqscan: bool,
     pub enable_indexscan: bool,
     pub enable_indexonlyscan: bool,
@@ -52,6 +55,7 @@ impl Default for PlannerConfig {
     fn default() -> Self {
         Self {
             enable_partitionwise_join: false,
+            enable_partitionwise_aggregate: false,
             enable_seqscan: true,
             enable_indexscan: true,
             enable_indexonlyscan: true,
@@ -622,6 +626,8 @@ pub enum Path {
         pathtarget: PathTarget,
         slot_id: usize,
         strategy: AggregateStrategy,
+        phase: AggregatePhase,
+        semantic_accumulators: Option<Vec<AggAccum>>,
         disabled: bool,
         pathkeys: Vec<PathKey>,
         input: Box<Path>,

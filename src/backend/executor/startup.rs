@@ -1208,11 +1208,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators: _,
+            semantic_output_names: _,
             having,
             output_columns,
         } => {
@@ -1221,6 +1224,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(AggregateState {
                 input: executor_start(*input),
                 strategy,
+                phase,
                 disabled,
                 group_by,
                 passthrough_exprs,

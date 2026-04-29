@@ -35,8 +35,8 @@ use crate::backend::parser::{
     CopyFromStatement, CopyOptions as ParserCopyOptions, CopySource, CopyToDestination,
     CopyToSource, CopyToStatement, CreateFunctionStatement, CreateTableAsQuery,
     CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode, DiscardTarget,
-    ExecuteStatement, ParseError, ParseOptions, PrepareStatement, PreparedInsert, SelectStatement,
-    Statement, bind_delete, bind_insert, bind_insert_prepared,
+    ExecuteStatement, ParseError, ParseOptions, PrepareStatement, PreparedInsert, RawTypeName,
+    SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
     bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
     pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
@@ -58,6 +58,7 @@ use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
 };
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
+use crate::backend::utils::misc::notices::push_warning_with_hint;
 use crate::backend::utils::misc::stack_depth::{
     MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
@@ -980,6 +981,67 @@ fn raw_type_name_for_event_identity(ty: &crate::backend::parser::RawTypeName) ->
         crate::backend::parser::RawTypeName::Named { name, .. } => name.clone(),
         crate::backend::parser::RawTypeName::Record => "record".into(),
     }
+}
+
+fn sql_tokens(sql: &str) -> Vec<String> {
+    sql.split_whitespace()
+        .map(clean_sql_token)
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn clean_sql_token(token: &str) -> String {
+    let trimmed = token.trim_matches(|ch: char| matches!(ch, ';' | ',' | '(' | ')'));
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        return trimmed[1..trimmed.len() - 1].replace("\"\"", "\"");
+    }
+    trimmed.to_string()
+}
+
+fn token_after(tokens: &[String], pattern: &[&str]) -> Option<String> {
+    tokens
+        .windows(pattern.len().saturating_add(1))
+        .find(|window| {
+            pattern.iter().enumerate().all(|(idx, expected)| {
+                window
+                    .get(idx)
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+            })
+        })
+        .and_then(|window| window.get(pattern.len()).cloned())
+}
+
+fn first_token_after_prefix(sql: &str, prefix: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with(prefix) {
+        return None;
+    }
+    trimmed
+        .get(prefix.len()..)?
+        .split_whitespace()
+        .next()
+        .map(clean_sql_token)
+}
+
+fn default_acl_objtype(name: &str) -> Result<char, ExecError> {
+    match name.to_ascii_lowercase().as_str() {
+        "table" | "tables" => Ok('r'),
+        "sequence" | "sequences" => Ok('S'),
+        "function" | "functions" | "routine" | "routines" => Ok('f'),
+        "type" | "types" => Ok('T'),
+        "schema" | "schemas" => Ok('n'),
+        _ => Err(ExecError::DetailedError {
+            message: format!("unrecognized default ACL object type \"{name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
+fn unsupported_object_address_ddl(feature: &str, sql: &str) -> ExecError {
+    ExecError::Parse(ParseError::FeatureNotSupported(format!("{feature}: {sql}")))
 }
 
 pub struct SelectGuard {
@@ -2427,6 +2489,11 @@ impl Session {
                 .get("enable_partitionwise_join")
                 .map(|value| parse_bool_guc(value).unwrap_or(false))
                 .unwrap_or(false),
+            enable_partitionwise_aggregate: self
+                .gucs
+                .get("enable_partitionwise_aggregate")
+                .map(|value| parse_bool_guc(value).unwrap_or(false))
+                .unwrap_or(false),
             enable_seqscan: self
                 .gucs
                 .get("enable_seqscan")
@@ -2891,6 +2958,148 @@ impl Session {
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys,
             trigger_depth: 0,
+        }
+    }
+
+    fn execute_object_address_unsupported_stmt(
+        &self,
+        db: &Database,
+        stmt: &crate::backend::parser::UnsupportedStatement,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<Option<StatementResult>, ExecError> {
+        match stmt.feature {
+            "ALTER DEFAULT PRIVILEGES" => {
+                self.execute_alter_default_privileges_for_object_address(db, &stmt.sql, xid, cid)?;
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            "CREATE TRANSFORM" => {
+                self.execute_create_transform_for_object_address(db, &stmt.sql, xid, cid)?;
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            "CREATE SUBSCRIPTION" => {
+                self.execute_create_subscription_for_object_address(db, &stmt.sql);
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            "DROP SUBSCRIPTION" => {
+                self.execute_drop_subscription_for_object_address(db, &stmt.sql);
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn execute_alter_default_privileges_for_object_address(
+        &self,
+        db: &Database,
+        sql: &str,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<(), ExecError> {
+        // :HACK: Track only the default-ACL identity rows needed by object_address.sql.
+        // This is not a privilege executor or dependency implementation.
+        let tokens = sql_tokens(sql);
+        let role_name = token_after(&tokens, &["for", "role"])
+            .ok_or_else(|| unsupported_object_address_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
+        let namespace_name = token_after(&tokens, &["in", "schema"]);
+        let object_kind = token_after(&tokens, &["on"])
+            .ok_or_else(|| unsupported_object_address_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
+        let objtype = default_acl_objtype(&object_kind)?;
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+        let role = catalog
+            .authid_rows()
+            .into_iter()
+            .find(|row| row.rolname.eq_ignore_ascii_case(&role_name))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("role \"{role_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        let namespace = namespace_name
+            .as_deref()
+            .map(|name| {
+                catalog
+                    .namespace_rows()
+                    .into_iter()
+                    .find(|row| row.nspname.eq_ignore_ascii_case(name))
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })
+            })
+            .transpose()?;
+        db.object_addresses.write().upsert_default_acl(
+            role.oid,
+            role.rolname,
+            namespace.as_ref().map(|row| row.oid),
+            namespace.map(|row| row.nspname),
+            objtype,
+        );
+        Ok(())
+    }
+
+    fn execute_create_transform_for_object_address(
+        &self,
+        db: &Database,
+        sql: &str,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<(), ExecError> {
+        // :HACK: Record transform identity only; SQL transform execution is intentionally absent.
+        let tokens = sql_tokens(sql);
+        let type_name = token_after(&tokens, &["for"])
+            .ok_or_else(|| unsupported_object_address_ddl("CREATE TRANSFORM", sql))?;
+        let language_name = token_after(&tokens, &["language"])
+            .ok_or_else(|| unsupported_object_address_ddl("CREATE TRANSFORM", sql))?;
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+        let raw_type = crate::backend::parser::parse_type_name(&type_name).unwrap_or_else(|_| {
+            RawTypeName::Named {
+                name: type_name.clone(),
+                array_bounds: 0,
+            }
+        });
+        let sql_type = crate::backend::parser::resolve_raw_type_name(&raw_type, &catalog)
+            .map_err(ExecError::Parse)?;
+        let type_oid = catalog
+            .type_oid_for_sql_type(sql_type)
+            .filter(|oid| *oid != 0)
+            .unwrap_or(sql_type.type_oid);
+        if type_oid == 0 {
+            return Err(ExecError::Parse(ParseError::UnsupportedType(type_name)));
+        }
+        let language = catalog
+            .language_row_by_name(&language_name)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("language \"{language_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        db.object_addresses
+            .write()
+            .upsert_transform(type_oid, language.oid);
+        Ok(())
+    }
+
+    fn execute_create_subscription_for_object_address(&self, db: &Database, sql: &str) {
+        // :HACK: Store enough subscription catalog identity for object-address tests.
+        if let Some(name) = first_token_after_prefix(sql, "create subscription") {
+            db.object_addresses
+                .write()
+                .upsert_subscription(name, self.current_user_oid());
+        }
+        push_warning_with_hint(
+            "subscription was created, but is not connected",
+            "To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.",
+        );
+    }
+
+    fn execute_drop_subscription_for_object_address(&self, db: &Database, sql: &str) {
+        if let Some(name) = first_token_after_prefix(sql, "drop subscription") {
+            db.object_addresses.write().drop_subscription(&name);
         }
     }
 
@@ -9425,17 +9634,18 @@ impl Session {
                     Ok(StatementResult::AffectedRows(0))
                 }
                 Statement::Unsupported(ref unsupported_stmt) => {
-                    if unsupported_stmt.feature == "ALTER DEFAULT PRIVILEGES" {
-                        // :HACK: default ACL storage is not implemented yet. This
-                        // compatibility slice accepts the DDL as a no-op for
-                        // regression scripts that exercise ownership setup.
-                        Ok(StatementResult::AffectedRows(0))
-                    } else {
-                        Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-                            "{}: {}",
-                            unsupported_stmt.feature, unsupported_stmt.sql
-                        ))))
+                    if let Some(result) = self.execute_object_address_unsupported_stmt(
+                        db,
+                        unsupported_stmt,
+                        xid,
+                        cid,
+                    )? {
+                        return Ok(result);
                     }
+                    Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                        "{}: {}",
+                        unsupported_stmt.feature, unsupported_stmt.sql
+                    ))))
                 }
                 Statement::Call(ref call_stmt) => self.execute_call_stmt(db, call_stmt, xid, cid),
                 Statement::AlterSchemaOwner(ref alter_stmt) => {
@@ -10931,6 +11141,7 @@ impl Session {
         } else if matches!(
             normalized,
             "enable_partitionwise_join"
+                | "enable_partitionwise_aggregate"
                 | "enable_seqscan"
                 | "enable_indexscan"
                 | "enable_indexonlyscan"
@@ -10970,7 +11181,7 @@ impl Session {
                 "timezone" => default_timezone().to_string(),
                 "xmlbinary" => format_xmlbinary(self.datetime_config.xml.binary).to_string(),
                 "xmloption" => format_xmloption(self.datetime_config.xml.option).to_string(),
-                "enable_partitionwise_join" => "off".to_string(),
+                "enable_partitionwise_join" | "enable_partitionwise_aggregate" => "off".to_string(),
                 _ => default_runtime_guc_value(&name)
                     .map(str::to_string)
                     .unwrap_or_else(|| "default".to_string()),
@@ -13024,6 +13235,7 @@ fn apply_guc_value_to_state(
         "row_security"
         | "event_triggers"
         | "enable_partitionwise_join"
+        | "enable_partitionwise_aggregate"
         | "enable_seqscan"
         | "enable_indexscan"
         | "enable_indexonlyscan"

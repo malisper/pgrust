@@ -994,7 +994,12 @@ fn append_catalog_kind_rows(
                 .map(pg_depend_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
-        BootstrapCatalogKind::PgShdepend
+        BootstrapCatalogKind::PgDefaultAcl
+        | BootstrapCatalogKind::PgExtension
+        | BootstrapCatalogKind::PgTransform
+        | BootstrapCatalogKind::PgSubscription
+        | BootstrapCatalogKind::PgParameterAcl
+        | BootstrapCatalogKind::PgShdepend
         | BootstrapCatalogKind::PgShdescription
         | BootstrapCatalogKind::PgReplicationOrigin => {}
         BootstrapCatalogKind::PgDescription => {
