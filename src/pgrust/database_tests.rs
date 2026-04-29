@@ -49053,6 +49053,24 @@ fn plpgsql_record_function_returns_scalar_record_value() {
 }
 
 #[test]
+fn casted_row_constructor_keeps_row_default_name_for_expansion() {
+    let dir = temp_dir("casted_row_default_name");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type casted_row_pair as (i int4, j int4)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select (row).* from (select row(10, 1)::casted_row_pair) s",
+        ),
+        vec![vec![Value::Int32(10), Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();

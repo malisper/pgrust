@@ -22021,7 +22021,8 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             SqlExpr::ArraySubscript { .. }
             | SqlExpr::Column(_)
             | SqlExpr::FieldSelect { .. }
-            | SqlExpr::FuncCall { .. } => select_item_name(inner, index),
+            | SqlExpr::FuncCall { .. }
+            | SqlExpr::Row(_) => select_item_name(inner, index),
             SqlExpr::Cast(grand_inner, _) if matches!(grand_inner.as_ref(), SqlExpr::Column(_)) => {
                 select_item_name(inner, index)
             }
