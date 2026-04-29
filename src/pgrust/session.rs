@@ -2487,6 +2487,11 @@ impl Session {
                 .get("enable_partitionwise_join")
                 .map(|value| parse_bool_guc(value).unwrap_or(false))
                 .unwrap_or(false),
+            enable_partitionwise_aggregate: self
+                .gucs
+                .get("enable_partitionwise_aggregate")
+                .map(|value| parse_bool_guc(value).unwrap_or(false))
+                .unwrap_or(false),
             enable_seqscan: self
                 .gucs
                 .get("enable_seqscan")
@@ -11124,6 +11129,7 @@ impl Session {
         } else if matches!(
             normalized,
             "enable_partitionwise_join"
+                | "enable_partitionwise_aggregate"
                 | "enable_seqscan"
                 | "enable_indexscan"
                 | "enable_indexonlyscan"
@@ -11161,7 +11167,7 @@ impl Session {
                 "timezone" => default_timezone().to_string(),
                 "xmlbinary" => format_xmlbinary(self.datetime_config.xml.binary).to_string(),
                 "xmloption" => format_xmloption(self.datetime_config.xml.option).to_string(),
-                "enable_partitionwise_join" => "off".to_string(),
+                "enable_partitionwise_join" | "enable_partitionwise_aggregate" => "off".to_string(),
                 _ => default_runtime_guc_value(&name)
                     .map(str::to_string)
                     .unwrap_or_else(|| "default".to_string()),
@@ -13215,6 +13221,7 @@ fn apply_guc_value_to_state(
         "row_security"
         | "event_triggers"
         | "enable_partitionwise_join"
+        | "enable_partitionwise_aggregate"
         | "enable_seqscan"
         | "enable_indexscan"
         | "enable_indexonlyscan"
