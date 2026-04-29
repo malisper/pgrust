@@ -847,15 +847,27 @@ pub(super) fn bind_from_item_with_ctes(
         ),
         FromItem::DerivedTable(select) => {
             let visible_agg_scope = current_visible_aggregate_scope();
-            let (plan, _) = analyze_select_query_with_outer(
-                select,
-                catalog,
-                outer_scopes,
-                None,
-                visible_agg_scope.as_ref(),
-                ctes,
-                expanded_views,
-            )?;
+            let (plan, _) = if select.set_operation.is_some() {
+                analyze_select_query_with_outer(
+                    select,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.cloned(),
+                    visible_agg_scope.as_ref(),
+                    ctes,
+                    expanded_views,
+                )?
+            } else {
+                analyze_select_query_with_outer(
+                    select,
+                    catalog,
+                    &[],
+                    None,
+                    visible_agg_scope.as_ref(),
+                    ctes,
+                    expanded_views,
+                )?
+            };
             let bound = AnalyzedFrom::subquery(plan);
             let desc = synthetic_desc_from_analyzed_from(&bound);
             Ok((

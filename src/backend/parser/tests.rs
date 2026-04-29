@@ -4135,6 +4135,21 @@ fn parse_alter_table_inherit_statement() {
             only: true,
             table_name: "child_items".into(),
             parent_name: "parent_items".into(),
+            additional_parent_names: Vec::new(),
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table child_items inherit parent_items, inherit archive_items")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableInherit(AlterTableInheritStatement {
+            if_exists: false,
+            only: false,
+            table_name: "child_items".into(),
+            parent_name: "parent_items".into(),
+            additional_parent_names: vec!["archive_items".into()],
         })
     );
 }
@@ -4150,6 +4165,22 @@ fn parse_alter_table_no_inherit_statement() {
             only: true,
             table_name: "child_items".into(),
             parent_name: "parent_items".into(),
+            additional_parent_names: Vec::new(),
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table child_items no inherit parent_items, no inherit archive_items",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableNoInherit(AlterTableNoInheritStatement {
+            if_exists: false,
+            only: false,
+            table_name: "child_items".into(),
+            parent_name: "parent_items".into(),
+            additional_parent_names: vec!["archive_items".into()],
         })
     );
 }

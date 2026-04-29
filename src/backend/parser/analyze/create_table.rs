@@ -514,7 +514,7 @@ fn expand_create_table_of_type(
     Ok((expanded, type_row.oid))
 }
 
-fn expand_create_table_like_clauses(
+pub(super) fn expand_create_table_like_clauses(
     stmt: &CreateTableStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<(CreateTableStatement, Vec<CreateTableLikePostCreateAction>), ParseError> {

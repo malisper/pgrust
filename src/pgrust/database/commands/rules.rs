@@ -435,11 +435,6 @@ pub(crate) fn prepare_bound_update_for_execution(
     stmt: crate::backend::parser::BoundUpdateStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<PreparedBoundStatement<crate::backend::parser::BoundUpdateStatement>, ExecError> {
-    if stmt.input_plan.is_some() && stmt.targets.iter().any(|target| target.relkind != 'r') {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-            "UPDATE ... FROM is not yet supported for views".into(),
-        )));
-    }
     let Some(view_target) = stmt.targets.iter().find(|target| target.relkind == 'v') else {
         return Ok(PreparedBoundStatement {
             stmt,

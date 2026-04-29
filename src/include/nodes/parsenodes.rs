@@ -2937,6 +2937,7 @@ pub struct AlterTableNoInheritStatement {
     pub only: bool,
     pub table_name: String,
     pub parent_name: String,
+    pub additional_parent_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2945,6 +2946,7 @@ pub struct AlterTableInheritStatement {
     pub only: bool,
     pub table_name: String,
     pub parent_name: String,
+    pub additional_parent_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4247,6 +4249,7 @@ pub enum TableConstraint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExclusionElement {
     pub column: String,
+    pub expr_sql: Option<String>,
     pub operator: String,
 }
 

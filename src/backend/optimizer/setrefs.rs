@@ -1105,7 +1105,7 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
         Expr::Var(var) => {
             var.varlevelsup == 0
                 && !is_executor_special_varno(var.varno)
-                && !is_system_attr(var.varattno)
+                && (attrno_index(var.varattno).is_some() || is_system_attr(var.varattno))
         }
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_local_semantic_var)
@@ -1211,6 +1211,16 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+fn expr_is_local_system_var(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Var(var)
+            if var.varlevelsup == 0
+                && !is_executor_special_varno(var.varno)
+                && is_system_attr(var.varattno)
+    )
 }
 
 fn path_single_relid(path: &Path) -> Option<usize> {
@@ -1780,9 +1790,10 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
 }
 
 fn can_bind_as_nest_param(rebased_expr: &Expr, fixed_expr: &Expr) -> bool {
-    fixed_expr != rebased_expr
+    expr_contains_local_semantic_var(rebased_expr)
+        && fixed_expr != rebased_expr
         && expr_sql_type(fixed_expr) == expr_sql_type(rebased_expr)
-        && !expr_contains_local_semantic_var(fixed_expr)
+        && (!expr_contains_local_semantic_var(fixed_expr) || expr_is_local_system_var(fixed_expr))
 }
 
 fn decrement_outer_expr_levels(expr: Expr) -> Expr {
