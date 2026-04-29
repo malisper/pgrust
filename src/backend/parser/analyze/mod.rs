@@ -118,9 +118,10 @@ pub use modify::{
     plan_merge,
 };
 pub(crate) use modify::{
-    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
-    bind_insert_with_outer_scopes_and_ctes, bind_update_with_outer_scopes,
-    bind_update_with_outer_scopes_and_ctes, rewrite_bound_delete_auto_view_target,
+    bind_delete_with_outer_scopes, bind_delete_with_outer_scopes_and_ctes,
+    bind_insert_with_outer_scopes, bind_insert_with_outer_scopes_and_ctes,
+    bind_update_with_outer_scopes, bind_update_with_outer_scopes_and_ctes,
+    plan_merge_with_outer_ctes, rewrite_bound_delete_auto_view_target,
     rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
 };
 pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
@@ -3897,9 +3898,11 @@ fn analyze_non_recursive_cte_body(
             let desc = cte_query_desc(&query);
             Ok((query, desc))
         }
-        CteBody::Insert(_) | CteBody::Update(_) => Err(ParseError::FeatureNotSupported(
-            "writable CTE must be materialized before binding".into(),
-        )),
+        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => {
+            Err(ParseError::FeatureNotSupported(
+                "writable CTE must be materialized before binding".into(),
+            ))
+        }
         CteBody::RecursiveUnion { .. } => {
             let stmt = cte_body_as_select(body)?;
             let (query, _) = analyze_select_query_with_outer(
@@ -3943,9 +3946,11 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             locking_targets: Vec::new(),
             set_operation: None,
         }),
-        CteBody::Insert(_) | CteBody::Update(_) => Err(ParseError::FeatureNotSupported(
-            "writable CTE must be materialized before binding".into(),
-        )),
+        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => {
+            Err(ParseError::FeatureNotSupported(
+                "writable CTE must be materialized before binding".into(),
+            ))
+        }
         CteBody::RecursiveUnion {
             all,
             anchor,
@@ -4192,7 +4197,7 @@ fn bind_ctes(
     Ok(bound)
 }
 
-fn cte_body_references_table(body: &CteBody, table_name: &str) -> bool {
+pub(crate) fn cte_body_references_table(body: &CteBody, table_name: &str) -> bool {
     match body {
         CteBody::Select(select) => select_statement_references_table(select, table_name),
         CteBody::Values(values) => values
@@ -4202,6 +4207,8 @@ fn cte_body_references_table(body: &CteBody, table_name: &str) -> bool {
             .any(|expr| sql_expr_references_table(expr, table_name)),
         CteBody::Insert(insert) => insert_statement_references_table(insert, table_name),
         CteBody::Update(update) => update_statement_references_table(update, table_name),
+        CteBody::Delete(delete) => delete_statement_references_table(delete, table_name),
+        CteBody::Merge(merge) => merge_statement_references_table(merge, table_name),
         CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -4316,6 +4323,54 @@ impl<'a> RecursiveReferenceChecker<'a> {
                     self.visit_expr(where_clause, context)?;
                 }
                 for item in &update.returning {
+                    self.visit_expr(&item.expr, context)?;
+                }
+                Ok(())
+            }
+            CteBody::Delete(delete) => {
+                for cte in &delete.with {
+                    self.visit_cte_body(&cte.body, RecursiveReferenceContext::Subquery)?;
+                }
+                self.note_reference(&delete.table_name, context)?;
+                if let Some(using) = &delete.using {
+                    self.visit_from(using, context)?;
+                }
+                if let Some(where_clause) = &delete.where_clause {
+                    self.visit_expr(where_clause, context)?;
+                }
+                for item in &delete.returning {
+                    self.visit_expr(&item.expr, context)?;
+                }
+                Ok(())
+            }
+            CteBody::Merge(merge) => {
+                for cte in &merge.with {
+                    self.visit_cte_body(&cte.body, RecursiveReferenceContext::Subquery)?;
+                }
+                self.note_reference(&merge.target_table, context)?;
+                self.visit_from(&merge.source, context)?;
+                self.visit_expr(&merge.join_condition, context)?;
+                for clause in &merge.when_clauses {
+                    if let Some(condition) = &clause.condition {
+                        self.visit_expr(condition, context)?;
+                    }
+                    match &clause.action {
+                        MergeAction::DoNothing | MergeAction::Delete => {}
+                        MergeAction::Update { assignments } => {
+                            for assignment in assignments {
+                                self.visit_expr(&assignment.expr, context)?;
+                            }
+                        }
+                        MergeAction::Insert { source, .. } => {
+                            if let MergeInsertSource::Values(values) = source {
+                                for expr in values {
+                                    self.visit_expr(expr, context)?;
+                                }
+                            }
+                        }
+                    }
+                }
+                for item in &merge.returning {
                     self.visit_expr(&item.expr, context)?;
                 }
                 Ok(())
@@ -4787,7 +4842,7 @@ fn validate_recursive_cte_recursive_term_decorations(
     Ok(())
 }
 
-fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -> bool {
+pub(crate) fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -> bool {
     stmt.from
         .as_ref()
         .is_some_and(|from| from_item_references_table(from, table_name))
@@ -4819,7 +4874,7 @@ fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -
             .any(|item| sql_expr_references_table(&item.expr, table_name))
 }
 
-fn insert_statement_references_table(stmt: &InsertStatement, table_name: &str) -> bool {
+pub(crate) fn insert_statement_references_table(stmt: &InsertStatement, table_name: &str) -> bool {
     stmt.with
         .iter()
         .any(|cte| cte_body_references_table(&cte.body, table_name))
@@ -4837,11 +4892,10 @@ fn insert_statement_references_table(stmt: &InsertStatement, table_name: &str) -
             .any(|item| sql_expr_references_table(&item.expr, table_name))
 }
 
-fn update_statement_references_table(stmt: &UpdateStatement, table_name: &str) -> bool {
+pub(crate) fn update_statement_references_table(stmt: &UpdateStatement, table_name: &str) -> bool {
     stmt.with
         .iter()
         .any(|cte| cte_body_references_table(&cte.body, table_name))
-        || stmt.table_name.eq_ignore_ascii_case(table_name)
         || stmt
             .from
             .as_ref()
@@ -4854,6 +4908,54 @@ fn update_statement_references_table(stmt: &UpdateStatement, table_name: &str) -
             .where_clause
             .as_ref()
             .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+        || stmt
+            .returning
+            .iter()
+            .any(|item| sql_expr_references_table(&item.expr, table_name))
+}
+
+pub(crate) fn delete_statement_references_table(stmt: &DeleteStatement, table_name: &str) -> bool {
+    stmt.with
+        .iter()
+        .any(|cte| cte_body_references_table(&cte.body, table_name))
+        || stmt
+            .using
+            .as_ref()
+            .is_some_and(|using| from_item_references_table(using, table_name))
+        || stmt
+            .where_clause
+            .as_ref()
+            .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+        || stmt
+            .returning
+            .iter()
+            .any(|item| sql_expr_references_table(&item.expr, table_name))
+}
+
+pub(crate) fn merge_statement_references_table(stmt: &MergeStatement, table_name: &str) -> bool {
+    stmt.with
+        .iter()
+        .any(|cte| cte_body_references_table(&cte.body, table_name))
+        || from_item_references_table(&stmt.source, table_name)
+        || sql_expr_references_table(&stmt.join_condition, table_name)
+        || stmt.when_clauses.iter().any(|clause| {
+            clause
+                .condition
+                .as_ref()
+                .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+                || match &clause.action {
+                    MergeAction::DoNothing | MergeAction::Delete => false,
+                    MergeAction::Update { assignments } => assignments
+                        .iter()
+                        .any(|assignment| sql_expr_references_table(&assignment.expr, table_name)),
+                    MergeAction::Insert { source, .. } => match source {
+                        MergeInsertSource::Values(values) => values
+                            .iter()
+                            .any(|expr| sql_expr_references_table(expr, table_name)),
+                        MergeInsertSource::DefaultValues => false,
+                    },
+                }
+        })
         || stmt
             .returning
             .iter()

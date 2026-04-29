@@ -1542,15 +1542,30 @@ pub fn plan_merge(
     stmt: &MergeStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundMergeStatement, ParseError> {
+    if stmt.with_recursive {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "WITH RECURSIVE is not supported for MERGE statement".into(),
+        ));
+    }
+    plan_merge_with_outer_ctes(stmt, catalog, &[])
+}
+
+pub(crate) fn plan_merge_with_outer_ctes(
+    stmt: &MergeStatement,
+    catalog: &dyn CatalogLookup,
+    outer_ctes: &[BoundCte],
+) -> Result<BoundMergeStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
         &[],
         None,
-        &[],
+        outer_ctes,
         &[],
     )?;
+    let mut visible_ctes = local_ctes.clone();
+    visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.target_table)?;
     let auto_view_target = if entry.relkind == 'v'
         && let Some(event) = merge_mutating_event(stmt)
@@ -1573,7 +1588,7 @@ pub fn plan_merge(
         .map(|target| target.base_relation.clone())
         .unwrap_or_else(|| entry.clone());
     let column_defaults =
-        bind_insert_column_defaults(&execution_relation.desc, catalog, &local_ctes)?;
+        bind_insert_column_defaults(&execution_relation.desc, catalog, &visible_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
     let explain_target_name = merge_explain_target_name(stmt);
     let mut target_base = AnalyzedFrom::relation(
@@ -1607,7 +1622,7 @@ pub fn plan_merge(
         target_scope.output_exprs = resolved.visible_output_exprs.clone();
     }
     let (source_base, source_scope_raw) =
-        bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &local_ctes, &[])?;
+        bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &visible_ctes, &[])?;
     let (source_from, source_visible_count) = with_merge_source_present(source_base);
 
     if source_scope_raw.relations.iter().any(|relation| {
@@ -1643,7 +1658,7 @@ pub fn plan_merge(
         catalog,
         &[],
         None,
-        &local_ctes,
+        &visible_ctes,
     )?;
     let join_condition = and_predicates(
         Some(join_condition),
@@ -1704,7 +1719,7 @@ pub fn plan_merge(
         &returning_scope,
         returning_visible_column_count,
         catalog,
-        &local_ctes,
+        &visible_ctes,
     )?;
     let merge_update_rls = build_target_relation_row_security(
         &stmt.target_table,
@@ -1744,7 +1759,7 @@ pub fn plan_merge(
                 &action_source_scope,
                 &action_merged_scope,
                 catalog,
-                &local_ctes,
+                &visible_ctes,
                 &entry.desc,
             )
         })
@@ -4747,18 +4762,29 @@ pub(crate) fn bind_delete_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<BoundDeleteStatement, ParseError> {
+    bind_delete_with_outer_scopes_and_ctes(stmt, catalog, outer_scopes, &[])
+}
+
+pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
+    stmt: &DeleteStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<BoundDeleteStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
         outer_scopes,
         None,
-        &[],
+        outer_ctes,
         &[],
     )?;
+    let mut visible_ctes = local_ctes.clone();
+    visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     if stmt.using.is_some() {
-        return bind_delete_using(stmt, catalog, outer_scopes, &local_ctes, &entry);
+        return bind_delete_using(stmt, catalog, outer_scopes, &visible_ctes, &entry);
     }
     let scope = scope_for_base_relation_with_generated(
         &stmt.table_name,
@@ -4771,7 +4797,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         .where_clause
         .as_ref()
         .map(|expr| {
-            bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
+            bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &visible_ctes)
         })
         .transpose()?;
     let returning = bind_returning_targets(
@@ -4779,7 +4805,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         &returning_scope,
         catalog,
         outer_scopes,
-        &local_ctes,
+        &visible_ctes,
     )?;
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,

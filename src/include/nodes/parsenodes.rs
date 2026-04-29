@@ -1694,6 +1694,8 @@ pub enum CteBody {
     Values(ValuesStatement),
     Insert(Box<InsertStatement>),
     Update(Box<UpdateStatement>),
+    Delete(Box<DeleteStatement>),
+    Merge(Box<MergeStatement>),
     RecursiveUnion {
         all: bool,
         anchor: Box<CteBody>,
@@ -2439,6 +2441,7 @@ pub struct RuleActionStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRuleStatement {
+    pub replace_existing: bool,
     pub rule_name: String,
     pub relation_name: String,
     pub event: RuleEvent,

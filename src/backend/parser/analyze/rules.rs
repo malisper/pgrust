@@ -6,6 +6,8 @@ pub(crate) enum BoundRuleAction {
     Insert(BoundInsertStatement),
     Update(BoundUpdateStatement),
     Delete(BoundDeleteStatement),
+    Select(PlannedStmt),
+    Notify(NotifyStatement),
 }
 
 fn scope_for_special_rule_tuple(
@@ -101,6 +103,10 @@ pub(crate) fn bind_rule_action_statement(
             catalog,
             &outer_scopes,
         )?)),
+        Statement::Select(stmt) => Ok(BoundRuleAction::Select(
+            pg_plan_query_with_outer_scopes_and_ctes(stmt, catalog, &outer_scopes, &[])?,
+        )),
+        Statement::Notify(stmt) => Ok(BoundRuleAction::Notify(stmt.clone())),
         _ => Err(ParseError::FeatureNotSupported(
             "rule action statement".into(),
         )),
@@ -112,6 +118,7 @@ fn rule_action_returning_targets(action: &BoundRuleAction) -> &[TargetEntry] {
         BoundRuleAction::Insert(stmt) => &stmt.returning,
         BoundRuleAction::Update(stmt) => &stmt.returning,
         BoundRuleAction::Delete(stmt) => &stmt.returning,
+        BoundRuleAction::Select(_) | BoundRuleAction::Notify(_) => &[],
     }
 }
 

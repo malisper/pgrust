@@ -18658,8 +18658,10 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
         Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
         Rule::update_stmt => Ok(CteBody::Update(Box::new(build_update(pair)?))),
+        Rule::delete_stmt => Ok(CteBody::Delete(Box::new(build_delete(pair)?))),
+        Rule::merge_stmt => Ok(CteBody::Merge(Box::new(build_merge(pair)?))),
         _ => Err(ParseError::UnexpectedToken {
-            expected: "SELECT, VALUES, or INSERT CTE body",
+            expected: "SELECT, VALUES, INSERT, UPDATE, DELETE, or MERGE CTE body",
             actual: pair.as_str().into(),
         }),
     }
@@ -20570,6 +20572,7 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
 }
 
 fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseError> {
+    let mut replace_existing = false;
     let mut rule_name = None;
     let mut relation_name = None;
     let mut event = None;
@@ -20579,6 +20582,7 @@ fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseE
     let mut actions = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::create_or_replace_clause => replace_existing = true,
             Rule::identifier if rule_name.is_none() => rule_name = Some(build_identifier(part)),
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_identifier(part));
@@ -20600,6 +20604,7 @@ fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseE
         }
     }
     Ok(CreateRuleStatement {
+        replace_existing,
         rule_name: rule_name.ok_or(ParseError::UnexpectedEof)?,
         relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
         event: event.ok_or(ParseError::UnexpectedEof)?,
@@ -20664,21 +20669,6 @@ fn build_rule_action_statement_sql(sql: &str) -> Result<RuleActionStatement, Par
     let sql = sql.trim().trim_end_matches(';').trim().to_string();
     let statement = parse_statement(&sql)?;
     match &statement {
-        Statement::Insert(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
-            return Err(ParseError::FeatureNotSupported(
-                "WITH in rule actions".into(),
-            ));
-        }
-        Statement::Update(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
-            return Err(ParseError::FeatureNotSupported(
-                "WITH in rule actions".into(),
-            ));
-        }
-        Statement::Delete(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
-            return Err(ParseError::FeatureNotSupported(
-                "WITH in rule actions".into(),
-            ));
-        }
         Statement::Unsupported(_) => {
             return Err(ParseError::FeatureNotSupported(
                 "rule action statement".into(),

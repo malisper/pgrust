@@ -33,18 +33,22 @@ use crate::backend::executor::{
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, CallStatement, CatalogLookup, CommonTableExpr,
+    AlterTableAddColumnStatement, BoundCte, CallStatement, CatalogLookup, CommonTableExpr,
     CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
     CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
     CreateTableAsQuery, CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode,
     DiscardTarget, ExecuteStatement, FromItem, InsertSource, InsertStatement, OrderByItem,
     ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
     PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
-    SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement, UpdateStatement,
-    ValuesStatement, bind_delete, bind_insert, bind_insert_prepared,
-    bind_insert_with_outer_scopes_and_ctes, bind_update, bind_update_with_outer_scopes_and_ctes,
-    bound_cte_from_query_rows, pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes,
-    plan_merge,
+    RuleEvent, SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement,
+    UpdateStatement, ValuesStatement, bind_delete, bind_delete_with_outer_scopes_and_ctes,
+    bind_insert, bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes, bind_update,
+    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_rows, cte_body_references_table,
+    delete_statement_references_table, insert_statement_references_table,
+    merge_statement_references_table, pg_plan_query_with_config,
+    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
+    plan_merge, plan_merge_with_outer_ctes, select_statement_references_table,
+    update_statement_references_table,
 };
 use crate::backend::rewrite::relation_row_security_is_enabled_for_user;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -3660,7 +3664,9 @@ impl Session {
 
     fn cte_body_has_writable_insert(body: &CteBody) -> bool {
         match body {
-            CteBody::Insert(_) | CteBody::Update(_) => true,
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => {
+                true
+            }
             CteBody::Select(select) => Self::select_has_writable_ctes(select),
             CteBody::Values(values) => values
                 .with
@@ -3675,6 +3681,179 @@ impl Session {
         }
     }
 
+    fn cte_body_is_modifying(body: &CteBody) -> bool {
+        matches!(
+            body,
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_)
+        )
+    }
+
+    fn modifying_cte_body_has_returning(body: &CteBody) -> bool {
+        match body {
+            CteBody::Insert(insert) => !insert.returning.is_empty(),
+            CteBody::Update(update) => !update.returning.is_empty(),
+            CteBody::Delete(delete) => !delete.returning.is_empty(),
+            CteBody::Merge(merge) => !merge.returning.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn modifying_cte_body_has_nested_modifying_ctes(body: &CteBody) -> bool {
+        let nested = match body {
+            CteBody::Insert(insert) => &insert.with,
+            CteBody::Update(update) => &update.with,
+            CteBody::Delete(delete) => &delete.with,
+            CteBody::Merge(merge) => &merge.with,
+            _ => return false,
+        };
+        nested
+            .iter()
+            .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
+    }
+
+    fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> CteBody {
+        match body {
+            CteBody::Insert(insert) => {
+                let mut insert = (**insert).clone();
+                let mut with = ctes.to_vec();
+                with.extend(insert.with);
+                insert.with = with;
+                CteBody::Insert(Box::new(insert))
+            }
+            CteBody::Update(update) => {
+                let mut update = (**update).clone();
+                let mut with = ctes.to_vec();
+                with.extend(update.with);
+                update.with = with;
+                CteBody::Update(Box::new(update))
+            }
+            CteBody::Delete(delete) => {
+                let mut delete = (**delete).clone();
+                let mut with = ctes.to_vec();
+                with.extend(delete.with);
+                delete.with = with;
+                CteBody::Delete(Box::new(delete))
+            }
+            CteBody::Merge(merge) => {
+                let mut merge = (**merge).clone();
+                let mut with = ctes.to_vec();
+                with.extend(merge.with);
+                merge.with = with;
+                CteBody::Merge(Box::new(merge))
+            }
+            _ => body.clone(),
+        }
+    }
+
+    fn modifying_cte_reference_error(name: &str) -> ExecError {
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(format!(
+            "WITH query \"{name}\" does not have a RETURNING clause"
+        )))
+    }
+
+    fn recursive_modifying_cte_error(name: &str) -> ExecError {
+        ExecError::Parse(ParseError::InvalidRecursion(format!(
+            "recursive query \"{name}\" must not contain data-modifying statements"
+        )))
+    }
+
+    fn nested_modifying_cte_error() -> ExecError {
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+            "WITH clause containing a data-modifying statement must be at the top level".into(),
+        ))
+    }
+
+    fn cte_referenced_after<F>(
+        ctes: &[CommonTableExpr],
+        cte_index: usize,
+        name: &str,
+        with_recursive: bool,
+        outer_references: &F,
+    ) -> bool
+    where
+        F: Fn(&str) -> bool,
+    {
+        let referenced_by_ctes = if with_recursive {
+            ctes.iter().enumerate().any(|(index, cte)| {
+                index != cte_index && cte_body_references_table(&cte.body, name)
+            })
+        } else {
+            ctes.iter()
+                .skip(cte_index + 1)
+                .any(|later| cte_body_references_table(&later.body, name))
+        };
+        referenced_by_ctes || outer_references(name)
+    }
+
+    fn modifying_cte_execution_order(
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+    ) -> Result<Vec<usize>, ExecError> {
+        let modifying_indexes = ctes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cte)| Self::cte_body_is_modifying(&cte.body).then_some(index))
+            .collect::<Vec<_>>();
+        if !with_recursive {
+            return Ok(modifying_indexes);
+        }
+
+        fn visit(
+            ctes: &[CommonTableExpr],
+            modifying_indexes: &[usize],
+            index: usize,
+            state: &mut [u8],
+            order: &mut Vec<usize>,
+        ) -> Result<(), ExecError> {
+            match state[index] {
+                1 => return Err(Session::recursive_modifying_cte_error(&ctes[index].name)),
+                2 => return Ok(()),
+                _ => {}
+            }
+            state[index] = 1;
+            for &dependency in modifying_indexes {
+                if dependency != index
+                    && cte_body_references_table(&ctes[index].body, &ctes[dependency].name)
+                {
+                    visit(ctes, modifying_indexes, dependency, state, order)?;
+                }
+            }
+            state[index] = 2;
+            order.push(index);
+            Ok(())
+        }
+
+        let mut state = vec![0; ctes.len()];
+        let mut order = Vec::with_capacity(modifying_indexes.len());
+        for &index in &modifying_indexes {
+            visit(ctes, &modifying_indexes, index, &mut state, &mut order)?;
+        }
+        Ok(order)
+    }
+
+    fn visible_select_ctes_for_modifying_body(
+        ctes: &[CommonTableExpr],
+        cte_index: usize,
+        with_recursive: bool,
+        all_select_ctes: &[CommonTableExpr],
+    ) -> Vec<CommonTableExpr> {
+        if with_recursive {
+            return all_select_ctes.to_vec();
+        }
+        ctes.iter()
+            .take(cte_index)
+            .filter(|cte| !Self::cte_body_is_modifying(&cte.body))
+            .cloned()
+            .collect()
+    }
+
+    fn values_has_writable_ctes(values: &ValuesStatement) -> bool {
+        values
+            .with
+            .iter()
+            .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
+    }
+
     fn select_has_writable_ctes(select: &SelectStatement) -> bool {
         select
             .with
@@ -3684,6 +3863,211 @@ impl Session {
                 .set_operation
                 .as_ref()
                 .is_some_and(|setop| setop.inputs.iter().any(Self::select_has_writable_ctes))
+    }
+
+    fn materialized_cte_from_dml_result(
+        cte: &CommonTableExpr,
+        result: StatementResult,
+    ) -> Result<Option<BoundCte>, ExecError> {
+        match result {
+            StatementResult::Query { columns, rows, .. } => {
+                let columns = Self::apply_writable_cte_column_aliases(cte, columns)?;
+                Ok(Some(bound_cte_from_query_rows(
+                    cte.name.clone(),
+                    columns,
+                    &rows,
+                )))
+            }
+            StatementResult::AffectedRows(_) => Ok(None),
+        }
+    }
+
+    fn execute_modifying_cte_body(
+        &mut self,
+        db: &Database,
+        cte: &CommonTableExpr,
+        catalog: &dyn CatalogLookup,
+        ctx: &mut ExecutorContext,
+        xid: TransactionId,
+        cid: CommandId,
+        materialized_ctes: &[BoundCte],
+    ) -> Result<Option<BoundCte>, ExecError> {
+        let result = match &cte.body {
+            CteBody::Insert(cte_insert) => {
+                let bound = bind_insert_with_outer_scopes_and_ctes(
+                    cte_insert,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?;
+                let prepared =
+                    crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                        bound, catalog,
+                    )?;
+                crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
+                    prepared.stmt.relation_oid,
+                    RuleEvent::Insert,
+                    catalog,
+                )?;
+                let lock_requests = merge_table_lock_requests(
+                    &insert_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
+                crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                    prepared.stmt,
+                    catalog,
+                    ctx,
+                    xid,
+                    cid,
+                )?
+            }
+            CteBody::Update(cte_update) => {
+                let bound = bind_update_with_outer_scopes_and_ctes(
+                    cte_update,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?;
+                let prepared =
+                    crate::pgrust::database::commands::rules::prepare_bound_update_for_execution(
+                        bound, catalog,
+                    )?;
+                for target in &prepared.stmt.targets {
+                    crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
+                        target.relation_oid,
+                        RuleEvent::Update,
+                        catalog,
+                    )?;
+                }
+                let lock_requests = merge_table_lock_requests(
+                    &update_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
+                let interrupts = self.interrupts();
+                ctx.interrupts = Arc::clone(&interrupts);
+                crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
+                    prepared.stmt,
+                    catalog,
+                    ctx,
+                    xid,
+                    cid,
+                    Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
+                )?
+            }
+            CteBody::Delete(cte_delete) => {
+                let bound = bind_delete_with_outer_scopes_and_ctes(
+                    cte_delete,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?;
+                let prepared =
+                    crate::pgrust::database::commands::rules::prepare_bound_delete_for_execution(
+                        bound, catalog,
+                    )?;
+                for target in &prepared.stmt.targets {
+                    crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
+                        target.relation_oid,
+                        RuleEvent::Delete,
+                        catalog,
+                    )?;
+                }
+                let lock_requests = merge_table_lock_requests(
+                    &delete_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
+                let interrupts = self.interrupts();
+                ctx.interrupts = Arc::clone(&interrupts);
+                crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
+                    prepared.stmt,
+                    catalog,
+                    ctx,
+                    xid,
+                    Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
+                )?
+            }
+            CteBody::Merge(cte_merge) => {
+                let bound = plan_merge_with_outer_ctes(cte_merge, catalog, materialized_ctes)?;
+                execute_merge(bound, catalog, ctx, xid, cid)?
+            }
+            _ => return Ok(None),
+        };
+        Self::materialized_cte_from_dml_result(cte, result)
+    }
+
+    fn materialize_modifying_ctes<F>(
+        &mut self,
+        db: &Database,
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+        catalog: &dyn CatalogLookup,
+        ctx: &mut ExecutorContext,
+        xid: TransactionId,
+        cid: CommandId,
+        outer_references: F,
+    ) -> Result<(Vec<BoundCte>, Vec<CommonTableExpr>), ExecError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut materialized_ctes = Vec::new();
+        let mut remaining_ctes = Vec::new();
+
+        for cte in ctes {
+            if !Self::cte_body_is_modifying(&cte.body) {
+                if Self::cte_body_has_writable_insert(&cte.body) {
+                    return Err(Self::nested_modifying_cte_error());
+                }
+                remaining_ctes.push(cte.clone());
+            }
+        }
+
+        let execution_order = Self::modifying_cte_execution_order(ctes, with_recursive)?;
+        for index in execution_order {
+            let cte = &ctes[index];
+
+            if cte_body_references_table(&cte.body, &cte.name) {
+                return Err(Self::recursive_modifying_cte_error(&cte.name));
+            }
+            if Self::modifying_cte_body_has_nested_modifying_ctes(&cte.body) {
+                return Err(Self::nested_modifying_cte_error());
+            }
+            if !Self::modifying_cte_body_has_returning(&cte.body)
+                && Self::cte_referenced_after(
+                    ctes,
+                    index,
+                    &cte.name,
+                    with_recursive,
+                    &outer_references,
+                )
+            {
+                return Err(Self::modifying_cte_reference_error(&cte.name));
+            }
+
+            let mut executable = cte.clone();
+            let visible_select_ctes = Self::visible_select_ctes_for_modifying_body(
+                ctes,
+                index,
+                with_recursive,
+                &remaining_ctes,
+            );
+            executable.body = Self::prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes);
+            if let Some(bound) = self.execute_modifying_cte_body(
+                db,
+                &executable,
+                catalog,
+                ctx,
+                xid,
+                cid,
+                &materialized_ctes,
+            )? {
+                materialized_ctes.push(bound);
+            }
+        }
+
+        Ok((materialized_ctes, remaining_ctes))
     }
 
     fn statement_requires_xid_in_transaction(stmt: &Statement) -> bool {
@@ -8312,6 +8696,120 @@ impl Session {
         })
     }
 
+    fn substitute_delete_statement(
+        delete: &crate::backend::parser::DeleteStatement,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<crate::backend::parser::DeleteStatement, ExecError> {
+        Ok(crate::backend::parser::DeleteStatement {
+            with_recursive: delete.with_recursive,
+            with: delete
+                .with
+                .iter()
+                .map(|cte| Self::substitute_common_table_expr(cte, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            table_name: delete.table_name.clone(),
+            only: delete.only,
+            using: delete
+                .using
+                .as_ref()
+                .map(|using| Self::substitute_from_item(using, subst))
+                .transpose()?,
+            where_clause: delete
+                .where_clause
+                .as_ref()
+                .map(|expr| Self::substitute_sql_expr(expr, subst))
+                .transpose()?,
+            current_of: delete.current_of.clone(),
+            returning: delete
+                .returning
+                .iter()
+                .map(|target| Self::substitute_select_item(target, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    fn substitute_merge_statement(
+        merge: &crate::backend::parser::MergeStatement,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<crate::backend::parser::MergeStatement, ExecError> {
+        Ok(crate::backend::parser::MergeStatement {
+            with_recursive: merge.with_recursive,
+            with: merge
+                .with
+                .iter()
+                .map(|cte| Self::substitute_common_table_expr(cte, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            target_table: merge.target_table.clone(),
+            target_alias: merge.target_alias.clone(),
+            target_only: merge.target_only,
+            source: Self::substitute_from_item(&merge.source, subst)?,
+            join_condition: Self::substitute_sql_expr(&merge.join_condition, subst)?,
+            when_clauses: merge
+                .when_clauses
+                .iter()
+                .map(|clause| {
+                    Ok(crate::backend::parser::MergeWhenClause {
+                        match_kind: clause.match_kind,
+                        condition: clause
+                            .condition
+                            .as_ref()
+                            .map(|expr| Self::substitute_sql_expr(expr, subst))
+                            .transpose()?,
+                        action: match &clause.action {
+                            crate::backend::parser::MergeAction::DoNothing => {
+                                crate::backend::parser::MergeAction::DoNothing
+                            }
+                            crate::backend::parser::MergeAction::Delete => {
+                                crate::backend::parser::MergeAction::Delete
+                            }
+                            crate::backend::parser::MergeAction::Update { assignments } => {
+                                crate::backend::parser::MergeAction::Update {
+                                    assignments: assignments
+                                        .iter()
+                                        .map(|assignment| {
+                                            Ok(crate::backend::parser::Assignment {
+                                                target: Self::substitute_assignment_target(
+                                                    &assignment.target,
+                                                    subst,
+                                                )?,
+                                                expr: Self::substitute_sql_expr(
+                                                    &assignment.expr,
+                                                    subst,
+                                                )?,
+                                            })
+                                        })
+                                        .collect::<Result<Vec<_>, ExecError>>()?,
+                                }
+                            }
+                            crate::backend::parser::MergeAction::Insert { columns, source } => {
+                                crate::backend::parser::MergeAction::Insert {
+                                    columns: columns.clone(),
+                                    source: match source {
+                                        crate::backend::parser::MergeInsertSource::Values(
+                                            values,
+                                        ) => {
+                                            crate::backend::parser::MergeInsertSource::Values(
+                                                Self::substitute_exprs(values, subst)?,
+                                            )
+                                        }
+                                        crate::backend::parser::MergeInsertSource::DefaultValues => {
+                                            crate::backend::parser::MergeInsertSource::DefaultValues
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
+            returning: merge
+                .returning
+                .iter()
+                .map(|target| Self::substitute_select_item(target, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
     fn substitute_common_table_expr(
         cte: &CommonTableExpr,
         subst: &mut PreparedParamSubstitution<'_>,
@@ -8331,6 +8829,12 @@ impl Session {
                 }
                 CteBody::Update(update) => {
                     CteBody::Update(Box::new(Self::substitute_update_statement(update, subst)?))
+                }
+                CteBody::Delete(delete) => {
+                    CteBody::Delete(Box::new(Self::substitute_delete_statement(delete, subst)?))
+                }
+                CteBody::Merge(merge) => {
+                    CteBody::Merge(Box::new(Self::substitute_merge_statement(merge, subst)?))
                 }
                 CteBody::RecursiveUnion {
                     all,
@@ -8361,6 +8865,12 @@ impl Session {
             }
             CteBody::Update(update) => {
                 CteBody::Update(Box::new(Self::substitute_update_statement(update, subst)?))
+            }
+            CteBody::Delete(delete) => {
+                CteBody::Delete(Box::new(Self::substitute_delete_statement(delete, subst)?))
+            }
+            CteBody::Merge(merge) => {
+                CteBody::Merge(Box::new(Self::substitute_merge_statement(merge, subst)?))
             }
             CteBody::RecursiveUnion {
                 all,
@@ -12418,10 +12928,40 @@ impl Session {
                 Statement::Merge(ref merge_stmt) => {
                     let snapshot = self.snapshot_for_command(db, xid, cid)?;
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    let bound = plan_merge(merge_stmt, &catalog)?;
                     let mut ctx =
                         self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
-                    let result = execute_merge(bound, &catalog, &mut ctx, xid, cid);
+                    let result = (|| {
+                        let has_writable_ctes = merge_stmt
+                            .with
+                            .iter()
+                            .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
+                        if !has_writable_ctes {
+                            let bound = plan_merge(merge_stmt, &catalog)?;
+                            return execute_merge(bound, &catalog, &mut ctx, xid, cid);
+                        }
+                        if merge_stmt.with_recursive {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                                "WITH RECURSIVE is not supported for MERGE statement".into(),
+                            )));
+                        }
+                        let mut outer_merge = merge_stmt.clone();
+                        outer_merge.with.clear();
+                        let refs_merge = outer_merge.clone();
+                        let (materialized_ctes, remaining_ctes) = self.materialize_modifying_ctes(
+                            db,
+                            &merge_stmt.with,
+                            merge_stmt.with_recursive,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            cid,
+                            |name| merge_statement_references_table(&refs_merge, name),
+                        )?;
+                        outer_merge.with = remaining_ctes;
+                        let bound =
+                            plan_merge_with_outer_ctes(&outer_merge, &catalog, &materialized_ctes)?;
+                        execute_merge(bound, &catalog, &mut ctx, xid, cid)
+                    })();
                     self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                     result
                 }
@@ -12452,188 +12992,59 @@ impl Session {
                     );
                     let result = match stmt {
                         Statement::Select(select) if Self::select_has_writable_ctes(&select) => {
-                            if select.with_recursive {
-                                Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                "WITH RECURSIVE containing data-modifying statements is not supported"
-                                    .into(),
-                            )))
-                            } else {
-                                let mut materialized_ctes = Vec::new();
+                            (|| {
                                 let mut outer_select = select.clone();
                                 outer_select.with.clear();
-
-                                let result = (|| {
-                                    for cte in &select.with {
-                                        match &cte.body {
-                                            CteBody::Insert(cte_insert) => {
-                                                if cte_insert.with_recursive
-                                                    || cte_insert.with.iter().any(|nested| {
-                                                        Self::cte_body_has_writable_insert(
-                                                            &nested.body,
-                                                        )
-                                                    })
-                                                {
-                                                    return Err(ExecError::Parse(
-                                                    ParseError::FeatureNotSupported(
-                                                        "nested writable CTEs are not supported"
-                                                            .into(),
-                                                    ),
-                                                ));
-                                                }
-                                                if cte_insert.returning.is_empty() {
-                                                    return Err(ExecError::Parse(
-                                                    ParseError::FeatureNotSupported(
-                                                        "writable CTE without RETURNING is not supported"
-                                                            .into(),
-                                                    ),
-                                                ));
-                                                }
-
-                                                let bound = bind_insert_with_outer_scopes_and_ctes(
-                                                    cte_insert,
-                                                    &catalog,
-                                                    &[],
-                                                    &materialized_ctes,
-                                                )?;
-                                                let prepared =
-                                                crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
-                                                    bound, &catalog,
-                                                )?;
-                                                let lock_requests = merge_table_lock_requests(
-                                                    &insert_foreign_key_lock_requests(
-                                                        &prepared.stmt,
-                                                    ),
-                                                    &prepared.extra_lock_requests,
-                                                );
-                                                self.lock_table_requests_if_needed(
-                                                    db,
-                                                    &lock_requests,
-                                                )?;
-                                                let result =
-                                                crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
-                                                    prepared.stmt,
-                                                    &catalog,
-                                                    &mut ctx,
-                                                    xid,
-                                                    cid,
-                                                )?;
-                                                let StatementResult::Query {
-                                                    columns, rows, ..
-                                                } = result
-                                                else {
-                                                    return Err(ExecError::Parse(
-                                                    ParseError::FeatureNotSupported(
-                                                        "writable CTE without RETURNING is not supported"
-                                                            .into(),
-                                                    ),
-                                                ));
-                                                };
-                                                let columns =
-                                                    Self::apply_writable_cte_column_aliases(
-                                                        cte, columns,
-                                                    )?;
-                                                materialized_ctes.push(bound_cte_from_query_rows(
-                                                    cte.name.clone(),
-                                                    columns,
-                                                    &rows,
-                                                ));
-                                            }
-                                            CteBody::Update(cte_update) => {
-                                                if cte_update.with_recursive
-                                                    || cte_update.with.iter().any(|nested| {
-                                                        Self::cte_body_has_writable_insert(
-                                                            &nested.body,
-                                                        )
-                                                    })
-                                                {
-                                                    return Err(ExecError::Parse(
-                                                    ParseError::FeatureNotSupported(
-                                                        "nested writable CTEs are not supported"
-                                                            .into(),
-                                                    ),
-                                                ));
-                                                }
-                                                if cte_update.returning.is_empty() {
-                                                    return Err(ExecError::Parse(
-                                                    ParseError::FeatureNotSupported(
-                                                        "writable CTE without RETURNING is not supported"
-                                                            .into(),
-                                                    ),
-                                                ));
-                                                }
-
-                                                let bound = bind_update_with_outer_scopes_and_ctes(
-                                                    cte_update,
-                                                    &catalog,
-                                                    &[],
-                                                    &materialized_ctes,
-                                                )?;
-                                                let prepared =
-                                                crate::pgrust::database::commands::rules::prepare_bound_update_for_execution(
-                                                    bound, &catalog,
-                                                )?;
-                                                let lock_requests = merge_table_lock_requests(
-                                                    &update_foreign_key_lock_requests(
-                                                        &prepared.stmt,
-                                                    ),
-                                                    &prepared.extra_lock_requests,
-                                                );
-                                                self.lock_table_requests_if_needed(
-                                                    db,
-                                                    &lock_requests,
-                                                )?;
-                                                let interrupts = self.interrupts();
-                                                let result =
-                                                crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
-                                                    prepared.stmt,
-                                                    &catalog,
-                                                    &mut ctx,
-                                                    xid,
-                                                    cid,
-                                                    Some((
-                                                        &db.txns,
-                                                        &db.txn_waiter,
-                                                        interrupts.as_ref(),
-                                                    )),
-                                                )?;
-                                                let StatementResult::Query {
-                                                    columns, rows, ..
-                                                } = result
-                                                else {
-                                                    return Err(ExecError::Parse(
-                                                    ParseError::FeatureNotSupported(
-                                                        "writable CTE without RETURNING is not supported"
-                                                            .into(),
-                                                    ),
-                                                ));
-                                                };
-                                                let columns =
-                                                    Self::apply_writable_cte_column_aliases(
-                                                        cte, columns,
-                                                    )?;
-                                                materialized_ctes.push(bound_cte_from_query_rows(
-                                                    cte.name.clone(),
-                                                    columns,
-                                                    &rows,
-                                                ));
-                                            }
-                                            _ => {
-                                                outer_select.with.push(cte.clone());
-                                            }
-                                        }
-                                    }
-
-                                    let planned = pg_plan_query_with_outer_scopes_and_ctes(
-                                        &outer_select,
+                                let refs_select = outer_select.clone();
+                                let (materialized_ctes, remaining_ctes) = self
+                                    .materialize_modifying_ctes(
+                                        db,
+                                        &select.with,
+                                        select.with_recursive,
                                         &catalog,
-                                        &[],
-                                        &materialized_ctes,
+                                        &mut ctx,
+                                        xid,
+                                        cid,
+                                        |name| {
+                                            select_statement_references_table(&refs_select, name)
+                                        },
                                     )?;
-                                    check_planned_stmt_select_privileges(&planned, &ctx)?;
-                                    execute_planned_stmt(planned, &mut ctx)
-                                })();
-                                result
-                            }
+                                outer_select.with = remaining_ctes;
+                                let planned = pg_plan_query_with_outer_scopes_and_ctes(
+                                    &outer_select,
+                                    &catalog,
+                                    &[],
+                                    &materialized_ctes,
+                                )?;
+                                check_planned_stmt_select_privileges(&planned, &ctx)?;
+                                execute_planned_stmt(planned, &mut ctx)
+                            })()
+                        }
+                        Statement::Values(values) if Self::values_has_writable_ctes(&values) => {
+                            (|| {
+                                let mut outer_values = values.clone();
+                                outer_values.with.clear();
+                                let refs_body = CteBody::Values(outer_values.clone());
+                                let (materialized_ctes, remaining_ctes) = self
+                                    .materialize_modifying_ctes(
+                                        db,
+                                        &values.with,
+                                        values.with_recursive,
+                                        &catalog,
+                                        &mut ctx,
+                                        xid,
+                                        cid,
+                                        |name| cte_body_references_table(&refs_body, name),
+                                    )?;
+                                outer_values.with = remaining_ctes;
+                                let planned = pg_plan_values_query_with_outer_scopes_and_ctes(
+                                    &outer_values,
+                                    &catalog,
+                                    &[],
+                                    &materialized_ctes,
+                                )?;
+                                execute_planned_stmt(planned, &mut ctx)
+                            })()
                         }
                         Statement::Select(select) if select.locking_clause.is_some() => {
                             let planned = pg_plan_query_with_config(
@@ -12692,7 +13103,7 @@ impl Session {
                         let has_writable_ctes = insert_stmt
                             .with
                             .iter()
-                            .any(|cte| matches!(cte.body, CteBody::Insert(_)));
+                            .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
                         if !has_writable_ctes {
                             let bound = bind_insert(insert_stmt, &catalog)?;
                             let prepared =
@@ -12710,76 +13121,23 @@ impl Session {
                             &mut ctx,
                             xid,
                             cid,
-                        );
+                            );
                         }
 
-                        if insert_stmt.with_recursive {
-                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                            "WITH RECURSIVE containing data-modifying statements is not supported"
-                                .into(),
-                        )));
-                        }
-
-                        let mut materialized_ctes = Vec::new();
                         let mut outer_insert = insert_stmt.clone();
                         outer_insert.with.clear();
-
-                        for cte in &insert_stmt.with {
-                            let CteBody::Insert(cte_insert) = &cte.body else {
-                                outer_insert.with.push(cte.clone());
-                                continue;
-                            };
-                            if cte_insert.with_recursive
-                                || cte_insert
-                                    .with
-                                    .iter()
-                                    .any(|nested| matches!(nested.body, CteBody::Insert(_)))
-                            {
-                                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                    "nested writable CTEs are not supported".into(),
-                                )));
-                            }
-                            if cte_insert.returning.is_empty() {
-                                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                    "writable CTE without RETURNING is not supported".into(),
-                                )));
-                            }
-
-                            let bound = bind_insert_with_outer_scopes_and_ctes(
-                                cte_insert,
-                                &catalog,
-                                &[],
-                                &materialized_ctes,
-                            )?;
-                            let prepared =
-                            crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
-                                bound, &catalog,
-                            )?;
-                            let lock_requests = merge_table_lock_requests(
-                                &insert_foreign_key_lock_requests(&prepared.stmt),
-                                &prepared.extra_lock_requests,
-                            );
-                            self.lock_table_requests_if_needed(db, &lock_requests)?;
-                            let result =
-                            crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
-                                prepared.stmt,
-                                &catalog,
-                                &mut ctx,
-                                xid,
-                                cid,
-                            )?;
-                            let StatementResult::Query { columns, rows, .. } = result else {
-                                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                    "writable CTE without RETURNING is not supported".into(),
-                                )));
-                            };
-                            let columns = Self::apply_writable_cte_column_aliases(cte, columns)?;
-                            materialized_ctes.push(bound_cte_from_query_rows(
-                                cte.name.clone(),
-                                columns,
-                                &rows,
-                            ));
-                        }
+                        let refs_insert = outer_insert.clone();
+                        let (materialized_ctes, remaining_ctes) = self.materialize_modifying_ctes(
+                            db,
+                            &insert_stmt.with,
+                            insert_stmt.with_recursive,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            cid,
+                            |name| insert_statement_references_table(&refs_insert, name),
+                        )?;
+                        outer_insert.with = remaining_ctes;
 
                         let bound = bind_insert_with_outer_scopes_and_ctes(
                             &outer_insert,
@@ -12790,6 +13148,11 @@ impl Session {
                         let prepared =
                         crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
                             bound, &catalog,
+                        )?;
+                        crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
+                            prepared.stmt.relation_oid,
+                            RuleEvent::Insert,
+                            &catalog,
                         )?;
                         let lock_requests = merge_table_lock_requests(
                             &insert_foreign_key_lock_requests(&prepared.stmt),
@@ -12810,16 +13173,6 @@ impl Session {
                 Statement::Update(ref update_stmt) => {
                     let snapshot = self.snapshot_for_command(db, xid, cid)?;
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    let bound = bind_update(update_stmt, &catalog)?;
-                    let prepared =
-                    crate::pgrust::database::commands::rules::prepare_bound_update_for_execution(
-                        bound, &catalog,
-                    )?;
-                    let lock_requests = merge_table_lock_requests(
-                        &update_foreign_key_lock_requests(&prepared.stmt),
-                        &prepared.extra_lock_requests,
-                    );
-                    self.lock_table_requests_if_needed(db, &lock_requests)?;
                     let interrupts = self.interrupts();
                     let deferred_foreign_keys = self
                         .active_txn
@@ -12836,7 +13189,54 @@ impl Session {
                         None,
                     );
                     ctx.interrupts = Arc::clone(&interrupts);
-                    let result =
+                    let result = (|| {
+                        let has_writable_ctes = update_stmt
+                            .with
+                            .iter()
+                            .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
+                        let bound = if has_writable_ctes {
+                            let mut outer_update = update_stmt.clone();
+                            outer_update.with.clear();
+                            let refs_update = outer_update.clone();
+                            let (materialized_ctes, remaining_ctes) = self
+                                .materialize_modifying_ctes(
+                                    db,
+                                    &update_stmt.with,
+                                    update_stmt.with_recursive,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    cid,
+                                    |name| update_statement_references_table(&refs_update, name),
+                                )?;
+                            outer_update.with = remaining_ctes;
+                            bind_update_with_outer_scopes_and_ctes(
+                                &outer_update,
+                                &catalog,
+                                &[],
+                                &materialized_ctes,
+                            )?
+                        } else {
+                            bind_update(update_stmt, &catalog)?
+                        };
+                        let prepared =
+                        crate::pgrust::database::commands::rules::prepare_bound_update_for_execution(
+                            bound, &catalog,
+                        )?;
+                        if has_writable_ctes {
+                            for target in &prepared.stmt.targets {
+                                crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
+                                    target.relation_oid,
+                                    RuleEvent::Update,
+                                    &catalog,
+                                )?;
+                            }
+                        }
+                        let lock_requests = merge_table_lock_requests(
+                            &update_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        self.lock_table_requests_if_needed(db, &lock_requests)?;
                         crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -12844,23 +13244,14 @@ impl Session {
                             xid,
                             cid,
                             Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
-                        );
+                        )
+                    })();
                     self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                     result
                 }
                 Statement::Delete(ref delete_stmt) => {
                     let snapshot = self.snapshot_for_command(db, xid, cid)?;
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    let bound = bind_delete(delete_stmt, &catalog)?;
-                    let prepared =
-                    crate::pgrust::database::commands::rules::prepare_bound_delete_for_execution(
-                        bound, &catalog,
-                    )?;
-                    let lock_requests = merge_table_lock_requests(
-                        &delete_foreign_key_lock_requests(&prepared.stmt),
-                        &prepared.extra_lock_requests,
-                    );
-                    self.lock_table_requests_if_needed(db, &lock_requests)?;
                     let interrupts = self.interrupts();
                     let deferred_foreign_keys = self
                         .active_txn
@@ -12877,14 +13268,62 @@ impl Session {
                         None,
                     );
                     ctx.interrupts = Arc::clone(&interrupts);
-                    let result =
+                    let result = (|| {
+                        let has_writable_ctes = delete_stmt
+                            .with
+                            .iter()
+                            .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
+                        let bound = if has_writable_ctes {
+                            let mut outer_delete = delete_stmt.clone();
+                            outer_delete.with.clear();
+                            let refs_delete = outer_delete.clone();
+                            let (materialized_ctes, remaining_ctes) = self
+                                .materialize_modifying_ctes(
+                                    db,
+                                    &delete_stmt.with,
+                                    delete_stmt.with_recursive,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    cid,
+                                    |name| delete_statement_references_table(&refs_delete, name),
+                                )?;
+                            outer_delete.with = remaining_ctes;
+                            bind_delete_with_outer_scopes_and_ctes(
+                                &outer_delete,
+                                &catalog,
+                                &[],
+                                &materialized_ctes,
+                            )?
+                        } else {
+                            bind_delete(delete_stmt, &catalog)?
+                        };
+                        let prepared =
+                        crate::pgrust::database::commands::rules::prepare_bound_delete_for_execution(
+                            bound, &catalog,
+                        )?;
+                        if has_writable_ctes {
+                            for target in &prepared.stmt.targets {
+                                crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
+                                    target.relation_oid,
+                                    RuleEvent::Delete,
+                                    &catalog,
+                                )?;
+                            }
+                        }
+                        let lock_requests = merge_table_lock_requests(
+                            &delete_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        self.lock_table_requests_if_needed(db, &lock_requests)?;
                         crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
                             prepared.stmt,
                             &catalog,
                             &mut ctx,
                             xid,
                             Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
-                        );
+                        )
+                    })();
                     self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                     result
                 }

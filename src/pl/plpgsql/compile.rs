@@ -11,14 +11,14 @@ use crate::backend::parser::{
     AliasColumnSpec, ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection,
     BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
     CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement, CteBody,
-    DeleteStatement, FromItem, InsertSource, InsertStatement, OnConflictAction, OnConflictClause,
-    OnConflictTarget, OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
-    RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr,
-    SqlType, SqlTypeKind, Statement, UpdateStatement, ValuesStatement, XmlTableColumn,
-    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
-    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
-    parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
-    pg_plan_query_with_outer_scopes_and_ctes_config,
+    DeleteStatement, FromItem, InsertSource, InsertStatement, MergeAction, MergeInsertSource,
+    MergeStatement, OnConflictAction, OnConflictClause, OnConflictTarget, OrderByItem, ParseError,
+    RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectItem, SelectStatement,
+    SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement,
+    UpdateStatement, ValuesStatement, XmlTableColumn, bind_delete_with_outer_scopes,
+    bind_insert_with_outer_scopes, bind_scalar_expr_in_named_slot_scope,
+    bind_update_with_outer_scopes, parse_expr, parse_statement, parse_type_name,
+    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_query_with_outer_scopes_and_ctes_config,
     pg_plan_values_query_with_outer_scopes_and_ctes,
     pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
 };
@@ -5220,6 +5220,10 @@ fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
         CteBody::Update(update) => {
             CteBody::Update(Box::new(normalize_plpgsql_update(*update, env)))
         }
+        CteBody::Delete(delete) => {
+            CteBody::Delete(Box::new(normalize_plpgsql_delete(*delete, env)))
+        }
+        CteBody::Merge(merge) => CteBody::Merge(Box::new(normalize_plpgsql_merge(*merge, env))),
         CteBody::RecursiveUnion {
             all,
             anchor,
@@ -5314,6 +5318,57 @@ fn normalize_plpgsql_delete(mut stmt: DeleteStatement, env: &CompileEnv) -> Dele
     stmt.using = stmt
         .using
         .map(|from| normalize_plpgsql_from_item(from, env));
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|item| normalize_plpgsql_select_item(item, env))
+        .collect();
+    stmt
+}
+
+fn normalize_plpgsql_merge(mut stmt: MergeStatement, env: &CompileEnv) -> MergeStatement {
+    stmt.with = stmt
+        .with
+        .into_iter()
+        .map(|mut cte| {
+            cte.body = normalize_plpgsql_cte_body(cte.body, env);
+            cte
+        })
+        .collect();
+    stmt.source = normalize_plpgsql_from_item(stmt.source, env);
+    stmt.join_condition = normalize_plpgsql_expr(stmt.join_condition, env);
+    stmt.when_clauses = stmt
+        .when_clauses
+        .into_iter()
+        .map(|mut clause| {
+            clause.condition = clause
+                .condition
+                .map(|expr| normalize_plpgsql_expr(expr, env));
+            clause.action = match clause.action {
+                MergeAction::DoNothing => MergeAction::DoNothing,
+                MergeAction::Delete => MergeAction::Delete,
+                MergeAction::Update { assignments } => MergeAction::Update {
+                    assignments: assignments
+                        .into_iter()
+                        .map(|assignment| normalize_plpgsql_assignment(assignment, env))
+                        .collect(),
+                },
+                MergeAction::Insert { columns, source } => MergeAction::Insert {
+                    columns,
+                    source: match source {
+                        MergeInsertSource::Values(values) => MergeInsertSource::Values(
+                            values
+                                .into_iter()
+                                .map(|expr| normalize_plpgsql_expr(expr, env))
+                                .collect(),
+                        ),
+                        MergeInsertSource::DefaultValues => MergeInsertSource::DefaultValues,
+                    },
+                },
+            };
+            clause
+        })
+        .collect();
     stmt.returning = stmt
         .returning
         .into_iter()

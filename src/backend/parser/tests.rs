@@ -8074,6 +8074,35 @@ fn parse_select_with_writable_update_cte() {
 }
 
 #[test]
+fn parse_select_with_writable_delete_cte() {
+    let stmt = parse_statement("with moved as (delete from src returning id) select id from moved")
+        .unwrap();
+    match stmt {
+        Statement::Select(select) => {
+            assert_eq!(select.with.len(), 1);
+            assert!(matches!(select.with[0].body, CteBody::Delete(_)));
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_select_with_writable_merge_cte() {
+    let stmt = parse_statement(
+        "with moved as (merge into target t using source s on t.id = s.id \
+         when matched then delete returning merge_action(), t.id) select * from moved",
+    )
+    .unwrap();
+    match stmt {
+        Statement::Select(select) => {
+            assert_eq!(select.with.len(), 1);
+            assert!(matches!(select.with[0].body, CteBody::Merge(_)));
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_select_with_writable_insert_cte_returning_tableoid_and_star() {
     let stmt = parse_statement(
         "with ins (a, b, c) as \
@@ -11879,6 +11908,7 @@ fn parse_create_rule_single_action() {
     assert_eq!(
         stmt,
         Statement::CreateRule(CreateRuleStatement {
+            replace_existing: false,
             rule_name: "r1".into(),
             relation_name: "people".into(),
             event: RuleEvent::Insert,
@@ -11984,6 +12014,7 @@ fn parse_create_rule_instead_nothing() {
     assert_eq!(
         stmt,
         Statement::CreateRule(CreateRuleStatement {
+            replace_existing: false,
             rule_name: "r1".into(),
             relation_name: "people".into(),
             event: RuleEvent::Delete,
@@ -11993,6 +12024,19 @@ fn parse_create_rule_instead_nothing() {
             actions: vec![],
         })
     );
+}
+
+#[test]
+fn parse_create_or_replace_rule() {
+    let stmt =
+        parse_statement("create or replace rule r1 as on insert to people do instead notify foo")
+            .unwrap();
+    let Statement::CreateRule(stmt) = stmt else {
+        panic!("expected create rule");
+    };
+    assert!(stmt.replace_existing);
+    assert_eq!(stmt.rule_name, "r1");
+    assert!(matches!(stmt.actions[0].statement, Statement::Notify(_)));
 }
 
 #[test]

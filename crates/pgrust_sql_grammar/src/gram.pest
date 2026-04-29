@@ -72,7 +72,7 @@ cte_clause = { kw_with ~ kw_recursive? ~ common_table_expr ~ ("," ~ common_table
 common_table_expr = { identifier ~ cte_column_list? ~ kw_as ~ cte_materialization? ~ "(" ~ cte_body ~ ")" }
 cte_column_list = { "(" ~ ident_list ~ ")" }
 cte_materialization = { kw_not? ~ kw_materialized }
-cte_body = { insert_stmt | update_stmt | select_stmt | values_stmt }
+cte_body = { select_stmt | values_stmt | insert_stmt | update_stmt | delete_stmt | merge_stmt }
 empty_select_list = { &(kw_from | kw_union | kw_intersect | kw_except) }
 group_by_clause = { kw_group ~ kw_by ~ expr ~ ("," ~ expr)* }
 having_clause = { kw_having ~ expr }
@@ -176,7 +176,7 @@ view_options_clause = { kw_with ~ "(" ~ view_reloption ~ ("," ~ view_reloption)*
 view_reloption = { identifier ~ ("=" ~ set_value_atom)? }
 create_or_replace_clause = { kw_or ~ kw_replace }
 view_check_option_clause = { kw_with ~ (kw_local | kw_cascaded)? ~ kw_check ~ kw_option }
-create_rule_stmt = { kw_create ~ kw_rule ~ identifier ~ kw_as ~ kw_on ~ rule_event ~ kw_to ~ identifier ~ rule_where_clause? ~ kw_do ~ rule_do_kind? ~ rule_action_body }
+create_rule_stmt = { kw_create ~ create_or_replace_clause? ~ kw_rule ~ identifier ~ kw_as ~ kw_on ~ rule_event ~ kw_to ~ identifier ~ rule_where_clause? ~ kw_do ~ rule_do_kind? ~ rule_action_body }
 create_index_stmt = { kw_create ~ kw_unique? ~ kw_index ~ kw_concurrently? ~ if_not_exists_clause? ~ create_index_name? ~ kw_on ~ only_clause? ~ identifier ~ create_index_using_clause? ~ "(" ~ create_index_item ~ ("," ~ create_index_item)* ~ ")" ~ create_index_include_clause? ~ unique_nulls_distinct_clause? ~ create_index_where_clause? ~ create_index_with_clause? }
 create_index_name = { !(kw_on_atom | kw_concurrently_atom) ~ identifier }
 create_index_using_clause = { kw_using ~ identifier }
