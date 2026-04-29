@@ -28,7 +28,10 @@ use crate::backend::executor::value_io::{
     decode_value, encode_value, format_unique_key_detail, format_vector_array_storage_text,
 };
 use crate::backend::storage::fsm::get_free_index_page;
-use crate::backend::storage::page::bufpage::{MAX_HEAP_TUPLE_SIZE, max_align, page_header};
+use crate::backend::storage::page::bufpage::{
+    ITEM_ID_SIZE, MAX_HEAP_TUPLE_SIZE, PageHeaderData, SIZE_OF_PAGE_HEADER_DATA, max_align,
+    page_header,
+};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
 use crate::include::access::amapi::{
@@ -78,6 +81,7 @@ fn check_insert_split_interrupts(ctx: &IndexInsertContext) -> Result<(), Catalog
 
 const TOAST_INDEX_TARGET: usize = MAX_HEAP_TUPLE_SIZE / 16;
 pub(crate) const UNIQUE_BUILD_DETAIL_SEPARATOR: &str = "\nDETAIL: ";
+const INDEX_TUPLE_HEADER_SIZE: usize = crate::include::access::itup::SIZE_OF_INDEX_TUPLE_DATA;
 
 #[derive(Debug, Clone)]
 struct BuiltPageRef {
@@ -816,6 +820,75 @@ fn keys_contain_null(values: &[Value]) -> bool {
     values.iter().any(|value| matches!(value, Value::Null))
 }
 
+fn write_page_header_fast(
+    page: &mut [u8; crate::backend::storage::smgr::BLCKSZ],
+    header: PageHeaderData,
+) {
+    page[0..8].copy_from_slice(&header.pd_lsn.to_le_bytes());
+    page[8..10].copy_from_slice(&header.pd_checksum.to_le_bytes());
+    page[10..12].copy_from_slice(&header.pd_flags.to_le_bytes());
+    page[12..14].copy_from_slice(&header.pd_lower.to_le_bytes());
+    page[14..16].copy_from_slice(&header.pd_upper.to_le_bytes());
+    page[16..18].copy_from_slice(&header.pd_special.to_le_bytes());
+    page[18..20].copy_from_slice(&header.pd_pagesize_version.to_le_bytes());
+    page[20..24].copy_from_slice(&header.pd_prune_xid.to_le_bytes());
+}
+
+fn write_index_tuple_at(
+    page: &mut [u8; crate::backend::storage::smgr::BLCKSZ],
+    offset: usize,
+    tuple: &IndexTupleData,
+) {
+    page[offset..offset + 4].copy_from_slice(&tuple.t_tid.block_number.to_le_bytes());
+    page[offset + 4..offset + 6].copy_from_slice(&tuple.t_tid.offset_number.to_le_bytes());
+    page[offset + 6..offset + INDEX_TUPLE_HEADER_SIZE].copy_from_slice(&tuple.t_info.to_le_bytes());
+    page[offset + INDEX_TUPLE_HEADER_SIZE..offset + tuple.size()].copy_from_slice(&tuple.payload);
+}
+
+fn write_item_id_fast(
+    page: &mut [u8; crate::backend::storage::smgr::BLCKSZ],
+    offset: usize,
+    lp_off: usize,
+    lp_len: usize,
+) {
+    let raw = (lp_off as u32 & 0x7fff) | (1u32 << 15) | ((lp_len as u32 & 0x7fff) << 17);
+    let idx = max_align(SIZE_OF_PAGE_HEADER_DATA) + (offset - 1) * ITEM_ID_SIZE;
+    page[idx..idx + ITEM_ID_SIZE].copy_from_slice(&raw.to_le_bytes());
+}
+
+fn append_tuples_to_build_page(
+    page: &mut [u8; crate::backend::storage::smgr::BLCKSZ],
+    tuples: &[IndexTupleData],
+) -> Result<(), CatalogError> {
+    let mut header = page_header(page)
+        .map_err(|err| CatalogError::Io(format!("btree build page header failed: {err:?}")))?;
+    let mut offset =
+        (usize::from(header.pd_lower) - max_align(SIZE_OF_PAGE_HEADER_DATA)) / ITEM_ID_SIZE + 1;
+
+    for tuple in tuples {
+        let len = tuple.size();
+        let aligned_len = max_align(len);
+        if header.free_space() < aligned_len + ITEM_ID_SIZE {
+            return Err(CatalogError::Io(
+                "index tuple too large for btree build page".into(),
+            ));
+        }
+        let new_upper = usize::from(header.pd_upper) - aligned_len;
+        write_index_tuple_at(page, new_upper, tuple);
+        page[new_upper + len..new_upper + aligned_len].fill(0);
+        write_item_id_fast(page, offset, new_upper, len);
+        header.pd_upper = new_upper as u16;
+        header.pd_lower = usize::from(header.pd_lower)
+            .checked_add(ITEM_ID_SIZE)
+            .ok_or(CatalogError::Corrupt("btree build page lower overflow"))?
+            as u16;
+        offset += 1;
+    }
+
+    write_page_header_fast(page, header);
+    Ok(())
+}
+
 fn build_leaf_pages(
     ctx: &IndexBuildContext,
     tuples: Vec<BtSortTuple>,
@@ -840,10 +913,7 @@ fn build_leaf_pages(
         let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
         bt_page_init(&mut page, BTP_LEAF, 0)
             .map_err(|err| CatalogError::Io(format!("btree leaf init failed: {err:?}")))?;
-        for tuple in &items {
-            bt_page_append_tuple(&mut page, tuple)
-                .map_err(|_| CatalogError::Io("index tuple too large for leaf page".into()))?;
-        }
+        append_tuples_to_build_page(&mut page, &items)?;
         let mut opaque = bt_page_get_opaque(&page)
             .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
         opaque.btpo_prev = if idx == 0 { P_NONE } else { block - 1 };
@@ -922,10 +992,7 @@ fn build_internal_level(
         let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
         bt_page_init(&mut page, 0, level)
             .map_err(|err| CatalogError::Io(format!("btree internal init failed: {err:?}")))?;
-        for tuple in &items {
-            bt_page_append_tuple(&mut page, tuple)
-                .map_err(|_| CatalogError::Io("index tuple too large for internal page".into()))?;
-        }
+        append_tuples_to_build_page(&mut page, &items)?;
         let mut opaque = bt_page_get_opaque(&page)
             .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
         opaque.btpo_prev = if idx == 0 { P_NONE } else { block - 1 };

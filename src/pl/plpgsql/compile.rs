@@ -224,6 +224,9 @@ pub(crate) enum CompiledStmt {
         source: CompiledForQuerySource,
         body: Vec<CompiledStmt>,
     },
+    ExitWhen {
+        condition: Option<CompiledExpr>,
+    },
     Raise {
         level: RaiseLevel,
         sqlstate: Option<String>,
@@ -1191,6 +1194,12 @@ fn compile_stmt(
             source,
             body,
         } => compile_for_query_stmt(target, source, body, catalog, env, return_contract)?,
+        Stmt::ExitWhen { condition } => CompiledStmt::ExitWhen {
+            condition: condition
+                .as_deref()
+                .map(|condition| compile_condition_text(condition, catalog, env))
+                .transpose()?,
+        },
         Stmt::Raise {
             level,
             sqlstate,

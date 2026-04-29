@@ -2088,27 +2088,33 @@ fn nonverbose_plan_label(
             index_name,
             direction,
             ..
-        } => context_relation_scan_alias(ctx, relation_name).map(|alias| {
-            let direction = scan_direction_label(*direction);
-            let relation_name = relation_name_base(relation_name);
-            format!("Index Only Scan{direction} using {index_name} on {relation_name} {alias}")
-        }),
+        } => nonverbose_index_scan_label(
+            "Index Only Scan",
+            relation_name,
+            index_name,
+            *direction,
+            context_relation_scan_alias(ctx, relation_name),
+        ),
         Plan::IndexScan {
             relation_name,
             index_name,
             direction,
             index_only,
             ..
-        } => context_relation_scan_alias(ctx, relation_name).map(|alias| {
-            let direction = scan_direction_label(*direction);
+        } => {
             let scan_name = if *index_only {
                 "Index Only Scan"
             } else {
                 "Index Scan"
             };
-            let relation_name = relation_name_base(relation_name);
-            format!("{scan_name}{direction} using {index_name} on {relation_name} {alias}")
-        }),
+            nonverbose_index_scan_label(
+                scan_name,
+                relation_name,
+                index_name,
+                *direction,
+                context_relation_scan_alias(ctx, relation_name),
+            )
+        }
         Plan::BitmapHeapScan { relation_name, .. } => nonverbose_relation_scan_label(
             "Bitmap Heap Scan",
             relation_name,
@@ -2130,6 +2136,27 @@ fn context_relation_scan_alias<'a>(
         .or(ctx.relation_scan_alias.as_deref())
 }
 
+fn relation_name_without_alias(relation_name: &str) -> &str {
+    relation_name
+        .rsplit_once(' ')
+        .map(|(name, _)| name)
+        .unwrap_or(relation_name)
+}
+
+fn nonverbose_index_scan_label(
+    scan_name: &str,
+    relation_name: &str,
+    index_name: &str,
+    direction: crate::include::access::relscan::ScanDirection,
+    alias: Option<&str>,
+) -> Option<String> {
+    alias.map(|alias| {
+        let direction = scan_direction_label(direction);
+        let relation_name = relation_name_without_alias(relation_name);
+        format!("{scan_name}{direction} using {index_name} on {relation_name} {alias}")
+    })
+}
+
 fn nonverbose_relation_scan_label(
     scan_name: &str,
     relation_name: &str,
@@ -2137,10 +2164,7 @@ fn nonverbose_relation_scan_label(
     is_child: bool,
 ) -> Option<String> {
     if let Some(alias) = alias {
-        let relation_name = relation_name
-            .rsplit_once(' ')
-            .map(|(name, _)| name)
-            .unwrap_or(relation_name);
+        let relation_name = relation_name_without_alias(relation_name);
         return Some(format!("{scan_name} on {relation_name} {alias}"));
     }
     if !is_child

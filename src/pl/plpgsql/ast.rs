@@ -46,9 +46,9 @@ pub enum Decl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaiseLevel {
     Info,
+    Log,
     Notice,
     Warning,
-    Log,
     Exception,
 }
 
@@ -118,6 +118,9 @@ pub enum Stmt {
         target: ForTarget,
         source: ForQuerySource,
         body: Vec<Stmt>,
+    },
+    ExitWhen {
+        condition: Option<String>,
     },
     Raise {
         level: RaiseLevel,

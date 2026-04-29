@@ -8,13 +8,13 @@ use crate::backend::rewrite::{
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
-use crate::include::nodes::plannodes::PlannedStmt;
+use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
     expr_contains_set_returning,
 };
 use crate::include::nodes::primnodes::{
-    JoinType, RelationPrivilegeMask, RelationPrivilegeRequirement,
+    JoinType, QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +73,7 @@ pub struct BoundUpdateTarget {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub relkind: char,
+    pub allow_partition_routing: bool,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
@@ -1784,6 +1785,7 @@ fn build_update_target(
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
     parent_rls_write_checks: &[RlsWriteCheck],
+    allow_partition_routing: bool,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateTarget, ParseError> {
@@ -1835,6 +1837,7 @@ fn build_update_target(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        allow_partition_routing,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
         desc: child.desc.clone(),
@@ -1864,6 +1867,7 @@ fn build_update_target_from_joined_input(
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
     parent_rls_write_checks: &[RlsWriteCheck],
+    allow_partition_routing: bool,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateTarget, ParseError> {
@@ -1903,6 +1907,7 @@ fn build_update_target_from_joined_input(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        allow_partition_routing,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
         desc: child.desc.clone(),
@@ -2023,19 +2028,20 @@ fn reject_duplicate_auto_view_targets(
 
 fn rewrite_auto_view_returning_targets(
     targets: Vec<TargetEntry>,
-    output_exprs: &[Expr],
+    local_output_exprs: &[Expr],
+    view_output_exprs: &[Expr],
     base_desc: &RelationDesc,
 ) -> Vec<TargetEntry> {
     let old_view_output_exprs =
-        view_returning_pseudo_output_exprs(output_exprs, base_desc, OUTER_VAR);
+        view_returning_pseudo_output_exprs(view_output_exprs, base_desc, OUTER_VAR);
     let new_view_output_exprs =
-        view_returning_pseudo_output_exprs(output_exprs, base_desc, INNER_VAR);
+        view_returning_pseudo_output_exprs(view_output_exprs, base_desc, INNER_VAR);
     targets
         .into_iter()
         .map(|target| TargetEntry {
             expr: rewrite_local_vars_for_output_exprs(
                 rewrite_local_vars_for_output_exprs(
-                    rewrite_local_vars_for_output_exprs(target.expr, 1, output_exprs),
+                    rewrite_local_vars_for_output_exprs(target.expr, 1, local_output_exprs),
                     OUTER_VAR,
                     &old_view_output_exprs,
                 ),
@@ -2043,6 +2049,491 @@ fn rewrite_auto_view_returning_targets(
                 &new_view_output_exprs,
             ),
             ..target
+        })
+        .collect()
+}
+
+fn update_auto_view_input_output_exprs(
+    stmt: &BoundUpdateStatement,
+    view_output_exprs: &[Expr],
+) -> Vec<Expr> {
+    let input_columns = stmt
+        .input_plan
+        .as_ref()
+        .map(|plan| plan.columns())
+        .unwrap_or_default();
+    let width = stmt
+        .visible_column_count
+        .max(stmt.target_ctid_index.saturating_add(1))
+        .max(stmt.target_tableoid_index.saturating_add(1));
+    (0..width)
+        .map(|index| {
+            if index < stmt.target_visible_count
+                && let Some(expr) = view_output_exprs.get(index)
+            {
+                expr.clone()
+            } else {
+                update_input_identity_expr(index, &input_columns)
+            }
+        })
+        .collect()
+}
+
+fn update_input_identity_expr(index: usize, input_columns: &[QueryColumn]) -> Expr {
+    Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: input_columns
+            .get(index)
+            .map(|column| column.sql_type)
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::AnyElement)),
+    })
+}
+
+fn rewrite_auto_view_update_input_plan(
+    input_plan: Option<PlannedStmt>,
+    view_relation_oid: u32,
+    view_desc: &RelationDesc,
+    base_relation_name: &str,
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+) -> Option<PlannedStmt> {
+    input_plan.map(|mut planned| {
+        planned.plan_tree = rewrite_auto_view_scan_plan(
+            planned.plan_tree,
+            view_relation_oid,
+            view_desc,
+            base_relation_name,
+            resolved,
+        );
+        planned
+    })
+}
+
+fn rewrite_auto_view_scan_plan(
+    plan: Plan,
+    view_relation_oid: u32,
+    view_desc: &RelationDesc,
+    base_relation_name: &str,
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+) -> Plan {
+    match plan {
+        Plan::SeqScan {
+            plan_info,
+            source_id,
+            relation_oid,
+            disabled,
+            ..
+        } if relation_oid == view_relation_oid => {
+            let base_scan = Plan::SeqScan {
+                plan_info,
+                source_id,
+                rel: resolved.base_relation.rel,
+                relation_name: base_relation_name.to_string(),
+                relation_oid: resolved.base_relation.relation_oid,
+                relkind: resolved.base_relation.relkind,
+                relispopulated: resolved.base_relation.relispopulated,
+                toast: resolved.base_relation.toast,
+                desc: resolved.base_relation.desc.clone(),
+                disabled,
+            };
+            if view_output_is_base_identity(
+                &resolved.visible_output_exprs,
+                &resolved.base_relation.desc,
+            ) {
+                base_scan
+            } else {
+                Plan::Projection {
+                    plan_info,
+                    input: Box::new(base_scan),
+                    targets: view_projection_targets(view_desc, &resolved.visible_output_exprs),
+                }
+            }
+        }
+        Plan::Append {
+            plan_info,
+            source_id,
+            desc,
+            children,
+        } => Plan::Append {
+            plan_info,
+            source_id,
+            desc,
+            children: children
+                .into_iter()
+                .map(|child| {
+                    rewrite_auto_view_scan_plan(
+                        child,
+                        view_relation_oid,
+                        view_desc,
+                        base_relation_name,
+                        resolved,
+                    )
+                })
+                .collect(),
+        },
+        Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            children,
+        } => Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            children: children
+                .into_iter()
+                .map(|child| {
+                    rewrite_auto_view_scan_plan(
+                        child,
+                        view_relation_oid,
+                        view_desc,
+                        base_relation_name,
+                        resolved,
+                    )
+                })
+                .collect(),
+        },
+        Plan::Unique {
+            plan_info,
+            key_indices,
+            input,
+        } => Plan::Unique {
+            plan_info,
+            key_indices,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+        },
+        Plan::Hash {
+            plan_info,
+            input,
+            hash_keys,
+        } => Plan::Hash {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            hash_keys,
+        },
+        Plan::NestedLoopJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            nest_params,
+            join_qual,
+            qual,
+        } => Plan::NestedLoopJoin {
+            plan_info,
+            left: Box::new(rewrite_auto_view_scan_plan(
+                *left,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            right: Box::new(rewrite_auto_view_scan_plan(
+                *right,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            kind,
+            nest_params,
+            join_qual,
+            qual,
+        },
+        Plan::HashJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+        } => Plan::HashJoin {
+            plan_info,
+            left: Box::new(rewrite_auto_view_scan_plan(
+                *left,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            right: Box::new(rewrite_auto_view_scan_plan(
+                *right,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            kind,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+        },
+        Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+        } => Plan::MergeJoin {
+            plan_info,
+            left: Box::new(rewrite_auto_view_scan_plan(
+                *left,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            right: Box::new(rewrite_auto_view_scan_plan(
+                *right,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            kind,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+        },
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate,
+        } => Plan::Filter {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            predicate,
+        },
+        Plan::OrderBy {
+            plan_info,
+            input,
+            items,
+            display_items,
+        } => Plan::OrderBy {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            items,
+            display_items,
+        },
+        Plan::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        } => Plan::IncrementalSort {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        },
+        Plan::Limit {
+            plan_info,
+            input,
+            limit,
+            offset,
+        } => Plan::Limit {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            limit,
+            offset,
+        },
+        Plan::LockRows {
+            plan_info,
+            input,
+            row_marks,
+        } => Plan::LockRows {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            row_marks,
+        },
+        Plan::Projection {
+            plan_info,
+            input,
+            targets,
+        } => Plan::Projection {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            targets,
+        },
+        Plan::Aggregate {
+            plan_info,
+            strategy,
+            phase,
+            disabled,
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            semantic_accumulators,
+            semantic_output_names,
+            having,
+            output_columns,
+        } => Plan::Aggregate {
+            plan_info,
+            strategy,
+            phase,
+            disabled,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            semantic_accumulators,
+            semantic_output_names,
+            having,
+            output_columns,
+        },
+        Plan::WindowAgg {
+            plan_info,
+            input,
+            clause,
+            output_columns,
+        } => Plan::WindowAgg {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            clause,
+            output_columns,
+        },
+        Plan::SubqueryScan {
+            plan_info,
+            input,
+            scan_name,
+            filter,
+            output_columns,
+        } => Plan::SubqueryScan {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            scan_name,
+            filter,
+            output_columns,
+        },
+        Plan::ProjectSet {
+            plan_info,
+            input,
+            targets,
+        } => Plan::ProjectSet {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            targets,
+        },
+        other => other,
+    }
+}
+
+fn view_output_is_base_identity(output_exprs: &[Expr], base_desc: &RelationDesc) -> bool {
+    output_exprs.len() == base_desc.columns.len()
+        && output_exprs.iter().enumerate().all(|(index, expr)| {
+            matches!(
+                expr,
+                Expr::Var(var)
+                    if var.varno == 1
+                        && var.varlevelsup == 0
+                        && var.varattno == user_attrno(index)
+            )
+        })
+}
+
+fn view_projection_targets(view_desc: &RelationDesc, output_exprs: &[Expr]) -> Vec<TargetEntry> {
+    view_desc
+        .columns
+        .iter()
+        .zip(output_exprs.iter())
+        .enumerate()
+        .map(|(index, (column, expr))| {
+            TargetEntry::new(
+                column.name.clone(),
+                expr.clone(),
+                column.sql_type,
+                index + 1,
+            )
+            .with_input_resno(index + 1)
         })
         .collect()
 }
@@ -2355,6 +2846,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
             &resolved.visible_output_exprs,
+            &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
         rls_write_checks: stmt
@@ -2408,6 +2900,8 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         resolved.base_relation.relation_oid,
         &target.relation_name,
     );
+    let input_output_exprs =
+        update_auto_view_input_output_exprs(&stmt, &resolved.visible_output_exprs);
     let assignments = target
         .assignments
         .iter()
@@ -2421,18 +2915,18 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                 )?,
                 subscripts: rewrite_assignment_subscripts(
                     &assignment.subscripts,
-                    &resolved.visible_output_exprs,
+                    &input_output_exprs,
                 ),
                 field_path: assignment.field_path.clone(),
                 indirection: rewrite_assignment_indirection(
                     &assignment.indirection,
-                    &resolved.visible_output_exprs,
+                    &input_output_exprs,
                 ),
                 target_sql_type: assignment.target_sql_type,
                 expr: rewrite_local_vars_for_output_exprs(
                     assignment.expr.clone(),
                     1,
-                    &resolved.visible_output_exprs,
+                    &input_output_exprs,
                 ),
             })
         })
@@ -2455,24 +2949,40 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         ));
     }
     let predicate = and_predicates(
-        target.predicate.as_ref().map(|expr| {
-            rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
-        }),
+        target
+            .predicate
+            .as_ref()
+            .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &input_output_exprs)),
         resolved.combined_predicate.clone(),
     );
 
     let targets = auto_view_base_children(&resolved, catalog)?
         .into_iter()
         .map(|child| {
-            build_update_target(
-                &relation_name,
-                &resolved.base_relation.desc,
-                &assignments,
-                predicate.as_ref(),
-                &target.rls_write_checks,
-                &child,
-                catalog,
-            )
+            let allow_partition_routing = resolved.base_relation.relkind == 'p';
+            if stmt.input_plan.is_some() {
+                build_update_target_from_joined_input(
+                    &relation_name,
+                    &resolved.base_relation.desc,
+                    &assignments,
+                    predicate.as_ref(),
+                    &target.rls_write_checks,
+                    allow_partition_routing,
+                    &child,
+                    catalog,
+                )
+            } else {
+                build_update_target(
+                    &relation_name,
+                    &resolved.base_relation.desc,
+                    &assignments,
+                    predicate.as_ref(),
+                    &target.rls_write_checks,
+                    allow_partition_routing,
+                    &child,
+                    catalog,
+                )
+            }
             .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
@@ -2500,8 +3010,16 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         targets,
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
+            &input_output_exprs,
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
+        ),
+        input_plan: rewrite_auto_view_update_input_plan(
+            stmt.input_plan,
+            target.relation_oid,
+            &target.desc,
+            &relation_name,
+            &resolved,
         ),
         required_privileges,
         ..stmt
@@ -2574,6 +3092,7 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         targets,
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
+            &resolved.visible_output_exprs,
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
@@ -3384,6 +3903,7 @@ fn bind_simple_update(
                 &assignments,
                 predicate.as_ref(),
                 &target_rls.write_checks,
+                entry.relkind == 'p' && !stmt.only,
                 &child,
                 catalog,
             )
@@ -3445,7 +3965,7 @@ fn bind_update_from(
         entry.relkind,
         entry.relispopulated,
         entry.toast,
-        !stmt.only && entry.relkind == 'r',
+        !stmt.only && matches!(entry.relkind, 'r' | 'p'),
         entry.desc.clone(),
     );
     target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
@@ -3577,6 +4097,7 @@ fn bind_update_from(
             &assignments,
             predicate.as_ref(),
             &target_rls.write_checks,
+            entry.relkind == 'p' && !stmt.only,
             &child,
             catalog,
         )

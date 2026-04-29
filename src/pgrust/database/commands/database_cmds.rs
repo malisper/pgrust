@@ -1,10 +1,12 @@
 use super::super::*;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::parser::{
-    AlterDatabaseAction, AlterDatabaseStatement, CreateDatabaseStatement, DropDatabaseStatement,
+    AlterDatabaseAction, AlterDatabaseStatement, CommentOnDatabaseStatement,
+    CreateDatabaseStatement, DropDatabaseStatement,
 };
 use crate::include::catalog::{
-    DEFAULT_TABLESPACE_OID, TEMPLATE0_DATABASE_NAME, TEMPLATE1_DATABASE_NAME,
+    DEFAULT_TABLESPACE_OID, PG_SHDESCRIPTION_RELATION_OID, TEMPLATE0_DATABASE_NAME,
+    TEMPLATE1_DATABASE_NAME,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -342,6 +344,89 @@ impl Database {
             .write()
             .replace_database_row_mvcc(row, &ctx)
             .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_database_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CommentOnDatabaseStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_database_stmt_in_transaction(
+            client_id,
+            stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_comment_on_database_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &CommentOnDatabaseStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .auth_catalog(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let cache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let row = cache
+            .database_rows()
+            .into_iter()
+            .find(|row| row.datname.eq_ignore_ascii_case(&stmt.database_name))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("database \"{}\" does not exist", stmt.database_name),
+                detail: None,
+                hint: None,
+                sqlstate: "3D000",
+            })?;
+        let current_role = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "current role does not exist".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        if !current_role.rolsuper && !auth.has_effective_membership(row.datdba, &auth_catalog) {
+            return Err(ExecError::DetailedError {
+                message: format!("must be owner of database {}", stmt.database_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_database_mvcc(row.oid, stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        self.session_stats_state(client_id)
+            .write()
+            .note_relation_update(PG_SHDESCRIPTION_RELATION_OID);
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }

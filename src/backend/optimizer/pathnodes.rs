@@ -353,7 +353,6 @@ impl Path {
     pub fn pathkeys(&self) -> Vec<PathKey> {
         match self {
             Self::Result { .. }
-            | Self::Append { .. }
             | Self::SeqScan { .. }
             | Self::BitmapIndexScan { .. }
             | Self::BitmapOr { .. }
@@ -365,6 +364,7 @@ impl Path {
             | Self::Values { .. }
             | Self::FunctionScan { .. }
             | Self::ProjectSet { .. } => Vec::new(),
+            Self::Append { pathkeys, .. } => pathkeys.clone(),
             Self::Aggregate {
                 strategy, pathkeys, ..
             } if *strategy == AggregateStrategy::Sorted => pathkeys.clone(),
