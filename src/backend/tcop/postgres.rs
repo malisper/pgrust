@@ -2182,6 +2182,9 @@ fn select_function_call_name(sql: &str) -> Option<String> {
 }
 
 fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> {
+    if let Some(position) = plpgsql_shadowed_variable_position(sql, message, 1) {
+        return Some(position);
+    }
     if let Some(position) = plpgsql_get_diagnostics_target_error_position(sql, message) {
         return Some(position);
     }
@@ -2263,6 +2266,42 @@ fn find_nth_identifier_position(sql: &str, ident: &str, nth: usize) -> Option<us
         } else {
             index += 1;
         }
+    }
+    None
+}
+
+fn plpgsql_shadowed_variable_position(
+    sql: &str,
+    message: &str,
+    occurrence: usize,
+) -> Option<usize> {
+    let name = message
+        .strip_prefix("variable \"")?
+        .split_once("\" shadows a previously defined variable")?
+        .0;
+    let body_start = sql.find("$$").map(|index| index + "$$".len()).unwrap_or(0);
+    let pre_body_has_name = find_identifier_in_segment(&sql[..body_start], name).is_some();
+    let body_occurrence = occurrence + usize::from(!pre_body_has_name);
+    find_nth_identifier_token_position(&sql[body_start..], name, body_occurrence)
+        .map(|position| body_start + position)
+}
+
+fn find_nth_identifier_token_position(
+    segment: &str,
+    token: &str,
+    occurrence: usize,
+) -> Option<usize> {
+    if occurrence == 0 {
+        return None;
+    }
+    let mut from = 0usize;
+    let mut seen = 0usize;
+    while let Some(offset) = find_identifier_in_segment(&segment[from..], token) {
+        seen += 1;
+        if seen == occurrence {
+            return Some(from + offset + 1);
+        }
+        from += offset + token.len();
     }
     None
 }
@@ -2774,7 +2813,10 @@ fn find_sql_identifier_token_position(sql: &str, token: &str) -> Option<usize> {
     None
 }
 
-fn infer_backend_notice_position(sql: &str, message: &str) -> Option<usize> {
+fn infer_backend_notice_position(sql: &str, message: &str, occurrence: usize) -> Option<usize> {
+    if let Some(position) = plpgsql_shadowed_variable_position(sql, message, occurrence) {
+        return Some(position);
+    }
     if let Some(ty) = message
         .strip_prefix("argument type ")
         .and_then(|rest| rest.strip_suffix(" is only a shell"))
@@ -9713,10 +9755,15 @@ fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
 }
 
 fn send_queued_notices_with_sql(stream: &mut impl Write, sql: Option<&str>) -> io::Result<()> {
+    let mut notice_occurrences = HashMap::new();
     for notice in take_backend_notices() {
-        let position = notice
-            .position
-            .or_else(|| sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message)));
+        let occurrence = notice_occurrences
+            .entry(notice.message.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        let position = notice.position.or_else(|| {
+            sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message, *occurrence))
+        });
         if notice.hint.is_some() {
             send_notice_with_hint(
                 stream,
@@ -15203,6 +15250,34 @@ ORDER BY 1, 2;";
                 &err("not enough arguments for cursor \"c1\""),
             ),
             not_enough_sql.find(");\nend").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_plpgsql_shadowed_variables() {
+        let sql = "create or replace function shadowtest(in1 int)\n  returns int as $$\ndeclare\nin1 int;\nbegin\n  declare\n    in1 int;\n  begin\n  end;\n  return 1;\nend\n$$ language plpgsql;";
+        let message = "variable \"in1\" shadows a previously defined variable";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: message.into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42712",
+        });
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("\nin1 int;").map(|index| index + 2)
+        );
+        assert_eq!(
+            infer_backend_notice_position(sql, message, 2),
+            sql.rfind("in1 int;").map(|index| index + 1)
+        );
+
+        let local_sql = "create or replace function shadowtest()\n  returns void as $$\ndeclare\nf1 int;\nbegin\n  declare\n    f1 int;\n  begin\n  end;\nend\n$$ language plpgsql;";
+        let local_message = "variable \"f1\" shadows a previously defined variable";
+        assert_eq!(
+            infer_backend_notice_position(local_sql, local_message, 1),
+            local_sql.rfind("f1 int;").map(|index| index + 1)
         );
     }
 
