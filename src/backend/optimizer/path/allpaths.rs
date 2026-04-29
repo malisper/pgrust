@@ -54,7 +54,8 @@ use super::super::util::{
 use super::super::{
     CPU_OPERATOR_COST, IndexPathSpec, JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids,
     flatten_and_conjuncts, has_outer_joins, is_pushable_base_clause, path_relids, predicate_cost,
-    relids_disjoint, relids_overlap, relids_subset, relids_union, reverse_join_type,
+    pull_up_sublinks, relids_disjoint, relids_overlap, relids_subset, relids_union,
+    reverse_join_type,
 };
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
@@ -1846,7 +1847,7 @@ fn plan_query_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> (PlannerInfo, Path) {
-    let query = super::super::root::prepare_query_for_planning(query, catalog);
+    let query = prepare_query_path_input(query, catalog);
     let aggregate_layout = super::super::groupby_rewrite::build_aggregate_layout(&query, catalog);
     let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);
     let scanjoin_rel = query_planner(&mut root, catalog);
@@ -1859,6 +1860,14 @@ fn plan_query_path(
             pathtarget: PathTarget::new(Vec::new()),
         });
     (root, path)
+}
+
+fn prepare_query_path_input(
+    query: crate::include::nodes::parsenodes::Query,
+    catalog: &dyn CatalogLookup,
+) -> crate::include::nodes::parsenodes::Query {
+    let query = super::super::root::prepare_query_for_planning(query, catalog);
+    pull_up_sublinks(query)
 }
 
 fn plan_set_operation_child_path(
@@ -2394,7 +2403,7 @@ fn build_cte_scan_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = super::super::root::prepare_query_for_planning(query, catalog);
+    let query = prepare_query_path_input(query, catalog);
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
         let planned_query = query.clone();
         let aggregate_layout =
@@ -2435,7 +2444,7 @@ fn build_subquery_scan_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
-    let query = super::super::root::prepare_query_for_planning(query, catalog);
+    let query = prepare_query_path_input(query, catalog);
     if simple_subquery_where_qual_is_contradictory(&query) {
         return optimize_path_with_config(
             const_false_relation_path(rtindex, desc),

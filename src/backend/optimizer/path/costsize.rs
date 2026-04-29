@@ -4247,6 +4247,7 @@ fn is_mergejoinable_sql_type(sql_type: SqlType) -> bool {
             | SqlTypeKind::Char
             | SqlTypeKind::Varchar
             | SqlTypeKind::Bool
+            | SqlTypeKind::Tid
     )
 }
 fn clause_exprs(clauses: &[RestrictInfo]) -> Vec<Expr> {
