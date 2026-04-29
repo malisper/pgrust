@@ -37,7 +37,7 @@ use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::{AutovacuumRelationInput, relation_needs_vacanalyze};
 use crate::pgrust::database::ddl::{
     dependent_view_rewrites_for_relation, lookup_analyzable_relation_for_ddl,
-    lookup_index_relation_for_alter_index, lookup_table_or_partitioned_table_for_alter_table,
+    lookup_table_or_partitioned_table_for_alter_table,
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
@@ -122,6 +122,25 @@ fn lookup_vacuum_relation_for_ddl(
             expected: "table or materialized view",
         })),
         None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
+    }
+}
+
+fn lookup_index_relation_for_comment(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<crate::backend::parser::BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'i' | 'I') => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "index",
+        })),
+        None => Err(ExecError::DetailedError {
+            message: format!("relation \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P01",
+        }),
     }
 }
 
@@ -1545,9 +1564,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation =
-            lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
-                .expect("index lookup without if_exists should return relation or error");
+        let relation = lookup_index_relation_for_comment(&catalog, &comment_stmt.index_name)?;
         let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
             lock_tag,
@@ -1785,9 +1802,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation =
-            lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
-                .expect("index lookup without if_exists should return relation or error");
+        let relation = lookup_index_relation_for_comment(&catalog, &comment_stmt.index_name)?;
         ensure_relation_owner(self, client_id, &relation, &comment_stmt.index_name)?;
 
         let ctx = CatalogWriteContext {

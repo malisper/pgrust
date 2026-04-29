@@ -16,9 +16,8 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, ensure_class_rows, ensure_depend_rows, ensure_namespace_rows,
-    ensure_rewrite_rows, search_sys_cache_list1_db, search_sys_cache_list2_db,
-    search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
+    ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
@@ -235,11 +234,11 @@ fn role_row_by_oid_for_ddl(
     client_id: ClientId,
     role_oid: u32,
 ) -> Result<Option<crate::include::catalog::PgAuthIdRow>, ExecError> {
-    Ok(search_sys_cache1_db(
+    Ok(SearchSysCache1(
         db,
         client_id,
         None,
-        SysCacheId::AuthIdOid,
+        SysCacheId::AUTHOID,
         ddl_oid_key(role_oid),
     )
     .map_err(map_catalog_error)?
@@ -255,11 +254,11 @@ fn membership_rows_for_member_for_ddl(
     client_id: ClientId,
     member_oid: u32,
 ) -> Result<Vec<crate::include::catalog::PgAuthMembersRow>, ExecError> {
-    Ok(search_sys_cache_list1_db(
+    Ok(SearchSysCacheList1(
         db,
         client_id,
         None,
-        SysCacheId::AuthMembersMemberRole,
+        SysCacheId::AUTHMEMMEMROLE,
         ddl_oid_key(member_oid),
     )
     .map_err(map_catalog_error)?
@@ -473,11 +472,11 @@ fn rewrite_row_by_oid_for_ddl(
     txn_ctx: CatalogTxnContext,
     rewrite_oid: u32,
 ) -> Option<crate::include::catalog::PgRewriteRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::RewriteOid,
+        SysCacheId::REWRITEOID,
         ddl_oid_key(rewrite_oid),
     )
     .ok()?
@@ -494,11 +493,11 @@ fn class_row_by_oid_for_ddl(
     txn_ctx: CatalogTxnContext,
     relation_oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::RelOid,
+        SysCacheId::RELOID,
         ddl_oid_key(relation_oid),
     )
     .ok()?
@@ -515,11 +514,11 @@ fn rewrite_dependency_rows_for_relation(
     txn_ctx: CatalogTxnContext,
     relation_oid: u32,
 ) -> Vec<crate::include::catalog::PgDependRow> {
-    search_sys_cache_list2_db(
+    SearchSysCacheList2(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::DependReference,
+        SysCacheId::DEPENDREFERENCE,
         ddl_oid_key(PG_CLASS_RELATION_OID),
         ddl_oid_key(relation_oid),
     )
@@ -977,7 +976,7 @@ pub(crate) fn reject_column_with_trigger_dependencies(
     let relation_name = relation_name_for_oid(catalog, relation_oid);
     let trigger_rows = catalog.trigger_rows_for_relation(relation_oid);
     let details = catalog
-        .depend_rows()
+        .depend_rows_referencing(PG_CLASS_RELATION_OID, relation_oid, Some(i32::from(attnum)))
         .into_iter()
         .filter(|row| {
             row.classid == PG_TRIGGER_RELATION_OID

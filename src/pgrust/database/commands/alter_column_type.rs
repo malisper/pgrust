@@ -26,9 +26,8 @@ struct AlterColumnTypeTarget {
 
 fn reject_unsupported_alter_column_type_indexes(
     indexes: &[crate::backend::parser::BoundIndexRelation],
-    column_index: usize,
+    _column_index: usize,
 ) -> Result<(), ExecError> {
-    let target_attnum = (column_index + 1) as i16;
     let has_unsupported_dependency = indexes.iter().any(|index| {
         if index
             .index_meta
@@ -43,29 +42,12 @@ fn reject_unsupported_alter_column_type_indexes(
         {
             return true;
         }
-        if !index.index_meta.indkey.contains(&target_attnum) {
-            return false;
-        }
-        let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
-        let target_is_key_column = index
-            .index_meta
-            .indkey
-            .iter()
-            .take(key_count)
-            .any(|attnum| *attnum == target_attnum);
-        if !target_is_key_column {
-            return false;
-        }
-        // :HACK: Plain primary/unique key indexes survive the current heap
-        // rewrite path well enough for the regression ALTER TYPE cases, but
-        // general secondary-index metadata rewrites still need real support.
-        !(index.index_meta.indisprimary || index.index_meta.indisunique)
+        false
     });
     if has_unsupported_dependency {
-        // :HACK: First-pass ALTER COLUMN TYPE rewrites heap rows in place and
-        // only keeps plain primary/unique indexes in sync. Secondary target-
-        // column indexes and expression/partial indexes still need proper
-        // index metadata rewrites.
+        // :HACK: Plain column indexes can be rebuilt from rewritten heap rows,
+        // but expression and partial indexes still need proper expression
+        // rebinding against the replacement column type.
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "ALTER TABLE ALTER COLUMN TYPE with dependent indexes".into(),
         )));
@@ -567,7 +549,7 @@ impl Database {
             trigger_depth: 0,
         };
         for target in &targets {
-            if target.relation.relkind == 'f' {
+            if matches!(target.relation.relkind, 'f' | 'p') {
                 continue;
             }
             if target.fires_table_rewrite {
@@ -634,8 +616,24 @@ impl Database {
                 self.replace_temp_entry_desc(
                     client_id,
                     target.relation.relation_oid,
-                    target.new_desc,
+                    target.new_desc.clone(),
                 )?;
+            }
+            for index in target.indexes {
+                let effect = self
+                    .catalog
+                    .write()
+                    .alter_index_relation_for_column_type_mvcc(
+                        index.relation_oid,
+                        index.desc.clone(),
+                        index.index_meta.clone(),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                if target.relation.relpersistence == 't' {
+                    self.replace_temp_entry_desc(client_id, index.relation_oid, index.desc)?;
+                }
             }
         }
         Ok(StatementResult::AffectedRows(0))

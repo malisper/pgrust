@@ -46,6 +46,7 @@ fn lookup_partition_alter_parent(
     table_name: &str,
     if_exists: bool,
     unsupported_action: &'static str,
+    partitioned_index_action: Option<&'static str>,
 ) -> Result<Option<BoundRelation>, ExecError> {
     let Some(parent) = catalog.lookup_any_relation(table_name) else {
         if if_exists {
@@ -55,6 +56,18 @@ fn lookup_partition_alter_parent(
             table_name.to_string(),
         )));
     };
+    if parent.relkind == 'I'
+        && let Some(action) = partitioned_index_action
+    {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "ALTER action {action} cannot be performed on relation \"{table_name}\""
+            ),
+            detail: Some("This operation is not supported for partitioned indexes.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
     if parent.relkind != 'p' || parent.partitioned_table.is_none() {
         let relation_name = relation_name_for_oid(catalog, parent.relation_oid);
         return Err(ExecError::DetailedError {
@@ -391,6 +404,7 @@ impl Database {
             &stmt.parent_table,
             stmt.if_exists,
             "ATTACH PARTITION",
+            None,
         )?
         else {
             return Ok(StatementResult::AffectedRows(0));
@@ -453,6 +467,7 @@ impl Database {
             &stmt.parent_table,
             stmt.if_exists,
             "ATTACH PARTITION",
+            None,
         )?
         else {
             return Ok(StatementResult::AffectedRows(0));
@@ -712,6 +727,7 @@ impl Database {
             &stmt.parent_table,
             stmt.if_exists,
             detach_unsupported_action(&stmt.mode),
+            Some("DETACH PARTITION"),
         )?
         else {
             return Ok(StatementResult::AffectedRows(0));
@@ -804,6 +820,7 @@ impl Database {
             &stmt.parent_table,
             stmt.if_exists,
             detach_unsupported_action(&stmt.mode),
+            Some("DETACH PARTITION"),
         )?
         else {
             return Ok(StatementResult::AffectedRows(0));
@@ -865,6 +882,7 @@ impl Database {
             &finalize_stmt.parent_table,
             finalize_stmt.if_exists,
             detach_unsupported_action(&finalize_stmt.mode),
+            Some("DETACH PARTITION"),
         )?
         else {
             return Ok(StatementResult::AffectedRows(0));
@@ -932,6 +950,7 @@ impl Database {
             &stmt.parent_table,
             stmt.if_exists,
             detach_unsupported_action(&stmt.mode),
+            Some("DETACH PARTITION"),
         )?
         else {
             return Ok(None);

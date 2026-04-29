@@ -3581,6 +3581,16 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                     render_geometry_sort_arg(root, &func.args[0], catalog)
                 )
             }
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoDistance) => {
+                let [left, right] = func.args.as_slice() else {
+                    return crate::backend::executor::render_explain_expr(expr, &[]);
+                };
+                format!(
+                    "({} <-> {})",
+                    render_sort_key_expr(root, left, catalog),
+                    render_sort_key_expr(root, right, catalog)
+                )
+            }
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX)
             | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointY) => {
                 let Some(arg) = func.args.first() else {
@@ -3591,6 +3601,17 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                     _ => 1,
                 };
                 format!("(({})[{index}])", render_sort_key_expr(root, arg, catalog))
+            }
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+            | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow) => {
+                let Some(arg) = func.args.first() else {
+                    return crate::backend::executor::render_explain_expr(expr, &[]);
+                };
+                let index = match func.implementation {
+                    ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh) => 0,
+                    _ => 1,
+                };
+                format!("{}[{index}]", render_sort_key_expr(root, arg, catalog))
             }
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
                 if func.args.len() == 1 =>
