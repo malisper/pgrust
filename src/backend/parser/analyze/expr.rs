@@ -5652,10 +5652,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         }
                         return Err(err);
                     }
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "supported builtin function",
-                        actual: name.clone(),
-                    });
+                    return Err(proc_resolution_error.unwrap_or_else(|| {
+                        function_does_not_exist_error(name, &actual_types, catalog)
+                    }));
                 }
             };
             let lowered_args = lower_named_scalar_function_args(legacy_func, args_list)?;

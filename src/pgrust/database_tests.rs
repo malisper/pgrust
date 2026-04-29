@@ -17524,6 +17524,19 @@ fn comment_on_function_missing_signature_uses_canonical_type_names() {
 }
 
 #[test]
+fn missing_scalar_function_call_reports_signature() {
+    let base = temp_dir("missing_scalar_function_call");
+    let db = Database::open(&base, 16).unwrap();
+
+    let err = db.execute(1, "select missing_scalar_func(1)").unwrap_err();
+    assert_sqlstate(
+        err,
+        "42883",
+        "function missing_scalar_func(integer) does not exist",
+    );
+}
+
+#[test]
 fn comment_on_operator_uses_pg_operator_description_rows() {
     let base = temp_dir("comment_on_operator");
     let db = Database::open(&base, 16).unwrap();
