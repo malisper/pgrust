@@ -14,6 +14,12 @@ and UPDATE/DELETE/TRUNCATE/MAINTAIN for all modes. Added bootstrap
 privileges, but write/maintain roles do not bypass protected catalog/toast
 write checks.
 
+CI exposed that FK runtime locks were depending on the old non-PostgreSQL
+ShareUpdateExclusive/RowExclusive conflict. Kept PostgreSQL's table-lock matrix
+for user-visible relation locks and switched the coarse FK partner-lock shim to
+ShareLock, which still conflicts with RowExclusive DML until real row-level
+KEY SHARE/UPDATE FK locks exist.
+
 Files touched:
 Grammar/parser/AST, session/database execution routing, lock manager,
 permission helpers, command tags, auth bootstrap roles, and focused parser,
@@ -29,8 +35,14 @@ Tests run:
 `scripts/cargo_isolated.sh test --lib --quiet bootstrap_toast_relations_resolve_before_privilege_checks`
 `scripts/cargo_isolated.sh check`
 `scripts/run_regression.sh --test privileges --timeout 120 --jobs 1 --results-dir /tmp/pgrust_privileges_lock_results2`
+`scripts/cargo_isolated.sh test --lib --quiet foreign_key_locking_blocks_parent_delete_until_child_insert_finishes`
+`scripts/cargo_isolated.sh test --lib --quiet lock_table`
+`scripts/cargo_isolated.sh check`
+`scripts/cargo_isolated.sh test --lib --quiet foreign_key`
 
 Remaining:
 `privileges` now completes without error and the `LOCK TABLE` section is not in
 the diff. Remaining mismatches are unrelated privilege/function/operator/large
 object gaps; latest run matched 960/1295 queries with 2332 diff lines.
+PR #324 CI had one failing lib test in `cargo-test-run (2/2)`; the local
+targeted rerun now passes.

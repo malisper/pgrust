@@ -59,7 +59,7 @@ pub(crate) fn update_foreign_key_lock_requests(
             add_lock_request(
                 &mut requests,
                 constraint.child_rel,
-                TableLockMode::ShareUpdateExclusive,
+                foreign_key_partner_lock_mode(),
             );
         }
     }
@@ -76,7 +76,7 @@ pub(crate) fn delete_foreign_key_lock_requests(
             add_lock_request(
                 &mut requests,
                 constraint.child_rel,
-                TableLockMode::ShareUpdateExclusive,
+                foreign_key_partner_lock_mode(),
             );
         }
     }
@@ -778,9 +778,16 @@ fn add_relation_foreign_key_partner_locks(
         add_lock_request(
             requests,
             constraint.referenced_rel,
-            TableLockMode::ShareUpdateExclusive,
+            foreign_key_partner_lock_mode(),
         );
     }
+}
+
+fn foreign_key_partner_lock_mode() -> TableLockMode {
+    // :HACK: pgrust does not model PostgreSQL's row-level KEY SHARE/UPDATE
+    // foreign-key locks yet. ShareLock keeps this coarse relation-level stand-in
+    // conflicting with RowExclusiveLock DML under PostgreSQL's table lock matrix.
+    TableLockMode::Share
 }
 
 fn add_lock_request(
