@@ -6918,15 +6918,11 @@ fn relation_permission_denied_for_requirement(
     } else {
         "table"
     };
-    let relation_name = if requirement.relation_name.starts_with("pg_toast.") {
-        requirement.relation_name.as_str()
-    } else {
-        requirement
-            .relation_name
-            .rsplit_once('.')
-            .map(|(_, name)| name)
-            .unwrap_or(&requirement.relation_name)
-    };
+    let relation_name = requirement
+        .relation_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(&requirement.relation_name);
     ExecError::DetailedError {
         message: format!("permission denied for {relation_kind} {relation_name}"),
         detail: None,
