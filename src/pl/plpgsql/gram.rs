@@ -799,7 +799,6 @@ fn build_foreach_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 }
 
 fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
-    let line = pair.as_span().start_pos().line_col().0;
     let raw = pair.as_str().to_string();
     let mut level = RaiseLevel::Exception;
     let mut message = None::<String>;
@@ -2410,6 +2409,7 @@ mod tests {
             strict,
             into_targets,
             using_exprs,
+            ..
         } = unline(&block.statements[2])
         else {
             panic!("expected dynamic EXECUTE statement");
@@ -2609,7 +2609,7 @@ mod tests {
         )
         .unwrap();
 
-        let Stmt::ForQuery { source, body, .. } = &block.statements[0] else {
+        let Stmt::ForQuery { source, body, .. } = unline(&block.statements[0]) else {
             panic!("expected query FOR loop");
         };
         let ForQuerySource::Static(source) = source else {

@@ -5,9 +5,8 @@ use crate::backend::executor::expr_ops::{
     concat_values, div_values, mod_values, mul_values, negate_value, not_equal_values,
     order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
-use crate::backend::executor::{ExecError, Value, cast_value, eval_to_char_function};
+use crate::backend::executor::{ExecError, Value, cast_value};
 use crate::backend::parser::ParseError;
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::catalog::{builtin_range_spec_by_oid, builtin_type_name_for_oid};
 use crate::include::nodes::parsenodes::{

@@ -1172,18 +1172,21 @@ pub(crate) fn compile_event_trigger_function_from_proc(
     let mut env = CompileEnv::default();
     let bindings = seed_event_trigger_env(&mut env);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
     let return_contract = FunctionReturnContract::EventTrigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: row.proname.clone(),
+        proc_oid: row.oid,
         proconfig: row.proconfig.clone(),
+        print_strict_params: None,
         parameter_slots: Vec::new(),
         context_arg_type_names: Vec::new(),
         output_slots: Vec::new(),
         body,
         return_contract,
         found_slot,
+        sqlstate_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
@@ -1811,6 +1814,7 @@ fn compile_raise_stmt(
     }
 
     Ok(CompiledStmt::Raise {
+        line: 1,
         level: level.clone(),
         sqlstate,
         message,

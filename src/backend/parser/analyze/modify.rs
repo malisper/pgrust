@@ -4543,6 +4543,7 @@ fn bind_delete_using(
         target_tableoid_index: visible_column_count + 1,
         required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
         subplans: Vec::new(),
+        current_of: stmt.current_of.clone(),
     })
 }
 

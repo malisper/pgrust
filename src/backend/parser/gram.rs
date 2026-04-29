@@ -14338,13 +14338,18 @@ fn consume_keywords<'a>(input: &'a str, keywords: &[&str]) -> Option<&'a str> {
 
 fn keyword_at_boundary(input: &str, start: usize, keyword: &str) -> bool {
     let end = start.saturating_add(keyword.len());
+    let ident_char = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
     input
-        .get(start..end)
-        .is_some_and(|slice| slice.eq_ignore_ascii_case(keyword))
+        .get(..start)
+        .and_then(|slice| slice.chars().next_back())
+        .is_none_or(|ch| !ident_char(ch))
+        && input
+            .get(start..end)
+            .is_some_and(|slice| slice.eq_ignore_ascii_case(keyword))
         && input
             .get(end..)
             .and_then(|slice| slice.chars().next())
-            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .is_none_or(|ch| !ident_char(ch))
 }
 
 fn consume_keyword<'a>(input: &'a str, keyword: &str) -> &'a str {

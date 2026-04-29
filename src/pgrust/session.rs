@@ -7898,6 +7898,7 @@ impl Session {
                 .as_ref()
                 .map(|expr| Self::substitute_sql_expr(expr, subst))
                 .transpose()?,
+            current_of: update.current_of.clone(),
             returning: update
                 .returning
                 .iter()

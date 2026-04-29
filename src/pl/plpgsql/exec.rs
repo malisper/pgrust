@@ -732,8 +732,12 @@ pub fn execute_user_defined_event_trigger_function(
         cursors: HashMap::new(),
         local_guc_writes: HashSet::new(),
         session_guc_writes: HashSet::new(),
+        last_row_count: 0,
+        current_exception: None,
     };
     state.values[compiled.found_slot] = Value::Bool(false);
+    state.values[compiled.sqlstate_slot] = Value::Text(String::new().into());
+    state.values[compiled.sqlerrm_slot] = Value::Text(String::new().into());
     seed_event_trigger_state(bindings, call, &mut state);
     let _ddl_command_guard = push_event_trigger_ddl_commands(call);
     let _dropped_objects_guard = push_event_trigger_dropped_objects(call);
@@ -1570,12 +1574,7 @@ fn exec_do_block(
             Ok(DoControl::Continue) => {}
             Ok(DoControl::LoopContinue) => return Ok(DoControl::LoopContinue),
             Err(err) => {
-                return match exec_do_exception_handlers(
-                    &block.exception_handlers,
-                    &err,
-                    values,
-                    gucs,
-                )? {
+                return match exec_do_exception_handlers(block, &err, values, gucs)? {
                     Some(()) => Ok(DoControl::Continue),
                     None => Err(err),
                 };
@@ -1857,7 +1856,6 @@ fn exec_do_stmt(
         | CompiledStmt::ReturnTriggerNull
         | CompiledStmt::ReturnTriggerNoValue
         | CompiledStmt::Loop { .. }
-        | CompiledStmt::Exit { .. }
         | CompiledStmt::ForQuery { .. }
         | CompiledStmt::ForEach { .. }
         | CompiledStmt::ReturnQuery { .. }
@@ -3091,7 +3089,7 @@ fn exec_function_foreach(
     for value in values {
         assign_foreach_value_to_targets(value, target, state, ctx)?;
         match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
-            FunctionControl::Continue => {}
+            FunctionControl::Continue | FunctionControl::LoopContinue => {}
             FunctionControl::ExitLoop => break,
             FunctionControl::Return => return Ok(FunctionControl::Return),
         }
@@ -5016,15 +5014,7 @@ fn current_of_predicate(binding: SystemVarBinding) -> Result<Expr, ExecError> {
                 Expr::Const(Value::Int64(i64::from(binding.table_oid))),
             ],
         ),
-        Expr::op_auto(
-            OpExprKind::Eq,
-            vec![
-                ctid,
-                Expr::Const(Value::Text(
-                    format!("({},{})", tid.block_number, tid.offset_number).into(),
-                )),
-            ],
-        ),
+        Expr::op_auto(OpExprKind::Eq, vec![ctid, Expr::Const(Value::Tid(tid))]),
     ))
 }
 
@@ -6553,7 +6543,7 @@ fn finish_raise(
     let resolved_sqlstate = match level {
         RaiseLevel::Exception => sqlstate.and_then(resolve_raise_sqlstate).unwrap_or("P0001"),
         RaiseLevel::Warning => sqlstate.and_then(resolve_raise_sqlstate).unwrap_or("01000"),
-        RaiseLevel::Info | RaiseLevel::Notice => {
+        RaiseLevel::Info | RaiseLevel::Log | RaiseLevel::Notice => {
             sqlstate.and_then(resolve_raise_sqlstate).unwrap_or("00000")
         }
     };
