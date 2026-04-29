@@ -1383,6 +1383,12 @@ impl Database {
                     drop_stmt,
                     configured_search_path,
                 ),
+            Statement::DropOperatorClass(ref drop_stmt) => self
+                .execute_drop_operator_class_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateTextSearch(ref create_stmt) => self
                 .execute_create_text_search_stmt_with_search_path(
                     client_id,

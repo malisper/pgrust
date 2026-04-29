@@ -38,6 +38,7 @@ use super::super::joininfo;
 use super::super::partition_cache;
 use super::super::partition_prune::{
     partition_may_satisfy_filter, relation_may_satisfy_own_partition_bound,
+    relation_parent_pruning_context,
 };
 use super::super::partitionwise;
 use super::super::pathnodes::{
@@ -302,6 +303,19 @@ fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value)> {
             if !matches!(value, Value::Null) =>
         {
             Some((other.clone(), value.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn global_const_false_where_qual(root: &PlannerInfo) -> Option<Expr> {
+    let where_qual = root.parse.where_qual.as_ref()?;
+    if !expr_relids(where_qual).is_empty() {
+        return None;
+    }
+    match where_qual {
+        Expr::Const(Value::Bool(false)) | Expr::Const(Value::Null) => {
+            Some(Expr::Const(Value::Bool(false)))
         }
         _ => None,
     }
@@ -2890,7 +2904,12 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             .simple_rel_array
             .get(rtindex)
             .and_then(Option::as_ref)
-            .and_then(base_filter_expr);
+            .and_then(base_filter_expr)
+            .or_else(|| {
+                (relkind == 'p')
+                    .then(|| global_const_false_where_qual(root))
+                    .flatten()
+            });
         let required_index_only_attrs = collect_required_index_only_attrs_for_root(
             root,
             rtindex,
@@ -2915,6 +2934,8 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             .iter()
             .filter_map(|child| child.bound.clone())
             .collect::<Vec<_>>();
+        let parent_context_for_child_pruning =
+            relation_parent_pruning_context(catalog, relation_oid);
         if relkind != 'p' {
             children.push(normalize_rte_path(
                 rtindex,
@@ -2982,6 +3003,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         .find(|child| child.row.inhrelid == child_oid)
                         .and_then(|child| child.bound.as_ref()),
                     &sibling_bounds,
+                    parent_context_for_child_pruning.as_ref(),
                     filter.as_ref(),
                     Some(catalog),
                 )
@@ -4324,6 +4346,16 @@ fn path_dominates(left: &Path, right: &Path) -> bool {
     {
         return true;
     }
+    if bestpath::preferred_scalar_aggregate_outer_cross_join(right)
+        && !bestpath::preferred_scalar_aggregate_outer_cross_join(left)
+    {
+        return false;
+    }
+    if bestpath::preferred_scalar_aggregate_outer_cross_join(left)
+        && !bestpath::preferred_scalar_aggregate_outer_cross_join(right)
+    {
+        return true;
+    }
     if bestpath::non_nested_join_nearly_as_cheap(right, left) {
         return false;
     }
@@ -4362,6 +4394,11 @@ fn path_tie_breaker_prefers(
     ) && left_relids != right_relids
     {
         return left_relids > right_relids;
+    }
+    if bestpath::preferred_scalar_aggregate_outer_cross_join(left)
+        && !bestpath::preferred_scalar_aggregate_outer_cross_join(right)
+    {
+        return true;
     }
     left_pathkeys.len() > right_pathkeys.len()
 }

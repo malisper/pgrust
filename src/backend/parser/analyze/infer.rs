@@ -399,6 +399,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     }
 
     match expr {
+        SqlExpr::Parameter(_) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Column(name) => {
             if let Some(relation_name) = name.strip_suffix(".*") {
                 infer_relation_row_expr_type(scope, catalog, outer_scopes, relation_name)
@@ -426,7 +427,6 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             }
         }
         SqlExpr::Default => SqlType::new(SqlTypeKind::Text),
-        SqlExpr::Parameter(_) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),

@@ -3734,12 +3734,14 @@ fn partition_value_bound_literal(value: &SerializedPartitionValue) -> String {
         SerializedPartitionValue::Int64(value) => value.to_string(),
         SerializedPartitionValue::Money(value) => value.to_string(),
         SerializedPartitionValue::Bool(value) => value.to_string(),
+        SerializedPartitionValue::EnumOid(value) => quote_sql_literal(&value.to_string()),
         SerializedPartitionValue::Date(_)
         | SerializedPartitionValue::Time(_)
         | SerializedPartitionValue::TimeTz { .. }
         | SerializedPartitionValue::Timestamp(_)
         | SerializedPartitionValue::TimestampTz(_)
         | SerializedPartitionValue::Array(_)
+        | SerializedPartitionValue::Record(_)
         | SerializedPartitionValue::Range(_)
         | SerializedPartitionValue::Multirange(_) => {
             quote_sql_literal(&partition_value_text(value))
@@ -3983,6 +3985,8 @@ fn partition_value_type_name(value: &SerializedPartitionValue) -> &'static str {
         SerializedPartitionValue::Xml(_) => "xml",
         SerializedPartitionValue::InternalChar(_) => "\"char\"",
         SerializedPartitionValue::Bool(_) => "boolean",
+        SerializedPartitionValue::EnumOid(_) => "oid",
+        SerializedPartitionValue::Record(_) => "record",
         SerializedPartitionValue::Date(_) => "date",
         SerializedPartitionValue::Time(_) => "time without time zone",
         SerializedPartitionValue::TimeTz { .. } => "time with time zone",

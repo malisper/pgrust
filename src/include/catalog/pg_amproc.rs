@@ -615,6 +615,12 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         (HASH_INTEGER_FAMILY_OID, INT8_TYPE_OID, HASH_INT8_PROC_OID),
         (HASH_OID_FAMILY_OID, OID_TYPE_OID, HASH_OID_PROC_OID),
         (HASH_ENUM_FAMILY_OID, ANYENUMOID, HASH_ENUM_PROC_OID),
+        (HASH_ARRAY_FAMILY_OID, ANYARRAYOID, HASH_ARRAY_PROC_OID),
+        (
+            HASH_RECORD_FAMILY_OID,
+            RECORD_TYPE_OID,
+            HASH_RECORD_PROC_OID,
+        ),
         (
             HASH_CHAR_FAMILY_OID,
             INTERNAL_CHAR_TYPE_OID,
@@ -698,6 +704,28 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
                 amprocrighttype: type_oid,
                 amprocnum: 2,
                 amproc: HASH_ENUM_EXTENDED_PROC_OID,
+            });
+            oid = oid.saturating_add(1);
+        }
+        if family == HASH_ARRAY_FAMILY_OID {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: type_oid,
+                amprocrighttype: type_oid,
+                amprocnum: 2,
+                amproc: HASH_ARRAY_EXTENDED_PROC_OID,
+            });
+            oid = oid.saturating_add(1);
+        }
+        if family == HASH_RECORD_FAMILY_OID {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: type_oid,
+                amprocrighttype: type_oid,
+                amprocnum: 2,
+                amproc: HASH_RECORD_EXTENDED_PROC_OID,
             });
             oid = oid.saturating_add(1);
         }

@@ -8104,6 +8104,56 @@ fn partition_keys_accept_collations_opclasses_and_expressions() {
 }
 
 #[test]
+fn uncorrelated_lateral_scalar_aggregate_is_outer_to_partition_append() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    for sql in [
+        "create table mc3p (a int, b int, c int) partition by range (a, abs(b), c)",
+        "create table mc3p_default partition of mc3p default",
+        "create table mc3p1 partition of mc3p for values from (1, 1, 1) to (10, 5, 10)",
+        "create table mc2p (a int, b int) partition by range (a, b)",
+        "create table mc2p_default partition of mc2p default",
+        "create table mc2p1 partition of mc2p for values from (1, minvalue) to (1, 1)",
+        "create table mc2p2 partition of mc2p for values from (1, 1) to (2, minvalue)",
+    ] {
+        session.execute(&db, sql).unwrap();
+    }
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "(costs off) select * from mc2p t1, lateral \
+         (select count(*) from mc3p t2 \
+          where t2.a = 1 and abs(t2.b) = 1 and t2.c = 1) s \
+         where t1.a = 1",
+    );
+    let nested_loop_pos = lines
+        .iter()
+        .position(|line| line.trim() == "Nested Loop")
+        .unwrap_or_else(|| panic!("expected Nested Loop, got {lines:?}"));
+    let aggregate_pos = lines
+        .iter()
+        .position(|line| line.trim() == "->  Aggregate")
+        .unwrap_or_else(|| panic!("expected aggregate child, got {lines:?}"));
+    let append_pos = lines
+        .iter()
+        .position(|line| line.trim() == "->  Append")
+        .unwrap_or_else(|| panic!("expected append child, got {lines:?}"));
+
+    assert!(
+        nested_loop_pos < aggregate_pos && aggregate_pos < append_pos,
+        "expected scalar aggregate to be the outer nested-loop side, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| { line == "              Filter: ((a = 1) AND (c = 1) AND (abs(b) = 1))" }),
+        "expected scan filter detail to keep PostgreSQL indentation, got {lines:?}"
+    );
+}
+
+#[test]
 fn hash_partitioning_uses_custom_opclass_support_proc() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -8360,6 +8410,37 @@ fn satisfies_hash_partition_matches_postgres_validation_and_hashing() {
             "select satisfies_hash_partition('text_hashp'::regclass, 2, 0, 'xxx'::text) or satisfies_hash_partition('text_hashp'::regclass, 2, 1, 'xxx'::text)"
         ),
         vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn hash_partition_pruned_scan_keeps_key_quals_before_residual_filter() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    for sql in [
+        "create table hp (a int4, b text, c int4) partition by hash (a, b)",
+        "create table hp0 partition of hp for values with (modulus 4, remainder 0)",
+        "create table hp1 partition of hp for values with (modulus 4, remainder 1)",
+        "create table hp2 partition of hp for values with (modulus 4, remainder 2)",
+        "create table hp3 partition of hp for values with (modulus 4, remainder 3)",
+    ] {
+        session.execute(&db, sql).unwrap();
+    }
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "(costs off) select * from hp \
+         where a = 1 and b = 'abcde' and (c = 2 or c = 3)",
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line == "  Filter: ((a = 1) AND (b = 'abcde'::text) AND ((c = 2) OR (c = 3)))"
+                || line
+                    == "        Filter: ((a = 1) AND (b = 'abcde'::text) AND ((c = 2) OR (c = 3)))"
+        }),
+        "expected partition key quals before residual filter, got {lines:?}"
     );
 }
 
@@ -10555,6 +10636,48 @@ fn explain_inherited_order_by_scan_does_not_panic() {
 }
 
 #[test]
+fn explain_verbose_partition_alias_uses_parent_layout_for_reordered_child() {
+    let dir = temp_dir("partition_alias_reordered_child_explain");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    for sql in [
+        "create table part (a int, b int) partition by list (a)",
+        "create table part_p1 partition of part for values in (-2,-1,0,1,2)",
+        "create table part_p2 partition of part default partition by range(a)",
+        "create table part_p2_p1 partition of part_p2 default",
+        "create table part_rev (b int, c int, a int)",
+        "alter table part_rev drop column c",
+        "alter table part attach partition part_rev for values in (3)",
+    ] {
+        session.execute(&db, sql).unwrap();
+    }
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "(verbose, costs off) select * from part p(x) order by x",
+    );
+    let rendered = lines.join("\n");
+    assert!(
+        rendered.contains("Output: p.x, p.b"),
+        "expected Sort output to use parent alias layout, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Seq Scan on public.part_rev p_2"),
+        "expected verbose child scan label, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Output: p_2.x, p_2.b"),
+        "expected reordered child output to use parent column aliases, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Projection") && !rendered.contains("p_2.a"),
+        "expected no physical child projection leak, got:\n{rendered}"
+    );
+}
+
+#[test]
 fn explain_update_accepts_inherited_update_statement() {
     let dir = temp_dir("inheritance_explain_update");
     let db = Database::open(&dir, 128).unwrap();
@@ -11918,10 +12041,10 @@ fn scalar_array_any_rejects_uncast_array_subselect() {
         matches!(
             err,
             ExecError::Parse(ParseError::UndefinedOperator {
-                op: "=",
+                ref op,
                 ref left_type,
                 ref right_type,
-            }) if left_type == "text" && right_type == "text[]"
+            }) if op == "=" && left_type == "text" && right_type == "text[]"
         ),
         "{err:?}"
     );

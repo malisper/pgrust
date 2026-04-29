@@ -16,8 +16,8 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind,
-    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TargetEntry, WindowClause,
-    expr_contains_set_returning, set_returning_call_exprs, user_attrno,
+    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TABLE_OID_ATTR_NO,
+    TargetEntry, WindowClause, expr_contains_set_returning, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::bestpath;
@@ -3423,6 +3423,9 @@ fn sort_key_display_items(
 ) -> Vec<String> {
     let mut display_items = Vec::new();
     let mut display_exprs = Vec::new();
+    let qualify_relation_vars = pathkeys
+        .iter()
+        .any(|pathkey| expr_contains_tableoid_var(&pathkey.expr));
     for key in pathkeys {
         let display_expr = root
             .query_pathkeys
@@ -3439,8 +3442,9 @@ fn sort_key_display_items(
         {
             continue;
         }
-        let mut rendered = render_sort_key_expr(root, &dedupe_expr, catalog);
-        if sort_key_needs_extra_expression_parens(&dedupe_expr)
+        let mut rendered =
+            render_sort_key_expr(root, &display_expr, catalog, qualify_relation_vars);
+        if sort_key_needs_extra_expression_parens(&display_expr)
             || sort_key_rendering_needs_expression_parens(&rendered)
         {
             rendered = format!("({rendered})");
@@ -3460,7 +3464,53 @@ fn sort_key_display_items(
         display_exprs.push(dedupe_expr);
         display_items.push(rendered);
     }
+    if qualify_relation_vars
+        && let Some(qualifier) = display_items
+            .iter()
+            .find_map(|item| tableoid_sort_key_qualifier(item))
+    {
+        for item in &mut display_items {
+            if sort_key_is_bare_identifier(item) {
+                *item = format!("{qualifier}.{item}");
+            }
+        }
+    }
     display_items
+}
+
+fn sort_key_is_bare_identifier(item: &str) -> bool {
+    !item.is_empty()
+        && item
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn tableoid_sort_key_qualifier(item: &str) -> Option<String> {
+    let (before, _) = item.split_once(".tableoid")?;
+    before
+        .rsplit(|ch| ch == '(' || ch == ' ')
+        .next()
+        .filter(|qualifier| !qualifier.is_empty())
+        .map(str::to_string)
+}
+
+fn expr_contains_tableoid_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varattno == TABLE_OID_ATTR_NO,
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_tableoid_var(inner)
+        }
+        Expr::Op(op) => op.args.iter().any(expr_contains_tableoid_var),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_tableoid_var),
+        Expr::Func(func) => func.args.iter().any(expr_contains_tableoid_var),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_tableoid_var(left) || expr_contains_tableoid_var(right)
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_tableoid_var(inner),
+        _ => false,
+    }
 }
 
 fn sort_key_needs_extra_expression_parens(expr: &Expr) -> bool {
@@ -3525,8 +3575,27 @@ fn inner_join_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bo
     })
 }
 
-fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLookup) -> String {
+fn render_sort_key_expr(
+    root: &PlannerInfo,
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+    qualify_relation_vars: bool,
+) -> String {
     match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varattno == TABLE_OID_ATTR_NO => root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .and_then(|rte| {
+                let qualifier = rte.alias.clone().or_else(|| match rte.kind {
+                    RangeTblEntryKind::Relation { relation_oid, .. } => catalog
+                        .class_row_by_oid(relation_oid)
+                        .map(|row| row.relname),
+                    _ => None,
+                })?;
+                Some(format!("{qualifier}.tableoid"))
+            })
+            .unwrap_or_else(|| "tableoid".into()),
         Expr::Var(var) if var.varlevelsup == 0 => root
             .parse
             .rtable
@@ -3536,7 +3605,12 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                     if let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind
                         && let Some(alias_expr) = joinaliasvars.get(index)
                     {
-                        return Some(render_sort_key_expr(root, alias_expr, catalog));
+                        return Some(render_sort_key_expr(
+                            root,
+                            alias_expr,
+                            catalog,
+                            qualify_relation_vars,
+                        ));
                     }
                     if let RangeTblEntryKind::Subquery { query } = &rte.kind
                         && let Some(target) = query
@@ -3580,6 +3654,16 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                             }
                             (Some(qualifier), _) if qualifier == column.name => column.name.clone(),
                             (Some(qualifier), _) => format!("{qualifier}.{}", column.name),
+                            (None, RangeTblEntryKind::Relation { relation_oid, .. })
+                                if qualify_relation_vars =>
+                            {
+                                catalog
+                                    .class_row_by_oid(*relation_oid)
+                                    .map(|class_row| {
+                                        format!("{}.{}", class_row.relname, column.name)
+                                    })
+                                    .unwrap_or_else(|| column.name.clone())
+                            }
                             (None, _) => column.name.clone(),
                         }
                     })
@@ -3606,20 +3690,36 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
             };
             format!(
                 "({} {} {})",
-                render_sort_key_expr(root, left, catalog),
+                render_sort_key_expr(root, left, catalog, qualify_relation_vars),
                 op_text,
-                render_sort_key_expr(root, right, catalog)
+                render_sort_key_expr(root, right, catalog, qualify_relation_vars)
+            )
+        }
+        Expr::Cast(inner, ty)
+            if matches!(ty.kind, crate::backend::parser::SqlTypeKind::RegClass)
+                && expr_contains_tableoid_var(inner) =>
+        {
+            format!(
+                "(({})::regclass)",
+                render_sort_key_expr(root, inner, catalog, qualify_relation_vars)
             )
         }
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            render_sort_key_expr(root, inner, catalog)
+            render_sort_key_expr(root, inner, catalog, qualify_relation_vars)
         }
-        Expr::Aggref(aggref) => render_sort_key_aggref(root, aggref, catalog),
+        Expr::Aggref(aggref) => {
+            render_sort_key_aggref(root, aggref, catalog, qualify_relation_vars)
+        }
         Expr::Func(func) => match func.implementation {
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoArea) => func
                 .args
                 .first()
-                .map(|arg| format!("(area({}))", render_geometry_sort_arg(root, arg, catalog)))
+                .map(|arg| {
+                    format!(
+                        "(area({}))",
+                        render_geometry_sort_arg(root, arg, catalog, qualify_relation_vars)
+                    )
+                })
                 .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPolyCenter) => func
                 .args
@@ -3627,7 +3727,7 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                 .map(|arg| {
                     format!(
                         "poly_center({})",
-                        render_geometry_sort_arg(root, arg, catalog)
+                        render_geometry_sort_arg(root, arg, catalog, qualify_relation_vars)
                     )
                 })
                 .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
@@ -3638,7 +3738,7 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
             {
                 format!(
                     "poly_center({})",
-                    render_geometry_sort_arg(root, &func.args[0], catalog)
+                    render_geometry_sort_arg(root, &func.args[0], catalog, qualify_relation_vars)
                 )
             }
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoDistance) => {
@@ -3647,8 +3747,8 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                 };
                 format!(
                     "({} <-> {})",
-                    render_sort_key_expr(root, left, catalog),
-                    render_sort_key_expr(root, right, catalog)
+                    render_sort_key_expr(root, left, catalog, qualify_relation_vars),
+                    render_sort_key_expr(root, right, catalog, qualify_relation_vars)
                 )
             }
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX)
@@ -3660,7 +3760,10 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                     ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX) => 0,
                     _ => 1,
                 };
-                format!("(({})[{index}])", render_sort_key_expr(root, arg, catalog))
+                format!(
+                    "(({})[{index}])",
+                    render_sort_key_expr(root, arg, catalog, qualify_relation_vars)
+                )
             }
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
             | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow) => {
@@ -3671,19 +3774,22 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                     ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh) => 0,
                     _ => 1,
                 };
-                format!("{}[{index}]", render_sort_key_expr(root, arg, catalog))
+                format!(
+                    "{}[{index}]",
+                    render_sort_key_expr(root, arg, catalog, qualify_relation_vars)
+                )
             }
             ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
                 if func.args.len() == 1 =>
             {
-                render_sort_key_expr(root, &func.args[0], catalog)
+                render_sort_key_expr(root, &func.args[0], catalog, qualify_relation_vars)
             }
-            _ => render_sort_key_function_expr(root, func, catalog),
+            _ => render_sort_key_function_expr(root, func, catalog, qualify_relation_vars),
         },
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
-            render_sort_key_expr(root, left, catalog),
-            render_sort_key_expr(root, right, catalog)
+            render_sort_key_expr(root, left, catalog, qualify_relation_vars),
+            render_sort_key_expr(root, right, catalog, qualify_relation_vars)
         ),
         Expr::Row { fields, .. } => render_whole_row_sort_expr(root, fields, catalog)
             .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
@@ -3704,6 +3810,7 @@ fn render_sort_key_aggref(
     root: &PlannerInfo,
     aggref: &crate::include::nodes::primnodes::Aggref,
     catalog: &dyn CatalogLookup,
+    qualify_relation_vars: bool,
 ) -> String {
     let name = builtin_aggregate_function_for_proc_oid(aggref.aggfnoid)
         .map(|func| func.name().to_string())
@@ -3714,7 +3821,7 @@ fn render_sort_key_aggref(
         aggref
             .args
             .iter()
-            .map(|arg| render_sort_key_expr(root, arg, catalog))
+            .map(|arg| render_sort_key_expr(root, arg, catalog, qualify_relation_vars))
             .collect::<Vec<_>>()
     };
     if aggref.aggdistinct && !args.is_empty() {
@@ -3726,7 +3833,8 @@ fn render_sort_key_aggref(
             .aggorder
             .iter()
             .map(|item| {
-                let mut item_rendered = render_sort_key_expr(root, &item.expr, catalog);
+                let mut item_rendered =
+                    render_sort_key_expr(root, &item.expr, catalog, qualify_relation_vars);
                 if item.descending {
                     item_rendered.push_str(" DESC");
                 }
@@ -3837,6 +3945,7 @@ fn render_sort_key_function_expr(
     root: &PlannerInfo,
     func: &crate::include::nodes::primnodes::FuncExpr,
     catalog: &dyn CatalogLookup,
+    qualify_relation_vars: bool,
 ) -> String {
     let name = match func.implementation {
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Abs) => "abs".to_string(),
@@ -3858,7 +3967,7 @@ fn render_sort_key_function_expr(
     let args = func
         .args
         .iter()
-        .map(|arg| render_sort_key_expr(root, arg, catalog))
+        .map(|arg| render_sort_key_expr(root, arg, catalog, qualify_relation_vars))
         .collect::<Vec<_>>()
         .join(", ");
     format!("{name}({args})")
@@ -3868,8 +3977,9 @@ fn render_geometry_sort_arg(
     root: &PlannerInfo,
     expr: &Expr,
     catalog: &dyn CatalogLookup,
+    qualify_relation_vars: bool,
 ) -> String {
-    let rendered = render_sort_key_expr(root, expr, catalog);
+    let rendered = render_sort_key_expr(root, expr, catalog, qualify_relation_vars);
     let Some((qualifier, name)) = rendered.rsplit_once('.') else {
         return rendered;
     };

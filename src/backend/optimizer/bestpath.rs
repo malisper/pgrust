@@ -105,6 +105,16 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
         {
             return false;
         }
+        if preferred_scalar_aggregate_outer_cross_join(candidate)
+            && !preferred_scalar_aggregate_outer_cross_join(current)
+        {
+            return true;
+        }
+        if preferred_scalar_aggregate_outer_cross_join(current)
+            && !preferred_scalar_aggregate_outer_cross_join(candidate)
+        {
+            return false;
+        }
         if non_nested_join_nearly_as_cheap(candidate, current) {
             return true;
         }
@@ -237,6 +247,43 @@ fn underestimated_seqscan_nested_loop(path: &Path) -> bool {
                 && contains_seq_scan(left)
                 && contains_seq_scan(right)
         }
+        _ => false,
+    }
+}
+
+pub(super) fn preferred_scalar_aggregate_outer_cross_join(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind: JoinType::Cross,
+            ..
+        } => {
+            // :HACK: PostgreSQL tends to put an uncorrelated one-row aggregate on
+            // the outer side of a cross/lateral join. Keep that explain shape
+            // when both physical orientations are otherwise interchangeable.
+            path_is_scalar_aggregate_relation(left) && !path_is_scalar_aggregate_relation(right)
+        }
+        _ => false,
+    }
+}
+
+fn path_is_scalar_aggregate_relation(path: &Path) -> bool {
+    match path {
+        Path::Aggregate {
+            group_by,
+            plan_info,
+            ..
+        } => group_by.is_empty() && plan_info.plan_rows.as_f64() <= 1.0,
+        Path::SubqueryScan {
+            input, plan_info, ..
+        } => plan_info.plan_rows.as_f64() <= 1.0 && path_is_scalar_aggregate_relation(input),
+        Path::Projection {
+            input, plan_info, ..
+        }
+        | Path::Filter {
+            input, plan_info, ..
+        } => plan_info.plan_rows.as_f64() <= 1.0 && path_is_scalar_aggregate_relation(input),
         _ => false,
     }
 }

@@ -5,9 +5,8 @@ use crate::backend::executor::expr_ops::{
     concat_values, div_values, mod_values, mul_values, negate_value, not_equal_values,
     order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
-use crate::backend::executor::{ExecError, Value, cast_value, eval_to_char_function};
+use crate::backend::executor::{ExecError, Value, cast_value};
 use crate::backend::parser::ParseError;
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::builtin_range_spec_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::parsenodes::{
@@ -56,10 +55,7 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .into_iter()
             .map(simplify_sort_group_clause)
             .collect::<Result<Vec<_>, _>>()?,
-        where_qual: query
-            .where_qual
-            .map(|expr| simplify_expr(expr, None))
-            .transpose()?,
+        where_qual: query.where_qual.map(simplify_where_qual).transpose()?,
         group_by: query
             .group_by
             .into_iter()
@@ -860,10 +856,86 @@ fn evaluate_const_func(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Power) => {
             eval_power_function(args).map(Some)
         }
-        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ToChar) => {
-            eval_to_char_function(args, &DateTimeConfig::default()).map(Some)
-        }
         _ => Ok(None),
+    }
+}
+
+fn simplify_where_qual(expr: Expr) -> Result<Expr, ParseError> {
+    simplify_expr(expr, None).map(simplify_where_null_scalar_array_ops)
+}
+
+fn simplify_where_null_scalar_array_ops(expr: Expr) -> Expr {
+    match expr {
+        Expr::Const(Value::Null) => Expr::Const(Value::Bool(false)),
+        Expr::Bool(bool_expr) => {
+            let args = bool_expr
+                .args
+                .into_iter()
+                .map(simplify_where_null_scalar_array_ops)
+                .collect::<Vec<_>>();
+            match bool_expr.boolop {
+                BoolExprType::And => simplify_where_and_args(args),
+                BoolExprType::Or => simplify_where_or_args(args),
+                BoolExprType::Not => Expr::Bool(Box::new(BoolExpr {
+                    boolop: BoolExprType::Not,
+                    args,
+                })),
+            }
+        }
+        Expr::ScalarArrayOp(saop) if scalar_array_right_is_null(&saop.right) => {
+            Expr::Const(Value::Bool(false))
+        }
+        other => other,
+    }
+}
+
+fn scalar_array_right_is_null(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(Value::Null) => true,
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            scalar_array_right_is_null(inner)
+        }
+        _ => false,
+    }
+}
+
+fn simplify_where_and_args(args: Vec<Expr>) -> Expr {
+    let mut kept = Vec::new();
+    for arg in args {
+        match arg {
+            Expr::Const(Value::Bool(false)) | Expr::Const(Value::Null) => {
+                return Expr::Const(Value::Bool(false));
+            }
+            Expr::Const(Value::Bool(true)) => {}
+            other => kept.push(other),
+        }
+    }
+    match kept.len() {
+        0 => Expr::Const(Value::Bool(true)),
+        1 => kept.pop().expect("one arg"),
+        _ => Expr::Bool(Box::new(BoolExpr {
+            boolop: BoolExprType::And,
+            args: kept,
+        })),
+    }
+}
+
+fn simplify_where_or_args(args: Vec<Expr>) -> Expr {
+    let mut kept = Vec::new();
+    for arg in args {
+        match arg {
+            Expr::Const(Value::Bool(true)) => return Expr::Const(Value::Bool(true)),
+            Expr::Const(Value::Bool(false)) | Expr::Const(Value::Null) => {}
+            other => kept.push(other),
+        }
+    }
+    match kept.len() {
+        0 => Expr::Const(Value::Bool(false)),
+        1 => kept.pop().expect("one arg"),
+        _ => Expr::Bool(Box::new(BoolExpr {
+            boolop: BoolExprType::Or,
+            args: kept,
+        })),
     }
 }
 
@@ -1264,4 +1336,38 @@ fn const_expr_values(exprs: &[Expr]) -> Option<Vec<Value>> {
         .iter()
         .map(|expr| const_expr_value(expr).cloned())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::include::nodes::primnodes::{ScalarArrayOpExpr, Var};
+
+    fn int_var() -> Expr {
+        Expr::Var(Var {
+            varno: 1,
+            varattno: 1,
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Int4),
+        })
+    }
+
+    #[test]
+    fn where_scalar_array_null_folds_to_false() {
+        let expr = Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            op: crate::backend::parser::SubqueryComparisonOp::Eq,
+            use_or: true,
+            left: Box::new(int_var()),
+            right: Box::new(Expr::Cast(
+                Box::new(Expr::Const(Value::Null)),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
+            )),
+            collation_oid: None,
+        }));
+
+        assert_eq!(
+            simplify_where_qual(expr).unwrap(),
+            Expr::Const(Value::Bool(false))
+        );
+    }
 }

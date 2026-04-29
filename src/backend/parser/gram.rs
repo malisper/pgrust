@@ -6918,6 +6918,10 @@ fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Stateme
         return build_drop_operator_family_statement(trimmed)
             .map(|stmt| Some(Statement::DropOperatorFamily(stmt)));
     }
+    if lowered.starts_with("drop operator class ") {
+        return build_drop_operator_class_statement(trimmed)
+            .map(|stmt| Some(Statement::DropOperatorClass(stmt)));
+    }
     if lowered.starts_with("create operator class ") {
         return build_create_operator_class_statement(trimmed)
             .map(|stmt| Some(Statement::CreateOperatorClass(stmt)));
@@ -12261,6 +12265,42 @@ fn build_drop_operator_family_statement(
     })
 }
 
+fn build_drop_operator_class_statement(
+    sql: &str,
+) -> Result<DropOperatorClassStatement, ParseError> {
+    let mut rest = sql["drop operator class".len()..].trim_start();
+    let if_exists = keyword_at_start(rest, "if exists");
+    if if_exists {
+        rest = consume_keyword(rest, "if exists").trim_start();
+    }
+    let ((schema_name, opclass_name), rest) = parse_qualified_sql_name(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "using") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "USING access method",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "using").trim_start();
+    let (access_method, rest) = parse_sql_identifier(rest)?;
+    let suffix = rest.trim();
+    if !(suffix.is_empty()
+        || keyword_at_start(suffix, "restrict")
+        || keyword_at_start(suffix, "cascade"))
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of DROP OPERATOR CLASS",
+            actual: suffix.into(),
+        });
+    }
+    Ok(DropOperatorClassStatement {
+        if_exists,
+        schema_name,
+        opclass_name,
+        access_method,
+    })
+}
+
 fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement, ParseError> {
     let prefix = "create operator";
     let rest = sql
@@ -16270,12 +16310,12 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
 fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
     let mut name = None;
     let mut parameter_types = Vec::new();
-    let mut query = None;
+    let mut statement = None;
     let mut query_sql = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
-            Rule::prepare_arg_types => {
+            Rule::prepare_type_list => {
                 parameter_types = part
                     .into_inner()
                     .filter(|inner| inner.as_rule() == Rule::type_name)
@@ -16284,7 +16324,11 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
             }
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
-                query = Some(build_select(part)?);
+                statement = Some(Statement::Select(build_select(part)?));
+            }
+            Rule::update_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                statement = Some(Statement::Update(build_update(part)?));
             }
             _ => {}
         }
@@ -16292,7 +16336,7 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
     Ok(PrepareStatement {
         name: name.ok_or(ParseError::UnexpectedEof)?,
         parameter_types,
-        query: query.ok_or(ParseError::UnexpectedEof)?,
+        statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
     })
 }
@@ -16300,15 +16344,26 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
 fn build_execute_statement(pair: Pair<'_, Rule>) -> Result<ExecuteStatement, ParseError> {
     let mut name = None;
     let mut args_sql = Vec::new();
+    let mut args = Vec::new();
+    let mut arg_sqls = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
-            Rule::expr_list => {
-                args_sql.extend(
-                    part.into_inner()
-                        .filter(|inner| inner.as_rule() == Rule::expr)
-                        .map(|inner| inner.as_str().trim().to_string()),
-                );
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::execute_arg_list => {
+                if let Some(inner) = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr_list)
+                {
+                    for expr in inner
+                        .into_inner()
+                        .filter(|expr| expr.as_rule() == Rule::expr)
+                    {
+                        let arg_sql = expr.as_str().trim().to_string();
+                        args_sql.push(arg_sql.clone());
+                        arg_sqls.push(arg_sql);
+                        args.push(build_expr(expr)?);
+                    }
+                }
             }
             _ => {}
         }
@@ -16316,6 +16371,8 @@ fn build_execute_statement(pair: Pair<'_, Rule>) -> Result<ExecuteStatement, Par
     Ok(ExecuteStatement {
         name: name.ok_or(ParseError::UnexpectedEof)?,
         args_sql,
+        args,
+        arg_sqls,
     })
 }
 
@@ -17162,6 +17219,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
             Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
             Rule::delete_stmt => statement = Some(Statement::Delete(build_delete(part)?)),
+            Rule::execute_prepared_stmt => {
+                statement = Some(Statement::Execute(build_execute_statement(part)?))
+            }
             Rule::create_materialized_view_stmt => {
                 statement = Some(Statement::CreateTableAs(build_create_materialized_view(
                     part,
@@ -21865,6 +21925,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     let _ = index;
     match expr {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
+        SqlExpr::Parameter(_) => "?column?".to_string(),
         SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => "array".to_string(),
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
@@ -24761,6 +24822,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         "<=" => SubqueryComparisonOp::LtEq,
                         ">" => SubqueryComparisonOp::Gt,
                         ">=" => SubqueryComparisonOp::GtEq,
+                        "~" => SubqueryComparisonOp::RegexMatch,
+                        "!~" => SubqueryComparisonOp::NotRegexMatch,
                         other => {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "subquery comparison operator",
@@ -25971,7 +26034,11 @@ fn build_comparison_expr(left: SqlExpr, op: &str, right: SqlExpr) -> Result<SqlE
                 SqlFunctionArg::positional(SqlExpr::Const(Value::Text("i".into()))),
             ],
         ))),
-        _ => unreachable!(),
+        other => SqlExpr::BinaryOperator {
+            op: other.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
     })
 }
 
@@ -27708,6 +27775,16 @@ mod tests {
                 operator_name: "===".to_string(),
                 left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
                 right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+            })
+        );
+        assert_eq!(
+            parse_statement("drop operator class if exists public.bool_ops2 using hash restrict")
+                .unwrap(),
+            Statement::DropOperatorClass(DropOperatorClassStatement {
+                if_exists: true,
+                schema_name: Some("public".to_string()),
+                opclass_name: "bool_ops2".to_string(),
+                access_method: "hash".to_string(),
             })
         );
     }

@@ -8,21 +8,26 @@ use super::{
     TablePersistence, bind_expr_with_outer_and_ctes, bind_scalar_expr_in_scope,
     expr_contains_set_returning, infer_sql_expr_type, scope_for_relation, sql_type_name,
 };
-use crate::backend::executor::{Value, cast_value};
+use crate::backend::executor::{
+    Value, cast_value_with_source_type_catalog_and_config, eval_to_char_function,
+};
 use crate::backend::parser::parse_expr;
 use crate::backend::utils::cache::catcache::sql_type_oid;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::{
     ANYARRAYOID, ANYMULTIRANGEOID, ARRAY_BTREE_OPCLASS_OID, BPCHAR_TYPE_OID, BTREE_AM_OID,
     HASH_AM_OID, INT4_TYPE_OID, OID_TYPE_OID, PgPartitionedTableRow, TEXT_TYPE_OID,
     VARCHAR_TYPE_OID, builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
     builtin_type_row_by_oid, default_btree_opclass_oid, default_hash_opclass_oid,
+    default_opclass_oid_for_am,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, MultirangeTypeRef, MultirangeValue, RangeBound, RangeValue,
+    RecordValue,
 };
 use crate::include::nodes::primnodes::{
-    Expr, FuncExpr, RelationDesc, ScalarFunctionImpl, Var, attrno_index, expr_sql_type_hint,
-    user_attrno,
+    BuiltinScalarFunction, Expr, FuncExpr, RelationDesc, ScalarFunctionImpl, Var, attrno_index,
+    expr_sql_type_hint, user_attrno,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +66,8 @@ pub enum SerializedPartitionValue {
     Xml(String),
     InternalChar(u8),
     Bool(bool),
+    EnumOid(u32),
+    Record(Vec<SerializedPartitionValue>),
     Date(i32),
     Time(i64),
     TimeTz { time: i64, offset_seconds: i32 },
@@ -207,7 +214,7 @@ pub(crate) fn lower_partition_clause(
             sqlstate: "42P16",
         });
     }
-    ensure_matching_partition_shape(&stmt.table_name, relation_desc, &parent)?;
+    ensure_matching_partition_shape(&stmt.table_name, relation_desc, &parent, parent_name)?;
 
     let parent_spec = relation_partition_spec(&parent)?;
     let raw_bound = stmt.partition_bound.as_ref().ok_or_else(|| {
@@ -511,6 +518,19 @@ pub(crate) fn partition_value_to_value(value: &SerializedPartitionValue) -> Valu
         SerializedPartitionValue::Xml(v) => Value::Xml(v.clone().into()),
         SerializedPartitionValue::InternalChar(v) => Value::InternalChar(*v),
         SerializedPartitionValue::Bool(v) => Value::Bool(*v),
+        SerializedPartitionValue::EnumOid(v) => Value::EnumOid(*v),
+        SerializedPartitionValue::Record(fields) => Value::Record(RecordValue::anonymous(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    (
+                        format!("f{}", index.saturating_add(1)),
+                        partition_value_to_value(value),
+                    )
+                })
+                .collect(),
+        )),
         SerializedPartitionValue::Date(v) => {
             Value::Date(crate::include::nodes::datetime::DateADT(*v))
         }
@@ -560,6 +580,14 @@ pub(crate) fn value_to_partition_value(
         Value::Xml(v) => SerializedPartitionValue::Xml(v.to_string()),
         Value::InternalChar(v) => SerializedPartitionValue::InternalChar(*v),
         Value::Bool(v) => SerializedPartitionValue::Bool(*v),
+        Value::EnumOid(v) => SerializedPartitionValue::EnumOid(*v),
+        Value::Record(record) => SerializedPartitionValue::Record(
+            record
+                .fields
+                .iter()
+                .map(value_to_partition_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         Value::Date(v) => SerializedPartitionValue::Date(v.0),
         Value::Time(v) => SerializedPartitionValue::Time(v.0),
         Value::TimeTz(v) => SerializedPartitionValue::TimeTz {
@@ -1553,8 +1581,29 @@ fn default_opclass_for_partition_strategy(
         PartitionStrategy::List | PartitionStrategy::Range if sql_type.is_array => {
             Some(ARRAY_BTREE_OPCLASS_OID)
         }
-        PartitionStrategy::List | PartitionStrategy::Range => default_btree_opclass_oid(type_oid),
-        PartitionStrategy::Hash => default_hash_opclass_oid(type_oid),
+        PartitionStrategy::List | PartitionStrategy::Range
+            if matches!(
+                sql_type.element_type().kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            ) =>
+        {
+            Some(crate::include::catalog::RECORD_BTREE_OPCLASS_OID)
+        }
+        PartitionStrategy::List | PartitionStrategy::Range => default_btree_opclass_oid(type_oid)
+            .or_else(|| {
+                default_opclass_oid_for_am(
+                    partition_access_method_oid(strategy, sql_type),
+                    type_oid,
+                    sql_type,
+                )
+            }),
+        PartitionStrategy::Hash => default_hash_opclass_oid(type_oid).or_else(|| {
+            default_opclass_oid_for_am(
+                partition_access_method_oid(strategy, sql_type),
+                type_oid,
+                sql_type,
+            )
+        }),
     }
 }
 
@@ -1659,7 +1708,7 @@ fn evaluate_partition_bound_expr(
             "set-returning functions are not allowed in partition bound",
         ));
     }
-    let folded = crate::backend::optimizer::fold_expr_constants(bound)?;
+    let folded = fold_partition_bound_constants(bound)?;
     let value = match folded {
         Expr::Const(value) => value,
         Expr::CurrentTimestamp { precision } => {
@@ -1682,7 +1731,68 @@ fn evaluate_partition_bound_expr(
     {
         return Err(partition_bound_cast_error(target, key_name));
     }
-    cast_value(value, target).map_err(|_| partition_bound_cast_error(target, key_name))
+    cast_value_with_source_type_catalog_and_config(
+        value,
+        None,
+        target,
+        Some(catalog),
+        &DateTimeConfig::default(),
+    )
+    .map_err(|_| partition_bound_cast_error(target, key_name))
+}
+
+fn fold_partition_bound_constants(expr: Expr) -> Result<Expr, ParseError> {
+    let folded = crate::backend::optimizer::fold_expr_constants(expr)?;
+    fold_partition_bound_compat_functions(folded)
+}
+
+fn fold_partition_bound_compat_functions(expr: Expr) -> Result<Expr, ParseError> {
+    match expr {
+        Expr::Func(func) => fold_partition_bound_func(*func),
+        Expr::Cast(inner, target) => {
+            let inner = fold_partition_bound_constants(*inner)?;
+            crate::backend::optimizer::fold_expr_constants(Expr::Cast(Box::new(inner), target))
+        }
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Ok(Expr::Collate {
+            expr: Box::new(fold_partition_bound_constants(*expr)?),
+            collation_oid,
+        }),
+        other => Ok(other),
+    }
+}
+
+fn fold_partition_bound_func(mut func: FuncExpr) -> Result<Expr, ParseError> {
+    func.args = func
+        .args
+        .into_iter()
+        .map(fold_partition_bound_constants)
+        .collect::<Result<Vec<_>, _>>()?;
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ToChar)
+    ) {
+        let Some(values) = func
+            .args
+            .iter()
+            .map(|expr| match expr {
+                Expr::Const(value) => Some(value.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(Expr::Func(Box::new(func)));
+        };
+        // :HACK: PostgreSQL evaluates partition-bound expressions through a
+        // DDL-only constant-expression path that accepts stable formatting
+        // functions such as to_char(); keep pruning constant folding stricter.
+        return eval_to_char_function(&values, &DateTimeConfig::default())
+            .map(Expr::Const)
+            .map_err(|err| partition_bound_error(format!("{err:?}")));
+    }
+    Ok(Expr::Func(Box::new(func)))
 }
 
 fn partition_bound_cast_error(target: SqlType, key_name: &str) -> ParseError {
@@ -1697,6 +1807,7 @@ fn ensure_matching_partition_shape(
     relation_name: &str,
     relation_desc: &RelationDesc,
     parent: &BoundRelation,
+    parent_name: &str,
 ) -> Result<(), ParseError> {
     let child_columns = relation_desc
         .columns
@@ -1709,11 +1820,29 @@ fn ensure_matching_partition_shape(
         .iter()
         .filter(|column| !column.dropped)
         .collect::<Vec<_>>();
+    for child_column in &child_columns {
+        if !parent_columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case(&child_column.name))
+        {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "table \"{}\" contains column \"{}\" not found in parent \"{}\"",
+                    relation_name, child_column.name, parent_name
+                ),
+                detail: Some(
+                    "The new partition may contain only the columns present in parent.".into(),
+                ),
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+    }
     if child_columns.len() != parent_columns.len() {
         return Err(ParseError::DetailedError {
             message: format!(
                 "partition \"{}\" has different column count than partitioned table \"{}\"",
-                relation_name, parent.relation_oid
+                relation_name, parent_name
             ),
             detail: None,
             hint: None,

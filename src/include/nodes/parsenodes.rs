@@ -51,7 +51,7 @@ pub enum ParseError {
     },
     WindowingError(String),
     UndefinedOperator {
-        op: &'static str,
+        op: String,
         left_type: String,
         right_type: String,
     },
@@ -370,6 +370,7 @@ pub enum Statement {
     AlterOperatorFamily(AlterOperatorFamilyStatement),
     AlterOperatorClass(AlterOperatorClassStatement),
     DropOperatorFamily(DropOperatorFamilyStatement),
+    DropOperatorClass(DropOperatorClassStatement),
     CreateTextSearch(CreateTextSearchStatement),
     AlterTextSearch(AlterTextSearchStatement),
     AlterSequence(AlterSequenceStatement),
@@ -2308,7 +2309,7 @@ pub enum TableAsObjectType {
 pub struct PrepareStatement {
     pub name: String,
     pub parameter_types: Vec<RawTypeName>,
-    pub query: SelectStatement,
+    pub statement: Box<Statement>,
     pub query_sql: String,
 }
 
@@ -2316,6 +2317,8 @@ pub struct PrepareStatement {
 pub struct ExecuteStatement {
     pub name: String,
     pub args_sql: Vec<String>,
+    pub args: Vec<SqlExpr>,
+    pub arg_sqls: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2545,6 +2548,14 @@ pub struct DropOperatorFamilyStatement {
     pub if_exists: bool,
     pub schema_name: Option<String>,
     pub family_name: String,
+    pub access_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropOperatorClassStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub opclass_name: String,
     pub access_method: String,
 }
 
@@ -4851,6 +4862,8 @@ pub enum SubqueryComparisonOp {
     NotILike,
     Similar,
     NotSimilar,
+    RegexMatch,
+    NotRegexMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

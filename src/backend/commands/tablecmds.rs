@@ -18,9 +18,7 @@ use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::value_io::format_failing_row_detail;
-use crate::backend::optimizer::{
-    finalize_expr_subqueries, planner, relation_may_satisfy_own_partition_bound,
-};
+use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundAssignmentTargetIndirection, BoundDeleteStatement, BoundDeleteTarget,
@@ -467,6 +465,7 @@ pub(crate) fn execute_explain(
             )));
         }
         Statement::Merge(merge) => EitherExplainTarget::Merge(merge),
+        Statement::Delete(_) => unreachable!("DELETE handled above"),
         Statement::CreateTableAs(create_table_as) => {
             if explain_create_table_as_relation_exists(&create_table_as, catalog)? {
                 return Ok(StatementResult::Query {
@@ -772,7 +771,7 @@ fn execute_explain_delete(
 fn explain_delete_lines(
     stmt: &DeleteStatement,
     bound: &BoundDeleteStatement,
-    catalog: &dyn CatalogLookup,
+    _catalog: &dyn CatalogLookup,
     show_costs: bool,
     verbose: bool,
 ) -> Vec<String> {
@@ -789,9 +788,7 @@ fn explain_delete_lines(
     let child_targets = bound
         .targets
         .iter()
-        .filter(|target| {
-            target.relation_name != stmt.table_name && delete_target_can_match(target, catalog)
-        })
+        .filter(|target| target.relation_name != stmt.table_name && delete_target_is_live(target))
         .collect::<Vec<_>>();
     for (index, target) in child_targets.iter().enumerate() {
         push_explain_line(
@@ -809,7 +806,7 @@ fn explain_delete_lines(
     let live_targets = bound
         .targets
         .iter()
-        .filter(|target| delete_target_can_match(target, catalog))
+        .filter(|target| delete_target_is_live(target))
         .collect::<Vec<_>>();
     let has_subplans = !bound.subplans.is_empty();
     if has_subplans {
@@ -994,15 +991,8 @@ fn from_item_is_lateral_derived_table(item: &FromItem) -> bool {
     }
 }
 
-fn delete_target_can_match(target: &BoundDeleteTarget, catalog: &dyn CatalogLookup) -> bool {
-    if is_const_false(target.predicate.as_ref()) {
-        return false;
-    }
-    let filter = target
-        .predicate
-        .as_ref()
-        .and_then(delete_target_filter_expr);
-    relation_may_satisfy_own_partition_bound(catalog, target.relation_oid, filter.as_ref())
+fn delete_target_is_live(target: &BoundDeleteTarget) -> bool {
+    !is_const_false(target.predicate.as_ref())
 }
 
 fn push_delete_target_scan_lines(
@@ -1059,25 +1049,7 @@ fn push_delete_single_target_scan(
         show_costs,
         lines,
     );
-    if let Some(filter) = target
-        .predicate
-        .as_ref()
-        .and_then(delete_target_filter_expr)
-    {
-        lines.push(format!(
-            "{}Filter: {}",
-            " ".repeat(indent + 6),
-            crate::backend::executor::render_explain_expr(
-                &filter,
-                &target
-                    .desc
-                    .columns
-                    .iter()
-                    .map(|column| column.name.clone())
-                    .collect::<Vec<_>>(),
-            )
-        ));
-    }
+    explain_delete_scan_detail(target, indent, lines);
 }
 
 fn explain_delete_scan_label(target: &BoundDeleteTarget, alias: Option<&str>) -> String {
@@ -1129,6 +1101,55 @@ fn delete_target_filter_expr(expr: &Expr) -> Option<Expr> {
         }
         other => Some(other.clone()),
     }
+}
+
+fn explain_delete_scan_detail(target: &BoundDeleteTarget, indent: usize, lines: &mut Vec<String>) {
+    if let Some(index_cond) = explain_delete_index_cond(target) {
+        lines.push(format!(
+            "{}Index Cond: {index_cond}",
+            " ".repeat(indent + 6)
+        ));
+    } else if let Some(predicate) = target
+        .predicate
+        .as_ref()
+        .and_then(delete_target_filter_expr)
+    {
+        lines.push(format!(
+            "{}Filter: {}",
+            " ".repeat(indent + 6),
+            crate::backend::executor::render_explain_expr(
+                &predicate,
+                &target
+                    .desc
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+        ));
+    }
+}
+
+fn explain_delete_index_cond(target: &BoundDeleteTarget) -> Option<String> {
+    let BoundModifyRowSource::Index { index, keys } = &target.row_source else {
+        return None;
+    };
+    let rendered = keys
+        .iter()
+        .filter_map(|key| {
+            let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
+            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?)
+                .ok()?
+                .checked_sub(1)?;
+            let column_name = target.desc.columns.get(heap_attno)?.name.clone();
+            Some(format!(
+                "({column_name} {} {})",
+                explain_strategy_operator(key.strategy),
+                render_explain_index_value(&key.argument)
+            ))
+        })
+        .collect::<Vec<_>>();
+    (!rendered.is_empty()).then(|| format!("({})", rendered.join(" AND ")))
 }
 
 fn explain_update_lines(

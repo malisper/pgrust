@@ -1293,9 +1293,28 @@ fn execute_compiled_function(
     )
     .map_err(|err| with_plpgsql_context_if_missing(err, compiled, "statement"));
 
-    if let Err(err) = block_result {
-        ctx.gucs = saved_gucs;
-        return Err(err);
+    match block_result {
+        Ok(FunctionControl::Continue | FunctionControl::Return) => {}
+        Ok(FunctionControl::LoopContinue) => {
+            ctx.gucs = saved_gucs;
+            return Err(function_runtime_error(
+                "CONTINUE cannot be used outside a loop",
+                None,
+                "2D000",
+            ));
+        }
+        Ok(FunctionControl::Break) => {
+            ctx.gucs = saved_gucs;
+            return Err(function_runtime_error(
+                "EXIT cannot be used outside a loop",
+                None,
+                "2D000",
+            ));
+        }
+        Err(err) => {
+            ctx.gucs = saved_gucs;
+            return Err(err);
+        }
     }
 
     if has_function_config {
@@ -1412,6 +1431,7 @@ fn exec_do_stmt(
             Ok(())
         }
         CompiledStmt::Null => Ok(()),
+        CompiledStmt::Continue => Ok(()),
         CompiledStmt::If {
             branches,
             else_branch,
@@ -1531,7 +1551,6 @@ fn exec_do_stmt(
             "SET is only supported inside CREATE FUNCTION".into(),
         ))),
         CompiledStmt::Return { .. }
-        | CompiledStmt::Continue
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
         | CompiledStmt::ReturnTriggerNull

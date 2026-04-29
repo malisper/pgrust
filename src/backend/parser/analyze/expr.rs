@@ -962,7 +962,7 @@ fn fixed_length_array_slice_error() -> ParseError {
 
 fn fixed_geometry_subscript_error(sql_type: SqlType) -> ParseError {
     ParseError::UndefinedOperator {
-        op: "[]",
+        op: "[]".into(),
         left_type: sql_type_name(sql_type),
         right_type: "integer".into(),
     }
@@ -2982,8 +2982,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             )?,
-            "<<<" => bind_catalog_binary_operator_expr(
-                "<<<",
+            _ => bind_catalog_binary_operator_expr(
+                op,
                 left,
                 right,
                 scope,
@@ -2992,12 +2992,6 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             )?,
-            _ => {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "bound builtin operator",
-                    actual: format!("unsupported operator {op}"),
-                });
-            }
         },
         SqlExpr::Add(left, right) => {
             if let Some(result) = bind_maybe_multirange_arithmetic(
@@ -3467,7 +3461,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 && !is_network
             {
                 return Err(ParseError::UndefinedOperator {
-                    op: "~",
+                    op: "~".into(),
                     left_type: sql_type_name(inner_type),
                     right_type: "unknown".to_string(),
                 });
@@ -4175,27 +4169,43 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 )?
             }
         }
-        SqlExpr::RegexMatch(left, right) => Expr::op_auto(
-            OpExprKind::RegexMatch,
-            vec![
-                bind_expr_with_outer_and_ctes(
+        SqlExpr::RegexMatch(left, right) => {
+            if let Some((is_all, array)) = quantified_function_arg(right) {
+                bind_quantified_array_expr(
                     left,
+                    SubqueryComparisonOp::RegexMatch,
+                    is_all,
+                    array,
                     scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
                     ctes,
-                )?,
-                bind_expr_with_outer_and_ctes(
-                    right,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )?,
-            ],
-        ),
+                )?
+            } else {
+                Expr::op_auto(
+                    OpExprKind::RegexMatch,
+                    vec![
+                        bind_expr_with_outer_and_ctes(
+                            left,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        bind_expr_with_outer_and_ctes(
+                            right,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                    ],
+                )
+            }
+        }
         SqlExpr::Like {
             expr,
             pattern,
@@ -6298,6 +6308,14 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
     catalog: &dyn CatalogLookup,
 ) -> bool {
     if source_type.element_type() == target_type.element_type() {
+        return true;
+    }
+    if !source_type.is_array
+        && !target_type.is_array
+        && is_text_like_type(source_type)
+        && matches!(target_type.kind, SqlTypeKind::Composite)
+        && target_type.typrelid != 0
+    {
         return true;
     }
     let source_oid = catalog.type_oid_for_sql_type(source_type);

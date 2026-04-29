@@ -2436,6 +2436,8 @@ fn render_subquery_op(op: SubqueryComparisonOp) -> &'static str {
         SubqueryComparisonOp::NotILike => "NOT ILIKE",
         SubqueryComparisonOp::Similar => "SIMILAR TO",
         SubqueryComparisonOp::NotSimilar => "NOT SIMILAR TO",
+        SubqueryComparisonOp::RegexMatch => "~",
+        SubqueryComparisonOp::NotRegexMatch => "!~",
     }
 }
 
