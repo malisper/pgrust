@@ -119,11 +119,38 @@ lines = [
 if prev_dir:
     lines.append(f"_Previous run: `{prev_dir}`_")
 
+memory_peaks = summary.get("memory_peaks") or []
+HOTSPOT_THRESHOLD_MB = 1024  # 1 GB
+hotspots = [p for p in memory_peaks if (p.get("peak_rss_mb") or 0) >= HOTSPOT_THRESHOLD_MB]
+
+blocks = [
+    {"type": "header", "text": {"type": "plain_text", "text": header}},
+    {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
+]
+
+if hotspots:
+    def _fmt_size(mb):
+        return f"{mb/1024:.1f} GB" if mb >= 1024 else f"{int(mb)} MB"
+
+    hotspot_lines = [":fire: *Memory hotspots* — pgrust_server peak RSS during the test:"]
+    for h in hotspots[:5]:
+        test = h.get("test", "?")
+        peak_mb = h.get("peak_rss_mb") or 0
+        dur = h.get("duration_sec") or 0
+        shard = h.get("shard")
+        suffix = f" ({dur}s, shard {shard})" if shard is not None else f" ({dur}s)"
+        hotspot_lines.append(f"• `{test}` — peak {_fmt_size(peak_mb)}{suffix}")
+    if len(hotspots) > 5:
+        hotspot_lines.append(f"_...and {len(hotspots) - 5} more above {HOTSPOT_THRESHOLD_MB} MB._")
+    hotspot_lines.append(
+        "_Upstream PG holds these tests well under 100MB — peaks above ~1GB suggest a pgrust memory regression worth investigating._"
+    )
+    blocks.append(
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(hotspot_lines)}}
+    )
+
 payload = {
-    "blocks": [
-        {"type": "header", "text": {"type": "plain_text", "text": header}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
-    ],
+    "blocks": blocks,
     "text": header,  # fallback for notifications
 }
 print(json.dumps(payload))
