@@ -9,6 +9,7 @@ pub struct BackendNotice {
     pub sqlstate: &'static str,
     pub message: String,
     pub detail: Option<String>,
+    pub hint: Option<String>,
     pub position: Option<usize>,
 }
 
@@ -24,11 +25,26 @@ pub fn push_warning(message: impl Into<String>) {
     push_backend_notice("WARNING", "01000", message, None, None);
 }
 
+pub fn push_warning_with_hint(message: impl Into<String>, hint: impl Into<String>) {
+    push_backend_notice_with_hint("WARNING", "01000", message, None, Some(hint.into()), None);
+}
+
 pub fn push_backend_notice(
     severity: &'static str,
     sqlstate: &'static str,
     message: impl Into<String>,
     detail: Option<String>,
+    position: Option<usize>,
+) {
+    push_backend_notice_with_hint(severity, sqlstate, message, detail, None, position);
+}
+
+pub fn push_backend_notice_with_hint(
+    severity: &'static str,
+    sqlstate: &'static str,
+    message: impl Into<String>,
+    detail: Option<String>,
+    hint: Option<String>,
     position: Option<usize>,
 ) {
     NOTICE_QUEUE.with(|queue| {
@@ -37,6 +53,7 @@ pub fn push_backend_notice(
             sqlstate,
             message: message.into(),
             detail,
+            hint,
             position,
         });
     });

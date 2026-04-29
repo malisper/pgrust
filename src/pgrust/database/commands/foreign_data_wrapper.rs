@@ -1990,23 +1990,24 @@ impl Database {
             let mut notices = Vec::new();
             for server in &dependent_servers {
                 notices.push(format!("drop cascades to server {}", server.srvname));
-            }
-            for mapping in &dependent_mappings {
-                let server_name = dependent_servers
+                for table in dependent_tables
                     .iter()
-                    .find(|server| server.oid == mapping.umserver)
-                    .map(|server| server.srvname.as_str())
-                    .unwrap_or("<unknown>");
-                notices.push(format!(
-                    "drop cascades to {}",
-                    user_mapping_object_name(self, client_id, mapping, server_name)?
-                ));
-            }
-            for table in &dependent_tables {
-                notices.push(format!(
-                    "drop cascades to {}",
-                    foreign_table_object_name(&catcache, table.ftrelid)
-                ));
+                    .filter(|table| table.ftserver == server.oid)
+                {
+                    notices.push(format!(
+                        "drop cascades to {}",
+                        foreign_table_object_name(&catcache, table.ftrelid)
+                    ));
+                }
+                for mapping in dependent_mappings
+                    .iter()
+                    .filter(|mapping| mapping.umserver == server.oid)
+                {
+                    notices.push(format!(
+                        "drop cascades to {}",
+                        user_mapping_object_name(self, client_id, mapping, &server.srvname)?
+                    ));
+                }
             }
             push_drop_cascade_notices(notices);
 
