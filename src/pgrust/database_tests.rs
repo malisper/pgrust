@@ -17319,6 +17319,94 @@ fn plpgsql_declare_default_scope_matches_declaration_order() {
 }
 
 #[test]
+fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
+    let base = temp_dir("plpgsql_variable_conflict_modes");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table plpgsql_conflict_src(q1 int, q2 int)")
+        .unwrap();
+    session
+        .execute(&db, "insert into plpgsql_conflict_src values (10, 20)")
+        .unwrap();
+    session
+        .execute(&db, "set plpgsql.variable_conflict = error")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function plpgsql_conflict_test() returns text language plpgsql as $$
+             declare
+               a int;
+               b int;
+               q1 int := 42;
+             begin
+               for a, b in select q1, q2 from plpgsql_conflict_src loop
+                 return a::text || ',' || b::text;
+               end loop;
+               return null;
+             end
+             $$",
+        )
+        .unwrap();
+
+    assert_sqlstate(
+        session
+            .execute(&db, "select plpgsql_conflict_test()")
+            .unwrap_err(),
+        "42702",
+        "column reference \"q1\" is ambiguous",
+    );
+
+    session
+        .execute(
+            &db,
+            "create or replace function plpgsql_conflict_test() returns text language plpgsql as $$
+             #variable_conflict use_variable
+             declare
+               a int;
+               b int;
+               q1 int := 42;
+             begin
+               for a, b in select q1, q2 from plpgsql_conflict_src loop
+                 return a::text || ',' || b::text;
+               end loop;
+               return null;
+             end
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select plpgsql_conflict_test()"),
+        vec![vec![Value::Text("42,20".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create or replace function plpgsql_conflict_test() returns text language plpgsql as $$
+             #variable_conflict use_column
+             declare
+               a int;
+               b int;
+               q1 int := 42;
+             begin
+               for a, b in select q1, q2 from plpgsql_conflict_src loop
+                 return a::text || ',' || b::text;
+               end loop;
+               return null;
+             end
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select plpgsql_conflict_test()"),
+        vec![vec![Value::Text("10,20".into())]]
+    );
+}
+
+#[test]
 fn plpgsql_get_diagnostics_pg_routine_oid_reports_current_function() {
     let base = temp_dir("plpgsql_pg_routine_oid");
     let db = Database::open(&base, 16).unwrap();

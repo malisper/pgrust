@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::Expr;
@@ -8,8 +8,8 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
-    ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection, BoundCte,
-    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
+    AliasColumnSpec, ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection,
+    BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
     CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement, CteBody,
     DeleteStatement, FromItem, InsertSource, InsertStatement, OnConflictClause, OnConflictTarget,
     OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr,
@@ -97,6 +97,14 @@ pub(crate) struct CompiledVar {
     pub(crate) ty: SqlType,
     pub(crate) default_expr: Option<CompiledExpr>,
     pub(crate) not_null: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PlpgsqlVariableConflict {
+    #[default]
+    Error,
+    UseVariable,
+    UseColumn,
 }
 
 #[derive(Debug, Clone)]
@@ -474,6 +482,7 @@ struct CompileEnv {
     positional_parameter_names: Vec<String>,
     exception_sqlstate: Option<ScopeVar>,
     exception_sqlerrm: Option<ScopeVar>,
+    variable_conflict: PlpgsqlVariableConflict,
     next_slot: usize,
 }
 
@@ -820,7 +829,23 @@ impl CompileEnv {
                 hidden: false,
             })
             .collect::<Vec<_>>();
-        ordered.sort_by_key(|column| column.slot);
+        for (name, var) in &self.vars {
+            if is_internal_plpgsql_name(name) {
+                continue;
+            }
+            ordered.push(SlotScopeColumn {
+                slot: var.slot,
+                name: plpgsql_var_alias(var.slot),
+                sql_type: var.ty,
+                hidden: false,
+            });
+        }
+        ordered.sort_by(|left, right| {
+            left.slot
+                .cmp(&right.slot)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        ordered.dedup_by(|left, right| left.name == right.name);
         ordered
     }
 
@@ -847,7 +872,16 @@ pub(crate) fn compile_do_block(
     block: &Block,
     catalog: &dyn CatalogLookup,
 ) -> Result<CompiledBlock, ParseError> {
+    compile_do_block_with_gucs(block, catalog, None)
+}
+
+pub(crate) fn compile_do_block_with_gucs(
+    block: &Block,
+    catalog: &dyn CatalogLookup,
+    gucs: Option<&HashMap<String, String>>,
+) -> Result<CompiledBlock, ParseError> {
     let mut env = CompileEnv::default();
+    env.variable_conflict = variable_conflict_from_gucs(gucs);
     let _ = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     let _ = env.define_exception_slots();
     compile_block(block, catalog, &mut env, None)
@@ -856,8 +890,10 @@ pub(crate) fn compile_do_block(
 pub(crate) fn compile_do_function(
     block: &Block,
     catalog: &dyn CatalogLookup,
+    gucs: Option<&HashMap<String, String>>,
 ) -> Result<CompiledFunction, ParseError> {
     let mut env = CompileEnv::default();
+    env.variable_conflict = variable_conflict_from_gucs(gucs);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
     let return_contract = FunctionReturnContract::Scalar {
@@ -887,6 +923,7 @@ pub(crate) fn compile_do_function(
 pub(crate) fn compile_function_from_proc(
     row: &PgProcRow,
     catalog: &dyn CatalogLookup,
+    gucs: Option<&HashMap<String, String>>,
 ) -> Result<CompiledFunction, ParseError> {
     if row.prorettype == EVENT_TRIGGER_TYPE_OID {
         return Err(ParseError::DetailedError {
@@ -899,6 +936,7 @@ pub(crate) fn compile_function_from_proc(
     let block = parse_block(&row.prosrc)?;
     let print_strict_params = print_strict_params_directive(&row.prosrc);
     let mut env = CompileEnv::default();
+    env.variable_conflict = variable_conflict_mode(&row.prosrc, gucs);
     let mut parameter_slots = Vec::new();
     let mut output_slots = Vec::new();
 
@@ -1029,15 +1067,49 @@ fn print_strict_params_directive(source: &str) -> Option<bool> {
     })
 }
 
+fn variable_conflict_mode(
+    source: &str,
+    gucs: Option<&HashMap<String, String>>,
+) -> PlpgsqlVariableConflict {
+    variable_conflict_directive(source).unwrap_or_else(|| variable_conflict_from_gucs(gucs))
+}
+
+fn variable_conflict_from_gucs(gucs: Option<&HashMap<String, String>>) -> PlpgsqlVariableConflict {
+    gucs.and_then(|gucs| gucs.get("plpgsql.variable_conflict"))
+        .and_then(|value| parse_variable_conflict_mode(value))
+        .unwrap_or_default()
+}
+
+fn variable_conflict_directive(source: &str) -> Option<PlpgsqlVariableConflict> {
+    source.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("#variable_conflict")?.trim();
+        rest.split_whitespace()
+            .next()
+            .and_then(parse_variable_conflict_mode)
+    })
+}
+
+fn parse_variable_conflict_mode(value: &str) -> Option<PlpgsqlVariableConflict> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "error" => Some(PlpgsqlVariableConflict::Error),
+        "use_variable" => Some(PlpgsqlVariableConflict::UseVariable),
+        "use_column" => Some(PlpgsqlVariableConflict::UseColumn),
+        _ => None,
+    }
+}
+
 pub(crate) fn compile_trigger_function_from_proc(
     row: &PgProcRow,
     relation_desc: &RelationDesc,
     transition_tables: &[TriggerTransitionTable],
     catalog: &dyn CatalogLookup,
+    gucs: Option<&HashMap<String, String>>,
 ) -> Result<CompiledFunction, ParseError> {
     let block = parse_block(&row.prosrc)?;
     let print_strict_params = print_strict_params_directive(&row.prosrc);
     let mut env = CompileEnv::default();
+    env.variable_conflict = variable_conflict_mode(&row.prosrc, gucs);
     let mut trigger_transition_ctes = Vec::new();
     env.local_ctes = transition_tables
         .iter()
@@ -1957,6 +2029,7 @@ fn plan_select_for_env(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<PlannedStmt, ParseError> {
+    validate_select_variable_conflicts(stmt, catalog, env)?;
     let stmt = normalize_plpgsql_select(stmt.clone(), env);
     pg_plan_query_with_outer_scopes_and_ctes_config(
         &stmt,
@@ -1986,6 +2059,301 @@ fn plpgsql_planner_config() -> PlannerConfig {
     PlannerConfig {
         fold_constants: false,
         ..PlannerConfig::default()
+    }
+}
+
+fn validate_select_variable_conflicts(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<(), ParseError> {
+    if env.variable_conflict != PlpgsqlVariableConflict::Error {
+        return Ok(());
+    }
+    let Some(from) = stmt.from.as_ref() else {
+        return Ok(());
+    };
+    let mut from_columns = HashSet::new();
+    collect_from_item_column_names(from, catalog, env, &mut from_columns);
+    if from_columns.is_empty() {
+        return Ok(());
+    }
+    let mut refs = Vec::new();
+    collect_select_column_refs(stmt, &mut refs);
+    for name in refs {
+        if from_columns.contains(&name.to_ascii_lowercase()) && env.get_var(&name).is_some() {
+            return Err(ambiguous_plpgsql_column_error(&name));
+        }
+    }
+    Ok(())
+}
+
+fn ambiguous_plpgsql_column_error(name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("column reference \"{name}\" is ambiguous"),
+        detail: Some("It could refer to either a PL/pgSQL variable or a table column.".into()),
+        hint: None,
+        sqlstate: "42702",
+    }
+}
+
+fn collect_from_item_column_names(
+    item: &FromItem,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+    names: &mut HashSet<String>,
+) {
+    match item {
+        FromItem::Table { name, .. } => {
+            if let Some(cte) = env
+                .local_ctes
+                .iter()
+                .find(|cte| cte.name.eq_ignore_ascii_case(name))
+            {
+                names.extend(
+                    cte.desc
+                        .columns
+                        .iter()
+                        .filter(|column| !column.dropped)
+                        .map(|column| column.name.to_ascii_lowercase()),
+                );
+                return;
+            }
+            if let Some(relation) = catalog.lookup_any_relation(name) {
+                names.extend(
+                    relation
+                        .desc
+                        .columns
+                        .iter()
+                        .filter(|column| !column.dropped)
+                        .map(|column| column.name.to_ascii_lowercase()),
+                );
+            }
+        }
+        FromItem::Alias {
+            source,
+            column_aliases,
+            ..
+        } => match column_aliases {
+            AliasColumnSpec::Names(alias_names) if !alias_names.is_empty() => {
+                names.extend(alias_names.iter().map(|name| name.to_ascii_lowercase()));
+            }
+            AliasColumnSpec::Definitions(defs) if !defs.is_empty() => {
+                names.extend(defs.iter().map(|def| def.name.to_ascii_lowercase()));
+            }
+            _ => collect_from_item_column_names(source, catalog, env, names),
+        },
+        FromItem::Join { left, right, .. } => {
+            collect_from_item_column_names(left, catalog, env, names);
+            collect_from_item_column_names(right, catalog, env, names);
+        }
+        FromItem::Lateral(source) => collect_from_item_column_names(source, catalog, env, names),
+        _ => {}
+    }
+}
+
+fn collect_select_column_refs(stmt: &SelectStatement, refs: &mut Vec<String>) {
+    for target in &stmt.targets {
+        collect_expr_column_refs(&target.expr, refs);
+    }
+    if let Some(expr) = &stmt.where_clause {
+        collect_expr_column_refs(expr, refs);
+    }
+    for expr in &stmt.group_by {
+        collect_expr_column_refs(expr, refs);
+    }
+    if let Some(expr) = &stmt.having {
+        collect_expr_column_refs(expr, refs);
+    }
+    for item in &stmt.order_by {
+        collect_expr_column_refs(&item.expr, refs);
+    }
+}
+
+fn collect_expr_column_refs(expr: &SqlExpr, refs: &mut Vec<String>) {
+    match expr {
+        SqlExpr::Column(name) if !name.contains('.') && !is_internal_plpgsql_name(name) => {
+            refs.push(name.clone());
+        }
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right) => {
+            collect_expr_column_refs(left, refs);
+            collect_expr_column_refs(right, refs);
+        }
+        SqlExpr::BinaryOperator { left, right, .. } => {
+            collect_expr_column_refs(left, refs);
+            collect_expr_column_refs(right, refs);
+        }
+        SqlExpr::UnaryPlus(expr)
+        | SqlExpr::Negate(expr)
+        | SqlExpr::BitNot(expr)
+        | SqlExpr::PrefixOperator { expr, .. }
+        | SqlExpr::Cast(expr, _)
+        | SqlExpr::Not(expr)
+        | SqlExpr::IsNull(expr)
+        | SqlExpr::IsNotNull(expr)
+        | SqlExpr::FieldSelect { expr, .. } => collect_expr_column_refs(expr, refs),
+        SqlExpr::Subscript { expr, .. } => collect_expr_column_refs(expr, refs),
+        SqlExpr::GeometryUnaryOp { expr, .. } => collect_expr_column_refs(expr, refs),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            collect_expr_column_refs(left, refs);
+            collect_expr_column_refs(right, refs);
+        }
+        SqlExpr::Collate { expr, .. } => collect_expr_column_refs(expr, refs),
+        SqlExpr::AtTimeZone { expr, zone } => {
+            collect_expr_column_refs(expr, refs);
+            collect_expr_column_refs(zone, refs);
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_expr_column_refs(expr, refs);
+            collect_expr_column_refs(pattern, refs);
+            if let Some(escape) = escape {
+                collect_expr_column_refs(escape, refs);
+            }
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                collect_expr_column_refs(arg, refs);
+            }
+            for arm in args {
+                collect_expr_column_refs(&arm.expr, refs);
+                collect_expr_column_refs(&arm.result, refs);
+            }
+            if let Some(defresult) = defresult {
+                collect_expr_column_refs(defresult, refs);
+            }
+        }
+        SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => {
+            for item in items {
+                collect_expr_column_refs(item, refs);
+            }
+        }
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            collect_expr_column_refs(left, refs);
+            collect_expr_column_refs(array, refs);
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            collect_expr_column_refs(array, refs);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_expr_column_refs(lower, refs);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_expr_column_refs(upper, refs);
+                }
+            }
+        }
+        SqlExpr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_expr_column_refs(child, refs);
+            }
+        }
+        SqlExpr::JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_expr_column_refs(child, refs);
+            }
+        }
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
+            for arg in args.args() {
+                collect_expr_column_refs(&arg.value, refs);
+            }
+            for item in order_by {
+                collect_expr_column_refs(&item.expr, refs);
+            }
+            if let Some(within_group) = within_group {
+                for item in within_group {
+                    collect_expr_column_refs(&item.expr, refs);
+                }
+            }
+            if let Some(filter) = filter {
+                collect_expr_column_refs(filter, refs);
+            }
+            if let Some(over) = over {
+                collect_window_column_refs(over, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_window_column_refs(spec: &RawWindowSpec, refs: &mut Vec<String>) {
+    for expr in &spec.partition_by {
+        collect_expr_column_refs(expr, refs);
+    }
+    for item in &spec.order_by {
+        collect_expr_column_refs(&item.expr, refs);
+    }
+    if let Some(frame) = &spec.frame {
+        collect_window_frame_bound_refs(&frame.start_bound, refs);
+        collect_window_frame_bound_refs(&frame.end_bound, refs);
+    }
+}
+
+fn collect_window_frame_bound_refs(bound: &RawWindowFrameBound, refs: &mut Vec<String>) {
+    match bound {
+        RawWindowFrameBound::OffsetPreceding(expr) | RawWindowFrameBound::OffsetFollowing(expr) => {
+            collect_expr_column_refs(expr, refs)
+        }
+        RawWindowFrameBound::UnboundedPreceding
+        | RawWindowFrameBound::CurrentRow
+        | RawWindowFrameBound::UnboundedFollowing => {}
     }
 }
 
@@ -2350,13 +2718,7 @@ fn compile_exec_sql_stmt(
     let outer_scope = outer_scope_for_sql(env);
     match stmt {
         Statement::Select(stmt) => Ok(CompiledStmt::Perform {
-            plan: pg_plan_query_with_outer_scopes_and_ctes_config(
-                &stmt,
-                catalog,
-                &[outer_scope],
-                &env.local_ctes,
-                plpgsql_planner_config(),
-            )?,
+            plan: plan_select_for_env(&stmt, catalog, env)?,
             line: 1,
             sql: Some(rewritten_sql.clone()),
         }),
@@ -2687,6 +3049,14 @@ fn plpgsql_label_alias(scope_index: usize, slot: usize, name: &str) -> String {
 
 fn is_plpgsql_label_alias(name: &str) -> bool {
     name.starts_with("__pgrust_plpgsql_label_")
+}
+
+fn plpgsql_var_alias(slot: usize) -> String {
+    format!("__pgrust_plpgsql_var_{slot}")
+}
+
+fn is_internal_plpgsql_name(name: &str) -> bool {
+    name.starts_with("__pgrust_plpgsql_")
 }
 
 fn rewrite_plpgsql_sql_text(sql: &str, env: &CompileEnv) -> Result<String, ParseError> {
@@ -3943,6 +4313,13 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
         SqlExpr::Column(name) => {
             if let Some(expr) = normalize_labeled_column_name(&name, env) {
                 return expr;
+            }
+            if env.variable_conflict == PlpgsqlVariableConflict::UseVariable
+                && !name.contains('.')
+                && !is_internal_plpgsql_name(&name)
+                && let Some(var) = env.get_var(&name)
+            {
+                return SqlExpr::Column(plpgsql_var_alias(var.slot));
             }
             if let Some((base, field)) = name.rsplit_once('.')
                 && let Some(var) = env.get_var(base)

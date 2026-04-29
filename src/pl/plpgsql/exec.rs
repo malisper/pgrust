@@ -750,7 +750,7 @@ fn compiled_function_for_proc(
     let compile_row =
         concrete_polymorphic_proc_row(&row, resolved_result_type, actual_arg_types, catalog)?
             .unwrap_or_else(|| row.clone());
-    let mut compiled = compile_function_from_proc(&compile_row, catalog)
+    let mut compiled = compile_function_from_proc(&compile_row, catalog, Some(&ctx.gucs))
         .map_err(|err| plpgsql_compile_error(err, &row))?;
     compiled.context_arg_type_names = proc_context_arg_type_names(&row, catalog);
     let compiled = Arc::new(compiled);
@@ -1093,7 +1093,7 @@ fn compiled_procedure_for_proc(
         return Ok(compiled);
     }
     let compiled = Arc::new(
-        compile_function_from_proc(&row, catalog)
+        compile_function_from_proc(&row, catalog, Some(&ctx.gucs))
             .map_err(|err| plpgsql_compile_error(err, &row))?,
     );
     ctx.plpgsql_function_cache
@@ -1149,6 +1149,7 @@ fn compiled_trigger_function_for_proc(
             &call.relation_desc,
             &call.transition_tables,
             catalog,
+            Some(&ctx.gucs),
         )
         .map_err(ExecError::Parse)?,
     );

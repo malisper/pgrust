@@ -768,7 +768,8 @@ pub fn execute_do_with_gucs(
         }
         exec::clear_notices();
         let block = parse_block(&stmt.code)?;
-        let compiled = compile::compile_do_block(&block, &Catalog::default())?;
+        let compiled =
+            compile::compile_do_block_with_gucs(&block, &Catalog::default(), Some(gucs))?;
         exec::execute_block_with_gucs(&compiled, gucs)
     })
 }
@@ -792,7 +793,7 @@ pub(crate) fn execute_do_with_context(
         }
         exec::clear_notices();
         let block = parse_block(&stmt.code)?;
-        let compiled = compile::compile_do_function(&block, catalog)?;
+        let compiled = compile::compile_do_function(&block, catalog, Some(&ctx.gucs))?;
         exec::execute_do_function(&compiled, ctx)
     })
 }
