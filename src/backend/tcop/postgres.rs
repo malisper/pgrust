@@ -753,6 +753,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("invalid value for parameter \"") {
                 return None;
             }
+            if message.starts_with("unrecognized origin value: ")
+                || message.starts_with("unrecognized subscription parameter: ")
+                || (message.starts_with("subscription \"")
+                    && message.contains("invalid port number: "))
+            {
+                return None;
+            }
             if message.starts_with("unrecognized reset target: ")
                 || message.starts_with("invalid statistics kind: ")
             {

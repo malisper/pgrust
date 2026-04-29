@@ -2535,6 +2535,35 @@ impl CatalogLookup for LazyCatalogLookup {
         build_pg_stat_recovery_prefetch_rows(&self.db.stats.read())
     }
 
+    fn pg_stat_subscription_stats_rows(&self) -> Vec<Vec<Value>> {
+        self.db
+            .object_addresses
+            .read()
+            .subscriptions
+            .iter()
+            .filter(|entry| entry.row.subdbid == self.db.database_oid)
+            .map(|entry| {
+                vec![
+                    Value::Int64(i64::from(entry.row.oid)),
+                    Value::Text(entry.row.subname.clone().into()),
+                    Value::Int64(0),
+                    Value::Int64(0),
+                    Value::Int64(0),
+                    Value::Int64(0),
+                    Value::Int64(0),
+                    Value::Int64(0),
+                    Value::Int64(0),
+                    Value::Int64(0),
+                    Value::Int64(0),
+                    entry
+                        .stats_reset
+                        .map(Value::TimestampTz)
+                        .unwrap_or(Value::Null),
+                ]
+            })
+            .collect()
+    }
+
     fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {
         let namespaces = ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx);
         let classes = ensure_class_rows(&self.db, self.client_id, self.txn_ctx);

@@ -405,14 +405,6 @@ impl Database {
                 )?;
                 Ok(Some(StatementResult::AffectedRows(0)))
             }
-            "CREATE SUBSCRIPTION" => {
-                self.execute_create_subscription_for_object_address(client_id, &stmt.sql);
-                Ok(Some(StatementResult::AffectedRows(0)))
-            }
-            "DROP SUBSCRIPTION" => {
-                self.execute_drop_subscription_for_object_address(&stmt.sql);
-                Ok(Some(StatementResult::AffectedRows(0)))
-            }
             _ => Ok(None),
         }
     }
@@ -1712,6 +1704,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterSubscription(ref alter_stmt) => self
+                .execute_alter_subscription_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterOperator(ref alter_stmt) => self
                 .execute_alter_operator_stmt_with_search_path(
                     client_id,
@@ -1913,6 +1911,12 @@ impl Database {
             }
             Statement::CommentOnPublication(ref comment_stmt) => self
                 .execute_comment_on_publication_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
+            Statement::CommentOnSubscription(ref comment_stmt) => self
+                .execute_comment_on_subscription_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,
@@ -2702,6 +2706,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateSubscription(ref create_stmt) => self
+                .execute_create_subscription_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateTrigger(ref create_stmt) => self
                 .execute_create_trigger_stmt_with_search_path(
                     client_id,
@@ -2892,6 +2902,12 @@ impl Database {
                 ),
             Statement::DropPublication(ref drop_stmt) => self
                 .execute_drop_publication_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropSubscription(ref drop_stmt) => self
+                .execute_drop_subscription_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,

@@ -448,6 +448,7 @@ pub enum Statement {
     AlterEventTriggerOwner(AlterEventTriggerOwnerStatement),
     AlterForeignTableOptions(AlterForeignTableOptionsStatement),
     AlterPublication(AlterPublicationStatement),
+    AlterSubscription(AlterSubscriptionStatement),
     AlterOperator(AlterOperatorStatement),
     AlterAggregateRename(AlterAggregateRenameStatement),
     AlterConversion(AlterConversionStatement),
@@ -470,6 +471,7 @@ pub enum Statement {
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnForeignServer(CommentOnForeignServerStatement),
     CommentOnPublication(CommentOnPublicationStatement),
+    CommentOnSubscription(CommentOnSubscriptionStatement),
     CommentOnStatistics(CommentOnStatisticsStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
     CommentOnFunction(CommentOnFunctionStatement),
@@ -478,6 +480,7 @@ pub enum Statement {
     CreateConversion(CreateConversionStatement),
     CreateCollation(CreateCollationStatement),
     CreatePublication(CreatePublicationStatement),
+    CreateSubscription(CreateSubscriptionStatement),
     CommentOnDatabase(CommentOnDatabaseStatement),
     CommentOnRole(CommentOnRoleStatement),
     GrantObject(GrantObjectStatement),
@@ -490,6 +493,7 @@ pub enum Statement {
     DropCollation(DropCollationStatement),
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
+    DropSubscription(DropSubscriptionStatement),
     DropStatistics(DropStatisticsStatement),
     DropCast(DropCastStatement),
     DropFunction(DropFunctionStatement),
@@ -3347,6 +3351,75 @@ pub struct DropPublicationStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnPublicationStatement {
     pub publication_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionOptionValue {
+    Identifier(String),
+    String(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionOption {
+    pub name: String,
+    pub value: Option<SubscriptionOptionValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSubscriptionStatement {
+    pub subscription_name: String,
+    pub connection: String,
+    pub publications: Vec<String>,
+    pub options: Vec<SubscriptionOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterSubscriptionStatement {
+    pub subscription_name: String,
+    pub action: AlterSubscriptionAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterSubscriptionAction {
+    SetOptions(Vec<SubscriptionOption>),
+    Connection(String),
+    SetPublication {
+        publications: Vec<String>,
+        options: Vec<SubscriptionOption>,
+    },
+    AddPublication {
+        publications: Vec<String>,
+        options: Vec<SubscriptionOption>,
+    },
+    DropPublication {
+        publications: Vec<String>,
+        options: Vec<SubscriptionOption>,
+    },
+    RefreshPublication {
+        options: Vec<SubscriptionOption>,
+    },
+    Enable,
+    Disable,
+    Skip(Vec<SubscriptionOption>),
+    Rename {
+        new_name: String,
+    },
+    OwnerTo {
+        new_owner: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSubscriptionStatement {
+    pub if_exists: bool,
+    pub subscription_names: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnSubscriptionStatement {
+    pub subscription_name: String,
     pub comment: Option<String>,
 }
 

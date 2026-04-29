@@ -54,15 +54,15 @@ use crate::include::catalog::{
     PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, PgAmopRow, PgAmprocRow,
-    PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow,
-    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    PgUserMappingRow, policy_shdepend_rows, relkind_has_storage,
+    PG_SUBSCRIPTION_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
+    PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, policy_shdepend_rows, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -8735,6 +8735,20 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         self.comment_shared_object_mvcc(publication_oid, PG_PUBLICATION_RELATION_OID, comment, ctx)
+    }
+
+    pub fn comment_subscription_mvcc(
+        &mut self,
+        subscription_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(
+            subscription_oid,
+            PG_SUBSCRIPTION_RELATION_OID,
+            comment,
+            ctx,
+        )
     }
 
     pub fn comment_statistics_mvcc(

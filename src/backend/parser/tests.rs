@@ -12,23 +12,25 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
-    AlterColumnIdentityAction, AlterDomainAction, AlterGenericOptionAction, AlterTableTriggerMode,
+    AlterColumnIdentityAction, AlterDomainAction, AlterGenericOptionAction,
+    AlterSubscriptionAction, AlterSubscriptionStatement, AlterTableTriggerMode,
     AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
     AlterTypeSetOptionsStatement, CastContext, ClusterStatement, ColumnConstraint,
     ColumnGeneratedKind, ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
-    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
-    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
-    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
-    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, CursorScrollOption, DeclareCursorStatement, DomainConstraintSpecKind,
-    DropAggregateStatement, DropCastStatement, DropTriggerStatement, DropTypeStatement,
-    ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, GrantTableColumnPrivilege,
-    IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode, LockTableMode, LockTableStatement,
-    OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnSubscriptionStatement,
+    CommentOnTypeStatement, CommentOnViewStatement, CompositeTypeAttributeDef,
+    CreateAggregateStatement, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod,
+    CreateCastStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
+    CreateTriggerStatement, CreateTypeStatement, CursorScrollOption, DeclareCursorStatement,
+    DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement, DropSubscriptionStatement,
+    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
+    GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy,
+    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
+    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    SetSessionAuthorizationStatement, SqlCallArgs, SubscriptionOptionValue, TableConstraint,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
+    UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -274,6 +276,119 @@ fn parse_drop_and_comment_on_publication() {
             publication_name,
             comment: Some(comment),
         }) if publication_name == "pub" && comment == "hello"
+    ));
+}
+
+#[test]
+fn parse_create_subscription_statement() {
+    let stmt = parse_statement(
+        "create subscription sub1 connection 'dbname=regression password=secret' publication pub1, pub2 with (connect = false, streaming = parallel, slot_name = none)",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreateSubscription(stmt) => {
+            assert_eq!(stmt.subscription_name, "sub1");
+            assert_eq!(stmt.connection, "dbname=regression password=secret");
+            assert_eq!(stmt.publications, vec!["pub1", "pub2"]);
+            assert_eq!(stmt.options.len(), 3);
+            assert!(stmt.options.iter().any(|option| option.name == "connect"));
+            assert!(stmt.options.iter().any(|option| {
+                option.name == "streaming"
+                    && matches!(
+                        option.value,
+                        Some(SubscriptionOptionValue::Identifier(ref value)) if value == "parallel"
+                    )
+            }));
+        }
+        other => panic!("expected create subscription, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_alter_subscription_actions() {
+    assert!(matches!(
+        parse_statement("alter subscription sub1 connection 'dbname=other'").unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            subscription_name,
+            action: AlterSubscriptionAction::Connection(conninfo),
+        }) if subscription_name == "sub1" && conninfo == "dbname=other"
+    ));
+    assert!(matches!(
+        parse_statement("alter subscription sub1 set publication pub2 with (refresh = false)")
+            .unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            action: AlterSubscriptionAction::SetPublication { publications, options },
+            ..
+        }) if publications == vec!["pub2"] && options.len() == 1
+    ));
+    assert!(matches!(
+        parse_statement("alter subscription sub1 add publication pub3, pub4").unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            action: AlterSubscriptionAction::AddPublication { publications, .. },
+            ..
+        }) if publications == vec!["pub3", "pub4"]
+    ));
+    assert!(matches!(
+        parse_statement("alter subscription sub1 drop publication pub3 with (refresh = false)")
+            .unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            action: AlterSubscriptionAction::DropPublication { publications, .. },
+            ..
+        }) if publications == vec!["pub3"]
+    ));
+    assert!(matches!(
+        parse_statement("alter subscription sub1 refresh publication").unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            action: AlterSubscriptionAction::RefreshPublication { .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_statement("alter subscription sub1 enable").unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            action: AlterSubscriptionAction::Enable,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_statement("alter subscription sub1 skip (lsn = '0/12345')").unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            action: AlterSubscriptionAction::Skip(options),
+            ..
+        }) if options.len() == 1
+    ));
+    assert!(matches!(
+        parse_statement("alter subscription sub1 rename to sub2").unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            action: AlterSubscriptionAction::Rename { new_name },
+            ..
+        }) if new_name == "sub2"
+    ));
+    assert!(matches!(
+        parse_statement("alter subscription sub1 owner to app_owner").unwrap(),
+        Statement::AlterSubscription(AlterSubscriptionStatement {
+            action: AlterSubscriptionAction::OwnerTo { new_owner },
+            ..
+        }) if new_owner == "app_owner"
+    ));
+}
+
+#[test]
+fn parse_drop_and_comment_on_subscription() {
+    assert!(matches!(
+        parse_statement("drop subscription if exists sub1, sub2 restrict").unwrap(),
+        Statement::DropSubscription(DropSubscriptionStatement {
+            if_exists: true,
+            subscription_names,
+            cascade: false,
+        }) if subscription_names == vec!["sub1", "sub2"]
+    ));
+    assert!(matches!(
+        parse_statement("comment on subscription sub1 is null").unwrap(),
+        Statement::CommentOnSubscription(CommentOnSubscriptionStatement {
+            subscription_name,
+            comment: None,
+        }) if subscription_name == "sub1"
     ));
 }
 
