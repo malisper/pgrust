@@ -3739,7 +3739,9 @@ fn partition_value_bound_literal(value: &SerializedPartitionValue) -> String {
         | SerializedPartitionValue::TimeTz { .. }
         | SerializedPartitionValue::Timestamp(_)
         | SerializedPartitionValue::TimestampTz(_)
+        | SerializedPartitionValue::EnumOid(_)
         | SerializedPartitionValue::Array(_)
+        | SerializedPartitionValue::Record(_)
         | SerializedPartitionValue::Range(_)
         | SerializedPartitionValue::Multirange(_) => {
             quote_sql_literal(&partition_value_text(value))
@@ -3946,7 +3948,9 @@ fn partition_value_constraint_literal(value: &SerializedPartitionValue) -> Strin
         | SerializedPartitionValue::TimeTz { .. }
         | SerializedPartitionValue::Timestamp(_)
         | SerializedPartitionValue::TimestampTz(_)
+        | SerializedPartitionValue::EnumOid(_)
         | SerializedPartitionValue::Range(_)
+        | SerializedPartitionValue::Record(_)
         | SerializedPartitionValue::Multirange(_) => format!(
             "{}::{}",
             quote_sql_literal(&partition_value_text(value)),
@@ -3989,6 +3993,8 @@ fn partition_value_type_name(value: &SerializedPartitionValue) -> &'static str {
         SerializedPartitionValue::Timestamp(_) => "timestamp without time zone",
         SerializedPartitionValue::TimestampTz(_) => "timestamp with time zone",
         SerializedPartitionValue::Array(_) => "text[]",
+        SerializedPartitionValue::EnumOid(_) => "text",
+        SerializedPartitionValue::Record(_) => "text",
         SerializedPartitionValue::Range(_) => "text",
         SerializedPartitionValue::Multirange(_) => "text",
     }
@@ -7780,12 +7786,14 @@ pub fn eval_expr(
             hint: None,
             sqlstate: "XX000",
         }),
-        Expr::Param(param) => ctx
-            .expr_bindings
-            .exec_params
-            .get(&param.paramid)
-            .cloned()
-            .ok_or(ExecError::DetailedError {
+        Expr::Param(param) => {
+            let params = match param.paramkind {
+                crate::include::nodes::primnodes::ParamKind::Exec => &ctx.expr_bindings.exec_params,
+                crate::include::nodes::primnodes::ParamKind::External => {
+                    &ctx.expr_bindings.external_params
+                }
+            };
+            params.get(&param.paramid).cloned().ok_or(ExecError::DetailedError {
                 message: "executor param reached expression evaluation without a binding".into(),
                 detail: Some(format!(
                     "paramkind={:?}, paramid={}, paramtype={:?}",
@@ -7793,7 +7801,8 @@ pub fn eval_expr(
                 )),
                 hint: None,
                 sqlstate: "XX000",
-            }),
+            })
+        }
         Expr::Var(var) => {
             if var.varno == OUTER_VAR {
                 if is_system_attr(var.varattno) {

@@ -3,10 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
-    executor_start, render_explain_expr, render_index_order_by,
-    render_index_scan_condition_with_key_names,
+    ExecutorContext, executor_start, render_explain_expr, render_explain_literal,
+    render_index_order_by, render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
-    render_verbose_range_support_expr, set_returning_call_label,
+    render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
+    set_returning_call_label,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
@@ -117,6 +118,23 @@ pub(crate) fn format_explain_plan_with_subplans(
     );
 }
 
+pub(crate) fn format_explain_plan_with_subplans_and_catalog(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    catalog: &dyn CatalogLookup,
+    lines: &mut Vec<String>,
+) {
+    let ctx = VerboseExplainContext {
+        type_names: collect_explain_type_names(plan, subplans, catalog),
+        ..VerboseExplainContext::default()
+    };
+    format_explain_plan_with_subplans_inner(
+        plan, subplans, indent, show_costs, false, false, false, &ctx, lines,
+    );
+}
+
 pub(crate) fn format_explain_child_plan_with_subplans(
     plan: &Plan,
     subplans: &[Plan],
@@ -137,6 +155,214 @@ pub(crate) fn format_explain_child_plan_with_subplans(
     );
 }
 
+pub(crate) fn apply_runtime_pruning_for_explain_plan(
+    mut plan: Plan,
+    ctx: &mut ExecutorContext,
+) -> Plan {
+    match &mut plan {
+        Plan::Append {
+            partition_prune,
+            children,
+            ..
+        }
+        | Plan::MergeAppend {
+            partition_prune,
+            children,
+            ..
+        } => {
+            *children = prune_runtime_explain_children(std::mem::take(children), ctx);
+            if let Some(partition_prune) = partition_prune
+                && expr_contains_external_param(&partition_prune.filter)
+            {
+                let (startup_visible, removed) =
+                    runtime_pruned_startup_child_indexes(partition_prune, ctx);
+                if removed > 0 {
+                    partition_prune.subplans_removed += removed;
+                    let existing_children = std::mem::take(children);
+                    *children = startup_visible
+                        .into_iter()
+                        .filter_map(|index| existing_children.get(index).cloned())
+                        .collect();
+                }
+            }
+        }
+        Plan::BitmapOr { children, .. } | Plan::SetOp { children, .. } => {
+            *children = prune_runtime_explain_children(std::mem::take(children), ctx);
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => prune_runtime_explain_box(bitmapqual, ctx),
+        Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Filter { input, .. } => prune_runtime_explain_box(input, ctx),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            prune_runtime_explain_box(left, ctx);
+            prune_runtime_explain_box(right, ctx);
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            prune_runtime_explain_box(anchor, ctx);
+            prune_runtime_explain_box(recursive, ctx);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => {}
+    }
+    plan
+}
+
+fn prune_runtime_explain_children(children: Vec<Plan>, ctx: &mut ExecutorContext) -> Vec<Plan> {
+    children
+        .into_iter()
+        .map(|child| apply_runtime_pruning_for_explain_plan(child, ctx))
+        .collect()
+}
+
+fn prune_runtime_explain_box(input: &mut Box<Plan>, ctx: &mut ExecutorContext) {
+    let old = std::mem::replace(
+        input,
+        Box::new(Plan::Result {
+            plan_info: PlanEstimate::default(),
+        }),
+    );
+    *input = Box::new(apply_runtime_pruning_for_explain_plan(*old, ctx));
+}
+
+fn expr_contains_external_param(expr: &Expr) -> bool {
+    match expr {
+        Expr::Param(param) => param.paramkind == ParamKind::External,
+        Expr::Var(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+        Expr::Aggref(aggref) => {
+            aggref.direct_args.iter().any(expr_contains_external_param)
+                || aggref.args.iter().any(expr_contains_external_param)
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| expr_contains_external_param(&item.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_external_param)
+        }
+        Expr::WindowFunc(window_func) => window_func.args.iter().any(expr_contains_external_param),
+        Expr::Op(op) => op.args.iter().any(expr_contains_external_param),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_external_param),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|arg| expr_contains_external_param(arg))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_external_param(&arm.expr)
+                        || expr_contains_external_param(&arm.result)
+                })
+                || expr_contains_external_param(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_external_param),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(expr_contains_external_param),
+        Expr::SetReturning(set_returning) => set_returning_call_exprs(&set_returning.call)
+            .into_iter()
+            .any(expr_contains_external_param),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_contains_external_param(expr)),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_external_param(expr))
+                || subplan.args.iter().any(expr_contains_external_param)
+        }
+        Expr::ScalarArrayOp(scalar) => {
+            expr_contains_external_param(&scalar.left)
+                || expr_contains_external_param(&scalar.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_external_param),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_contains_external_param(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_external_param(expr)
+                || expr_contains_external_param(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|escape| expr_contains_external_param(escape))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_external_param(left) || expr_contains_external_param(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_external_param),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, field)| expr_contains_external_param(field)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_external_param(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_external_param)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_external_param)
+                })
+        }
+    }
+}
 pub(crate) fn format_verbose_explain_plan_with_subplans(
     plan: &Plan,
     subplans: &[Plan],
@@ -606,7 +832,17 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         {
             Some(input.as_ref())
         }
-        Plan::Append { children, .. } if children.len() == 1 => children.first(),
+        Plan::Append {
+            children,
+            partition_prune,
+            ..
+        } if children.len() == 1
+            && partition_prune
+                .as_ref()
+                .is_none_or(|info| info.subplans_removed == 0) =>
+        {
+            children.first()
+        }
         _ => None,
     }
 }
@@ -966,6 +1202,20 @@ fn push_nonverbose_plan_details(
 ) -> bool {
     let prefix = explain_detail_prefix(indent);
     match plan {
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            if let Some(rendered) = render_nonverbose_expr_with_dynamic_type_names(
+                predicate,
+                &input.column_names(),
+                ctx,
+            ) {
+                lines.push(format!("{prefix}Filter: {rendered}"));
+                true
+            } else {
+                false
+            }
+        }
         Plan::OrderBy {
             input,
             items,
@@ -2848,6 +3098,19 @@ fn collect_plan_type_names(
     catalog: &dyn CatalogLookup,
     type_names: &mut BTreeMap<u32, String>,
 ) {
+    match plan {
+        Plan::Append { desc, .. }
+        | Plan::MergeAppend { desc, .. }
+        | Plan::SeqScan { desc, .. }
+        | Plan::IndexOnlyScan { desc, .. }
+        | Plan::IndexScan { desc, .. }
+        | Plan::BitmapHeapScan { desc, .. } => {
+            for column in &desc.columns {
+                collect_sql_type_name(column.sql_type, catalog, type_names);
+            }
+        }
+        _ => {}
+    }
     if let Plan::FunctionScan { call, .. } = plan {
         for column in call.output_columns() {
             collect_sql_type_name(column.sql_type, catalog, type_names);
@@ -4824,10 +5087,16 @@ fn render_verbose_join_expr(
             .find(|source| source.paramid == param.paramid)
             .map(|source| render_verbose_expr(&source.expr, &source.column_names, ctx))
             .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Param(param) if param.paramkind == ParamKind::External => {
+            format!("${}", param.paramid)
+        }
         Expr::Const(value) => {
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
         Expr::Cast(inner, ty) => {
+            if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
+                return rendered;
+            }
             let inner = render_verbose_join_expr(inner, left_names, right_names, ctx);
             format!("({inner})::{}", render_type_name(*ty, ctx))
         }
@@ -4942,10 +5211,16 @@ fn render_verbose_expr(
             .find(|source| source.paramid == param.paramid)
             .map(|source| render_verbose_expr(&source.expr, &source.column_names, ctx))
             .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Param(param) if param.paramkind == ParamKind::External => {
+            format!("${}", param.paramid)
+        }
         Expr::Const(value) => {
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
         Expr::Cast(inner, ty) => {
+            if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
+                return rendered;
+            }
             let inner = render_verbose_expr(inner, column_names, ctx);
             format!("({inner})::{}", render_type_name(*ty, ctx))
         }
@@ -5181,6 +5456,132 @@ fn strip_outer_parens(text: &str) -> String {
         .and_then(|value| value.strip_suffix(')'))
         .unwrap_or(text)
         .to_string()
+}
+
+fn render_nonverbose_expr_with_dynamic_type_names(
+    expr: &Expr,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let mut replacements = Vec::new();
+    collect_dynamic_const_cast_replacements(expr, ctx, &mut replacements);
+    if replacements.is_empty() {
+        return None;
+    }
+    let mut rendered = render_explain_expr(expr, column_names);
+    replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+    replacements.dedup();
+    for (from, to) in replacements {
+        rendered = rendered.replace(&from, &to);
+    }
+    Some(rendered)
+}
+
+fn collect_dynamic_const_cast_replacements(
+    expr: &Expr,
+    ctx: &VerboseExplainContext,
+    replacements: &mut Vec<(String, String)>,
+) {
+    match expr {
+        Expr::Cast(inner, ty)
+            if ty.type_oid != 0
+                && ctx.type_names.contains_key(&ty.type_oid)
+                && matches!(inner.as_ref(), Expr::Const(_)) =>
+        {
+            let old = render_explain_expr(expr, &[]);
+            let new = render_verbose_const_cast(inner, *ty, ctx)
+                .expect("dynamic constant cast checked above");
+            replacements.push((old, new));
+            if let Expr::Const(value) = inner.as_ref() {
+                replacements.push((
+                    format!("{}::text", render_explain_literal(value)),
+                    render_verbose_const_cast(inner, *ty, ctx)
+                        .expect("dynamic constant cast checked above"),
+                ));
+            }
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
+            collect_dynamic_const_cast_replacements(inner, ctx, replacements);
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_dynamic_const_cast_replacements(&saop.left, ctx, replacements);
+            collect_dynamic_const_cast_replacements(&saop.right, ctx, replacements);
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_dynamic_const_cast_replacements(left, ctx, replacements);
+            collect_dynamic_const_cast_replacements(right, ctx, replacements);
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_dynamic_const_cast_replacements(element, ctx, replacements);
+            }
+        }
+        Expr::Row { fields, .. } => {
+            for (_, field) in fields {
+                collect_dynamic_const_cast_replacements(field, ctx, replacements);
+            }
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+            for arm in &case_expr.args {
+                collect_dynamic_const_cast_replacements(&arm.expr, ctx, replacements);
+                collect_dynamic_const_cast_replacements(&arm.result, ctx, replacements);
+            }
+            collect_dynamic_const_cast_replacements(&case_expr.defresult, ctx, replacements);
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_dynamic_const_cast_replacements(array, ctx, replacements);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_dynamic_const_cast_replacements(lower, ctx, replacements);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_dynamic_const_cast_replacements(upper, ctx, replacements);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_verbose_const_cast(
+    inner: &Expr,
+    ty: crate::backend::parser::SqlType,
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    if ty.type_oid == 0 || !ctx.type_names.contains_key(&ty.type_oid) {
+        return None;
+    }
+    let Expr::Const(value) = inner else {
+        return None;
+    };
+    Some(format!(
+        "{}::{}",
+        render_explain_literal(value),
+        render_type_name(ty, ctx)
+    ))
 }
 
 fn render_type_name(ty: crate::backend::parser::SqlType, ctx: &VerboseExplainContext) -> String {

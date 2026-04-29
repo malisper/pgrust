@@ -543,6 +543,39 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_runs_continue_in_loop() {
+        run_plpgsql_test("execute_do_runs_continue_in_loop", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"
+                    declare
+                        total int4 := 0;
+                    begin
+                        for i in 1..4 loop
+                            if i = 2 then
+                                continue;
+                            end if;
+                            total := total + i;
+                        end loop;
+                        raise notice '%', total;
+                    end
+                "#
+                .into(),
+            };
+
+            let result = execute_do(&stmt).unwrap();
+            assert_eq!(result, StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice {
+                    level: RaiseLevel::Notice,
+                    message: "8".into(),
+                }]
+            );
+        });
+    }
+
+    #[test]
     fn parse_block_accepts_comments_in_declare_section() {
         let block = parse_block(
             r#"

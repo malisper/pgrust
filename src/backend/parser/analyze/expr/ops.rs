@@ -1189,6 +1189,14 @@ pub(super) fn supports_comparison_operator(
     if !left.is_array
         && !right.is_array
         && left == right
+        && matches!(left.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+    {
+        return true;
+    }
+    if !left.is_array
+        && !right.is_array
+        && left == right
         && matches!(
             left.kind,
             SqlTypeKind::TsQuery
@@ -2098,6 +2106,61 @@ pub(super) fn bind_catalog_binary_operator_expr(
             coerce_bound_expr(right_bound, raw_right_type, right_type),
         ],
     ))
+}
+
+pub(super) fn bind_catalog_equality_operator_expr(
+    op: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let left_oid = catalog
+        .type_oid_for_sql_type(left_type)
+        .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(left_type)))?;
+    let right_oid = catalog
+        .type_oid_for_sql_type(right_type)
+        .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(right_type)))?;
+    let operator = catalog
+        .operator_by_name_left_right(op, left_oid, right_oid)
+        .or_else(|| {
+            let left_oid = catalog_operator_lookup_oid_for_row_type(left_type, left_oid);
+            let right_oid = catalog_operator_lookup_oid_for_row_type(right_type, right_oid);
+            catalog.operator_by_name_left_right(op, left_oid, right_oid)
+        })
+        .ok_or_else(|| ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        })?;
+    let left_bound =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    Ok(Expr::Op(Box::new(OpExpr {
+        opno: operator.oid,
+        opfuncid: operator.oprcode,
+        // :HACK: The partition_prune regression defines === as an equality
+        // operator backed by int4eq so equivclass reordering does not hide
+        // contradiction handling. Keep this path explicit until catalog
+        // operator strategy metadata is threaded into OpExpr binding.
+        op: OpExprKind::Eq,
+        opresulttype: SqlType::new(SqlTypeKind::Bool),
+        args: vec![
+            coerce_bound_expr(left_bound, raw_left_type, left_type),
+            coerce_bound_expr(right_bound, raw_right_type, right_type),
+        ],
+        collation_oid: None,
+    })))
 }
 
 fn catalog_operator_lookup_oid_for_row_type(sql_type: SqlType, oid: u32) -> u32 {
