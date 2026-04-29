@@ -4381,6 +4381,11 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
             relation_vacuum_truncate(entry.relation_oid, catalog, truncate, default_truncate),
         )
         .map_err(ExecError::Heap)?;
+        {
+            let mut session_stats = ctx.session_stats.write();
+            session_stats.note_io_read("client backend", "relation", "vacuum", 8192);
+            session_stats.note_io_reuse("client backend", "relation", "vacuum");
+        }
         stats.push(relation_stats);
         processed += 1;
     }
@@ -4869,12 +4874,6 @@ pub fn execute_create_index(
     }
 
     let access_method = create_index_access_method_row(stmt.using_method.as_deref())?;
-    if access_method.oid == BRIN_AM_OID && stmt.predicate.is_some() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "BRIN partial indexes".into(),
-        )));
-    }
-
     let table_alias = stmt
         .table_name
         .rsplit('.')
@@ -5223,6 +5222,10 @@ pub fn execute_insert(
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let relpersistence = catalog
+            .relation_by_oid(stmt.relation_oid)
+            .map(|relation| relation.relpersistence)
+            .unwrap_or('p');
 
         let returned_rows = if let Some(on_conflict) = stmt.on_conflict.as_ref() {
             let returned_rows = if catalog
@@ -5265,7 +5268,7 @@ pub fn execute_insert(
             for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
-                    .note_relation_insert(stmt.relation_oid);
+                    .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
             }
             returned_rows
         } else {
@@ -5289,7 +5292,7 @@ pub fn execute_insert(
             for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
-                    .note_relation_insert(stmt.relation_oid);
+                    .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
             }
             returned_rows
         };
@@ -6267,9 +6270,13 @@ fn execute_merge_insert_action(
         cid,
     )?;
     if let Some(inserted_values) = inserted.into_iter().next() {
+        let relpersistence = catalog
+            .relation_by_oid(stmt.relation_oid)
+            .map(|relation| relation.relpersistence)
+            .unwrap_or('p');
         ctx.session_stats
             .write()
-            .note_relation_insert(stmt.relation_oid);
+            .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
         Ok(Some(inserted_values))
     } else {
         Ok(None)
@@ -8808,7 +8815,14 @@ pub fn execute_prepared_insert_row(
     )?;
     ctx.session_stats
         .write()
-        .note_relation_insert(prepared.relation_oid);
+        .note_relation_insert_with_persistence(
+            prepared.relation_oid,
+            ctx.catalog
+                .as_deref()
+                .and_then(|catalog| catalog.relation_by_oid(prepared.relation_oid))
+                .map(|relation| relation.relpersistence)
+                .unwrap_or('p'),
+        );
     if let Some(triggers) = &triggers {
         if let Some(capture) = transition_capture.as_mut() {
             triggers.capture_insert_row(capture, &values);

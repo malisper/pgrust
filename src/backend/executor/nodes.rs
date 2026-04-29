@@ -478,6 +478,19 @@ fn note_filtered_row(stats: &mut NodeExecStats) {
     stats.rows_removed_by_filter += 1;
 }
 
+fn relation_io_object(ctx: &ExecutorContext, relation_oid: u32) -> &'static str {
+    if ctx
+        .catalog
+        .as_deref()
+        .and_then(|catalog| catalog.relation_by_oid(relation_oid))
+        .is_some_and(|relation| relation.relpersistence == 't')
+    {
+        "temp relation"
+    } else {
+        "relation"
+    }
+}
+
 fn render_order_by_key(item: &OrderByEntry, column_names: &[String]) -> String {
     let mut rendered = render_explain_expr_inner(&item.expr, column_names);
     if item.descending {
@@ -1593,7 +1606,9 @@ impl PlanNode for SeqScanState {
             } else {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_block_fetched(self.relation_oid);
-                session_stats.note_io_read("client backend", "relation", "bulkread", 8192);
+                let object = relation_io_object(ctx, self.relation_oid);
+                session_stats.note_io_read("client backend", object, "normal", 8192);
+                session_stats.note_io_hit("client backend", object, "normal");
             }
         }
     }
@@ -1742,6 +1757,7 @@ impl PlanNode for IndexOnlyScanState {
             let mut session_stats = ctx.session_stats.write();
             session_stats.note_relation_scan(self.index_meta.indexrelid);
             session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            session_stats.note_io_hit("client backend", "relation", "normal");
         }
 
         loop {
@@ -1847,6 +1863,7 @@ impl PlanNode for IndexOnlyScanState {
                 session_stats.note_relation_tuple_fetched(self.relation_oid);
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
             self.slot.kind = SlotKind::HeapTuple {
                 desc: self.desc.clone(),
@@ -2017,6 +2034,7 @@ impl PlanNode for IndexScanState {
             let mut session_stats = ctx.session_stats.write();
             session_stats.note_relation_scan(self.index_meta.indexrelid);
             session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            session_stats.note_io_hit("client backend", "relation", "normal");
         }
 
         loop {
@@ -2146,6 +2164,7 @@ impl PlanNode for IndexScanState {
                 session_stats.note_relation_tuple_fetched(self.relation_oid);
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
             self.slot.kind = SlotKind::HeapTuple {
                 desc: self.desc.clone(),
@@ -2644,6 +2663,7 @@ impl BitmapIndexScanState {
             let mut session_stats = ctx.session_stats.write();
             session_stats.note_relation_scan(self.index_meta.indexrelid);
             session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            session_stats.note_io_hit("client backend", "relation", "normal");
         }
         let tuples = indexam::index_getbitmap(&mut scan, self.am_oid, &mut self.bitmap)
             .map_err(|err| bitmap_am_error("index access method bitmap scan", err))?;
@@ -2909,6 +2929,7 @@ impl BitmapHeapScanState {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
 
             self.current_page_pin = Some(pin_rc);

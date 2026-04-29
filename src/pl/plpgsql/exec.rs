@@ -126,6 +126,7 @@ pub enum TriggerFunctionResult {
 enum FunctionControl {
     Continue,
     LoopContinue,
+    Break,
     Return,
 }
 
@@ -1455,6 +1456,7 @@ fn exec_do_stmt(
             }
             Ok(())
         }
+        CompiledStmt::ExitWhen { .. } => Ok(()),
         CompiledStmt::Raise {
             level,
             sqlstate,
@@ -1633,6 +1635,10 @@ fn exec_function_block(
                 finish_function_block_subxact(ctx, subxact, true)?;
                 return Ok(FunctionControl::LoopContinue);
             }
+            Ok(FunctionControl::Break) => {
+                finish_function_block_subxact(ctx, subxact, true)?;
+                return Ok(FunctionControl::Break);
+            }
             Ok(FunctionControl::Return) => {
                 finish_function_block_subxact(ctx, subxact, true)?;
                 return Ok(FunctionControl::Return);
@@ -1757,6 +1763,7 @@ fn exec_function_stmt(
             while eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)? {
                 match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
                     FunctionControl::Continue | FunctionControl::LoopContinue => {}
+                    FunctionControl::Break => break,
                     FunctionControl::Return => return Ok(FunctionControl::Return),
                 }
             }
@@ -1800,6 +1807,7 @@ fn exec_function_stmt(
                 state.values[*slot] = Value::Int32(current);
                 match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
                     FunctionControl::Continue | FunctionControl::LoopContinue => {}
+                    FunctionControl::Break => break,
                     FunctionControl::Return => return Ok(FunctionControl::Return),
                 }
             }
@@ -1832,6 +1840,19 @@ fn exec_function_stmt(
                 .collect::<Result<Vec<_>, _>>()?;
             finish_raise(level, sqlstate.as_deref(), message, &param_values)?;
             Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::ExitWhen { condition } => {
+            let should_exit = match condition {
+                Some(condition) => {
+                    eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)?
+                }
+                None => true,
+            };
+            Ok(if should_exit {
+                FunctionControl::Break
+            } else {
+                FunctionControl::Continue
+            })
         }
         CompiledStmt::Assert { condition, message } => {
             if !plpgsql_check_asserts_enabled_from_values(Some(ctx)) {
@@ -1976,12 +1997,10 @@ fn exec_function_stmt_list(
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
     for stmt in statements {
-        match exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
-            .map_err(|err| with_plpgsql_stmt_context_if_missing(err, compiled, stmt))?
-        {
-            FunctionControl::Continue => {}
-            FunctionControl::LoopContinue => return Ok(FunctionControl::LoopContinue),
-            FunctionControl::Return => return Ok(FunctionControl::Return),
+        let control = exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
+            .map_err(|err| with_plpgsql_stmt_context_if_missing(err, compiled, stmt))?;
+        if !matches!(control, FunctionControl::Continue) {
+            return Ok(control);
         }
     }
     Ok(FunctionControl::Continue)
@@ -2275,6 +2294,7 @@ fn exec_function_for_query(
         assign_query_row_to_targets(row, &result.columns, &target.targets, state, ctx, true)?;
         match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
             FunctionControl::Continue | FunctionControl::LoopContinue => {}
+            FunctionControl::Break => break,
             FunctionControl::Return => return Ok(FunctionControl::Return),
         }
     }
@@ -3985,7 +4005,8 @@ fn finish_raise(
                 sqlstate,
             }),
         },
-        RaiseLevel::Info | RaiseLevel::Notice | RaiseLevel::Warning | RaiseLevel::Log => {
+        RaiseLevel::Log => Ok(()),
+        RaiseLevel::Info | RaiseLevel::Notice | RaiseLevel::Warning => {
             NOTICE_QUEUE.with(|queue| {
                 queue.borrow_mut().push(PlpgsqlNotice {
                     level: level.clone(),
@@ -4217,6 +4238,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::While { .. } => "WHILE",
         CompiledStmt::ForInt { .. } => "FOR with integer loop variable",
         CompiledStmt::ForQuery { .. } => "FOR over SELECT rows",
+        CompiledStmt::ExitWhen { .. } => "EXIT",
         CompiledStmt::Raise { .. } => "RAISE",
         CompiledStmt::Assert { .. } => "ASSERT",
         CompiledStmt::Continue => "CONTINUE",

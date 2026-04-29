@@ -5,10 +5,12 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_io_rows,
-    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
-    build_pg_user_mappings_rows, build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stat_activity_rows, build_pg_stat_all_tables_rows,
+    build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows,
+    build_pg_stat_database_rows, build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows,
+    build_pg_stat_slru_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_stat_wal_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
+    build_pg_tables_rows, build_pg_user_mappings_rows, build_pg_views_rows,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PgAggregateRow, PgAmprocRow, PgAuthIdRow,
@@ -999,7 +1001,40 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
-        Vec::new()
+        build_pg_stat_activity_rows(0, "regression")
+    }
+
+    fn pg_stat_database_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let stats = DatabaseStatsStore::with_default_io_rows();
+        build_pg_stat_database_rows(self.database_rows(), &stats)
+    }
+
+    fn pg_stat_checkpointer_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let stats = DatabaseStatsStore::with_default_io_rows();
+        build_pg_stat_checkpointer_rows(
+            &crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+            &stats,
+        )
+    }
+
+    fn pg_stat_wal_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_wal_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_stat_slru_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_slru_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_stat_archiver_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_archiver_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_stat_bgwriter_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_bgwriter_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_stat_recovery_prefetch_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_recovery_prefetch_rows(&DatabaseStatsStore::with_default_io_rows())
     }
 
     fn pg_stat_all_tables_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {

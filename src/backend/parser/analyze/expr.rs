@@ -864,16 +864,21 @@ pub(super) fn bind_legacy_scalar_function_call(
     } else {
         0
     };
-    let legacy_declared_arg_types =
-        if let Some(range_type) = legacy_result_type.and_then(range_type_ref_for_sql_type) {
-            let mut declared = vec![range_type.subtype, range_type.subtype];
-            if args.len() == 3 {
-                declared.push(SqlType::new(SqlTypeKind::Text));
-            }
-            declared
-        } else {
-            actual_types.clone()
-        };
+    let legacy_declared_arg_types = if name
+        .rsplit('.')
+        .next()
+        .is_some_and(|base| base.eq_ignore_ascii_case("pg_sleep_for"))
+    {
+        vec![SqlType::new(SqlTypeKind::Interval)]
+    } else if let Some(range_type) = legacy_result_type.and_then(range_type_ref_for_sql_type) {
+        let mut declared = vec![range_type.subtype, range_type.subtype];
+        if args.len() == 3 {
+            declared.push(SqlType::new(SqlTypeKind::Text));
+        }
+        declared
+    } else {
+        actual_types.clone()
+    };
     let expr = bind_scalar_function_call(
         legacy_func,
         0,

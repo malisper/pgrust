@@ -654,6 +654,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("invalid value for parameter \"") {
                 return None;
             }
+            if message.starts_with("unrecognized reset target: ")
+                || message.starts_with("invalid statistics kind: ")
+            {
+                return None;
+            }
             if message.starts_with("time zone \"") && message.ends_with("\" not recognized") {
                 return find_first_string_literal_position(sql);
             }
@@ -3278,6 +3283,7 @@ where
         }
     };
     cluster.register_connection(db.database_oid);
+    db.stats.write().record_database_session_start();
     let temp_backend_id = cluster.allocate_temp_backend_id();
     db.install_temp_backend_id(client_id, temp_backend_id);
 
@@ -8144,9 +8150,9 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
     for notice in notices {
         let (severity, sqlstate) = match notice.level {
             RaiseLevel::Info => ("INFO", "00000"),
+            RaiseLevel::Log => continue,
             RaiseLevel::Notice => ("NOTICE", "00000"),
             RaiseLevel::Warning => ("WARNING", "01000"),
-            RaiseLevel::Log => ("LOG", "00000"),
             RaiseLevel::Exception => continue,
         };
         send_notice_with_severity(stream, severity, sqlstate, &notice.message, None, None)?;

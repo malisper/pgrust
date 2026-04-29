@@ -1297,6 +1297,7 @@ fn relation_stats_with_inherit(
     let (relpages, reltuples) = if let Some(class_row) = class_row.as_ref() {
         if relkind_has_storage(class_row.relkind) {
             if let Some(mut current_pages) = catalog.current_relation_pages(relation_oid) {
+                let storage_pages = current_pages;
                 if current_pages < 10 && class_row.reltuples < 0.0 && !class_row.relhassubclass {
                     current_pages = 10;
                 }
@@ -1306,6 +1307,18 @@ fn relation_stats_with_inherit(
                     0.0
                 } else if class_row.reltuples >= 0.0 && class_row.relpages > 0 {
                     (class_row.reltuples / class_row.relpages as f64 * relpages).round()
+                } else if storage_pages >= 10
+                    && let Some(live_tuples) = catalog
+                        .current_relation_live_tuples(relation_oid)
+                        .filter(|tuples| *tuples > 0.0)
+                {
+                    // :HACK: pgrust's heap storage does not yet model all heap
+                    // reloptions that affect physical density, notably low
+                    // fillfactor.  For relations large enough to avoid
+                    // PostgreSQL's "fresh small table" heuristic, the stats
+                    // subsystem's live count is a closer compatibility estimate
+                    // than pgrust's current page-density fallback.
+                    live_tuples
                 } else {
                     (heap_fallback_density(width) * relpages).round()
                 };
@@ -5550,6 +5563,12 @@ fn estimate_relation_width(desc: &RelationDesc, stats: &HashMap<i16, PgStatistic
                 .unwrap_or_else(|| {
                     if column.storage.attlen > 0 {
                         column.storage.attlen as usize
+                    } else if matches!(
+                        column.sql_type.kind,
+                        SqlTypeKind::Char | SqlTypeKind::Varchar
+                    ) && let Some(length) = column.sql_type.char_len()
+                    {
+                        length.max(1) as usize
                     } else {
                         estimate_sql_type_width(column.sql_type)
                     }

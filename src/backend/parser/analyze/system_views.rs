@@ -278,6 +278,15 @@ pub(super) fn bind_builtin_system_view(
             })
             .collect(),
         SyntheticSystemViewKind::PgStatActivity => catalog.pg_stat_activity_rows(),
+        SyntheticSystemViewKind::PgStatDatabase => catalog.pg_stat_database_rows(),
+        SyntheticSystemViewKind::PgStatCheckpointer => catalog.pg_stat_checkpointer_rows(),
+        SyntheticSystemViewKind::PgStatWal => catalog.pg_stat_wal_rows(),
+        SyntheticSystemViewKind::PgStatSlru => catalog.pg_stat_slru_rows(),
+        SyntheticSystemViewKind::PgStatArchiver => catalog.pg_stat_archiver_rows(),
+        SyntheticSystemViewKind::PgStatBgwriter => catalog.pg_stat_bgwriter_rows(),
+        SyntheticSystemViewKind::PgStatRecoveryPrefetch => {
+            catalog.pg_stat_recovery_prefetch_rows()
+        }
         SyntheticSystemViewKind::PgStatAllTables => catalog.pg_stat_all_tables_rows(),
         SyntheticSystemViewKind::PgStatUserTables => catalog.pg_stat_user_tables_rows(),
         SyntheticSystemViewKind::PgStatioUserTables => catalog.pg_statio_user_tables_rows(),

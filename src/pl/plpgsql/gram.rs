@@ -298,6 +298,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::if_stmt => build_if_stmt(inner),
         Rule::while_stmt => build_while_stmt(inner),
         Rule::for_stmt => build_for_stmt(inner),
+        Rule::exit_stmt => build_exit_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
         Rule::assert_stmt => build_assert_stmt(inner),
         Rule::continue_stmt => Ok(Stmt::Continue),
@@ -502,6 +503,16 @@ fn build_while_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     })
 }
 
+fn build_exit_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut condition = None;
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::expr_until_semi {
+            condition = Some(part.as_str().trim().to_string());
+        }
+    }
+    Ok(Stmt::ExitWhen { condition })
+}
+
 fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let line = pair.as_span().start_pos().line_col().0;
     let raw = pair.as_str().to_string();
@@ -515,6 +526,8 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                 let token = part.as_str();
                 level = if token.eq_ignore_ascii_case("info") {
                     RaiseLevel::Info
+                } else if token.eq_ignore_ascii_case("log") {
+                    RaiseLevel::Log
                 } else if token.eq_ignore_ascii_case("notice") {
                     RaiseLevel::Notice
                 } else if token.eq_ignore_ascii_case("warning") {

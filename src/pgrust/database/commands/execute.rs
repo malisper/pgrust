@@ -715,6 +715,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableSetTablespace(ref alter_stmt) => self
+                .execute_alter_table_set_tablespace_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableReset(ref alter_stmt) => self
                 .execute_alter_table_reset_stmt_with_search_path(
                     client_id,
@@ -1044,6 +1050,9 @@ impl Database {
             }
             Statement::ReassignOwned(ref reassign_stmt) => {
                 self.execute_reassign_owned_stmt(client_id, reassign_stmt)
+            }
+            Statement::CommentOnDatabase(ref comment_stmt) => {
+                self.execute_comment_on_database_stmt(client_id, comment_stmt)
             }
             Statement::CommentOnRole(ref comment_stmt) => {
                 self.execute_comment_on_role_stmt(client_id, comment_stmt)

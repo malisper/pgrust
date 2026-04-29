@@ -5580,7 +5580,7 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
 }
 
 #[test]
-fn analyze_in_explicit_transaction_reports_stats_only_on_commit() {
+fn analyze_in_explicit_transaction_reports_stats_even_on_rollback() {
     let dir = temp_dir("analyze_xact_stats_commit");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -5608,7 +5608,7 @@ fn analyze_in_explicit_transaction_reports_stats_only_on_commit() {
              from pg_stat_user_tables
              where relname = 'analyze_xact_t'",
         ),
-        vec![vec![Value::Int64(0), Value::Bool(true), Value::Int64(3)]]
+        vec![vec![Value::Int64(1), Value::Bool(false), Value::Int64(0)]]
     );
 
     session.execute(&db, "begin").unwrap();
@@ -5627,7 +5627,7 @@ fn analyze_in_explicit_transaction_reports_stats_only_on_commit() {
              from pg_stat_user_tables
              where relname = 'analyze_xact_t'",
         ),
-        vec![vec![Value::Int64(1), Value::Bool(true), Value::Int64(0)]]
+        vec![vec![Value::Int64(2), Value::Bool(true), Value::Int64(0)]]
     );
 }
 
@@ -31832,7 +31832,7 @@ fn relation_stats_views_track_commit_flush_and_rollback() {
             &db,
             "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
         ),
-        vec![vec![Value::Int64(2)]]
+        vec![vec![Value::Int64(3)]]
     );
 }
 
@@ -31897,7 +31897,7 @@ fn function_stats_respect_track_functions_and_rollback() {
             &db,
             "select pg_stat_get_function_calls('add_one(int4)'::regprocedure::oid)",
         ),
-        vec![vec![Value::Int64(2)]]
+        vec![vec![Value::Int64(3)]]
     );
 
     session_query_rows(&mut session1, &db, "select pg_stat_force_next_flush()");
@@ -31907,7 +31907,7 @@ fn function_stats_respect_track_functions_and_rollback() {
             &db,
             "select calls from pg_stat_user_functions where funcname = 'add_one'",
         ),
-        vec![vec![Value::Int64(2)]]
+        vec![vec![Value::Int64(3)]]
     );
 }
 
@@ -31936,7 +31936,7 @@ fn pg_stat_io_exposes_pg_shaped_rows() {
         session_query_rows(
             &mut session,
             &db,
-            "select reads > 0, read_bytes > 0 from pg_stat_io where backend_type = 'client backend' and object = 'relation' and context = 'bulkread'",
+            "select reads > 0, read_bytes > 0 from pg_stat_io where backend_type = 'client backend' and object = 'relation' and context = 'normal'",
         ),
         vec![vec![Value::Bool(true), Value::Bool(true)]]
     );

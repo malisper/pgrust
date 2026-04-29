@@ -49,7 +49,7 @@ use crate::include::catalog::{
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID,
     PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_EVENT_TRIGGER_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_DATABASE_RELATION_OID, PG_EVENT_TRIGGER_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_FOREIGN_SERVER_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
@@ -8159,6 +8159,18 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         self.comment_shared_object_mvcc(role_oid, PG_AUTHID_RELATION_OID, comment, ctx)
+    }
+
+    pub fn comment_database_mvcc(
+        &mut self,
+        database_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        // :HACK: pgrust stores shared-object comments in the existing
+        // pg_description row format until pg_shdescription has its own
+        // persisted shared-catalog row store.
+        self.comment_shared_object_mvcc(database_oid, PG_DATABASE_RELATION_OID, comment, ctx)
     }
 
     pub fn comment_rule_mvcc(
