@@ -175,6 +175,7 @@ fn main() -> Result<(), ExecError> {
                 relispopulated: true,
                 disabled: false,
                 toast: None,
+                tablesample: None,
                 desc: desc(),
             }),
             predicate: Expr::op_auto(
