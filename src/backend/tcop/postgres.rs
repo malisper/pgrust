@@ -2194,6 +2194,9 @@ fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> 
     if let Some(position) = plpgsql_cursor_arg_error_position(sql, message) {
         return Some(position);
     }
+    if let Some(position) = plpgsql_cursor_for_loop_error_position(sql, message) {
+        return Some(position);
+    }
     match message {
         "invalid attribute in procedure definition" => {
             find_case_insensitive_token_position(sql, "WINDOW")
@@ -2266,6 +2269,33 @@ fn find_nth_identifier_position(sql: &str, ident: &str, nth: usize) -> Option<us
         } else {
             index += 1;
         }
+    }
+    None
+}
+
+fn plpgsql_cursor_for_loop_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message != "cursor FOR loop must use a bound cursor variable" {
+        return None;
+    }
+    let lower = sql.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find("for") {
+        let for_start = from + offset;
+        if !identifier_boundaries(sql.as_bytes(), for_start, "for".len()) {
+            from = for_start + "for".len();
+            continue;
+        }
+        let Some(loop_offset) = lower[for_start..].find("loop") else {
+            return None;
+        };
+        let loop_start = for_start + loop_offset;
+        let segment = &lower[for_start..loop_start];
+        if let Some(in_offset) = find_identifier_in_segment(segment, "in") {
+            let target_start =
+                skip_ascii_whitespace(sql, for_start + in_offset + "in".len(), loop_start);
+            return Some(target_start + 1);
+        }
+        from = for_start + "for".len();
     }
     None
 }
@@ -15250,6 +15280,22 @@ ORDER BY 1, 2;";
                 &err("not enough arguments for cursor \"c1\""),
             ),
             not_enough_sql.find(");\nend").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_unbound_plpgsql_cursor_for_loop() {
+        let sql = "create function cursor_loop_bad() returns void as $$\ndeclare\n  c refcursor;\n  r record;\nbegin\n  for r in c loop\n  end loop;\nend;\n$$ language plpgsql;";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "cursor FOR loop must use a bound cursor variable".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("c loop").map(|index| index + 1)
         );
     }
 
