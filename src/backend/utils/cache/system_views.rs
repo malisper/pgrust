@@ -596,6 +596,22 @@ pub fn build_pg_views_rows(
     classes: Vec<PgClassRow>,
     rewrites: Vec<PgRewriteRow>,
 ) -> Vec<Vec<Value>> {
+    build_pg_views_rows_with_definition_formatter(
+        namespaces,
+        authids,
+        classes,
+        rewrites,
+        |_, definition| definition.to_string(),
+    )
+}
+
+pub fn build_pg_views_rows_with_definition_formatter(
+    namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
+    classes: Vec<PgClassRow>,
+    rewrites: Vec<PgRewriteRow>,
+    mut format_definition: impl FnMut(&PgClassRow, &str) -> String,
+) -> Vec<Vec<Value>> {
     let namespace_names = namespaces
         .into_iter()
         .map(|row| (row.oid, row.nspname))
@@ -614,7 +630,8 @@ pub fn build_pg_views_rows(
         .into_iter()
         .filter(|class| class.relkind == 'v')
         .filter_map(|class| {
-            let definition = return_rules.get(&class.oid)?.clone();
+            let raw_definition = return_rules.get(&class.oid)?;
+            let definition = format_definition(&class, raw_definition);
             let schemaname = namespace_names
                 .get(&class.relnamespace)
                 .cloned()

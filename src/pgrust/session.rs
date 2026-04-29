@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write as _;
 use std::mem;
@@ -25,9 +25,9 @@ use crate::backend::commands::tablecmds::{
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
-    DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState, Expr,
-    RelationDesc, SessionReplicationRole, StatementResult, Value, cast_value,
-    cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
+    DeferredConstraintSnapshot, DeferredForeignKeyTracker, ExecError, ExecutorContext,
+    ExecutorTransactionState, Expr, RelationDesc, SessionReplicationRole, StatementResult, Value,
+    cast_value, cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text, render_sql_literal,
     substitute_named_arg, substitute_positional_args,
 };
@@ -69,8 +69,8 @@ use crate::backend::utils::misc::stack_depth::{
     MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
 use crate::include::catalog::{
-    ANYARRAYOID, ANYELEMENTOID, ANYOID, INT4_TYPE_OID, NUMERIC_TYPE_OID, PG_CHECKPOINT_OID,
-    PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
+    ANYARRAYOID, ANYELEMENTOID, ANYOID, CONSTRAINT_FOREIGN, INT4_TYPE_OID, NUMERIC_TYPE_OID,
+    PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
     PG_WRITE_SERVER_FILES_OID, PgProcRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::execnodes::ScalarType;
@@ -1472,6 +1472,7 @@ struct SavepointState {
     prior_catalog_invalidation_len: usize,
     temp_effect_len: usize,
     sequence_effect_len: usize,
+    deferred_foreign_key_snapshot: DeferredConstraintSnapshot,
     guc_effective_state: GucState,
     guc_commit_state: GucState,
     stats_state: crate::backend::utils::activity::SessionStatsState,
@@ -2394,6 +2395,46 @@ fn parse_plpgsql_extra_checks(value: &str) -> Result<String, ExecError> {
     }
 }
 
+fn relation_name_for_error(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+fn pending_trigger_events_error(relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot ALTER TABLE \"{relation_name}\" because it has pending trigger events"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55006",
+    }
+}
+
+fn foreign_key_constraint_family_oids(
+    catalog: &dyn CatalogLookup,
+    constraint_oid: u32,
+) -> BTreeSet<u32> {
+    let mut family = BTreeSet::from([constraint_oid]);
+    loop {
+        let mut changed = false;
+        for row in catalog.constraint_rows() {
+            if row.contype != CONSTRAINT_FOREIGN {
+                continue;
+            }
+            if family.contains(&row.oid) && row.conparentid != 0 {
+                changed |= family.insert(row.conparentid);
+            }
+            if row.conparentid != 0 && family.contains(&row.conparentid) {
+                changed |= family.insert(row.oid);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    family
+}
+
 impl Session {
     const DEFAULT_MAINTENANCE_WORK_MEM_KB: usize = 65_536;
 
@@ -3173,6 +3214,7 @@ impl Session {
             subplans: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: Arc::clone(&self.plpgsql_function_cache),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -4592,6 +4634,54 @@ impl Session {
                 &txn.deferred_foreign_keys,
             )
         }
+    }
+
+    fn reject_drop_constraint_with_pending_trigger_events(
+        &self,
+        db: &Database,
+        drop_stmt: &crate::backend::parser::AlterTableDropConstraintStatement,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<(), ExecError> {
+        let Some(txn) = self.active_txn.as_ref() else {
+            return Ok(());
+        };
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+        let Some(relation) = catalog.lookup_any_relation(&drop_stmt.table_name) else {
+            return Ok(());
+        };
+        let Some(row) = catalog
+            .constraint_rows_for_relation(relation.relation_oid)
+            .into_iter()
+            .find(|row| row.conname.eq_ignore_ascii_case(&drop_stmt.constraint_name))
+        else {
+            return Ok(());
+        };
+        if row.contype != CONSTRAINT_FOREIGN {
+            return Ok(());
+        }
+
+        let family_oids = foreign_key_constraint_family_oids(&catalog, row.oid);
+
+        if let Some(check) = txn
+            .deferred_foreign_keys
+            .pending_foreign_key_checks()
+            .iter()
+            .find(|check| family_oids.contains(&check.constraint_oid))
+        {
+            return Err(pending_trigger_events_error(&check.relation_name));
+        }
+
+        if let Some(check) = txn
+            .deferred_foreign_keys
+            .pending_parent_foreign_key_checks()
+            .into_iter()
+            .find(|check| family_oids.contains(&check.constraint_oid))
+        {
+            return Err(pending_trigger_events_error(&check.relation_name));
+        }
+
+        Ok(())
     }
 
     fn finalize_taken_transaction(
@@ -7116,6 +7206,7 @@ impl Session {
                     prior_catalog_invalidation_len: txn.prior_cmd_catalog_invalidations.len(),
                     temp_effect_len: txn.temp_effects.len(),
                     sequence_effect_len: txn.sequence_effects.len(),
+                    deferred_foreign_key_snapshot: txn.deferred_foreign_keys.snapshot(),
                     guc_effective_state,
                     guc_commit_state: txn.guc_commit_state.clone(),
                     stats_state: self.stats_state.read().clone(),
@@ -7213,6 +7304,8 @@ impl Session {
                     txn.current_cmd_catalog_invalidations.clear();
                     txn.temp_effects.truncate(savepoint.temp_effect_len);
                     txn.sequence_effects.truncate(savepoint.sequence_effect_len);
+                    txn.deferred_foreign_keys
+                        .restore(savepoint.deferred_foreign_key_snapshot.clone());
                     let repair_invalidation =
                         Database::catalog_invalidation_from_effect(&repair_effect);
                     if !repair_invalidation.is_empty() {
@@ -8107,6 +8200,27 @@ impl Session {
                     .map(|arg| Self::substitute_function_arg(arg, subst))
                     .collect::<Result<Vec<_>, _>>()?,
                 func_variadic: *func_variadic,
+                with_ordinality: *with_ordinality,
+            },
+            FromItem::RowsFrom {
+                functions,
+                with_ordinality,
+            } => FromItem::RowsFrom {
+                functions: functions
+                    .iter()
+                    .map(|function| {
+                        Ok(crate::backend::parser::RowsFromFunction {
+                            name: function.name.clone(),
+                            args: function
+                                .args
+                                .iter()
+                                .map(|arg| Self::substitute_function_arg(arg, subst))
+                                .collect::<Result<Vec<_>, _>>()?,
+                            func_variadic: function.func_variadic,
+                            column_definitions: function.column_definitions.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?,
                 with_ordinality: *with_ordinality,
             },
             FromItem::JsonTable(_) | FromItem::XmlTable(_) => from.clone(),
@@ -10676,6 +10790,9 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
+                    self.reject_drop_constraint_with_pending_trigger_events(
+                        db, alter_stmt, xid, cid,
+                    )?;
                     self.lock_table_if_needed(
                         db,
                         crate::pgrust::database::relation_lock_tag(&relation),

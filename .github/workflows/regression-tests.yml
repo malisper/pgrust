@@ -1,15 +1,23 @@
 name: regression-tests
 
-# Twice-daily scheduled run of the full PostgreSQL regression suite against
-# pgrust_server. Results (summary + per-test output + diffs) are pushed to the
+# Scheduled regression suite runs against pgrust_server. Results (summary +
+# per-test output + diffs + memory peaks) are pushed to the
 # `regression-history` orphan branch and a summary is posted to Slack.
 #
-# Cron times are UTC. Times will drift by 1 hour around DST transitions; bump
-# the cron then if Pacific-local delivery time matters.
+# Cron times are UTC. Times below are tuned for PDT (UTC-7); during PST
+# (UTC-8) they will drift one hour earlier in local time. Bump at the DST
+# transition if Pacific-local delivery times matter.
 on:
   schedule:
-    - cron: '30 19 * * *'   # ~12:30 PDT start
-    - cron: '45 2 * * *'    # ~7:45pm PDT start
+    # Every 2 hours during the West Coast workday: 9am, 11am, 1pm, 3pm,
+    # 5pm, 7pm, 9pm PDT (= 16/18/20/22/00/02/04 UTC).
+    - cron: '0 0 * * *'    # ~5pm PDT
+    - cron: '0 2 * * *'    # ~7pm PDT
+    - cron: '0 4 * * *'    # ~9pm PDT
+    - cron: '0 16 * * *'   # ~9am PDT
+    - cron: '0 18 * * *'   # ~11am PDT
+    - cron: '0 20 * * *'   # ~1pm PDT
+    - cron: '0 22 * * *'   # ~3pm PDT
   workflow_dispatch:
     inputs:
       command_timeout:

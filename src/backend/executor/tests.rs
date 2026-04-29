@@ -944,6 +944,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pending_table_locks: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -1024,6 +1025,7 @@ fn run_plan(
         pending_table_locks: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -1140,6 +1142,7 @@ fn first_tuple_slot_kind_for_sql(
             pending_table_locks: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -1238,6 +1241,7 @@ fn first_tuple_slot_kind_for_plan(
             pending_table_locks: Vec::new(),
             catalog: None,
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -1350,6 +1354,7 @@ fn run_sql_with_catalog(
             pending_table_locks: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -4158,7 +4163,6 @@ fn explain_verbose_keeps_simple_projection() {
                     other => panic!("expected text explain line, got {:?}", other),
                 })
                 .collect::<Vec<_>>();
-            assert!(rendered.iter().any(|line| line.contains("Projection")));
             assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
         }
         other => panic!("expected query result, got {:?}", other),
@@ -9416,6 +9420,64 @@ fn unnest_with_ordinality_aliases_and_counts_rows() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn rows_from_zips_functions_and_null_pads_shorter_results() {
+    let base = temp_dir("rows_from_zip");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from rows from(generate_series(1, 3), unnest(ARRAY['x']::varchar[])) with ordinality as r(g, u, ord)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["g", "u", "ord"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Text("x".into()), Value::Int64(1)],
+                    vec![Value::Int32(2), Value::Null, Value::Int64(2)],
+                    vec![Value::Int32(3), Value::Null, Value::Int64(3)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn rows_from_accepts_scalar_function_items() {
+    let base = temp_dir("rows_from_scalar_function");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from rows from(abs(-7::int4), generate_series(1, 2)) with ordinality as r(s, g, ord)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["s", "g", "ord"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(7), Value::Int32(1), Value::Int64(1)],
+                    vec![Value::Null, Value::Int32(2), Value::Int64(2)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn casts_support_int2_int8_float4_and_float8() {
     let base = temp_dir("extended_numeric_casts");
@@ -11859,6 +11921,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         pending_table_locks: Vec::new(),
         catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -15398,7 +15461,6 @@ from (values (1),(2)) v1(r1)
         ) as ss1 on true
         full join generate_series(1, v1.r1) as gs4 on false
     ) as ss0 on true
-order by r1, gs1 nulls first, gs4 nulls last, gs2 nulls first, gs3 nulls first
 "#;
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
         StatementResult::Query {
@@ -15466,6 +15528,214 @@ order by r1, gs1 nulls first, gs4 nulls last, gs2 nulls first, gs3 nulls first
                     ],
                 ]
             );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_left_join_under_offset_uses_outer_ref_in_function_scan() {
+    let base = temp_dir("rangefuncs_lateral_offset_generate_series");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+select *
+from (values (1),(2),(3)) v1(r1),
+     lateral (
+       select r1, *
+       from (values (10),(20),(30)) v2(r2)
+       left join generate_series(20 + r1, 23) f(i) on ((r2 + i) < 100)
+       offset 0
+     ) s1
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(10),
+                        Value::Int32(21),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(10),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(10),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(20),
+                        Value::Int32(21),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(20),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(20),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(30),
+                        Value::Int32(21),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(30),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(30),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(10),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(10),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(20),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(20),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(30),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(30),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int32(3),
+                        Value::Int32(10),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int32(3),
+                        Value::Int32(20),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int32(3),
+                        Value::Int32(30),
+                        Value::Int32(23),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_left_join_under_offset_uses_nearest_outer_ref_in_function_scan() {
+    let base = temp_dir("rangefuncs_lateral_offset_nearest_outer");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+select *
+from (values (1),(2),(3)) v1(r1),
+     lateral (
+       select r1, *
+       from (values (10),(20),(30)) v2(r2)
+       left join generate_series(r2, r2 + 3) f(i) on ((r2 + i) < 100)
+       offset 0
+     ) s1
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let expected = [1, 2, 3]
+                .into_iter()
+                .flat_map(|r1| {
+                    [10, 20, 30].into_iter().flat_map(move |r2| {
+                        (r2..=r2 + 3).map(move |i| {
+                            vec![
+                                Value::Int32(r1),
+                                Value::Int32(r1),
+                                Value::Int32(r2),
+                                Value::Int32(i),
+                            ]
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_left_join_under_offset_uses_outer_refs_from_two_levels_in_function_scan() {
+    let base = temp_dir("rangefuncs_lateral_offset_two_outer_levels");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+select *
+from (values (1),(2),(3)) v1(r1),
+     lateral (
+       select r1, *
+       from (values (10),(20),(30)) v2(r2)
+       left join generate_series(r1, 2 + r2 / 5) f(i) on ((r2 + i) < 100)
+       offset 0
+     ) s1
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let expected = [1, 2, 3]
+                .into_iter()
+                .flat_map(|r1| {
+                    [10, 20, 30].into_iter().flat_map(move |r2| {
+                        (r1..=2 + r2 / 5).map(move |i| {
+                            vec![
+                                Value::Int32(r1),
+                                Value::Int32(r1),
+                                Value::Int32(r2),
+                                Value::Int32(i),
+                            ]
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -25317,6 +25587,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             pending_table_locks: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),

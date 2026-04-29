@@ -433,16 +433,18 @@ pub(super) fn bind_grouped_func_call(
                 bound_args,
             ))
         }
-        BuiltinScalarFunction::Erf | BuiltinScalarFunction::Erfc => Ok(Expr::builtin_func(
-            func,
-            Some(SqlType::new(SqlTypeKind::Float8)),
-            func_variadic,
-            vec![coerce_bound_expr(
-                bound_args[0].clone(),
-                arg_types[0],
-                SqlType::new(SqlTypeKind::Float8),
-            )],
-        )),
+        BuiltinScalarFunction::Sin | BuiltinScalarFunction::Erf | BuiltinScalarFunction::Erfc => {
+            Ok(Expr::builtin_func(
+                func,
+                Some(SqlType::new(SqlTypeKind::Float8)),
+                func_variadic,
+                vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::Float8),
+                )],
+            ))
+        }
         BuiltinScalarFunction::Sqrt | BuiltinScalarFunction::Exp | BuiltinScalarFunction::Ln => {
             let result_type = if matches!(arg_types[0].kind, SqlTypeKind::Numeric) {
                 SqlType::new(SqlTypeKind::Numeric)

@@ -164,6 +164,7 @@ impl AnalyzedFrom {
     pub(super) fn function(call: SetReturningCall) -> Self {
         let output_columns = call.output_columns().to_vec();
         let relation_name = match &call {
+            SetReturningCall::RowsFrom { .. } => "rows_from",
             SetReturningCall::SqlJsonTable(_) => "json_table",
             SetReturningCall::SqlXmlTable(_) => "xmltable",
             _ => "function_call",

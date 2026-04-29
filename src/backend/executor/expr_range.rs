@@ -10,7 +10,7 @@ use super::value_io::{
     format_array_text, format_array_value_text, format_array_value_text_with_config,
     format_record_text, format_record_text_with_config,
 };
-use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::days_from_ymd;
 use crate::include::catalog::{
@@ -263,6 +263,8 @@ pub(crate) fn eval_range_function(
     values: &[Value],
     result_type: Option<SqlType>,
     func_variadic: bool,
+    catalog: Option<&dyn CatalogLookup>,
+    datetime_config: &DateTimeConfig,
 ) -> Option<Result<Value, ExecError>> {
     use BuiltinScalarFunction::*;
 
@@ -276,7 +278,7 @@ pub(crate) fn eval_range_function(
     }
 
     let result = match func {
-        RangeConstructor => eval_range_constructor(values, result_type),
+        RangeConstructor => eval_range_constructor(values, result_type, catalog, datetime_config),
         RangeIsEmpty => unary_range_bool(values, "isempty", |range| Ok(Value::Bool(range.empty))),
         RangeLower => unary_range_value(values, "lower", range_lower_value),
         RangeUpper => unary_range_value(values, "upper", range_upper_value),
@@ -361,6 +363,8 @@ pub(crate) fn range_intersection_agg_transition(
 fn eval_range_constructor(
     values: &[Value],
     result_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+    datetime_config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
     let range_type = if let Some(range_type) = result_type.and_then(range_type_ref_for_sql_type) {
         range_type
@@ -396,14 +400,18 @@ fn eval_range_constructor(
     };
     let lower = values
         .first()
-        .and_then(value_to_constructor_bound)
+        .map(|value| value_to_constructor_bound(value, range_type, catalog, datetime_config))
+        .transpose()?
+        .flatten()
         .map(|value| RangeBound {
             value: Box::new(value),
             inclusive: lower_inc,
         });
     let upper = values
         .get(1)
-        .and_then(value_to_constructor_bound)
+        .map(|value| value_to_constructor_bound(value, range_type, catalog, datetime_config))
+        .transpose()?
+        .flatten()
         .map(|value| RangeBound {
             value: Box::new(value),
             inclusive: upper_inc,
@@ -411,8 +419,87 @@ fn eval_range_constructor(
     Ok(Value::Range(normalize_range(range_type, lower, upper)?))
 }
 
-fn value_to_constructor_bound(value: &Value) -> Option<Value> {
-    (!matches!(value, Value::Null)).then(|| value.to_owned_value())
+fn value_to_constructor_bound(
+    value: &Value,
+    range_type: RangeTypeRef,
+    catalog: Option<&dyn CatalogLookup>,
+    datetime_config: &DateTimeConfig,
+) -> Result<Option<Value>, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    Ok(Some(coerce_constructor_bound_to_subtype(
+        value.to_owned_value(),
+        range_type.subtype,
+        catalog,
+        datetime_config,
+    )?))
+}
+
+fn coerce_constructor_bound_to_subtype(
+    value: Value,
+    subtype: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    if matches!(subtype.kind, SqlTypeKind::Composite)
+        && subtype.typrelid != 0
+        && let Value::Record(record) = &value
+        && let Some(catalog) = catalog
+        && let Some(relation) = catalog.lookup_relation_by_oid(subtype.typrelid)
+    {
+        let descriptor = crate::include::nodes::datum::RecordDescriptor::named(
+            subtype.type_oid,
+            subtype.typrelid,
+            subtype.typmod,
+            relation
+                .desc
+                .columns
+                .iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        );
+        if descriptor.fields.len() != record.fields.len() {
+            return Err(ExecError::DetailedError {
+                message: "cannot cast record to target composite type".into(),
+                detail: Some(format!(
+                    "target expects {} fields but source has {}",
+                    descriptor.fields.len(),
+                    record.fields.len()
+                )),
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        let Value::Record(record) = value else {
+            unreachable!("record value matched above")
+        };
+        let fields = record
+            .fields
+            .into_iter()
+            .zip(descriptor.fields.iter())
+            .map(|(value, field)| {
+                crate::backend::executor::expr_casts::cast_value_with_source_type_catalog_and_config(
+                    value,
+                    None,
+                    field.sql_type,
+                    Some(catalog),
+                    datetime_config,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Value::Record(
+            crate::include::nodes::datum::RecordValue::from_descriptor(descriptor, fields),
+        ));
+    }
+    crate::backend::executor::expr_casts::cast_value_with_source_type_catalog_and_config(
+        value,
+        None,
+        subtype,
+        catalog,
+        datetime_config,
+    )
 }
 
 fn range_lower_value(range: &RangeValue) -> Result<Value, ExecError> {

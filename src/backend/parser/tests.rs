@@ -6980,6 +6980,35 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
 }
 
 #[test]
+fn parse_create_function_statement_with_mode_after_arg_name() {
+    let stmt = parse_statement(
+        "create function dup(f1 anyelement, f2 out anyelement, f3 out anyarray) as 'select $1, array[$1,$1]' language sql",
+    )
+    .unwrap();
+    let Statement::CreateFunction(stmt) = stmt else {
+        panic!("expected CREATE FUNCTION");
+    };
+    assert_eq!(stmt.function_name, "dup");
+    assert_eq!(
+        stmt.args
+            .iter()
+            .map(|arg| (arg.name.as_deref(), arg.mode))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("f1"), FunctionArgMode::In),
+            (Some("f2"), FunctionArgMode::Out),
+            (Some("f3"), FunctionArgMode::Out),
+        ]
+    );
+    assert!(matches!(
+        stmt.return_spec,
+        CreateFunctionReturnSpec::DerivedFromOutArgs {
+            setof_record: false
+        }
+    ));
+}
+
+#[test]
 fn parse_create_function_statement_with_sql_return_shorthand() {
     let stmt = parse_statement(
         "create function fipshash(bytea) returns text strict immutable parallel safe leakproof return substr(encode(sha256($1), 'hex'), 1, 32)",
@@ -17107,6 +17136,26 @@ fn parse_named_function_args_in_from() {
 }
 
 #[test]
+fn parse_rows_from_with_ordinality_and_column_definitions() {
+    let stmt = parse_select(
+        "select * from rows from(getrngfunc6(1) as (id int, name text), generate_series(1, 2)) with ordinality",
+    )
+    .unwrap();
+    let Some(FromItem::RowsFrom {
+        functions,
+        with_ordinality,
+    }) = stmt.from
+    else {
+        panic!("expected ROWS FROM item");
+    };
+    assert!(with_ordinality);
+    assert_eq!(functions.len(), 2);
+    assert_eq!(functions[0].name, "getrngfunc6");
+    assert_eq!(functions[0].column_definitions.len(), 2);
+    assert_eq!(functions[1].name, "generate_series");
+}
+
+#[test]
 fn build_plan_rejects_positional_after_named_function_arg() {
     let stmt = parse_select("select jsonb_path_exists(path => '$', '{}'::jsonb)").unwrap();
     assert!(matches!(
@@ -17144,6 +17193,40 @@ fn build_plan_for_unnest_uses_array_element_types() {
         );
         assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
     }
+}
+
+#[test]
+fn build_plan_for_rows_from_uses_single_function_scan() {
+    let stmt = parse_select(
+        "select * from rows from(generate_series(1, 2), unnest(ARRAY['a']::varchar[])) with ordinality as r(g, u, ord)",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    let output_columns = match plan {
+        Plan::FunctionScan {
+            call:
+                crate::include::nodes::primnodes::SetReturningCall::RowsFrom { output_columns, .. },
+            ..
+        } => output_columns,
+        Plan::Projection { input, .. } => match *input {
+            Plan::FunctionScan {
+                call:
+                    crate::include::nodes::primnodes::SetReturningCall::RowsFrom {
+                        output_columns, ..
+                    },
+                ..
+            } => output_columns,
+            other => panic!("expected ROWS FROM function scan, got {other:?}"),
+        },
+        other => panic!("expected ROWS FROM plan, got {other:?}"),
+    };
+    assert_eq!(
+        output_columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["g", "u", "ord"]
+    );
 }
 
 #[test]

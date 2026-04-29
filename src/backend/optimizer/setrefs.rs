@@ -19,8 +19,8 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR,
-    OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry,
-    Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+    OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, RowsFromSource, ScalarArrayOpExpr,
+    SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
     is_executor_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::BTreeSet;
@@ -1326,6 +1326,32 @@ fn lower_projection_expr_by_input_target(
                 .collect(),
             array_type,
         },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| {
+                    (
+                        name,
+                        lower_projection_expr_by_input_target(root, expr, input, input_tlist),
+                    )
+                })
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *expr,
+                input,
+                input_tlist,
+            )),
+            field,
+            field_type,
+        },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(lower_projection_expr_by_input_target(
                 root,
@@ -1924,12 +1950,11 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
 }
 
 fn exec_param_for_outer_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
+    let can_reuse_ancestor_param = expr_max_varlevelsup(&expr) > 1;
     let parent_expr = decrement_outer_expr_levels(expr.clone());
     let paramtype = expr_sql_type(&parent_expr);
-    if let Some(existing) = ctx
-        .ext_params
-        .iter()
-        .find(|param| param.expr == parent_expr)
+    if can_reuse_ancestor_param
+        && let Some(existing) = find_existing_exec_param(ctx, parent_expr.clone())
     {
         return Expr::Param(Param {
             paramkind: ParamKind::Exec,
@@ -1948,6 +1973,171 @@ fn exec_param_for_outer_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
         paramid,
         paramtype,
     })
+}
+
+fn expr_max_varlevelsup(expr: &Expr) -> usize {
+    match expr {
+        Expr::Var(var) => var.varlevelsup,
+        Expr::Aggref(aggref) => aggref
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .chain(
+                aggref
+                    .aggfilter
+                    .as_ref()
+                    .map(|expr| expr_max_varlevelsup(expr)),
+            )
+            .max()
+            .unwrap_or(aggref.agglevelsup)
+            .max(aggref.agglevelsup),
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .chain(match &window_func.kind {
+                WindowFuncKind::Aggregate(aggref) => aggref
+                    .aggfilter
+                    .as_ref()
+                    .map(|expr| expr_max_varlevelsup(expr)),
+                WindowFuncKind::Builtin(_) => None,
+            })
+            .max()
+            .unwrap_or(0),
+        Expr::Op(op) => op.args.iter().map(expr_max_varlevelsup).max().unwrap_or(0),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::Case(case_expr) => case_expr
+            .arg
+            .as_deref()
+            .map(expr_max_varlevelsup)
+            .into_iter()
+            .chain(case_expr.args.iter().flat_map(|arm| {
+                [
+                    expr_max_varlevelsup(&arm.expr),
+                    expr_max_varlevelsup(&arm.result),
+                ]
+            }))
+            .chain(std::iter::once(expr_max_varlevelsup(&case_expr.defresult)))
+            .max()
+            .unwrap_or(0),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .map(expr_max_varlevelsup)
+            .unwrap_or(0),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .map(expr_max_varlevelsup)
+            .into_iter()
+            .chain(subplan.args.iter().map(expr_max_varlevelsup))
+            .max()
+            .unwrap_or(0),
+        Expr::ScalarArrayOp(saop) => {
+            expr_max_varlevelsup(&saop.left).max(expr_max_varlevelsup(&saop.right))
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_max_varlevelsup(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => expr_max_varlevelsup(expr)
+            .max(expr_max_varlevelsup(pattern))
+            .max(escape.as_deref().map(expr_max_varlevelsup).unwrap_or(0)),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_max_varlevelsup(left).max(expr_max_varlevelsup(right))
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().map(expr_max_varlevelsup).max().unwrap_or(0)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .map(|(_, expr)| expr_max_varlevelsup(expr))
+            .max()
+            .unwrap_or(0),
+        Expr::ArraySubscript { array, subscripts } => subscripts
+            .iter()
+            .flat_map(|subscript| [subscript.lower.as_ref(), subscript.upper.as_ref()])
+            .flatten()
+            .map(expr_max_varlevelsup)
+            .chain(std::iter::once(expr_max_varlevelsup(array)))
+            .max()
+            .unwrap_or(0),
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => 0,
+    }
+}
+
+fn find_existing_exec_param<'a>(
+    ctx: &'a SetRefsContext<'_>,
+    mut expr: Expr,
+) -> Option<&'a ExecParamSource> {
+    loop {
+        if let Some(existing) = ctx
+            .ext_params
+            .iter()
+            .find(|param| exprs_equivalent(ctx.root, &param.expr, &expr))
+        {
+            return Some(existing);
+        }
+        let decremented = decrement_outer_expr_levels(expr.clone());
+        if decremented == expr {
+            return None;
+        }
+        expr = decremented;
+    }
 }
 
 fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec<usize>) -> Expr {
@@ -2230,6 +2420,35 @@ fn lower_set_returning_call(
     use crate::include::nodes::primnodes::SetReturningCall;
 
     match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::RowsFromItem {
+                    source: match item.source {
+                        RowsFromSource::Function(call) => {
+                            RowsFromSource::Function(lower_set_returning_call(ctx, call, mode))
+                        }
+                        RowsFromSource::Project {
+                            output_exprs,
+                            output_columns,
+                        } => RowsFromSource::Project {
+                            output_exprs: output_exprs
+                                .into_iter()
+                                .map(|expr| lower_expr(ctx, expr, mode))
+                                .collect(),
+                            output_columns,
+                        },
+                    },
+                    column_definitions: item.column_definitions,
+                })
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -2425,6 +2644,7 @@ fn lower_set_returning_call(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -2435,6 +2655,7 @@ fn lower_set_returning_call(
                 .into_iter()
                 .map(|arg| lower_expr(ctx, arg, mode))
                 .collect(),
+            inlined_expr: inlined_expr.map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
             output_columns,
             with_ordinality,
         },
@@ -2453,6 +2674,35 @@ fn fix_set_returning_call_upper_exprs(
     use crate::include::nodes::primnodes::SetReturningCall;
 
     match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::RowsFromItem {
+                    source: match item.source {
+                        RowsFromSource::Function(call) => RowsFromSource::Function(
+                            fix_set_returning_call_upper_exprs(root, call, path, input_tlist),
+                        ),
+                        RowsFromSource::Project {
+                            output_exprs,
+                            output_columns,
+                        } => RowsFromSource::Project {
+                            output_exprs: output_exprs
+                                .into_iter()
+                                .map(|expr| fix_upper_expr_for_input(root, expr, path, input_tlist))
+                                .collect(),
+                            output_columns,
+                        },
+                    },
+                    column_definitions: item.column_definitions,
+                })
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -2650,6 +2900,7 @@ fn fix_set_returning_call_upper_exprs(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -2660,6 +2911,8 @@ fn fix_set_returning_call_upper_exprs(
                 .into_iter()
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
+            inlined_expr: inlined_expr
+                .map(|expr| Box::new(fix_upper_expr_for_input(root, *expr, path, input_tlist))),
             output_columns,
             with_ordinality,
         },
@@ -3850,6 +4103,20 @@ fn validate_set_returning_call(
     use crate::include::nodes::primnodes::SetReturningCall;
 
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        validate_set_returning_call(call, plan_node, field, allowed_exec_params);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            validate_executable_expr(expr, plan_node, field, allowed_exec_params);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -4395,6 +4662,20 @@ fn validate_planner_set_returning_call(
     use crate::include::nodes::primnodes::SetReturningCall;
 
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        validate_planner_set_returning_call(call, path_node, field);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            validate_planner_expr(expr, path_node, field);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -5386,16 +5667,27 @@ fn set_nested_loop_join_references(
         split_join_restrict_clauses(kind, &restrict_clauses);
     let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
     let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
+    let inherited_param_ids = ctx
+        .ext_params
+        .iter()
+        .map(|param| param.paramid)
+        .collect::<Vec<_>>();
     let (mut right_plan, nest_params) = {
+        let inherited_params = ctx.ext_params.clone();
         let mut right_ctx = SetRefsContext {
             root: ctx.root,
             catalog: ctx.catalog,
             subplans: ctx.subplans,
             next_param_id: ctx.next_param_id,
-            ext_params: Vec::new(),
+            ext_params: inherited_params,
         };
         let plan = set_plan_refs(&mut right_ctx, *right);
         ctx.next_param_id = right_ctx.next_param_id;
+        let right_ext_params = right_ctx
+            .ext_params
+            .into_iter()
+            .filter(|param| !inherited_param_ids.contains(&param.paramid))
+            .collect::<Vec<_>>();
         if matches!(
             kind,
             crate::include::nodes::primnodes::JoinType::Right
@@ -5405,13 +5697,13 @@ fn set_nested_loop_join_references(
             // inner side parameterized by the current outer row. Keep those params
             // as ancestor-supplied exec params instead of turning them into
             // immediate nestloop params for this join.
-            ctx.ext_params.extend(right_ctx.ext_params);
+            ctx.ext_params.extend(right_ext_params);
             (plan, Vec::new())
         } else {
             let mut consumed_parent_params = Vec::new();
             let mut propagated_params = Vec::new();
             let mut params = Vec::new();
-            for param in right_ctx.ext_params {
+            for param in right_ext_params {
                 let mut param_consumed_parent_params = Vec::new();
                 let rebased_expr = inline_exec_params(
                     decrement_outer_expr_levels(param.expr),
@@ -5451,6 +5743,10 @@ fn set_nested_loop_join_references(
     let mut nest_params = nest_params;
     let mut retained_ext_params = Vec::new();
     for param in std::mem::take(&mut ctx.ext_params) {
+        if inherited_param_ids.contains(&param.paramid) {
+            retained_ext_params.push(param);
+            continue;
+        }
         if !plan_contains_exec_param_id(&right_plan, param.paramid) {
             retained_ext_params.push(param);
             continue;
@@ -6259,6 +6555,61 @@ fn set_subquery_scan_references(
     filter: Option<Expr>,
     force_display: bool,
 ) -> Plan {
+    if filter.is_none() && !force_display {
+        let input_columns = input.columns();
+        if input_columns == output_columns {
+            return recurse_with_root(ctx, Some(subroot.as_ref()), *input);
+        }
+        if input_columns.len() == output_columns.len() {
+            let input_target = input.semantic_output_target();
+            let input_tlist = build_path_tlist(Some(subroot.as_ref()), &input);
+            let targets = output_columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    let expr = input_target.exprs.get(index).cloned().unwrap_or_else(|| {
+                        Expr::Var(Var {
+                            varno: rtindex,
+                            varattno: user_attrno(index),
+                            varlevelsup: 0,
+                            vartype: column.sql_type,
+                        })
+                    });
+                    let ressortgroupref =
+                        input_target.sortgrouprefs.get(index).copied().unwrap_or(0);
+                    TargetEntry::new(column.name.clone(), expr, column.sql_type, index + 1)
+                        .with_sort_group_ref(ressortgroupref)
+                        .with_input_resno(index + 1)
+                })
+                .map(|target| TargetEntry {
+                    expr: fix_upper_expr_for_input(
+                        Some(subroot.as_ref()),
+                        target.expr,
+                        &input,
+                        &input_tlist,
+                    ),
+                    ..target
+                })
+                .map(|target| TargetEntry {
+                    expr: lower_expr(
+                        ctx,
+                        target.expr,
+                        LowerMode::Input {
+                            path: Some(&input),
+                            tlist: &input_tlist,
+                        },
+                    ),
+                    ..target
+                })
+                .collect();
+            let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
+            return Plan::Projection {
+                plan_info,
+                input: Box::new(input),
+                targets,
+            };
+        }
+    }
     let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
     if input.columns() == output_columns && filter.is_none() && !force_display {
         input
@@ -7083,6 +7434,22 @@ fn rebuild_setrefs_expr(
             elements: elements.into_iter().map(recurse).collect(),
             array_type,
         },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, recurse(expr)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(recurse(*expr)),
+            field,
+            field_type,
+        },
         Expr::Coalesce(left, right) => {
             Expr::Coalesce(Box::new(recurse(*left)), Box::new(recurse(*right)))
         }
@@ -7250,6 +7617,22 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
                 .map(|element| fully_expand_output_expr(element, path))
                 .collect(),
             array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, fully_expand_output_expr(expr, path)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(fully_expand_output_expr(*expr, path)),
+            field,
+            field_type,
         },
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(fully_expand_output_expr(*array, path)),

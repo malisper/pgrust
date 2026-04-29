@@ -5,7 +5,7 @@ use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
-use crate::backend::rewrite::relation_row_security_is_enabled_for_user;
+use crate::backend::rewrite::{format_view_definition, relation_row_security_is_enabled_for_user};
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
@@ -24,7 +24,7 @@ use crate::backend::utils::cache::system_views::{
     build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
     build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows, build_pg_stat_wal_rows,
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
-    build_pg_views_rows,
+    build_pg_views_rows_with_definition_formatter,
 };
 use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
@@ -2381,11 +2381,18 @@ impl CatalogLookup for LazyCatalogLookup {
             .auth_catalog(self.client_id, self.txn_ctx)
             .map(|catalog| catalog.roles().to_vec())
             .unwrap_or_default();
-        build_pg_views_rows(
+        build_pg_views_rows_with_definition_formatter(
             ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
             authids,
             ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
             ensure_rewrite_rows(&self.db, self.client_id, self.txn_ctx),
+            |class, definition| {
+                self.relation_by_oid(class.oid)
+                    .and_then(|relation| {
+                        format_view_definition(class.oid, &relation.desc, self).ok()
+                    })
+                    .unwrap_or_else(|| definition.to_string())
+            },
         )
     }
 

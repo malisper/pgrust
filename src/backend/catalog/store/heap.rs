@@ -38,7 +38,7 @@ use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::backend::utils::cache::relcache::{
-    RelCache, RelCacheEntry, relation_locator_for_class_row,
+    IndexRelCacheEntry, RelCache, RelCacheEntry, relation_locator_for_class_row,
 };
 use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
@@ -2917,13 +2917,8 @@ impl CatalogStore {
             ));
         }
         row.oid = old_visible.oid;
-        let old_depends = trigger_depend_rows(
-            old_visible.oid,
-            old_visible.tgrelid,
-            old_visible.tgfoid,
-            &old_visible.tgattr,
-            old_visible.tgconstraint,
-        );
+        let old_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_TRIGGER_RELATION_OID, old_visible.oid)?;
         let new_depends = trigger_depend_rows(
             row.oid,
             row.tgrelid,
@@ -3022,15 +3017,11 @@ impl CatalogStore {
             BootstrapCatalogKind::PgTrigger,
             BootstrapCatalogKind::PgDepend,
         ];
+        let old_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_TRIGGER_RELATION_OID, old_trigger.oid)?;
         let mut delete_rows = PhysicalCatalogRows {
             triggers: vec![old_trigger.clone()],
-            depends: trigger_depend_rows(
-                old_trigger.oid,
-                old_trigger.tgrelid,
-                old_trigger.tgfoid,
-                &old_trigger.tgattr,
-                old_trigger.tgconstraint,
-            ),
+            depends: old_depends,
             ..PhysicalCatalogRows::default()
         };
         if old_class.relhastriggers != has_remaining {
@@ -7023,6 +7014,39 @@ impl CatalogStore {
         if let Some(index_meta) = &new_entry.index_meta {
             effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
         }
+        Ok(effect)
+    }
+
+    pub fn replace_index_relation_desc_meta_mvcc(
+        &mut self,
+        index_oid: u32,
+        desc: RelationDesc,
+        index_meta: IndexRelCacheEntry,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let heap_relation_oid = index_meta.indrelid;
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, index_oid, ctx, move |entry, _control| {
+                if !matches!(entry.relkind, 'i' | 'I') {
+                    return Err(CatalogError::UnknownTable(index_oid.to_string()));
+                }
+                entry.desc = desc;
+                entry.index_meta = Some(catalog_index_meta_from_relcache(&index_meta));
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgIndex,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, index_oid);
+        effect_record_oid(&mut effect.relation_oids, heap_relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
         Ok(effect)
     }
 
@@ -11324,6 +11348,7 @@ fn constraint_depend_rows_mvcc(
         constraint_oid,
     )?);
     sort_pg_depend_rows(&mut rows);
+    rows.dedup();
     Ok(rows)
 }
 
@@ -11415,6 +11440,32 @@ fn catalog_entry_from_relation_row(
             gin_options: index.gin_options.clone(),
             hash_options: index.hash_options,
         }),
+    }
+}
+
+fn catalog_index_meta_from_relcache(index: &IndexRelCacheEntry) -> CatalogIndexMeta {
+    CatalogIndexMeta {
+        indrelid: index.indrelid,
+        indkey: index.indkey.clone(),
+        indisunique: index.indisunique,
+        indnullsnotdistinct: index.indnullsnotdistinct,
+        indisprimary: index.indisprimary,
+        indisexclusion: index.indisexclusion,
+        indimmediate: index.indimmediate,
+        indisvalid: index.indisvalid,
+        indisready: index.indisready,
+        indislive: index.indislive,
+        indclass: index.indclass.clone(),
+        indclass_options: index.indclass_options.clone(),
+        indcollation: index.indcollation.clone(),
+        indoption: index.indoption.clone(),
+        indexprs: index.indexprs.clone(),
+        indpred: index.indpred.clone(),
+        btree_options: index.btree_options.clone(),
+        brin_options: index.brin_options.clone(),
+        gist_options: index.gist_options.clone(),
+        gin_options: index.gin_options.clone(),
+        hash_options: index.hash_options.clone(),
     }
 }
 
@@ -11676,10 +11727,10 @@ fn rows_for_existing_relation_mvcc(
     {
         rows.types.push(row);
     }
-    if matches!(entry.relkind, 'i' | 'I') {
-        if let Some(row) = index_row_by_index_oid_mvcc(store, ctx, entry.relation_oid)? {
-            rows.indexes.push(row);
-        }
+    if matches!(entry.relkind, 'i' | 'I')
+        && let Some(row) = index_row_by_index_oid_mvcc(store, ctx, entry.relation_oid)?
+    {
+        rows.indexes.push(row);
     }
 
     collect_depend_rows_for_object_mvcc(

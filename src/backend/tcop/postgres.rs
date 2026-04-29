@@ -66,6 +66,9 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_sqlstate(&ExecError::Parse((**source).clone()))
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, .. }) => {
+            exec_error_sqlstate(&ExecError::Parse((**source).clone()))
+        }
         ExecError::Regex(err) => err.sqlstate,
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::XmlInput { sqlstate, .. } => sqlstate,
@@ -201,6 +204,9 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_detail_parse(source)
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, .. }) => {
+            exec_error_detail_parse(source)
+        }
         ExecError::Parse(
             crate::backend::parser::ParseError::InvalidPublicationParameterValue {
                 parameter, ..
@@ -245,6 +251,9 @@ fn exec_error_hint(e: &ExecError) -> Option<&str> {
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_hint_parse(source)
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, .. }) => {
+            exec_error_hint_parse(source)
+        }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { hint, .. }) => {
             hint.as_deref()
         }
@@ -274,6 +283,12 @@ fn exec_error_context(e: &ExecError) -> Option<String> {
         ExecError::JsonInput { context, .. } => context.clone(),
         ExecError::XmlInput { context, .. } => context.clone(),
         ExecError::Regex(err) => err.context.clone(),
+        ExecError::Parse(crate::backend::parser::ParseError::WithContext { source, context }) => {
+            match exec_error_context(&ExecError::Parse((**source).clone())) {
+                Some(inner) => Some(format!("{inner}\n{context}")),
+                None => Some(context.clone()),
+            }
+        }
         _ => None,
     }
 }
@@ -372,6 +387,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             actual, ..
         }) if actual == "positional argument cannot follow named argument" => {
             return find_positional_after_named_arg_position(sql);
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "function row description in FROM",
+            actual,
+        }) if is_function_coldeflist_error(actual) => {
+            return find_function_coldeflist_error_position(sql, actual);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(name)) => {
             return find_case_insensitive_token_position(sql, name);
@@ -546,7 +567,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return Some(position);
             }
             if message == "conflicting constraint properties" {
-                return find_constraint_enforcement_attribute_position(sql);
+                return find_conflicting_constraint_enforcement_attribute_position(sql);
             }
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
@@ -591,7 +612,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, "INITIALLY");
             }
             if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed" {
-                return find_constraint_enforcement_attribute_position(sql);
+                return find_conflicting_constraint_enforcement_attribute_position(sql);
             }
             return None;
         }
@@ -2402,6 +2423,23 @@ fn find_publication_where_function_position(sql: &str) -> Option<usize> {
     find_default_expr_identifier_position(sql, expression_position - 1, true)
 }
 
+fn is_function_coldeflist_error(message: &str) -> bool {
+    matches!(
+        message,
+        "a column definition list is required for functions returning \"record\""
+            | "a column definition list is redundant for a function with OUT parameters"
+            | "a column definition list is redundant for a function returning a named composite type"
+            | "a column definition list is only allowed for functions returning \"record\""
+    )
+}
+
+fn find_function_coldeflist_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message == "a column definition list is required for functions returning \"record\"" {
+        return find_token_after_case_insensitive_phrase(sql, "from");
+    }
+    sql.rfind('(').map(|index| index + 2)
+}
+
 fn find_nested_from_function_srf_position(sql: &str) -> Option<usize> {
     let from_index = find_identifier_in_segment(sql, "from")?;
     let after_from = from_index + "from".len();
@@ -2443,7 +2481,7 @@ fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<u
         .map(|index| index + 1)
 }
 
-fn find_constraint_enforcement_attribute_position(sql: &str) -> Option<usize> {
+fn find_conflicting_constraint_enforcement_attribute_position(sql: &str) -> Option<usize> {
     [
         find_case_insensitive_token_position(sql, "NOT ENFORCED"),
         find_last_case_insensitive_token_position(sql, "ENFORCED"),
@@ -7685,6 +7723,19 @@ fn psql_describe_constraints_query(
     let txn_ctx = session.catalog_txn_ctx();
     let include_sametable = lower.contains("as sametable");
     let include_ontable = lower.contains(" as ontable");
+    let include_partition_ancestors = lower.contains("pg_partition_ancestors");
+    let catalog = session.catalog_lookup(db);
+    let mut relation_oids = vec![oid];
+    if include_partition_ancestors {
+        let mut pending = catalog.inheritance_parents(oid);
+        while let Some(parent) = pending.pop() {
+            if relation_oids.contains(&parent.inhparent) {
+                continue;
+            }
+            relation_oids.push(parent.inhparent);
+            pending.extend(catalog.inheritance_parents(parent.inhparent));
+        }
+    }
     let incoming_refs = lower.contains("where confrelid in")
         || lower.contains("where c.confrelid in")
         || lower.contains("where r.confrelid in")
@@ -7698,7 +7749,7 @@ fn psql_describe_constraints_query(
             txn_ctx,
         )
         .into_iter()
-        .filter(|row| row.confrelid == oid)
+        .filter(|row| relation_oids.contains(&row.confrelid))
         .filter(|row| contype_filter.is_none_or(|contype| row.contype == contype))
         .filter(|row| !lower.contains("conparentid = 0") || row.conparentid == 0)
         .filter_map(|row| {
@@ -7726,20 +7777,26 @@ fn psql_describe_constraints_query(
         })
         .collect::<Vec<_>>()
     } else {
-        let relation = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
-        let relname = db
-            .relation_display_name(
-                session.client_id,
-                txn_ctx,
-                session.configured_search_path().as_deref(),
-                oid,
-            )
-            .unwrap_or_else(|| oid.to_string());
-        db.constraint_rows_for_relation(session.client_id, txn_ctx, oid)
+        relation_oids
             .into_iter()
-            .filter(|row| contype_filter.is_none_or(|contype| row.contype == contype))
-            .filter(|row| !lower.contains("conparentid = 0") || row.conparentid == 0)
-            .filter_map(|row| {
+            .flat_map(|relation_oid| {
+                db.constraint_rows_for_relation(session.client_id, txn_ctx, relation_oid)
+                    .into_iter()
+                    .map(move |row| (relation_oid, row))
+            })
+            .filter(|(_, row)| contype_filter.is_none_or(|contype| row.contype == contype))
+            .filter(|(_, row)| !lower.contains("conparentid = 0") || row.conparentid == 0)
+            .filter_map(|(relation_oid, row)| {
+                let relation =
+                    db.describe_relation_by_oid(session.client_id, txn_ctx, relation_oid)?;
+                let relname = db
+                    .relation_display_name(
+                        session.client_id,
+                        txn_ctx,
+                        session.configured_search_path().as_deref(),
+                        relation_oid,
+                    )
+                    .unwrap_or_else(|| relation_oid.to_string());
                 let condef = constraint_def_for_row(db, session, Some(&relation), &row)?;
                 if include_sametable {
                     Some(vec![
@@ -8230,7 +8287,23 @@ fn foreign_key_constraint_def(
         def.push_str(&set_columns.join(", "));
         def.push(')');
     }
+    append_foreign_key_constraint_options(&mut def, row);
     Some(def)
+}
+
+fn append_foreign_key_constraint_options(
+    def: &mut String,
+    row: &crate::include::catalog::PgConstraintRow,
+) {
+    if row.condeferrable {
+        def.push_str(" DEFERRABLE");
+        if row.condeferred {
+            def.push_str(" INITIALLY DEFERRED");
+        }
+    }
+    if !row.conenforced {
+        def.push_str(" NOT ENFORCED");
+    }
 }
 
 fn relation_column_names_for_attnums(
@@ -9886,6 +9959,10 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                     .as_ref()
                     .is_some_and(raw_expr_contains_pg_notify)
         }
+        crate::backend::parser::FromItem::RowsFrom { functions, .. } => functions
+            .iter()
+            .flat_map(|function| function.args.iter())
+            .any(|arg| raw_expr_contains_pg_notify(&arg.value)),
         crate::backend::parser::FromItem::JsonTable(table) => {
             raw_expr_contains_pg_notify(&table.context)
                 || table
@@ -10014,6 +10091,7 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
     match expr {
         crate::backend::parser::SqlExpr::Column(_)
         | crate::backend::parser::SqlExpr::Parameter(_)
+        | crate::backend::parser::SqlExpr::ParamRef(_)
         | crate::backend::parser::SqlExpr::Default
         | crate::backend::parser::SqlExpr::Const(_)
         | crate::backend::parser::SqlExpr::IntegerLiteral(_)
