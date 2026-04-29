@@ -1980,11 +1980,11 @@ fn manual_hash_join_inner_returns_matching_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -2023,11 +2023,11 @@ fn manual_hash_join_left_emits_null_extended_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -2070,11 +2070,11 @@ fn manual_hash_join_right_emits_unmatched_inner_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -2117,11 +2117,11 @@ fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],

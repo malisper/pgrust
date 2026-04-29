@@ -292,14 +292,26 @@ fn build_exists_membership_set(
     ctx: &mut ExecutorContext,
 ) -> Result<HashSet<Value>, ExecError> {
     let mut state = executor_start(input.clone());
-    let mut values = HashSet::new();
-    while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
-        let value = eval_expr(local_expr, &mut inner_slot, ctx)?;
-        if !matches!(value, Value::Null) {
-            values.insert(value.to_owned_value());
+    let saved_outer_tuple = ctx.expr_bindings.outer_tuple.clone();
+    let saved_outer_system_bindings = ctx.expr_bindings.outer_system_bindings.clone();
+    let result = (|| {
+        let mut values = HashSet::new();
+        while exec_next(&mut state, ctx)?.is_some() {
+            let mut row = state.materialize_current_row()?;
+            let mut outer_values = row.slot.values()?.to_vec();
+            Value::materialize_all(&mut outer_values);
+            ctx.expr_bindings.outer_tuple = Some(outer_values);
+            ctx.expr_bindings.outer_system_bindings = row.system_bindings.clone();
+            let value = eval_expr(local_expr, &mut row.slot, ctx)?;
+            if !matches!(value, Value::Null) {
+                values.insert(value.to_owned_value());
+            }
         }
-    }
-    Ok(values)
+        Ok(values)
+    })();
+    ctx.expr_bindings.outer_tuple = saved_outer_tuple;
+    ctx.expr_bindings.outer_system_bindings = saved_outer_system_bindings;
+    result
 }
 
 fn eval_exists_membership_fast_path(

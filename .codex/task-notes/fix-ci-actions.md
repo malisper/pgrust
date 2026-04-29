@@ -60,6 +60,41 @@ query_repl.rs still has the existing unreachable-pattern warning during check.
 ---
 
 Goal:
+Fix merge-queue cargo-test failures on the join-regression PR.
+
+Key decisions:
+Let non-lateral derived tables see ancestor query scopes again without exposing sibling FROM items.
+Normalize EXISTS subquery target lists to a dummy constant so SELECT-list expressions are not evaluated for existence checks.
+Bind the EXISTS membership fast path's input row as the active outer tuple when evaluating filter-local special Vars.
+Update stale whole-row and hash bucket order assertions to match current null-preserving row and bucket traversal behavior.
+
+Files touched:
+src/backend/executor/exec_expr/subquery.rs
+src/backend/executor/tests.rs
+src/backend/parser/analyze/agg_output_special.rs
+src/backend/parser/analyze/expr.rs
+src/backend/parser/analyze/expr/subquery.rs
+src/backend/parser/analyze/scope.rs
+src/backend/parser/tests.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet derived_table_in_correlated_subquery_can_reference_outer_query -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet grouped_query_having -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet nested_exists_not_exists_inside_derived_table_keeps_outer_levels_correct -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet create_table_as_values_and_matview_unknown_outputs_work -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet security_barrier_inheritance_view_filters_through_subquery_scan -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet bind_insert_returning -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet manual_hash_join_ -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet lateral_right_join_placeholder_uses_outer_binding_at_join_level -- --nocapture
+scripts/cargo_isolated.sh check
+
+Remaining:
+No local failures in the attached CI repro set.
+
+---
+
+Goal:
 Fix CI failures from cargo-test-run__1_2__73490903903.log on the join-regression branch.
 
 Key decisions:

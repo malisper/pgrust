@@ -11137,14 +11137,27 @@ fn assert_returning_var(expr: &Expr, varno: usize, attno: AttrNumber) {
     }
 }
 
+fn returning_row_fields(expr: &Expr) -> &[(String, Expr)] {
+    match expr {
+        Expr::Row { fields, .. } => fields,
+        Expr::Case(case_expr) => match case_expr.defresult.as_ref() {
+            Expr::Row { fields, .. } => fields,
+            other => panic!("expected CASE default row expression, got {other:?}"),
+        },
+        other => panic!("expected row expression, got {other:?}"),
+    }
+}
+
 fn assert_returning_row(expr: &Expr, varno: usize, attnos: &[AttrNumber]) {
-    let Expr::Row { fields, .. } = expr else {
-        panic!("expected row expression, got {expr:?}");
-    };
+    let fields = returning_row_fields(expr);
     assert_eq!(fields.len(), attnos.len());
     for ((_, field), attno) in fields.iter().zip(attnos.iter().copied()) {
         assert_returning_var(field, varno, attno);
     }
+}
+
+fn assert_whole_row_expr(expr: &Expr, width: usize) {
+    assert_eq!(returning_row_fields(expr).len(), width);
 }
 
 struct ReturningTestCatalog {
@@ -11423,7 +11436,7 @@ fn bind_insert_returning_relation_name_as_whole_row() {
 
     let bound =
         stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
-    assert!(matches!(bound.returning[0].expr, Expr::Row { .. }));
+    assert_whole_row_expr(&bound.returning[0].expr, 3);
 }
 
 #[test]

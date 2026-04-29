@@ -861,7 +861,7 @@ pub(super) fn bind_from_item_with_ctes(
                 analyze_select_query_with_outer(
                     select,
                     catalog,
-                    &[],
+                    outer_scopes,
                     None,
                     visible_agg_scope.as_ref(),
                     ctes,

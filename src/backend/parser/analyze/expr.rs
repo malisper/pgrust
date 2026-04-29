@@ -48,6 +48,7 @@ use self::ops::{
     bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
     bind_text_pattern_comparison_expr, bind_text_starts_with_expr, supports_comparison_operator,
 };
+pub(super) use self::subquery::exists_subquery_query;
 use self::subquery::{
     bind_array_subquery_expr, bind_exists_subquery_expr, bind_in_subquery_expr,
     bind_quantified_array_expr, bind_quantified_subquery_expr, bind_row_compare_subquery_expr,
