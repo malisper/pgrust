@@ -797,6 +797,11 @@ impl Database {
                     constraint_name: Some(index_name.to_string()),
                     existing_index_name: None,
                     columns: key_columns,
+                    index_columns: columns
+                        .iter()
+                        .filter(|column| column.expr_sql.is_none())
+                        .cloned()
+                        .collect(),
                     include_columns: Vec::new(),
                     primary: false,
                     exclusion: false,

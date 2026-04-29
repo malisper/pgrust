@@ -1136,6 +1136,7 @@ fn make_ordered_rel(
                 .partial_cmp(&right.plan_info().total_cost.as_f64())
                 .unwrap_or(Ordering::Equal)
         });
+    let suppress_sort_fallback = cheapest_presorted.is_some_and(ordered_append_path);
     if let Some(path) = cheapest_presorted {
         let display_items = sort_key_display_items(root, &root.query_pathkeys, catalog);
         rel.add_path(path_with_sort_display_items(path.clone(), &display_items));
@@ -1161,7 +1162,9 @@ fn make_ordered_rel(
     }
     if let Some(path) = input_rel.cheapest_total_path() {
         let required_pathkeys = required_query_pathkeys_for_path(root, path);
-        if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+        if !suppress_sort_fallback
+            && !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)
+        {
             let display_items = sort_key_display_items(root, &root.query_pathkeys, catalog);
             rel.add_path(optimize_path_with_config(
                 Path::OrderBy {
@@ -1181,6 +1184,17 @@ fn make_ordered_rel(
     bestpath::set_cheapest(&mut rel);
     root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
+}
+
+fn ordered_append_path(path: &Path) -> bool {
+    match path {
+        Path::Append { .. } | Path::MergeAppend { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => ordered_append_path(input),
+        _ => false,
+    }
 }
 
 fn distinct_pathkeys(root: &PlannerInfo, targets: &[TargetEntry]) -> Vec<PathKey> {
@@ -2245,7 +2259,12 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                 };
                 format!("(({})[{index}])", render_sort_key_expr(root, arg, catalog))
             }
-            _ => crate::backend::executor::render_explain_expr(expr, &[]),
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+                if func.args.len() == 1 =>
+            {
+                render_sort_key_expr(root, &func.args[0], catalog)
+            }
+            _ => render_sort_key_function_expr(root, func, catalog),
         },
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
@@ -2286,6 +2305,37 @@ fn render_sort_key_aggref(
         args[0] = format!("DISTINCT {}", args[0]);
     }
     format!("{name}({})", args.join(", "))
+}
+
+fn render_sort_key_function_expr(
+    root: &PlannerInfo,
+    func: &crate::include::nodes::primnodes::FuncExpr,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let name = match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Abs) => "abs".to_string(),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Lower) => "lower".to_string(),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Upper) => "upper".to_string(),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Left) => "\"left\"".to_string(),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Right) => "\"right\"".to_string(),
+        ScalarFunctionImpl::UserDefined { proc_oid } => func
+            .funcname
+            .clone()
+            .unwrap_or_else(|| format!("proc_{proc_oid}")),
+        _ => {
+            return crate::backend::executor::render_explain_expr(
+                &Expr::Func(Box::new(func.clone())),
+                &[],
+            );
+        }
+    };
+    let args = func
+        .args
+        .iter()
+        .map(|arg| render_sort_key_expr(root, arg, catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
 }
 
 fn render_geometry_sort_arg(

@@ -5,6 +5,16 @@ pub(crate) fn normalize_index_expression_sql(expr_sql: &str) -> String {
     normalize_infix_spacing(expr_sql.trim())
 }
 
+pub(crate) fn normalize_stored_expr_sql(expr_sql: &str) -> String {
+    normalize_keywords(&normalize_infix_spacing(strip_outer_parens_once(
+        expr_sql.trim(),
+    )))
+}
+
+pub(crate) fn normalize_check_expr_sql(expr_sql: &str) -> String {
+    format!("({})", normalize_stored_expr_sql(expr_sql))
+}
+
 pub(crate) fn normalize_index_predicate_sql(
     predicate_sql: &str,
     relation_desc: Option<&RelationDesc>,
@@ -75,18 +85,54 @@ fn normalize_infix_spacing(input: &str) -> String {
                 let _ = chars.next();
                 push_spaced_operator(&mut out, "||");
             }
-            '>' | '<' | '!' if input[idx + ch.len_utf8()..].starts_with('=') => {
-                let _ = chars.next();
-                let mut operator = String::with_capacity(2);
-                operator.push(ch);
-                operator.push('=');
-                push_spaced_operator(&mut out, &operator);
+            '>' | '<' | '!' => {
+                let rest = &input[idx + ch.len_utf8()..];
+                if rest.starts_with('=') || (ch == '<' && rest.starts_with('>')) {
+                    let _ = chars.next();
+                    let mut operator = String::with_capacity(2);
+                    operator.push(ch);
+                    operator.push(if rest.starts_with('=') { '=' } else { '>' });
+                    push_spaced_operator(&mut out, &operator);
+                } else {
+                    let mut operator = String::with_capacity(1);
+                    operator.push(ch);
+                    push_spaced_operator(&mut out, &operator);
+                }
             }
             '=' => push_spaced_operator(&mut out, "="),
             _ => out.push(ch),
         }
     }
     collapse_spaces(&out)
+}
+
+fn normalize_keywords(input: &str) -> String {
+    let mut out = input.to_string();
+    for (from, to) in [
+        (" is not null", " IS NOT NULL"),
+        (" is null", " IS NULL"),
+        (" and ", " AND "),
+        (" or ", " OR "),
+        (" not ", " NOT "),
+    ] {
+        out = replace_ascii_case_insensitive(&out, from, to);
+    }
+    out
+}
+
+fn replace_ascii_case_insensitive(input: &str, from: &str, to: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let needle = from.to_ascii_lowercase();
+    let mut out = String::with_capacity(input.len());
+    let mut pos = 0usize;
+    while let Some(relative) = lower[pos..].find(&needle) {
+        let start = pos + relative;
+        out.push_str(&input[pos..start]);
+        out.push_str(to);
+        pos = start + from.len();
+    }
+    out.push_str(&input[pos..]);
+    out
 }
 
 fn push_spaced_operator(out: &mut String, operator: &str) {
@@ -156,6 +202,16 @@ mod tests {
     fn normalizes_index_expression_operator_spacing() {
         assert_eq!(normalize_index_expression_sql("f2||f1"), "f2 || f1");
         assert_eq!(normalize_index_expression_sql("(f2||f1)"), "(f2 || f1)");
+    }
+
+    #[test]
+    fn normalizes_check_expression_sql() {
+        assert_eq!(
+            normalize_check_expr_sql("aa is not null"),
+            "(aa IS NOT NULL)"
+        );
+        assert_eq!(normalize_check_expr_sql("f2>0"), "(f2 > 0)");
+        assert_eq!(normalize_check_expr_sql("a<>0"), "(a <> 0)");
     }
 
     #[test]

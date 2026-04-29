@@ -700,6 +700,7 @@ pub enum BuiltinScalarFunction {
     Repeat,
     Strpos,
     Length,
+    BitLength,
     ArrayNdims,
     ArrayDims,
     ArrayLower,
