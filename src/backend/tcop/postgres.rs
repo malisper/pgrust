@@ -2185,6 +2185,12 @@ fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> 
     if let Some(position) = plpgsql_get_diagnostics_target_error_position(sql, message) {
         return Some(position);
     }
+    if let Some(position) = plpgsql_return_validation_error_position(sql, message) {
+        return Some(position);
+    }
+    if let Some(position) = plpgsql_cursor_arg_error_position(sql, message) {
+        return Some(position);
+    }
     match message {
         "invalid attribute in procedure definition" => {
             find_case_insensitive_token_position(sql, "WINDOW")
@@ -2283,6 +2289,182 @@ fn plpgsql_get_diagnostics_target_error_position(sql: &str, message: &str) -> Op
         }
     }
     None
+}
+
+fn plpgsql_return_validation_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "RETURN cannot have a parameter in function with OUT parameters"
+        | "RETURN cannot have a parameter in function returning void" => {
+            find_plpgsql_return_expression_position(sql)
+        }
+        "missing expression at or near \";\"" => find_plpgsql_return_semicolon_position(sql),
+        _ => None,
+    }
+}
+
+fn find_plpgsql_return_expression_position(sql: &str) -> Option<usize> {
+    let start = find_identifier_in_segment(sql, "return")?;
+    let expr_start = skip_ascii_whitespace(sql, start + "return".len(), sql.len());
+    (sql.as_bytes().get(expr_start) != Some(&b';')).then_some(expr_start + 1)
+}
+
+fn find_plpgsql_return_semicolon_position(sql: &str) -> Option<usize> {
+    let start = find_identifier_in_segment(sql, "return")?;
+    let expr_start = skip_ascii_whitespace(sql, start + "return".len(), sql.len());
+    if sql.as_bytes().get(expr_start) == Some(&b';') {
+        return Some(expr_start + 1);
+    }
+    sql[expr_start..]
+        .find(';')
+        .map(|offset| expr_start + offset + 1)
+}
+
+fn plpgsql_cursor_arg_error_position(sql: &str, message: &str) -> Option<usize> {
+    if let Some((param_name, cursor_name)) = duplicate_cursor_arg_error_parts(message) {
+        return find_duplicate_cursor_arg_position(sql, cursor_name, param_name);
+    }
+    if let Some(cursor_name) = message
+        .strip_prefix("not enough arguments for cursor \"")
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return find_plpgsql_cursor_call_arg_list(sql, cursor_name).map(|(_, close)| close + 1);
+    }
+    None
+}
+
+fn duplicate_cursor_arg_error_parts(message: &str) -> Option<(&str, &str)> {
+    let rest = message.strip_prefix("value for parameter \"")?;
+    let (param_name, rest) = rest.split_once("\" of cursor \"")?;
+    let cursor_name = rest.strip_suffix("\" specified more than once")?;
+    Some((param_name, cursor_name))
+}
+
+fn find_duplicate_cursor_arg_position(
+    sql: &str,
+    cursor_name: &str,
+    param_name: &str,
+) -> Option<usize> {
+    let (args_start, args_end) = find_plpgsql_cursor_call_arg_list(sql, cursor_name)?;
+    if let Some(position) =
+        find_repeated_named_cursor_arg_position(sql, args_start, args_end, param_name)
+    {
+        return Some(position);
+    }
+    let ordinal = find_declared_cursor_param_ordinal(sql, cursor_name, param_name)?;
+    find_top_level_item_start(sql, args_start, args_end, ordinal)
+}
+
+fn find_repeated_named_cursor_arg_position(
+    sql: &str,
+    args_start: usize,
+    args_end: usize,
+    param_name: &str,
+) -> Option<usize> {
+    let args = &sql[args_start..args_end];
+    let mut from = 0usize;
+    let mut seen = false;
+    while let Some(offset) = find_identifier_in_segment(&args[from..], param_name) {
+        let absolute = from + offset;
+        let after_name = skip_ascii_whitespace(args, absolute + param_name.len(), args.len());
+        let is_named_arg =
+            args[after_name..].starts_with(":=") || args[after_name..].starts_with("=>");
+        if is_named_arg {
+            if seen {
+                return Some(args_start + absolute + 1);
+            }
+            seen = true;
+        }
+        from = absolute + param_name.len();
+    }
+    None
+}
+
+fn find_plpgsql_cursor_call_arg_list(sql: &str, cursor_name: &str) -> Option<(usize, usize)> {
+    let lower = sql.to_ascii_lowercase();
+    let cursor_lower = cursor_name.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find("open") {
+        let open_start = from + offset;
+        if !identifier_boundaries(sql.as_bytes(), open_start, "open".len()) {
+            from = open_start + "open".len();
+            continue;
+        }
+        let name_start = skip_ascii_whitespace(sql, open_start + "open".len(), sql.len());
+        if !lower[name_start..].starts_with(&cursor_lower)
+            || !identifier_boundaries(sql.as_bytes(), name_start, cursor_name.len())
+        {
+            from = open_start + "open".len();
+            continue;
+        }
+        let paren_start = skip_ascii_whitespace(sql, name_start + cursor_name.len(), sql.len());
+        if sql.as_bytes().get(paren_start) == Some(&b'(') {
+            let paren_end = find_matching_delimiter(sql, paren_start, b'(', b')')?;
+            return Some((paren_start + 1, paren_end));
+        }
+        from = open_start + "open".len();
+    }
+    None
+}
+
+fn find_declared_cursor_param_ordinal(
+    sql: &str,
+    cursor_name: &str,
+    param_name: &str,
+) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let cursor_lower = cursor_name.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find(&cursor_lower) {
+        let name_start = from + offset;
+        if !identifier_boundaries(sql.as_bytes(), name_start, cursor_name.len()) {
+            from = name_start + cursor_name.len();
+            continue;
+        }
+        let cursor_keyword = skip_ascii_whitespace(sql, name_start + cursor_name.len(), sql.len());
+        if !lower[cursor_keyword..].starts_with("cursor")
+            || !identifier_boundaries(sql.as_bytes(), cursor_keyword, "cursor".len())
+        {
+            from = name_start + cursor_name.len();
+            continue;
+        }
+        let paren_start = skip_ascii_whitespace(sql, cursor_keyword + "cursor".len(), sql.len());
+        if sql.as_bytes().get(paren_start) != Some(&b'(') {
+            from = name_start + cursor_name.len();
+            continue;
+        }
+        let paren_end = find_matching_delimiter(sql, paren_start, b'(', b')')?;
+        let mut ordinal = 1usize;
+        let mut item_start = paren_start + 1;
+        for comma in top_level_commas(sql, paren_start + 1, paren_end)
+            .into_iter()
+            .chain(std::iter::once(paren_end))
+        {
+            let item = sql[item_start..comma].trim_start();
+            if starts_with_identifier(item, param_name) {
+                return Some(ordinal);
+            }
+            ordinal += 1;
+            item_start = comma + 1;
+        }
+        from = name_start + cursor_name.len();
+    }
+    None
+}
+
+fn identifier_boundaries(bytes: &[u8], start: usize, len: usize) -> bool {
+    let before = start.checked_sub(1).and_then(|index| bytes.get(index));
+    let after = bytes.get(start + len);
+    !before.is_some_and(|byte| is_sql_identifier_byte(*byte))
+        && !after.is_some_and(|byte| is_sql_identifier_byte(*byte))
+}
+
+fn starts_with_identifier(segment: &str, token: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    lower.starts_with(&token.to_ascii_lowercase())
+        && segment
+            .as_bytes()
+            .get(token.len())
+            .is_none_or(|byte| !is_sql_identifier_byte(*byte))
 }
 
 fn is_identifier_byte(byte: u8) -> bool {
@@ -14950,6 +15132,77 @@ ORDER BY 1, 2;";
         assert_eq!(
             first_error_response_position(&output),
             sql.find("f2[2]").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_plpgsql_return_validation_errors() {
+        let err = |message: &str| {
+            ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            })
+        };
+
+        let out_param_sql = "create function f1(in i int, out j int) as $$\nbegin\n  return i+1;\nend$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                out_param_sql,
+                &err("RETURN cannot have a parameter in function with OUT parameters"),
+            ),
+            out_param_sql.rfind("i+1").map(|index| index + 1)
+        );
+
+        let missing_expr_sql = "create function missing_return_expr() returns int as $$\nbegin\n    return ;\nend;$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                missing_expr_sql,
+                &err("missing expression at or near \";\""),
+            ),
+            missing_expr_sql
+                .find("return ;")
+                .map(|index| index + "return ".len() + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_plpgsql_cursor_arg_validation_errors() {
+        let err = |message: &str| {
+            ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            })
+        };
+
+        let positional_dup_sql = "create function namedparmcursor_test3() returns void as $$\ndeclare\n  c1 cursor (param1 int, param2 int) for select 1;\nbegin\n    open c1(param2 := 20, 21);\nend\n$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                positional_dup_sql,
+                &err("value for parameter \"param2\" of cursor \"c1\" specified more than once"),
+            ),
+            positional_dup_sql.find("21);").map(|index| index + 1)
+        );
+
+        let named_dup_sql = "create function namedparmcursor_test5() returns void as $$\ndeclare\n  c1 cursor (p1 int, p2 int) for select 1;\nbegin\n  open c1 (p2 := 77, p2 := 42);\nend\n$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                named_dup_sql,
+                &err("value for parameter \"p2\" of cursor \"c1\" specified more than once"),
+            ),
+            named_dup_sql.rfind("p2 := 42").map(|index| index + 1)
+        );
+
+        let not_enough_sql = "create function namedparmcursor_test6() returns void as $$\ndeclare\n  c1 cursor (p1 int, p2 int) for select 1;\nbegin\n  open c1 (p2 := 77);\nend\n$$ language plpgsql;";
+        assert_eq!(
+            exec_error_position(
+                not_enough_sql,
+                &err("not enough arguments for cursor \"c1\""),
+            ),
+            not_enough_sql.find(");\nend").map(|index| index + 1)
         );
     }
 
