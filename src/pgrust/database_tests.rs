@@ -49223,6 +49223,50 @@ fn plpgsql_return_query_uses_current_composite_shape() {
 }
 
 #[test]
+fn plpgsql_nested_dynamic_do_preserves_outer_notices() {
+    let dir = temp_dir("plpgsql_nested_dynamic_do_notices");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "do $outer$
+         begin
+           for i in 1..3 loop
+             begin
+               execute $inner$
+                 do $$
+                 declare x int = 0;
+                 begin
+                   x := 1 / x;
+                 end
+                 $$;
+               $inner$;
+             exception when division_by_zero then
+               raise notice 'caught division by zero';
+             end;
+           end loop;
+         end
+         $outer$",
+        )
+        .unwrap();
+
+    assert_eq!(
+        take_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec![
+            "caught division by zero",
+            "caught division by zero",
+            "caught division by zero",
+        ]
+    );
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();

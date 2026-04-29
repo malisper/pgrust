@@ -878,6 +878,23 @@ pub(crate) fn execute_do_with_context(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
+    execute_do_with_context_options(stmt, catalog, ctx, true)
+}
+
+pub(crate) fn execute_do_with_context_preserving_notices(
+    stmt: &DoStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    execute_do_with_context_options(stmt, catalog, ctx, false)
+}
+
+fn execute_do_with_context_options(
+    stmt: &DoStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    clear_notice_queue: bool,
+) -> Result<StatementResult, ExecError> {
     stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
         let language = stmt
             .language
@@ -890,7 +907,9 @@ pub(crate) fn execute_do_with_context(
                 actual: format!("LANGUAGE {}", stmt.language.as_deref().unwrap_or("plpgsql")),
             }));
         }
-        exec::clear_notices();
+        if clear_notice_queue {
+            exec::clear_notices();
+        }
         let block = parse_block(&stmt.code)?;
         let compiled = compile::compile_do_function(&block, catalog, Some(&ctx.gucs))?;
         exec::execute_do_function(&compiled, ctx)

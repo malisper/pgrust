@@ -4138,6 +4138,9 @@ fn execute_dynamic_sql_statement(
                 // helpers use SET LOCAL jit=0 only to stabilize EXPLAIN.
                 Ok(crate::backend::executor::StatementResult::AffectedRows(0))
             }
+            crate::backend::parser::Statement::Do(stmt) => {
+                super::execute_do_with_context_preserving_notices(&stmt, catalog.as_ref(), ctx)
+            }
             other => execute_readonly_statement(other, catalog.as_ref(), ctx),
         })
     });
