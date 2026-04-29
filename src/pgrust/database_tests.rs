@@ -49111,6 +49111,115 @@ fn plpgsql_composite_return_handles_null_and_scalar_mismatch() {
         format!("{err:?}").contains("InvalidIntegerInput"),
         "expected invalid integer input, got {err:?}"
     );
+
+    db.execute(
+        1,
+        "create function pl_comp_noncomposite() returns pl_comp_return language plpgsql as $$
+         begin
+           return 1 + 1;
+         end
+         $$",
+    )
+    .unwrap();
+    let err = db.execute(1, "select pl_comp_noncomposite()").unwrap_err();
+    assert!(
+        format!("{err:?}")
+            .contains("cannot return non-composite value from function returning composite type"),
+        "expected non-composite return error, got {err:?}"
+    );
+}
+
+#[test]
+fn plpgsql_return_query_uses_current_composite_shape() {
+    let dir = temp_dir("plpgsql_return_query_current_shape");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table pl_return_shape(a int4, b int4, c int4, d int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into pl_return_shape values (10, 20, 30, 40), (50, 60, 70, 80)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_return_shape_f() returns setof pl_return_shape language plpgsql as $$
+         begin
+           return query select * from pl_return_shape;
+           return query execute 'select * from pl_return_shape';
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_return_shape_f()"),
+        vec![
+            vec![
+                Value::Int32(10),
+                Value::Int32(20),
+                Value::Int32(30),
+                Value::Int32(40),
+            ],
+            vec![
+                Value::Int32(50),
+                Value::Int32(60),
+                Value::Int32(70),
+                Value::Int32(80),
+            ],
+            vec![
+                Value::Int32(10),
+                Value::Int32(20),
+                Value::Int32(30),
+                Value::Int32(40),
+            ],
+            vec![
+                Value::Int32(50),
+                Value::Int32(60),
+                Value::Int32(70),
+                Value::Int32(80),
+            ],
+        ]
+    );
+
+    db.execute(1, "alter table pl_return_shape drop column b")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_return_shape_f()"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(30), Value::Int32(40)],
+            vec![Value::Int32(50), Value::Int32(70), Value::Int32(80)],
+            vec![Value::Int32(10), Value::Int32(30), Value::Int32(40)],
+            vec![Value::Int32(50), Value::Int32(70), Value::Int32(80)],
+        ]
+    );
+
+    db.execute(1, "alter table pl_return_shape drop column d")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_return_shape_f()"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(30)],
+            vec![Value::Int32(50), Value::Int32(70)],
+            vec![Value::Int32(10), Value::Int32(30)],
+            vec![Value::Int32(50), Value::Int32(70)],
+        ]
+    );
+
+    db.execute(1, "alter table pl_return_shape add column d int4")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_return_shape_f()"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(30), Value::Null],
+            vec![Value::Int32(50), Value::Int32(70), Value::Null],
+            vec![Value::Int32(10), Value::Int32(30), Value::Null],
+            vec![Value::Int32(50), Value::Int32(70), Value::Null],
+        ]
+    );
 }
 
 #[test]

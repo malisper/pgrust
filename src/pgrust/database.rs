@@ -802,6 +802,12 @@ impl Database {
             .remove(&client_id);
     }
 
+    pub(crate) fn invalidate_plpgsql_function_cache(&self, client_id: ClientId) {
+        if let Some(cache) = self.session_plpgsql_function_caches.read().get(&client_id) {
+            cache.write().clear();
+        }
+    }
+
     pub(crate) fn clear_temp_backend_id(&self, client_id: ClientId) {
         self.session_temp_backend_ids.write().remove(&client_id);
     }

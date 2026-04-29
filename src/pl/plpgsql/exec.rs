@@ -2545,17 +2545,26 @@ fn return_row_values_from_value(
     value: Value,
     contract: &FunctionReturnContract,
     expected_record_shape: Option<&[QueryColumn]>,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, ExecError> {
     match value {
-        Value::Record(record) => record.fields,
-        Value::Null => match contract {
-            FunctionReturnContract::FixedRow { columns, .. } => vec![Value::Null; columns.len()],
+        Value::Record(record) => Ok(record.fields),
+        Value::Null => Ok(match contract {
+            FunctionReturnContract::FixedRow { columns, .. } => {
+                vec![Value::Null; expected_record_shape.unwrap_or(columns).len()]
+            }
             FunctionReturnContract::AnonymousRecord { .. } => expected_record_shape
                 .map(|columns| vec![Value::Null; columns.len()])
                 .unwrap_or_else(|| vec![Value::Null]),
             _ => vec![Value::Null],
-        },
-        other => vec![other],
+        }),
+        _ if matches!(contract, FunctionReturnContract::FixedRow { .. }) => {
+            Err(function_runtime_error(
+                "cannot return non-composite value from function returning composite type",
+                None,
+                "42804",
+            ))
+        }
+        other => Ok(vec![other]),
     }
 }
 
@@ -2618,7 +2627,7 @@ fn exec_function_return(
                     value,
                     &compiled.return_contract,
                     expected_record_shape,
-                );
+                )?;
                 state.rows.clear();
                 state.rows.push(coerce_function_result_row(
                     row,
@@ -2637,7 +2646,7 @@ fn exec_function_return(
                         value,
                         &compiled.return_contract,
                         expected_record_shape,
-                    );
+                    )?;
                     state.rows.push(coerce_row_to_columns(row, shape)?);
                 } else {
                     state.rows.push(TupleSlot::virtual_row(vec![value]));
@@ -2684,7 +2693,7 @@ fn exec_function_return_next(
                     value,
                     &compiled.return_contract,
                     expected_record_shape,
-                )
+                )?
             } else if matches!(
                 &compiled.return_contract,
                 FunctionReturnContract::FixedRow {
@@ -6107,7 +6116,9 @@ fn coerce_function_result_row(
                 "42804",
             )),
         },
-        FunctionReturnContract::FixedRow { columns, .. } => coerce_row_to_columns(row, columns),
+        FunctionReturnContract::FixedRow { columns, .. } => {
+            coerce_row_to_columns(row, expected_record_shape.unwrap_or(columns))
+        }
         FunctionReturnContract::AnonymousRecord { .. } => coerce_row_to_columns(
             row,
             expected_record_shape.ok_or_else(|| {
