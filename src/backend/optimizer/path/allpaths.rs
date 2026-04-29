@@ -2163,6 +2163,7 @@ fn set_op_type_sortable(sql_type: SqlType) -> bool {
 fn build_cte_scan_path(
     rtindex: usize,
     cte_id: usize,
+    cte_name: String,
     query: crate::include::nodes::parsenodes::Query,
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
@@ -2194,6 +2195,7 @@ fn build_cte_scan_path(
         pathtarget: slot_output_target(rtindex, &output_columns, |column| column.sql_type),
         slot_id: rte_slot_id(rtindex),
         cte_id,
+        cte_name,
         subroot: PlannerSubroot::new(subroot),
         query: Box::new(query),
         cte_plan: Box::new(cte_path),
@@ -3363,8 +3365,15 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rel.add_path(path);
         }
         RangeTblEntryKind::Cte { cte_id, query } => {
-            let mut path =
-                build_cte_scan_path(rtindex, cte_id, *query, &rte.desc, catalog, root.config);
+            let mut path = build_cte_scan_path(
+                rtindex,
+                cte_id,
+                rte.eref.aliasname.clone(),
+                *query,
+                &rte.desc,
+                catalog,
+                root.config,
+            );
             path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
             if let Some(filter) = base_filter_expr(rel) {
                 path = optimize_path_with_config(

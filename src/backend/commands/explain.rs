@@ -2120,6 +2120,7 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
             Some(scan_name) => format!("Subquery Scan on {scan_name}"),
             None => "Subquery Scan".into(),
         }),
+        Plan::CteScan { cte_name, .. } => Some(format!("CTE Scan on {cte_name}")),
         _ => None,
     }
 }
@@ -2187,6 +2188,7 @@ fn nonverbose_plan_label(
         Plan::SubqueryScan { scan_name, .. } => scan_name
             .as_ref()
             .map(|scan_name| format!("Subquery Scan on {scan_name}")),
+        Plan::CteScan { cte_name, .. } => Some(format!("CTE Scan on {cte_name}")),
         Plan::Values { .. } => Some(format!(
             "Values Scan on {}",
             ctx.values_scan_name.as_deref().unwrap_or("\"*VALUES*\"")
@@ -3304,6 +3306,24 @@ fn explain_plan_children_with_context(
             format_partitionwise_aggregate_append_children(
                 &children, subplans, indent, show_costs, verbose, ctx, lines,
             );
+        }
+        Plan::CteScan {
+            cte_name, cte_plan, ..
+        } => {
+            lines.push(format!("{}CTE {cte_name}", explain_detail_prefix(indent)));
+            let mut cte_lines = Vec::new();
+            format_explain_plan_with_subplans_inner(
+                cte_plan,
+                subplans,
+                indent + 1,
+                show_costs,
+                verbose,
+                true,
+                false,
+                ctx,
+                &mut cte_lines,
+            );
+            lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
         }
         _ => {
             let mut values_seen = 0usize;

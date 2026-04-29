@@ -764,7 +764,7 @@ pub(super) fn bind_from_item_with_ctes(
                         ),
                     ));
                 }
-                let plan = AnalyzedFrom::cte_scan(cte.cte_id, cte.plan.clone());
+                let plan = AnalyzedFrom::cte_scan(cte.name.clone(), cte.cte_id, cte.plan.clone());
                 return Ok((
                     plan.clone(),
                     scope_with_output_exprs(

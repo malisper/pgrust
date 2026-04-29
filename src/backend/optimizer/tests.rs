@@ -3977,6 +3977,25 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
 }
 
 #[test]
+fn explain_names_materialized_cte_scan_and_producer() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "with cte1 as materialized (select id from items where id > 1) select * from cte1",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines.iter().any(|line| line.trim() == "CTE Scan on cte1"),
+        "expected named CTE scan, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.trim() == "CTE cte1"),
+        "expected CTE producer label, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     let catalog = catalog_with_inherited_indexed_items();
     let planned =

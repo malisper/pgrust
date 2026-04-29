@@ -379,6 +379,7 @@ pub enum Plan {
     CteScan {
         plan_info: PlanEstimate,
         cte_id: usize,
+        cte_name: String,
         cte_plan: Box<Plan>,
         output_columns: Vec<QueryColumn>,
     },

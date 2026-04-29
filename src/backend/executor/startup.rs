@@ -1333,6 +1333,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::CteScan {
             plan_info,
             cte_id,
+            cte_name: _,
             cte_plan,
             output_columns,
         } => {

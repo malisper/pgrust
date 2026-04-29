@@ -681,6 +681,7 @@ pub enum Path {
         pathtarget: PathTarget,
         slot_id: usize,
         cte_id: usize,
+        cte_name: String,
         subroot: PlannerSubroot,
         query: Box<Query>,
         cte_plan: Box<Path>,

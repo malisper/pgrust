@@ -6024,6 +6024,7 @@ fn set_cte_scan_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     cte_id: usize,
+    cte_name: String,
     subroot: PlannerSubroot,
     cte_plan: Box<Path>,
     output_columns: Vec<QueryColumn>,
@@ -6031,6 +6032,7 @@ fn set_cte_scan_references(
     Plan::CteScan {
         plan_info,
         cte_id,
+        cte_name,
         cte_plan: Box::new(recurse_with_root(ctx, Some(subroot.as_ref()), *cte_plan)),
         output_columns,
     }
@@ -6540,6 +6542,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
         Path::CteScan {
             plan_info,
             cte_id,
+            cte_name,
             subroot,
             query,
             cte_plan,
@@ -6547,7 +6550,15 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             ..
         } => {
             let _ = query;
-            set_cte_scan_references(ctx, plan_info, cte_id, subroot, cte_plan, output_columns)
+            set_cte_scan_references(
+                ctx,
+                plan_info,
+                cte_id,
+                cte_name,
+                subroot,
+                cte_plan,
+                output_columns,
+            )
         }
         Path::WorkTableScan {
             plan_info,

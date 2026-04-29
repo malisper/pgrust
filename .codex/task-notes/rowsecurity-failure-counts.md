@@ -719,3 +719,18 @@ Leakproof comparison ordering bucket:
 - Remaining simple inherited-table qual-order hunks around `a <= 2`/`a = 2`
   still exist; this slice reduced other security ordering and notice-display
   mismatches.
+
+CTE EXPLAIN naming bucket:
+- Materialized CTE scans now carry the CTE display name from binding through
+  path planning and setrefs into `Plan::CteScan`.
+- EXPLAIN now prints `CTE Scan on <name>` plus a separate `CTE <name>` producer
+  line, with PostgreSQL-compatible producer-plan indentation for psql table
+  width.
+- Added focused coverage for a materialized CTE scan showing both labels.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  explain_names_materialized_cte_scan_and_producer` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `736/774` matched, `38` mismatches, `758` diff lines, `37` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.

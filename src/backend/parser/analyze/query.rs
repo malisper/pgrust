@@ -215,7 +215,7 @@ impl AnalyzedFrom {
         }
     }
 
-    pub(super) fn cte_scan(cte_id: usize, query: Query) -> Self {
+    pub(super) fn cte_scan(cte_name: String, cte_id: usize, query: Query) -> Self {
         let output_columns = query.columns();
         let desc = RelationDesc {
             columns: output_columns
@@ -227,7 +227,7 @@ impl AnalyzedFrom {
             rtable: vec![RangeTblEntry {
                 alias: None,
                 alias_preserves_source_names: false,
-                eref: rte_eref(format!("cte {cte_id}"), &output_columns),
+                eref: rte_eref(cte_name, &output_columns),
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
