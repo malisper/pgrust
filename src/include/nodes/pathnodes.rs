@@ -44,6 +44,8 @@ pub struct PlannerConfig {
     pub enable_hashjoin: bool,
     pub enable_hashagg: bool,
     pub enable_sort: bool,
+    pub force_parallel_gather: bool,
+    pub max_parallel_workers_per_gather: usize,
 }
 
 impl Default for PlannerConfig {
@@ -60,6 +62,8 @@ impl Default for PlannerConfig {
             enable_hashjoin: true,
             enable_hashagg: true,
             enable_sort: true,
+            force_parallel_gather: false,
+            max_parallel_workers_per_gather: 2,
         }
     }
 }

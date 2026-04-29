@@ -1329,6 +1329,9 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(append_with_join_children),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -1391,6 +1394,9 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
             }
         }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -1668,6 +1674,9 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             children.iter().any(|child| plan_contains(child, predicate))
         }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -1784,6 +1793,9 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(find_aggregate_plan),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -2066,6 +2078,9 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::SeqScan { .. } => Some(plan),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2120,6 +2135,9 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
             .map(|child| count_plan_nodes(child, predicate))
             .sum(),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -3663,6 +3681,9 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
         match plan {
             Plan::ProjectSet { .. } => Some(plan),
             Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
@@ -3737,6 +3758,9 @@ fn grouped_target_srf_uses_project_set_before_aggregate() {
                 plan_contains(input, |child| matches!(child, Plan::ProjectSet { .. }))
             }
             Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }

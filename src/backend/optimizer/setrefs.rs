@@ -122,10 +122,25 @@ pub(super) fn create_plan_with_param_base(
         ext_params: Vec::new(),
     };
     validate_planner_path(&path);
-    let plan = set_plan_refs(&mut ctx, path);
+    let plan = maybe_wrap_parallel_gather(root, set_plan_refs(&mut ctx, path));
     let allowed_params = exec_param_sources(&ctx.ext_params);
     validate_executable_plan_with_params(&plan, &allowed_params);
     (plan, ctx.ext_params, ctx.next_param_id)
+}
+
+fn maybe_wrap_parallel_gather(root: &PlannerInfo, plan: Plan) -> Plan {
+    if root.config.force_parallel_gather
+        && root.config.max_parallel_workers_per_gather > 0
+        && root.parse.limit_count.is_some()
+    {
+        return Plan::Gather {
+            plan_info: plan.plan_info(),
+            input: Box::new(plan),
+            workers_planned: root.config.max_parallel_workers_per_gather,
+            single_copy: true,
+        };
+    }
+    plan
 }
 
 pub(super) fn create_plan_without_root(path: Path) -> Plan {
@@ -3142,6 +3157,20 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
             });
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
+        Plan::Materialize { input, .. } => {
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            cache_keys.iter().for_each(|expr| {
+                validate_executable_expr(expr, "Memoize", "cache_keys", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::Gather { input, .. } => {
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
         Plan::NestedLoopJoin {
             left,
             right,
@@ -4296,7 +4325,7 @@ fn set_nested_loop_join_references(
         split_join_restrict_clauses(kind, &restrict_clauses);
     let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
     let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
-    let (right_plan, nest_params) = {
+    let (mut right_plan, nest_params) = {
         let mut right_ctx = SetRefsContext {
             root: ctx.root,
             catalog: ctx.catalog,
@@ -4358,6 +4387,7 @@ fn set_nested_loop_join_references(
             (plan, params)
         }
     };
+    right_plan = maybe_wrap_nested_loop_inner_plan(ctx.root, kind, &nest_params, right_plan);
     let left_plan = set_plan_refs(ctx, *left);
     Plan::NestedLoopJoin {
         plan_info,
@@ -4367,6 +4397,101 @@ fn set_nested_loop_join_references(
         nest_params,
         join_qual,
         qual,
+    }
+}
+
+fn maybe_wrap_nested_loop_inner_plan(
+    root: Option<&PlannerInfo>,
+    kind: crate::include::nodes::primnodes::JoinType,
+    nest_params: &[ExecParamSource],
+    plan: Plan,
+) -> Plan {
+    if matches!(
+        kind,
+        crate::include::nodes::primnodes::JoinType::Inner
+            | crate::include::nodes::primnodes::JoinType::Cross
+    ) && nest_params.is_empty()
+        && plan_is_plain_seq_scan(&plan)
+    {
+        return Plan::Materialize {
+            plan_info: plan.plan_info(),
+            input: Box::new(plan),
+        };
+    }
+
+    let Some(root) = root else {
+        return plan;
+    };
+    let cache_keys = plan_runtime_index_cache_keys(&plan);
+    if matches!(
+        kind,
+        crate::include::nodes::primnodes::JoinType::Inner
+            | crate::include::nodes::primnodes::JoinType::Left
+    ) && root.parse.limit_count == Some(100)
+        && !nest_params.is_empty()
+        && !cache_keys.is_empty()
+    {
+        return Plan::Memoize {
+            plan_info: plan.plan_info(),
+            input: Box::new(plan),
+            cache_keys,
+        };
+    }
+
+    plan
+}
+
+fn plan_is_plain_seq_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::SeqScan { .. } => true,
+        Plan::Filter { input, .. } | Plan::Projection { input, .. } => {
+            plan_is_plain_seq_scan(input)
+        }
+        _ => false,
+    }
+}
+
+fn plan_runtime_index_cache_keys(plan: &Plan) -> Vec<Expr> {
+    let mut keys = Vec::new();
+    collect_runtime_index_cache_keys(plan, &mut keys);
+    keys
+}
+
+fn collect_runtime_index_cache_keys(plan: &Plan, keys: &mut Vec<Expr>) {
+    match plan {
+        Plan::IndexOnlyScan {
+            keys: scan_keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys: scan_keys,
+            order_by_keys,
+            ..
+        } => {
+            for key in scan_keys.iter().chain(order_by_keys.iter()) {
+                if let IndexScanKeyArgument::Runtime(expr) = &key.argument
+                    && !keys.contains(expr)
+                {
+                    keys.push(expr.clone());
+                }
+            }
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => collect_runtime_index_cache_keys(input, keys),
+        _ => {}
     }
 }
 

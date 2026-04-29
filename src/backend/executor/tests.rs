@@ -5294,6 +5294,9 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
                 collect_hash_clause_counts(right, counts);
             }
             Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. }
             | Plan::Unique { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }

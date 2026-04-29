@@ -419,8 +419,9 @@ fn format_explain_plan_with_subplans_inner(
 ) {
     if let Some(plan_info) = const_false_filter_result_plan(plan) {
         let prefix = explain_node_prefix(indent, is_child);
+        let detail_prefix = explain_detail_prefix(indent);
         push_explain_line(&format!("{prefix}Result"), plan_info, show_costs, lines);
-        lines.push(format!("{prefix}  One-Time Filter: false"));
+        lines.push(format!("{detail_prefix}One-Time Filter: false"));
         return;
     }
 
@@ -723,6 +724,41 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::MergeAppend { items, .. } => {
+            let input_names = plan_join_output_exprs(plan, ctx, true);
+            let sort_key = items
+                .iter()
+                .map(|item| render_nonverbose_sort_item(item, &input_names, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !sort_key.is_empty() {
+                lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            true
+        }
+        Plan::Memoize { cache_keys, .. } => {
+            if !cache_keys.is_empty() {
+                let rendered = cache_keys
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &[], ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("{prefix}Cache Key: {rendered}"));
+            }
+            lines.push(format!("{prefix}Cache Mode: logical"));
+            true
+        }
+        Plan::Gather {
+            workers_planned,
+            single_copy,
+            ..
+        } => {
+            lines.push(format!("{prefix}Workers Planned: {workers_planned}"));
+            if *single_copy {
+                lines.push(format!("{prefix}Single Copy: true"));
+            }
+            true
+        }
         Plan::Aggregate {
             input,
             disabled,
@@ -819,6 +855,42 @@ fn push_nonverbose_plan_details(
                                 .join(" AND ")
                         });
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            }
+            if !join_qual.is_empty() {
+                let rendered = join_qual
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Join Filter: {rendered}"));
+            }
+            if !qual.is_empty() {
+                let rendered = qual
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Filter: {rendered}"));
+            }
+            true
+        }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            join_qual,
+            qual,
+            ..
+        } => {
+            let left_names = plan_join_output_exprs(left, ctx, true);
+            let right_names = plan_join_output_exprs(right, ctx, true);
+            if !merge_clauses.is_empty() {
+                let rendered = merge_clauses
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
                 let rendered = join_qual
@@ -1215,20 +1287,23 @@ fn render_hash_join_condition(
     if outer_hash_keys.len() != inner_hash_keys.len() || outer_hash_keys.is_empty() {
         return None;
     }
-    Some(
-        outer_hash_keys
-            .iter()
-            .zip(inner_hash_keys.iter())
-            .map(|(outer, inner)| {
-                format!(
-                    "({} = {})",
-                    render_verbose_expr(outer, left_names, ctx),
-                    render_verbose_expr(inner, right_names, ctx)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" AND "),
-    )
+    let rendered = outer_hash_keys
+        .iter()
+        .zip(inner_hash_keys.iter())
+        .map(|(outer, inner)| {
+            format!(
+                "({} = {})",
+                render_verbose_expr(outer, left_names, ctx),
+                render_verbose_expr(inner, right_names, ctx)
+            )
+        })
+        .collect::<Vec<_>>();
+    let joined = rendered.join(" AND ");
+    Some(if rendered.len() > 1 {
+        format!("({joined})")
+    } else {
+        joined
+    })
 }
 
 fn render_window_clause_for_explain(
@@ -2299,6 +2374,27 @@ fn push_verbose_plan_details(
                 render_verbose_set_returning_call(call, ctx)
             ));
         }
+        Plan::Memoize { cache_keys, .. } => {
+            if !cache_keys.is_empty() {
+                let rendered = cache_keys
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &[], ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("{prefix}Cache Key: {rendered}"));
+            }
+            lines.push(format!("{prefix}Cache Mode: logical"));
+        }
+        Plan::Gather {
+            workers_planned,
+            single_copy,
+            ..
+        } => {
+            lines.push(format!("{prefix}Workers Planned: {workers_planned}"));
+            if *single_copy {
+                lines.push(format!("{prefix}Single Copy: true"));
+            }
+        }
         Plan::Filter {
             input, predicate, ..
         } => {
@@ -2683,6 +2779,9 @@ fn child_leaf_scan_source(plan: &Plan) -> Option<LeafScanSource> {
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => relation_leaf_scan_source(relation_name),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2907,6 +3006,9 @@ fn plan_join_output_exprs(
         } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
         Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -3126,6 +3228,9 @@ fn verbose_plan_output_exprs(
         } => qualified_base_scan_output_exprs(relation_name, desc),
         Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -4033,6 +4138,9 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
             Vec::new()
         }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -4113,6 +4221,7 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
         {
             Some(*plan_info)
         }
+        Plan::Hash { input, .. } => const_false_filter_result_plan(input),
         Plan::Projection { input, targets, .. }
             if projection_targets_are_explain_passthrough(input, targets) =>
         {
@@ -4196,6 +4305,13 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
                 collect_direct_expr_subplans(expr, &mut found);
             }
         }
+        Plan::Materialize { .. } => {}
+        Plan::Memoize { cache_keys, .. } => {
+            for expr in cache_keys {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+        }
+        Plan::Gather { .. } => {}
         Plan::NestedLoopJoin {
             join_qual, qual, ..
         } => {

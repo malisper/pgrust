@@ -6447,6 +6447,9 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         }
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -6497,6 +6500,9 @@ fn plan_contains_lock_rows(plan: &Plan) -> bool {
         | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_lock_rows),
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
