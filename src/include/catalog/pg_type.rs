@@ -140,7 +140,10 @@ pub fn pg_type_desc() -> RelationDesc {
             column_desc("typdelim", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("typanalyze", SqlType::new(SqlTypeKind::RegProc), false),
             column_desc("typbasetype", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typtypmod", SqlType::new(SqlTypeKind::Int4), false),
             column_desc("typcollation", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typnotnull", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("typdefault", SqlType::new(SqlTypeKind::Text), true),
             column_desc(
                 "typacl",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Text)),

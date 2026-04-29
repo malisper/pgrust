@@ -5,7 +5,8 @@ use crate::backend::parser::parse_statement;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::{
-    ANYOID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PgPartitionedTableRow, PgProcRow,
+    ANYOID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PG_TYPE_RELATION_OID,
+    PgPartitionedTableRow, PgProcRow,
 };
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
@@ -748,6 +749,43 @@ fn scope_with_output_exprs(mut scope: BoundScope, output_exprs: &[Expr]) -> Boun
     scope
 }
 
+fn bind_relation_from_entry(
+    name: &str,
+    only: bool,
+    catalog: &dyn CatalogLookup,
+    entry: BoundRelation,
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S' | 't' | 'f') {
+        return Err(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table, view, materialized view, sequence, or TOAST table",
+        });
+    }
+    if entry.relkind == 'f' {
+        validate_foreign_table_scan_handler(catalog, entry.relation_oid)?;
+    }
+    let desc = entry.desc.clone();
+    let mut plan = AnalyzedFrom::relation(
+        name.to_string(),
+        entry.rel,
+        entry.relation_oid,
+        entry.relkind,
+        entry.relispopulated,
+        entry.toast,
+        !only && matches!(entry.relkind, 'r' | 'p'),
+        desc.clone(),
+    );
+    plan.output_exprs = generated_relation_output_exprs(&desc, catalog)?;
+    Ok((
+        plan,
+        scope_for_base_relation_with_generated(name, &desc, Some(entry.relation_oid), catalog)?,
+    ))
+}
+
+fn is_pg_type_relation_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("pg_type") || name.eq_ignore_ascii_case("pg_catalog.pg_type")
+}
+
 pub(super) fn bind_from_item_with_ctes(
     stmt: &FromItem,
     catalog: &dyn CatalogLookup,
@@ -788,42 +826,18 @@ pub(super) fn bind_from_item_with_ctes(
                     ),
                 ));
             }
+            if is_pg_type_relation_name(name)
+                && let Some(entry) = catalog.lookup_relation_by_oid(PG_TYPE_RELATION_OID)
+            {
+                return bind_relation_from_entry(name, *only, catalog, entry);
+            }
             if let Some(bound) = bind_builtin_system_view(name, catalog) {
                 return Ok(bound);
             }
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S' | 't' | 'f') {
-                return Err(ParseError::WrongObjectType {
-                    name: name.to_string(),
-                    expected: "table, view, materialized view, sequence, or TOAST table",
-                });
-            }
-            if entry.relkind == 'f' {
-                validate_foreign_table_scan_handler(catalog, entry.relation_oid)?;
-            }
-            let desc = entry.desc.clone();
-            let mut plan = AnalyzedFrom::relation(
-                name.clone(),
-                entry.rel,
-                entry.relation_oid,
-                entry.relkind,
-                entry.relispopulated,
-                entry.toast,
-                !*only && matches!(entry.relkind, 'r' | 'p'),
-                desc.clone(),
-            );
-            plan.output_exprs = generated_relation_output_exprs(&desc, catalog)?;
-            Ok((
-                plan,
-                scope_for_base_relation_with_generated(
-                    name,
-                    &desc,
-                    Some(entry.relation_oid),
-                    catalog,
-                )?,
-            ))
+            bind_relation_from_entry(name, *only, catalog, entry)
         }
         FromItem::Values { rows } => {
             bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer, ctes)
