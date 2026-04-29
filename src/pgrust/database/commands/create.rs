@@ -2323,7 +2323,7 @@ impl Database {
                     relation.relation_oid,
                     action.constraint_name.clone(),
                     action.enforced,
-                    action.enforced && !action.not_valid,
+                    action.enforced && (action.is_local || !action.not_valid),
                     action.no_inherit,
                     action.expr_sql.clone(),
                     action.parent_constraint_oid.unwrap_or(0),

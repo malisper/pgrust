@@ -858,6 +858,7 @@ impl Database {
                 &catalog,
                 type_row.oid,
                 &type_row.typname,
+                true,
             )?;
         }
 
@@ -876,6 +877,7 @@ impl Database {
                     &catalog,
                     type_row.oid,
                     &type_row.typname,
+                    false,
                 )?;
             }
             table_updates.push((relation, desc));
@@ -1430,6 +1432,7 @@ fn apply_composite_attribute_action(
     catalog: &dyn CatalogLookup,
     composite_type_oid: u32,
     composite_type_name: &str,
+    emit_missing_notice: bool,
 ) -> Result<(), ExecError> {
     match action {
         AlterCompositeTypeAction::AddAttribute { attribute, .. } => {
@@ -1475,6 +1478,11 @@ fn apply_composite_attribute_action(
         } => {
             let Some(index) = visible_column_index(desc, name) else {
                 if *if_exists {
+                    if emit_missing_notice {
+                        push_notice(format!(
+                            "column \"{name}\" of relation \"{composite_type_name}\" does not exist, skipping"
+                        ));
+                    }
                     return Ok(());
                 }
                 return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));

@@ -16,6 +16,15 @@ use crate::pgrust::database::queue_pending_notification;
 use crate::pl::plpgsql::execute_do;
 
 fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
+    if stmt.feature == "ALTER TABLE form" {
+        let lower = stmt.sql.to_ascii_lowercase();
+        if lower.contains(" set with oids") {
+            return ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "valid ALTER TABLE form",
+                actual: "syntax error at or near \"WITH\"".into(),
+            });
+        }
+    }
     ExecError::Parse(ParseError::FeatureNotSupported(format!(
         "{}: {}",
         stmt.feature, stmt.sql
@@ -675,6 +684,12 @@ fn execute_statement_with_source(
             // form so regression scripts that set up ownership can proceed.
             Ok(StatementResult::AffectedRows(0))
         }
+        Statement::Unsupported(stmt)
+            if stmt.feature == "ALTER TABLE form"
+                && stmt.sql.to_ascii_lowercase().contains(" set without oids") =>
+        {
+            Ok(StatementResult::AffectedRows(0))
+        }
         Statement::AlterTableCompound(_) => Err(ExecError::Parse(
             ParseError::FeatureNotSupported("ALTER TABLE compound execution".into()),
         )),
@@ -775,6 +790,12 @@ pub fn execute_readonly_statement_with_config(
         ))),
         Statement::Unsupported(stmt) if stmt.feature == "ALTER DEFAULT PRIVILEGES" => {
             // :HACK: see readonly path above.
+            Ok(StatementResult::AffectedRows(0))
+        }
+        Statement::Unsupported(stmt)
+            if stmt.feature == "ALTER TABLE form"
+                && stmt.sql.to_ascii_lowercase().contains(" set without oids") =>
+        {
             Ok(StatementResult::AffectedRows(0))
         }
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),

@@ -151,7 +151,7 @@ pub(super) fn lookup_index_relation_for_alter_index(
     if_exists: bool,
 ) -> Result<Option<BoundRelation>, ExecError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if entry.relkind == 'i' => Ok(Some(entry)),
+        Some(entry) if matches!(entry.relkind, 'i' | 'I') => Ok(Some(entry)),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "index",
@@ -1738,6 +1738,26 @@ pub(super) fn automatic_alter_type_cast_allowed(
         .is_some_and(|row| row.castcontext != 'e')
 }
 
+fn literal_default_cast_input(expr: &SqlExpr) -> Option<Value> {
+    match expr {
+        SqlExpr::Const(value) => Some(value.clone()),
+        SqlExpr::IntegerLiteral(value) | SqlExpr::NumericLiteral(value) => {
+            Some(Value::Text(value.clone().into()))
+        }
+        SqlExpr::UnaryPlus(inner) => literal_default_cast_input(inner),
+        SqlExpr::Negate(inner) => match literal_default_cast_input(inner)? {
+            Value::Text(text) => Some(Value::Text(format!("-{}", text.as_str()).into())),
+            Value::Int16(value) => Some(Value::Int16(value.saturating_neg())),
+            Value::Int32(value) => Some(Value::Int32(value.saturating_neg())),
+            Value::Int64(value) => Some(Value::Int64(value.saturating_neg())),
+            Value::Float64(value) => Some(Value::Float64(-value)),
+            Value::Numeric(value) => Some(Value::Numeric(value.negate())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub(super) fn validate_alter_table_alter_column_default(
     catalog: &dyn CatalogLookup,
     desc: &RelationDesc,
@@ -1786,6 +1806,14 @@ pub(super) fn validate_alter_table_alter_column_default(
             bind_scalar_expr_in_scope(expr, &[], catalog).map_err(ExecError::Parse)?;
         if !automatic_alter_type_cast_allowed(catalog, default_type, current_column.sql_type) {
             if let Some(sql) = default_expr_sql
+                && let Some(value) = literal_default_cast_input(expr)
+            {
+                crate::backend::executor::cast_value(value, current_column.sql_type)?;
+                normalized_default_expr_sql = Some(format!(
+                    "({sql})::{}",
+                    format_sql_type_name(current_column.sql_type)
+                ));
+            } else if let Some(sql) = default_expr_sql
                 && (current_column.sql_type.is_range() || current_column.sql_type.is_multirange())
                 && let SqlExpr::Const(value) = expr
                 && let Some(text) = value.as_text()
@@ -2086,6 +2114,14 @@ pub(super) fn validate_alter_index_alter_column_statistics(
             hint: None,
             sqlstate: "42809",
         })?;
+    if column_number < 1 {
+        return Err(ExecError::DetailedError {
+            message: "column number must be in range from 1 to 32767".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
     let column_index = usize::try_from(column_number - 1).unwrap_or(usize::MAX);
     let column = entry
         .desc
@@ -2150,12 +2186,13 @@ pub(super) fn validate_alter_table_alter_column_type(
     desc: &RelationDesc,
     column_name: &str,
     ty: &RawTypeName,
+    collation: Option<&str>,
     using_expr: Option<&SqlExpr>,
 ) -> Result<AlterColumnTypePlan, ExecError> {
     if is_system_column_name(column_name) {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "user column name for ALTER COLUMN TYPE",
-            actual: column_name.to_string(),
+            actual: format!("cannot alter system column \"{column_name}\""),
         }));
     }
 
@@ -2265,6 +2302,21 @@ pub(super) fn validate_alter_table_alter_column_type(
         target_sql_type,
         current_column.storage.nullable,
     );
+    if let Some(collation) = collation {
+        if !is_collatable_type(target_sql_type) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "collations are not supported by type {}",
+                    sql_type_name(target_sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        new_column.collation_oid =
+            resolve_collation_oid(collation, catalog).map_err(ExecError::Parse)?;
+    }
     new_column.storage.attstorage = current_column.storage.attstorage;
     new_column.storage.attcompression = current_column.storage.attcompression;
     new_column.attstattarget = current_column.attstattarget;

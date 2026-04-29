@@ -1,5 +1,5 @@
 use super::ddl::map_catalog_error;
-use super::{Database, LOGICAL_RELATION_LOCK_SPC_OID};
+use super::{Database, relation_lock_tag};
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatsImportRuntime, TypedFunctionArg, Value,
@@ -12,8 +12,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::misc::notices::{push_backend_notice, push_warning};
 use crate::include::catalog::{
-    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, PgStatisticRow, TEXT_TYPE_OID, relkind_has_storage,
-    relkind_is_analyzable,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, PgStatisticRow, TEXT_TYPE_OID, relkind_is_analyzable,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::compact_string::CompactString;
@@ -564,18 +563,7 @@ impl Database {
 }
 
 fn stats_relation_lock_tag(relation: &BoundRelation) -> RelFileLocator {
-    if relkind_has_storage(relation.relkind) {
-        return relation.rel;
-    }
-
-    // :HACK: pgrust does not have PostgreSQL heavyweight lock tags separate
-    // from storage locators yet. Use an impossible tablespace OID to represent
-    // relation-OID locks for relkinds without physical storage.
-    RelFileLocator {
-        spc_oid: LOGICAL_RELATION_LOCK_SPC_OID,
-        db_oid: relation.rel.db_oid,
-        rel_number: relation.relation_oid,
-    }
+    relation_lock_tag(relation)
 }
 
 fn validate_stats_relkind(
