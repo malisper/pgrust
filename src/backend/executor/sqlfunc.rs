@@ -209,15 +209,32 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
         let expand_single_record = sql_function_declares_record_result(row, catalog.as_ref());
         match result {
             StatementResult::Query { columns, rows, .. } => {
-                validate_sql_function_query_columns(catalog.as_ref(), &columns, output_columns)?;
+                let projection = sql_function_composite_projection(
+                    row,
+                    &columns,
+                    output_columns,
+                    catalog.as_ref(),
+                )?;
+                let returned_columns = projection
+                    .as_ref()
+                    .map(|projection| projection.columns.as_slice())
+                    .unwrap_or(columns.as_slice());
+                validate_sql_function_query_columns(
+                    catalog.as_ref(),
+                    returned_columns,
+                    output_columns,
+                )?;
                 let rows: Box<dyn Iterator<Item = Vec<Value>>> = if row.proretset {
                     Box::new(rows.into_iter())
                 } else {
                     Box::new(rows.into_iter().take(1))
                 };
-                rows.map(|row| {
+                rows.map(|mut row| {
+                    if let Some(projection) = &projection {
+                        row = project_sql_function_row(row, projection);
+                    }
                     if should_pack_sql_set_returning_record_row(output_columns, row.as_slice()) {
-                        let coerced = vec![pack_sql_function_record_row(row, &columns)];
+                        let coerced = vec![pack_sql_function_record_row(row, returned_columns)];
                         return Ok(TupleSlot::virtual_row(coerced));
                     }
                     if row.len() == 1
@@ -250,6 +267,156 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
         }
     })
     .map_err(|err| sql_function_context_error(row, err))
+}
+
+struct SqlFunctionCompositeProjection {
+    indexes: Vec<usize>,
+    columns: Vec<QueryColumn>,
+}
+
+fn sql_function_composite_projection(
+    row: &PgProcRow,
+    returned_columns: &[QueryColumn],
+    expected_columns: &[QueryColumn],
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<SqlFunctionCompositeProjection>, ExecError> {
+    if returned_columns == expected_columns {
+        return Ok(None);
+    }
+    if sql_function_outputs_single_composite_column(expected_columns) {
+        return Ok(None);
+    }
+    let Some(relation_desc) = sql_function_return_relation_desc(row, catalog) else {
+        return Ok(None);
+    };
+    if let Some(dropped_index) =
+        missing_expected_composite_output_attr_index(&relation_desc, expected_columns)
+    {
+        return Err(ExecError::Parse(
+            crate::backend::parser::ParseError::DetailedError {
+                message: format!(
+                    "attribute {} of type record has been dropped",
+                    dropped_index.saturating_add(1)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            },
+        ));
+    }
+
+    let mut indexes = Vec::with_capacity(expected_columns.len());
+    let mut columns = Vec::with_capacity(expected_columns.len());
+    let mut search_from = 0usize;
+    for expected in expected_columns {
+        let Some((index, column)) =
+            returned_columns
+                .iter()
+                .enumerate()
+                .skip(search_from)
+                .find(|(_, returned)| {
+                    returned.name == expected.name && returned.sql_type == expected.sql_type
+                })
+        else {
+            return Ok(None);
+        };
+        indexes.push(index);
+        columns.push(column.clone());
+        search_from = index.saturating_add(1);
+    }
+
+    if indexes
+        .iter()
+        .enumerate()
+        .all(|(index, projected)| index == *projected)
+        && indexes.len() == returned_columns.len()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(SqlFunctionCompositeProjection { indexes, columns }))
+}
+
+fn project_sql_function_row(
+    row: Vec<Value>,
+    projection: &SqlFunctionCompositeProjection,
+) -> Vec<Value> {
+    projection
+        .indexes
+        .iter()
+        .map(|index| row.get(*index).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn sql_function_return_relation_desc(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<crate::include::nodes::primnodes::RelationDesc> {
+    let return_type = catalog.type_by_oid(row.prorettype)?;
+    if return_type.typrelid == 0 {
+        return None;
+    }
+    catalog
+        .relation_by_oid(return_type.typrelid)
+        .or_else(|| catalog.lookup_relation_by_oid(return_type.typrelid))
+        .map(|relation| relation.desc)
+}
+
+fn missing_expected_composite_output_attr_index(
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+    expected_columns: &[QueryColumn],
+) -> Option<usize> {
+    let mut cursor = 0usize;
+    for (index, expected) in expected_columns.iter().enumerate() {
+        if let Some(found) = find_live_composite_column_at_or_after(desc, expected, cursor) {
+            cursor = found.saturating_add(1);
+            continue;
+        }
+        let next_live_index = expected_columns
+            .iter()
+            .skip(index.saturating_add(1))
+            .find_map(|column| find_live_composite_column_at_or_after(desc, column, cursor))
+            .unwrap_or(desc.columns.len());
+        return desc
+            .columns
+            .iter()
+            .enumerate()
+            .take(next_live_index)
+            .skip(cursor)
+            .rev()
+            .find_map(|(attr_index, column)| column.dropped.then_some(attr_index))
+            .or_else(|| {
+                desc.columns
+                    .iter()
+                    .enumerate()
+                    .skip(cursor)
+                    .find_map(|(attr_index, column)| column.dropped.then_some(attr_index))
+            });
+    }
+    None
+}
+
+fn find_live_composite_column_at_or_after(
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+    expected: &QueryColumn,
+    start: usize,
+) -> Option<usize> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, column)| {
+            !column.dropped && column.name == expected.name && column.sql_type == expected.sql_type
+        })
+        .map(|(index, _)| index)
+}
+
+fn sql_function_outputs_single_composite_column(output_columns: &[QueryColumn]) -> bool {
+    output_columns.len() == 1
+        && matches!(
+            output_columns[0].sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
 }
 
 fn sql_function_single_value_is_whole_result(
@@ -984,6 +1151,14 @@ fn sql_function_context_error(row: &PgProcRow, err: ExecError) -> ExecError {
         &err,
         ExecError::DetailedError { message, .. }
             if message == "function return row and query-specified return row do not match"
+    ) {
+        return err;
+    }
+    if matches!(
+        &err,
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+            if message.starts_with("attribute ")
+                && message.ends_with(" of type record has been dropped")
     ) {
         return err;
     }

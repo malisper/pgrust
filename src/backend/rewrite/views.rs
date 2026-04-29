@@ -406,6 +406,7 @@ fn validate_view_shape(
     display_name: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {
+    validate_view_function_target_columns(query, catalog)?;
     let actual_columns = query.columns();
     if actual_columns.len() != relation_desc.columns.len() {
         if actual_columns.len() > relation_desc.columns.len()
@@ -467,6 +468,172 @@ fn validate_view_shape(
         }
     }
     Ok(())
+}
+
+fn validate_view_function_target_columns(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    for target in query.target_list.iter().filter(|target| !target.resjunk) {
+        if let Expr::Var(var) = &target.expr {
+            validate_view_function_var_column(var, query, catalog)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_view_function_var_column(
+    var: &Var,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if var.varlevelsup != 0 {
+        return Ok(());
+    }
+    let Some(rte) = query.rtable.get(var.varno.saturating_sub(1)) else {
+        return Ok(());
+    };
+    let RangeTblEntryKind::Function { call } = &rte.kind else {
+        return Ok(());
+    };
+    let Some(target_index) = attrno_index(var.varattno) else {
+        return Ok(());
+    };
+    validate_view_function_call_column(call, target_index, catalog)
+}
+
+fn validate_view_function_call_column(
+    call: &SetReturningCall,
+    target_index: usize,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            let mut offset = 0usize;
+            for item in items {
+                let width = item.output_columns().len();
+                if target_index < offset.saturating_add(width) {
+                    if let RowsFromSource::Function(call) = &item.source {
+                        return validate_view_function_call_column(
+                            call,
+                            target_index.saturating_sub(offset),
+                            catalog,
+                        );
+                    }
+                    return Ok(());
+                }
+                offset = offset.saturating_add(width);
+            }
+            Ok(())
+        }
+        SetReturningCall::UserDefined {
+            proc_oid,
+            output_columns,
+            ..
+        } => validate_view_user_function_column(*proc_oid, output_columns, target_index, catalog),
+        _ => Ok(()),
+    }
+}
+
+fn validate_view_user_function_column(
+    proc_oid: u32,
+    output_columns: &[QueryColumn],
+    target_index: usize,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if function_outputs_single_composite_column(output_columns) {
+        return Ok(());
+    }
+    let Some(proc_row) = catalog.proc_row_by_oid(proc_oid) else {
+        return Ok(());
+    };
+    let Some(return_type) = catalog.type_by_oid(proc_row.prorettype) else {
+        return Ok(());
+    };
+    if return_type.typrelid == 0 {
+        return Ok(());
+    }
+    let Some(relation) = catalog
+        .relation_by_oid(return_type.typrelid)
+        .or_else(|| catalog.lookup_relation_by_oid(return_type.typrelid))
+    else {
+        return Ok(());
+    };
+    let Some(dropped_index) =
+        missing_composite_output_attr_index(&relation.desc, output_columns, target_index)
+    else {
+        return Ok(());
+    };
+    Err(ParseError::DetailedError {
+        message: format!(
+            "attribute {} of type record has been dropped",
+            dropped_index.saturating_add(1)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42703",
+    })
+}
+
+fn missing_composite_output_attr_index(
+    desc: &RelationDesc,
+    expected_columns: &[QueryColumn],
+    target_index: usize,
+) -> Option<usize> {
+    let mut cursor = 0usize;
+    for (index, expected) in expected_columns.iter().enumerate() {
+        if let Some(found) = find_live_column_at_or_after(desc, expected, cursor) {
+            cursor = found.saturating_add(1);
+            continue;
+        }
+        if index == target_index {
+            let next_live_index = expected_columns
+                .iter()
+                .skip(index.saturating_add(1))
+                .find_map(|column| find_live_column_at_or_after(desc, column, cursor))
+                .unwrap_or(desc.columns.len());
+            return desc
+                .columns
+                .iter()
+                .enumerate()
+                .take(next_live_index)
+                .skip(cursor)
+                .rev()
+                .find_map(|(attr_index, column)| column.dropped.then_some(attr_index))
+                .or_else(|| {
+                    desc.columns
+                        .iter()
+                        .enumerate()
+                        .skip(cursor)
+                        .find_map(|(attr_index, column)| column.dropped.then_some(attr_index))
+                });
+        }
+        return None;
+    }
+    None
+}
+
+fn find_live_column_at_or_after(
+    desc: &RelationDesc,
+    expected: &QueryColumn,
+    start: usize,
+) -> Option<usize> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find(|(_, column)| {
+            !column.dropped && column.name == expected.name && column.sql_type == expected.sql_type
+        })
+        .map(|(index, _)| index)
+}
+
+fn function_outputs_single_composite_column(output_columns: &[QueryColumn]) -> bool {
+    output_columns.len() == 1
+        && matches!(
+            output_columns[0].sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
 }
 
 fn dropped_view_attribute_number(
