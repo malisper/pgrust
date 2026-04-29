@@ -1428,15 +1428,54 @@ else
             "$([[ "$SCHEDULE_OVERRIDE" == true ]] && echo false || echo true)"
     )
 
+    # Longest-Processing-Time bin-packing: heaviest schedule groups go to the
+    # currently-least-loaded shard. Round-robin (idx % SHARD_TOTAL) left
+    # shard 0 with ~2x the test count of shard 3 because PG's heavy parallel
+    # groups happen to land on indices 0,4,8,12,16,20. Weighting by
+    # test-count-per-group is a proxy for runtime; per-test history would be
+    # better but requires plumbing regression-history data into the harness.
+    SHARD_ASSIGNMENTS=()
+    if [[ ${#ALL_TEST_GROUPS[@]} -gt 0 ]]; then
+        mapfile -t SHARD_ASSIGNMENTS < <(
+            printf '%s\n' "${ALL_TEST_GROUPS[@]}" | python3 - "$SHARD_TOTAL" <<'PY'
+import sys
+shard_total = int(sys.argv[1])
+groups = sys.stdin.read().splitlines()
+weights = [(len(g.split()), i) for i, g in enumerate(groups)]
+# Heaviest first; original index breaks ties so assignment is deterministic.
+weights.sort(key=lambda x: (-x[0], x[1]))
+loads = [0] * shard_total
+assignment = [0] * len(groups)
+for weight, orig_idx in weights:
+    target = min(range(shard_total), key=lambda s: (loads[s], s))
+    assignment[orig_idx] = target
+    loads[target] += weight
+for a in assignment:
+    print(a)
+PY
+        )
+    fi
+
+    SHARD_LOADS=()
+    for ((i=0; i<SHARD_TOTAL; i++)); do SHARD_LOADS[i]=0; done
     group_idx=0
     for group in "${ALL_TEST_GROUPS[@]}"; do
-        if [[ $((group_idx % SHARD_TOTAL)) -eq "$SHARD_INDEX" ]]; then
+        target="${SHARD_ASSIGNMENTS[$group_idx]:-0}"
+        test_count=$(printf '%s' "$group" | wc -w | tr -d ' ')
+        SHARD_LOADS[target]=$((${SHARD_LOADS[target]} + test_count))
+        if [[ "$target" == "$SHARD_INDEX" ]]; then
             TEST_GROUPS+=("$group")
         fi
         group_idx=$((group_idx + 1))
     done
 
     if [[ "$SHARD_TOTAL" -gt 1 ]]; then
+        load_summary=""
+        for ((i=0; i<SHARD_TOTAL; i++)); do
+            [[ -n "$load_summary" ]] && load_summary+=" "
+            load_summary+="shard${i}=${SHARD_LOADS[i]}"
+        done
+        echo "Balanced shard load (test count): $load_summary"
         echo "Selected ${#TEST_GROUPS[@]} of ${#ALL_TEST_GROUPS[@]} schedule groups for shard ${SHARD_INDEX}/${SHARD_TOTAL}."
     fi
 
