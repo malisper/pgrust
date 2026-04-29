@@ -456,10 +456,16 @@ pub fn heap_page_replace_tuple(
 ) -> Result<(), TupleError> {
     let item_id = page_get_item_id(page, offset)?;
     let start = usize::from(item_id.lp_off);
-    let on_page_hoff = page[start + 22] as usize;
-    let header_bytes = tuple.header.serialize();
-    debug_assert_eq!(header_bytes.len(), on_page_hoff);
-    page[start..start + on_page_hoff].copy_from_slice(&header_bytes);
+    let existing_infomask = u16::from_le_bytes([page[start + 20], page[start + 21]]);
+    let layout_bits = HEAP_HASNULL | HEAP_HASVARWIDTH;
+    let infomask = (tuple.header.infomask & !layout_bits) | (existing_infomask & layout_bits);
+
+    page[start..start + 4].copy_from_slice(&tuple.header.xmin.to_le_bytes());
+    page[start + 4..start + 8].copy_from_slice(&tuple.header.xmax.to_le_bytes());
+    page[start + 8..start + 12].copy_from_slice(&tuple.header.cid_or_xvac.to_le_bytes());
+    page[start + 12..start + 16].copy_from_slice(&tuple.header.ctid.block_number.to_le_bytes());
+    page[start + 16..start + 18].copy_from_slice(&tuple.header.ctid.offset_number.to_le_bytes());
+    page[start + 20..start + 22].copy_from_slice(&infomask.to_le_bytes());
     Ok(())
 }
 

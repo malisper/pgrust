@@ -37,3 +37,32 @@ Focused regression files still have output mismatches unrelated to statement
 timeouts. subselect.sql reaches the existing executor panic at
 src/backend/executor/nodes.rs:9332 after the previously timed-out IN queries
 complete.
+
+Crash follow-up:
+MERGE regression later exposed two separate crash paths. The source-side setrefs
+panic came from binding MERGE source action Vars to the raw joined source RTEs
+even though pgrust executes MERGE through a projected source subquery.
+PostgreSQL's setrefs.c rewrites MERGE source Vars against the MERGE subplan
+targetlist, so pgrust now retargets the source scope to the source projection
+before joining it to the target.
+
+The later pg_class heap tuple panic was caused by pgrust encoding aclitem[]
+catalog columns with generic 4-byte array alignment while relcache decoded
+pg_class.relacl with PostgreSQL's double alignment for arrays of double-aligned
+elements. pgrust now follows that PostgreSQL array alignment rule for column
+descriptors. heap_page_replace_tuple also now preserves on-page tuple layout
+header bits while updating MVCC header fields.
+
+Crash tests run:
+scripts/cargo_isolated.sh test --lib --quiet array_column_alignment_follows_postgres_element_alignment
+scripts/cargo_isolated.sh test --lib --quiet replace_tuple_preserves_tuple_layout_bits
+scripts/cargo_isolated.sh test --lib --quiet pg_class_long_relacl_catalog_tuple_roundtrips
+scripts/cargo_isolated.sh test --lib --quiet duplicate_table_grant_keeps_pg_class_tuple_layout
+scripts/cargo_isolated.sh test --lib --quiet merge_updates_pg_class_through_auto_updatable_view
+scripts/cargo_isolated.sh test --lib --quiet merge_inserts_from_unaliased_joined_source
+scripts/cargo_isolated.sh test --lib --quiet merge_accepts_joined_source
+scripts/run_regression.sh --test merge --timeout 300 --jobs 1 --port 59545 --results-dir /tmp/pgrust-merge-current-madrid-v4
+
+Crash follow-up remaining:
+merge.sql no longer crashes or times out locally; it completes with existing
+output diffs: 542/641 queries matched, 99 mismatched.

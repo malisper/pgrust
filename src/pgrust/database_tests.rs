@@ -13607,6 +13607,145 @@ fn merge_accepts_joined_source() {
 }
 
 #[test]
+fn merge_inserts_from_unaliased_joined_source() {
+    let dir = temp_dir("merge_unaliased_joined_source_insert");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table cj_target (tid int4, balance float8, val text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table cj_source1 (sid1 int4, scat int4, delta int4)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table cj_source2 (sid2 int4, sval text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cj_source1 values (1, 10, 100), (2, 20, 300)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cj_source2 values (1, 'source one'), (2, 'source two')",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "merge into cj_target t \
+             using cj_source1 s1 inner join cj_source2 s2 on sid1 = sid2 \
+             on t.tid = sid1 \
+             when not matched then insert values (sid1, delta, sval)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select tid, balance, val from cj_target order by tid",
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Float64(100.0),
+                Value::Text("source one".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Float64(300.0),
+                Value::Text("source two".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn merge_updates_pg_class_through_auto_updatable_view() {
+    let dir = temp_dir("merge_pg_class_view_update");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "merge into pg_class c \
+             using (select 'pg_depend'::regclass as oid) as j \
+             on j.oid = c.oid \
+             when matched then update set reltuples = reltuples + 1 \
+             returning j.oid",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create view classv as select * from pg_class")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into classv c \
+             using pg_namespace n \
+             on n.oid = c.relnamespace \
+             when matched and c.oid = 'pg_depend'::regclass then \
+                 update set reltuples = reltuples - 1 \
+             returning c.oid",
+        ),
+        vec![vec![Value::Int64(2608)]]
+    );
+}
+
+#[test]
+fn duplicate_table_grant_keeps_pg_class_tuple_layout() {
+    let dir = temp_dir("duplicate_table_grant_pg_class_layout");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create user regress_merge_privs")
+        .unwrap();
+    session
+        .execute(&db, "create user regress_merge_no_privs")
+        .unwrap();
+    session
+        .execute(&db, "create table target (tid int4, balance int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table target owner to regress_merge_privs")
+        .unwrap();
+    session
+        .execute(&db, "grant insert on target to regress_merge_no_privs")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization regress_merge_privs")
+        .unwrap();
+    session
+        .execute(&db, "grant insert on target to regress_merge_no_privs")
+        .unwrap();
+    session.execute(&db, "reset session authorization").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class where relname = 'target'",
+        ),
+        vec![vec![Value::Text("target".into())]]
+    );
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();

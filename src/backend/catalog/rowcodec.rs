@@ -2796,4 +2796,51 @@ mod tests {
         assert_eq!(roundtrip.stanumbers, row.stanumbers);
         assert_eq!(roundtrip.stavalues, row.stavalues);
     }
+
+    #[test]
+    fn pg_class_long_relacl_catalog_tuple_roundtrips() {
+        let row = PgClassRow {
+            oid: 16_384,
+            relname: "target".into(),
+            relnamespace: crate::include::catalog::PG_CATALOG_NAMESPACE_OID,
+            reltype: 16_385,
+            relowner: 16_386,
+            relam: crate::include::catalog::HEAP_TABLE_AM_OID,
+            relfilenode: 16_384,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relpersistence: 'p',
+            relkind: 'r',
+            relnatts: 2,
+            relhassubclass: false,
+            relhastriggers: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
+            relispopulated: true,
+            relispartition: false,
+            relfrozenxid: 3,
+            relpartbound: None,
+            reloptions: None,
+            relacl: Some(vec![
+                "regress_merge_privs=arwdDxtm/regress_merge_privs".into(),
+                "regress_merge_no_privs=a/malisper".into(),
+                "regress_merge_no_privs=a/regress_merge_privs".into(),
+            ]),
+            relreplident: 'd',
+            reloftype: 0,
+        };
+
+        let values = pg_class_row_values(row.clone());
+        let desc = bootstrap_relation_desc(BootstrapCatalogKind::PgClass);
+        let tuple = tuple_from_values(&desc, &values).unwrap();
+        let decoded = decode_catalog_tuple_values(&desc, &tuple).unwrap();
+        let roundtrip = pg_class_row_from_values(decoded).unwrap();
+
+        assert_eq!(roundtrip, row);
+    }
 }
