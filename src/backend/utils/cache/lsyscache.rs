@@ -5,6 +5,7 @@ use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
+use crate::backend::rewrite::relation_row_security_is_enabled_for_user;
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
@@ -2439,11 +2440,31 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
+        let classes = ensure_class_rows(&self.db, self.client_id, self.txn_ctx);
+        let class_rows_by_oid = classes
+            .iter()
+            .map(|row| (row.oid, row))
+            .collect::<BTreeMap<_, _>>();
+        let statistics = ensure_statistic_rows(&self.db, self.client_id, self.txn_ctx)
+            .into_iter()
+            .filter(|stat| {
+                let Some(class) = class_rows_by_oid.get(&stat.starelid) else {
+                    return false;
+                };
+                !class.relrowsecurity
+                    || !relation_row_security_is_enabled_for_user(
+                        class.oid,
+                        self.current_user_oid(),
+                        self,
+                    )
+                    .unwrap_or(true)
+            })
+            .collect();
         build_pg_stats_rows(
             ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
-            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+            classes,
             ensure_attribute_rows(&self.db, self.client_id, self.txn_ctx),
-            ensure_statistic_rows(&self.db, self.client_id, self.txn_ctx),
+            statistics,
         )
     }
 

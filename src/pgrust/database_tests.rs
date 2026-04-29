@@ -10271,6 +10271,91 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
 }
 
 #[test]
+fn pg_stats_hides_rows_when_row_security_is_active() {
+    let dir = temp_dir("pg_stats_rls_filter");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role pg_stats_owner nologin")
+        .unwrap();
+    session
+        .execute(&db, "create role pg_stats_reader nologin")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization pg_stats_owner")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pg_stats_rls_items(a int4, owner_name text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into pg_stats_rls_items values
+               (1, 'pg_stats_owner'),
+               (2, 'pg_stats_reader'),
+               (3, 'pg_stats_reader')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant select on pg_stats_rls_items to pg_stats_reader")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table pg_stats_rls_items enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on pg_stats_rls_items using (owner_name = current_user)",
+        )
+        .unwrap();
+    session.execute(&db, "analyze pg_stats_rls_items").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select row_security_active('pg_stats_rls_items')",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_stats where tablename = 'pg_stats_rls_items'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+
+    session
+        .execute(&db, "set session authorization pg_stats_reader")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select row_security_active('pg_stats_rls_items')",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_stats where tablename = 'pg_stats_rls_items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn table_inheritance_merges_columns_and_scans_children() {
     let dir = temp_dir("table_inheritance_scan");
     let db = Database::open(&dir, 128).unwrap();

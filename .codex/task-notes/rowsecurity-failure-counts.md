@@ -569,3 +569,17 @@ Positioned DML ctid bucket:
 - Remaining positioned-DML gap is EXPLAIN-only: pgrust still renders the
   lowered `ctid = ...` seq scan instead of PostgreSQL's `Tid Scan` with
   `TID Cond: CURRENT OF ...`.
+
+pg_stats RLS filtering bucket:
+- Synthetic `pg_stats` rows are now filtered with PostgreSQL's
+  `relrowsecurity = false OR NOT row_security_active(c.oid)` rule before
+  exposing per-column statistics.
+- Added focused coverage where the table owner can see analyzed stats while a
+  granted reader with active RLS sees no `pg_stats` rows.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  pg_stats_hides_rows_when_row_security_is_active` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `721/774` matched, `53` mismatches, `987` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
