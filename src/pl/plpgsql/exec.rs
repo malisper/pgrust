@@ -1648,7 +1648,12 @@ fn exec_function_block(
 
     for local in &block.local_slots {
         state.values[local.slot] = match &local.default_expr {
-            Some(expr) => cast_value(eval_function_expr(expr, &state.values, ctx)?, local.ty)?,
+            Some(expr) => cast_function_value(
+                eval_function_expr(expr, &state.values, ctx)?,
+                compiled_expr_sql_type_hint(expr),
+                local.ty,
+                ctx,
+            )?,
             None => Value::Null,
         };
     }
@@ -3997,6 +4002,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
         "syntax_error" => Some("42601"),
         "feature_not_supported" => Some("0A000"),
         "reading_sql_data_not_permitted" => Some("2F003"),
+        "wrong_object_type" => Some("42809"),
         _ => None,
     }
 }

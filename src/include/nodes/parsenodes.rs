@@ -3612,6 +3612,7 @@ pub enum GrantObjectPrivilege {
     TablePrivileges(String),
     TableColumnPrivileges(Vec<GrantTableColumnPrivilege>),
     AllPrivilegesOnSchema,
+    CreateOnSchema,
     UsageOnSchema,
     UsageOnType,
     UsageOnLanguage,

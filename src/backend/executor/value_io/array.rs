@@ -1453,7 +1453,7 @@ fn format_array_values_nested(
                 let rendered = render_jsonb_bytes(v).unwrap_or_else(|_| "null".into());
                 push_array_text_element(&mut out, &rendered);
             }
-            Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+            Value::Bool(v) => out.push_str(if *v { "t" } else { "f" }),
             Value::Point(_)
             | Value::Lseg(_)
             | Value::Path(_)

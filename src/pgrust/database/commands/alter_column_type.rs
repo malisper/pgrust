@@ -8,7 +8,10 @@ use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
-use crate::include::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, default_btree_opclass_oid};
+use crate::include::catalog::{
+    BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow, PgStatisticRow,
+    default_btree_opclass_oid,
+};
 use crate::pgrust::database::ddl::{
     lookup_table_or_partitioned_table_for_alter_table,
     reject_column_type_change_with_rule_dependencies, validate_alter_table_alter_column_type,
@@ -65,8 +68,16 @@ fn rewrite_bound_indexes_for_alter_column_type(
     indexes
         .into_iter()
         .map(|mut index| {
-            for (index_column_index, attnum) in index.index_meta.indkey.iter().enumerate() {
-                if *attnum != target_attnum {
+            for index_column_index in 0..index.desc.columns.len() {
+                let attnum_matches = index
+                    .index_meta
+                    .indkey
+                    .get(index_column_index)
+                    .is_some_and(|attnum| *attnum == target_attnum);
+                let name_matches = index.desc.columns[index_column_index]
+                    .name
+                    .eq_ignore_ascii_case(&new_column.name);
+                if !attnum_matches && !name_matches {
                     continue;
                 }
                 index.desc.columns[index_column_index] = new_column.clone();
@@ -135,6 +146,43 @@ fn rebuild_relation_indexes_for_alter_column_type(
         }
     }
     Ok(())
+}
+
+fn statistics_expression_references_column(expr: &str, column_name: &str) -> bool {
+    expr.split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .any(|token| token.eq_ignore_ascii_case(column_name))
+}
+
+fn statistics_row_depends_on_column(
+    row: &PgStatisticExtRow,
+    attnum: i16,
+    column_name: &str,
+) -> bool {
+    if row.stxkeys.contains(&attnum) {
+        return true;
+    }
+    row.stxexprs
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .is_some_and(|exprs| {
+            exprs
+                .iter()
+                .any(|expr| statistics_expression_references_column(expr, column_name))
+        })
+}
+
+fn dependent_statistics_oids_for_alter_column_type(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    attnum: i16,
+    column_name: &str,
+) -> BTreeSet<u32> {
+    catalog
+        .statistic_ext_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter(|row| statistics_row_depends_on_column(row, attnum, column_name))
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>()
 }
 
 fn relation_name_for_error(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
@@ -600,10 +648,21 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        for target in targets {
-            let effect = self
-                .catalog
-                .write()
+        let statistics_resets = targets
+            .iter()
+            .map(|target| {
+                dependent_statistics_oids_for_alter_column_type(
+                    &catalog,
+                    target.relation.relation_oid,
+                    (target.column_index + 1) as i16,
+                    &target.new_desc.columns[target.column_index].name,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut store = self.catalog.write();
+        let mut temp_replacements = Vec::new();
+        for (target, statistics_oids) in targets.into_iter().zip(statistics_resets) {
+            let effect = store
                 .alter_table_alter_column_type_mvcc(
                     target.relation.relation_oid,
                     &alter_stmt.column_name,
@@ -612,17 +671,16 @@ impl Database {
                 )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
-            if target.relation.relpersistence == 't' {
-                self.replace_temp_entry_desc(
-                    client_id,
+            let effect = store
+                .replace_relation_statistics_mvcc(
                     target.relation.relation_oid,
-                    target.new_desc.clone(),
-                )?;
-            }
+                    Vec::<PgStatisticRow>::new(),
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
             for index in target.indexes {
-                let effect = self
-                    .catalog
-                    .write()
+                let effect = store
                     .alter_index_relation_for_column_type_mvcc(
                         index.relation_oid,
                         index.desc.clone(),
@@ -632,9 +690,22 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
                 if target.relation.relpersistence == 't' {
-                    self.replace_temp_entry_desc(client_id, index.relation_oid, index.desc)?;
+                    temp_replacements.push((index.relation_oid, index.desc));
                 }
             }
+            for statistics_oid in statistics_oids {
+                let effect = store
+                    .replace_statistics_data_rows_mvcc(statistics_oid, Vec::new(), &ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+            }
+            if target.relation.relpersistence == 't' {
+                temp_replacements.push((target.relation.relation_oid, target.new_desc));
+            }
+        }
+        drop(store);
+        for (relation_oid, new_desc) in temp_replacements {
+            self.replace_temp_entry_desc(client_id, relation_oid, new_desc)?;
         }
         Ok(StatementResult::AffectedRows(0))
     }
