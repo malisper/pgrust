@@ -5098,7 +5098,6 @@ impl Database {
             &[],
         )?;
         let constraint_oids = analyzed_query.constraint_deps.clone();
-        let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
         let mut stored_query = analyzed_query.clone();
         apply_create_view_column_names_to_query(&mut stored_query, &create_stmt.column_names);
         let canonical_sql = if select_query_requires_original_view_sql(&create_stmt.query) {
@@ -5116,11 +5115,10 @@ impl Database {
         };
         let canonical_query_sql = append_view_check_option(canonical_sql, create_stmt.check_option);
         let mut desc = crate::backend::executor::RelationDesc {
-            columns: plan
-                .column_names()
+            columns: stored_query
+                .columns()
                 .into_iter()
-                .zip(plan.columns())
-                .map(|(name, column)| column_desc(name, column.sql_type, true))
+                .map(|column| column_desc(column.name, column.sql_type, true))
                 .collect(),
         };
         apply_create_view_column_names(&mut desc, &create_stmt.column_names)?;

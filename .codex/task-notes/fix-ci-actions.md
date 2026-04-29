@@ -1,4 +1,30 @@
 Goal:
+Fix cargo-test CI failure from cargo-test-run__2_2__73522505530.log.
+
+Key decisions:
+Do not run full query planning while creating normal views just to derive
+view relation metadata. Planning applies rewrite/RLS and can raise recursive
+policy errors during CREATE VIEW, while PostgreSQL defers that error until
+the view is used.
+
+Files touched:
+src/pgrust/database/commands/create.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh check
+scripts/cargo_isolated.sh test --lib --quiet create_view_defers_recursive_rls_policy_expansion_until_use
+scripts/cargo_isolated.sh test --lib --quiet rows_from_view_tracks_composite_function_column_dependencies
+scripts/cargo_isolated.sh test --lib --quiet create_view_selects_and_persists_rewrite_rule
+scripts/cargo_isolated.sh test --lib --quiet create_or_replace_view_rejects_incompatible_column_changes
+scripts/cargo_isolated.sh test --lib --quiet create_view_persists_security_reloptions
+
+Remaining:
+No local failures in the attached CI repro set.
+
+---
+
+Goal:
 Fix CI failures from cargo-test-run__1_2__73514442155.log, cargo-test-run__2_2__73514442144.log, and cargo-test_73514581540.log.
 
 Key decisions:
