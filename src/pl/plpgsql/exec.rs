@@ -6479,6 +6479,7 @@ fn exec_error_schema_name_owned(err: &ExecError) -> Option<String> {
 }
 
 fn exception_data_to_error(err: PlpgsqlExceptionData) -> ExecError {
+    let context = err.context.clone();
     let fields = PlpgsqlErrorFields {
         column_name: err.column_name,
         constraint_name: err.constraint_name,
@@ -6486,7 +6487,11 @@ fn exception_data_to_error(err: PlpgsqlExceptionData) -> ExecError {
         table_name: err.table_name,
         schema_name: err.schema_name,
     };
-    if err.sqlstate == "P0001" && err.detail.is_none() && err.hint.is_none() && fields.is_empty() {
+    let base = if err.sqlstate == "P0001"
+        && err.detail.is_none()
+        && err.hint.is_none()
+        && fields.is_empty()
+    {
         ExecError::RaiseException(err.message)
     } else if !fields.is_empty() {
         ExecError::DiagnosticError {
@@ -6507,6 +6512,13 @@ fn exception_data_to_error(err: PlpgsqlExceptionData) -> ExecError {
             hint: err.hint,
             sqlstate: err.sqlstate,
         }
+    };
+    match context {
+        Some(context) => ExecError::WithContext {
+            source: Box::new(base),
+            context,
+        },
+        None => base,
     }
 }
 

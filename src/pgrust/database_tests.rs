@@ -49551,6 +49551,34 @@ fn plpgsql_return_cast_errors_include_cast_context() {
 }
 
 #[test]
+fn plpgsql_reraise_preserves_original_error_context() {
+    let dir = temp_dir("plpgsql_reraise_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function reraise_context() returns void language plpgsql as $$
+         begin
+           raise exception 'check me' using detail = 'detail';
+         exception when others then
+           raise;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select reraise_context()").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function reraise_context() line 3 at RAISE"
+    ));
+    assert!(!exec_error_context_contains(
+        &err,
+        "PL/pgSQL function reraise_context() line 5 at RAISE"
+    ));
+}
+
+#[test]
 fn plpgsql_return_expr_with_out_parameter_is_compile_error() {
     let dir = temp_dir("plpgsql_return_expr_out_param");
     let db = Database::open(&dir, 64).unwrap();
