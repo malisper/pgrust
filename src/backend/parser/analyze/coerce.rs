@@ -790,6 +790,14 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
         SqlExpr::Sub(_, _) if matches!((left.kind, right.kind), (Date, Time)) => {
             return SqlType::new(Timestamp);
         }
+        SqlExpr::Sub(_, _)
+            if matches!(
+                (left.kind, right.kind),
+                (Timestamp, Timestamp) | (TimestampTz, TimestampTz)
+            ) =>
+        {
+            return SqlType::new(Interval);
+        }
         _ => {}
     }
 

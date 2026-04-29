@@ -6470,6 +6470,7 @@ fn parse_create_function_statement_with_returns_table() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
             link_symbol: None,
@@ -6515,6 +6516,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
             link_symbol: None,
@@ -6879,6 +6881,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
             link_symbol: None,
@@ -6924,6 +6927,7 @@ fn parse_create_function_statement_with_variadic_arg() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "sql".into(),
             body: " select $1[1] ".into(),
             link_symbol: None,
@@ -6992,6 +6996,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             security_definer: false,
             volatility: FunctionVolatility::Stable,
             parallel: FunctionParallel::Safe,
+            window: false,
             language: "c".into(),
             body: "regress".into(),
             link_symbol: Some("binary_coercible".into()),
@@ -7060,6 +7065,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             security_definer: false,
             volatility: FunctionVolatility::Immutable,
             parallel: FunctionParallel::Safe,
+            window: false,
             language: "sql".into(),
             body: "select substr(encode(sha256($1), 'hex'), 1, 32)".into(),
             link_symbol: None,
@@ -7126,6 +7132,7 @@ fn parse_create_function_statement_with_cost_clause() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
             link_symbol: None,
@@ -7158,6 +7165,26 @@ fn parse_create_function_statement_with_support_clause() {
 }
 
 #[test]
+fn parse_create_function_statement_with_window_clause() {
+    let stmt = parse_statement(
+        "create function nth_value_def(val anyelement, n integer = 1) returns anyelement language internal window immutable strict as 'window_nth_value'",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            function_name,
+            window: true,
+            language,
+            body,
+            ..
+        }) if function_name == "nth_value_def"
+            && language == "internal"
+            && body == "window_nth_value"
+    ));
+}
+
+#[test]
 fn parse_drop_function_statement_with_signature() {
     let stmt = parse_statement("drop function public.p2text(p2)").unwrap();
     assert_eq!(
@@ -7168,6 +7195,7 @@ fn parse_drop_function_statement_with_signature() {
             function_name: "p2text".into(),
             arg_list_specified: true,
             arg_types: vec!["p2".into()],
+            additional_functions: Vec::new(),
             cascade: false,
         })
     );
@@ -7184,7 +7212,29 @@ fn parse_drop_function_statement_without_signature() {
             function_name: "p2text".into(),
             arg_list_specified: false,
             arg_types: vec![],
+            additional_functions: Vec::new(),
             cascade: true,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_function_statement_with_multiple_names() {
+    let stmt = parse_statement("drop function f1, public.f2(int4) restrict").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropFunction(DropFunctionStatement {
+            if_exists: false,
+            schema_name: None,
+            function_name: "f1".into(),
+            arg_list_specified: false,
+            arg_types: vec![],
+            additional_functions: vec![DropRoutineItem {
+                schema_name: Some("public".into()),
+                routine_name: "f2".into(),
+                arg_types: vec!["int4".into()],
+            }],
+            cascade: false,
         })
     );
 }

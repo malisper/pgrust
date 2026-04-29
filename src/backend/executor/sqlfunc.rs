@@ -1598,7 +1598,11 @@ pub(crate) fn substitute_named_arg(input: &str, name: &str, replacement: &str) -
                 }
                 let ident = &input[start..i];
                 if ident.eq_ignore_ascii_case(name) {
-                    out.push_str(replacement);
+                    if named_arg_occurrence_is_window_unbounded_keyword(input, name, i) {
+                        out.push_str(ident);
+                    } else {
+                        out.push_str(replacement);
+                    }
                 } else {
                     out.push_str(ident);
                 }
@@ -1610,6 +1614,25 @@ pub(crate) fn substitute_named_arg(input: &str, name: &str, replacement: &str) -
         }
     }
     out
+}
+
+fn named_arg_occurrence_is_window_unbounded_keyword(input: &str, name: &str, end: usize) -> bool {
+    if !name.eq_ignore_ascii_case("unbounded") {
+        return false;
+    }
+    let rest = input[end..].trim_start();
+    keyword_at_start_ascii(rest, "preceding") || keyword_at_start_ascii(rest, "following")
+}
+
+fn keyword_at_start_ascii(input: &str, keyword: &str) -> bool {
+    let Some(prefix) = input.get(..keyword.len()) else {
+        return false;
+    };
+    prefix.eq_ignore_ascii_case(keyword)
+        && input[keyword.len()..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
 }
 
 fn render_sql_literal_with_catalog(
@@ -1983,6 +2006,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sql, "select 'value', \"$1\", ('abc'::text)");
+    }
+
+    #[test]
+    fn inline_sql_function_preserves_unbounded_window_frame_keyword() {
+        let catalog = crate::backend::parser::Catalog::default();
+        let datetime_config = DateTimeConfig::default();
+        let row = test_proc_row(
+            "select sum(x) over (rows between unbounded preceding and unbounded following), unbounded",
+            Some(vec!["unbounded"]),
+        );
+        let sql =
+            inline_sql_function_body(&row, &[Value::Int32(2)], None, &catalog, &datetime_config)
+                .unwrap();
+        assert_eq!(
+            sql,
+            "select sum(x) over (rows between unbounded preceding and unbounded following), (2)"
+        );
     }
 
     #[test]

@@ -718,7 +718,7 @@ fn range_offset_target_type(
         _ => {
             return Err(ParseError::WindowingError(format!(
                 "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {}",
-                super::coerce::sql_type_name(order_type)
+                range_offset_error_type_name(order_type)
             )));
         }
     };
@@ -728,9 +728,16 @@ fn range_offset_target_type(
 fn range_offset_pair_error(order_type: SqlType, offset_type: SqlType) -> ParseError {
     ParseError::WindowingError(format!(
         "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {} and offset type {}",
-        super::coerce::sql_type_name(order_type),
-        super::coerce::sql_type_name(offset_type)
+        range_offset_error_type_name(order_type),
+        range_offset_error_type_name(offset_type)
     ))
+}
+
+fn range_offset_error_type_name(sql_type: SqlType) -> String {
+    match sql_type.kind {
+        SqlTypeKind::Varchar | SqlTypeKind::Char => "text".into(),
+        _ => super::coerce::sql_type_name(sql_type),
+    }
 }
 
 fn bind_window_frame(

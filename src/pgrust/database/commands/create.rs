@@ -1669,6 +1669,7 @@ fn resolve_exact_proc_row(
 struct AggregateSupportProc {
     row: PgProcRow,
     result_type: SqlType,
+    declared_arg_oids: Vec<u32>,
     declared_arg_types: Vec<SqlType>,
 }
 
@@ -1768,11 +1769,15 @@ fn lookup_aggregate_support_proc_row(
             sqlstate: "42804",
         });
     }
-    for (actual_type, declared_type) in actual_types
+    for ((actual_type, declared_type), declared_oid) in actual_types
         .iter()
         .copied()
         .zip(support.declared_arg_types.iter().copied())
+        .zip(support.declared_arg_oids.iter().copied())
     {
+        if is_polymorphic_aggregate_signature_oid(declared_oid) {
+            continue;
+        }
         if !is_binary_coercible_type(actual_type, declared_type) {
             return Err(ExecError::DetailedError {
                 message: format!(
@@ -1805,6 +1810,7 @@ fn aggregate_support_from_resolved(
     Ok(AggregateSupportProc {
         row,
         result_type: resolved.result_type,
+        declared_arg_oids: resolved.declared_arg_oids,
         declared_arg_types: resolved.declared_arg_types,
     })
 }
@@ -1898,6 +1904,7 @@ fn lookup_exact_aggregate_support_proc(
             Ok(Some(AggregateSupportProc {
                 row,
                 result_type,
+                declared_arg_oids: arg_oids.to_vec(),
                 declared_arg_types,
             }))
         }
@@ -3407,6 +3414,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_create_function_stmt_in_transaction_with_search_path(
             client_id,
             create_stmt,
@@ -3415,8 +3423,9 @@ impl Database {
             configured_search_path,
             gucs,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }
@@ -3430,6 +3439,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         self.execute_create_function_stmt_in_transaction_with_kind(
             client_id,
@@ -3439,7 +3449,8 @@ impl Database {
             configured_search_path,
             gucs,
             catalog_effects,
-            'f',
+            temp_effects,
+            if create_stmt.window { 'w' } else { 'f' },
             "function",
         )
     }
@@ -3453,6 +3464,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_create_procedure_stmt_in_transaction_with_search_path(
             client_id,
             create_stmt,
@@ -3460,8 +3472,9 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }
@@ -3474,6 +3487,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         validate_sql_procedure_body(create_stmt, &catalog)?;
@@ -3503,6 +3517,7 @@ impl Database {
             security_definer: false,
             volatility: create_stmt.volatility,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: create_stmt.language.clone(),
             body: create_stmt.body.clone(),
             link_symbol: None,
@@ -3516,6 +3531,7 @@ impl Database {
             configured_search_path,
             None,
             catalog_effects,
+            temp_effects,
             'p',
             "procedure",
         )
@@ -3530,20 +3546,45 @@ impl Database {
         configured_search_path: Option<&[String]>,
         gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
         proc_kind: char,
         object_kind: &'static str,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let (function_name, namespace_oid) = normalize_create_proc_name_for_search_path(
-            self,
-            client_id,
-            Some((xid, cid)),
-            create_stmt.schema_name.as_deref(),
-            &create_stmt.function_name,
-            object_kind,
-            configured_search_path,
-        )?;
+        let mut function_cid = cid;
+        let explicit_pg_temp = create_stmt
+            .schema_name
+            .as_deref()
+            .is_some_and(|schema| schema.eq_ignore_ascii_case("pg_temp"));
+        let temp_namespace = if explicit_pg_temp {
+            Some(self.ensure_temp_namespace(
+                client_id,
+                xid,
+                &mut function_cid,
+                catalog_effects,
+                temp_effects,
+            )?)
+        } else {
+            None
+        };
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, function_cid)), configured_search_path);
+        let (function_name, namespace_oid) = if let Some(namespace) = temp_namespace {
+            (
+                create_stmt.function_name.to_ascii_lowercase(),
+                namespace.oid,
+            )
+        } else {
+            normalize_create_proc_name_for_search_path(
+                self,
+                client_id,
+                Some((xid, function_cid)),
+                create_stmt.schema_name.as_deref(),
+                &create_stmt.function_name,
+                object_kind,
+                configured_search_path,
+            )?
+        };
         validate_proc_arg_order(&create_stmt.args, proc_kind)?;
         if proc_kind == 'p' && create_stmt.strict {
             return Err(invalid_procedure_attribute());
@@ -3659,7 +3700,7 @@ impl Database {
                                 client_id,
                                 type_name,
                                 xid,
-                                cid,
+                                function_cid,
                                 configured_search_path,
                                 catalog_effects,
                             )?;
@@ -3890,7 +3931,13 @@ impl Database {
             .support
             .as_ref()
             .map(|signature| {
-                resolve_support_proc_oid(self, client_id, Some((xid, cid)), &catalog, signature)
+                resolve_support_proc_oid(
+                    self,
+                    client_id,
+                    Some((xid, function_cid)),
+                    &catalog,
+                    signature,
+                )
             })
             .transpose()?
             .unwrap_or_default();
@@ -3944,7 +3991,7 @@ impl Database {
             prosqlbody: None,
             proconfig: proc_config_from_options(&create_stmt.config),
         };
-        if proc_kind == 'f'
+        if matches!(proc_kind, 'f' | 'w')
             && let Some(existing) = existing_proc.as_ref()
         {
             validate_replaced_proc_signature(existing, &proc_row, &catalog)?;
@@ -3954,7 +4001,7 @@ impl Database {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: function_cid,
             client_id,
             waiter: None,
             interrupts,

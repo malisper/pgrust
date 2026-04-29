@@ -14,8 +14,8 @@ use crate::include::nodes::datum::{IntervalValue, NumericValue, Value};
 use crate::include::nodes::execnodes::{MaterializedRow, SystemVarBinding, TupleSlot};
 use crate::include::nodes::parsenodes::{WindowFrameExclusion, WindowFrameMode};
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, Aggref, BuiltinWindowFunction, OrderByEntry, WindowClause, WindowFrameBound,
-    WindowFuncExpr, WindowFuncKind,
+    AggAccum, AggFunc, Aggref, BuiltinScalarFunction, BuiltinWindowFunction, Expr, OrderByEntry,
+    ScalarFunctionImpl, WindowClause, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
 };
 use std::cmp::Ordering;
 
@@ -1071,6 +1071,185 @@ fn advance_window_aggregate(
     Ok(())
 }
 
+fn advance_window_moving_aggregate(
+    ctx: &mut ExecutorContext,
+    runtime: &AggregateRuntime,
+    state: &mut AccumState,
+    row: &mut MaterializedRow,
+    aggref: &Aggref,
+) -> Result<bool, ExecError> {
+    set_active_system_bindings(ctx, &row.system_bindings);
+    set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
+    if let Some(filter) = aggref.aggfilter.as_ref() {
+        match eval_expr(filter, &mut row.slot, ctx)? {
+            Value::Bool(true) => {}
+            Value::Bool(false) | Value::Null => return Ok(false),
+            other => return Err(ExecError::NonBoolQual(other)),
+        }
+    }
+    let values = aggref
+        .args
+        .iter()
+        .map(|arg| eval_expr(arg, &mut row.slot, ctx).map(|value| value.to_owned_value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let contributed = values.iter().all(|value| !matches!(value, Value::Null));
+    runtime.moving_transition(state, &values, ctx)?;
+    Ok(contributed)
+}
+
+fn moving_window_row_contributes(
+    ctx: &mut ExecutorContext,
+    row: &mut MaterializedRow,
+    aggref: &Aggref,
+) -> Result<bool, ExecError> {
+    set_active_system_bindings(ctx, &row.system_bindings);
+    set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
+    if let Some(filter) = aggref.aggfilter.as_ref() {
+        match eval_expr(filter, &mut row.slot, ctx)? {
+            Value::Bool(true) => {}
+            Value::Bool(false) | Value::Null => return Ok(false),
+            other => return Err(ExecError::NonBoolQual(other)),
+        }
+    }
+    aggref
+        .args
+        .iter()
+        .map(|arg| eval_expr(arg, &mut row.slot, ctx))
+        .try_fold(true, |contributes, value| {
+            value.map(|value| contributes && !matches!(value, Value::Null))
+        })
+}
+
+fn inverse_window_aggregate(
+    ctx: &mut ExecutorContext,
+    runtime: &AggregateRuntime,
+    state: &mut AccumState,
+    row: &mut MaterializedRow,
+    aggref: &Aggref,
+) -> Result<bool, ExecError> {
+    set_active_system_bindings(ctx, &row.system_bindings);
+    set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
+    if let Some(filter) = aggref.aggfilter.as_ref() {
+        match eval_expr(filter, &mut row.slot, ctx)? {
+            Value::Bool(true) => {}
+            Value::Bool(false) | Value::Null => return Ok(true),
+            other => return Err(ExecError::NonBoolQual(other)),
+        }
+    }
+    let values = aggref
+        .args
+        .iter()
+        .map(|arg| eval_expr(arg, &mut row.slot, ctx).map(|value| value.to_owned_value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    runtime.moving_inverse(state, &values, ctx)
+}
+
+fn window_expr_contains_volatile(expr: &Expr, ctx: &ExecutorContext) -> bool {
+    match expr {
+        Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|expr| window_expr_contains_volatile(expr, ctx)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|expr| window_expr_contains_volatile(expr, ctx)),
+        Expr::Func(func) => {
+            matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(
+                    BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal
+                )
+            ) || ctx
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.proc_row_by_oid(func.funcid))
+                .is_some_and(|row| row.provolatile == 'v')
+                || func
+                    .args
+                    .iter()
+                    .any(|expr| window_expr_contains_volatile(expr, ctx))
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            window_expr_contains_volatile(inner, ctx)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            window_expr_contains_volatile(expr, ctx)
+                || window_expr_contains_volatile(pattern, ctx)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| window_expr_contains_volatile(expr, ctx))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => window_expr_contains_volatile(inner, ctx),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            window_expr_contains_volatile(left, ctx) || window_expr_contains_volatile(right, ctx)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            window_expr_contains_volatile(&saop.left, ctx)
+                || window_expr_contains_volatile(&saop.right, ctx)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| window_expr_contains_volatile(expr, ctx)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| window_expr_contains_volatile(expr, ctx)),
+        Expr::FieldSelect { expr, .. } => window_expr_contains_volatile(expr, ctx),
+        Expr::ArraySubscript { array, subscripts } => {
+            window_expr_contains_volatile(array, ctx)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| window_expr_contains_volatile(expr, ctx))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| window_expr_contains_volatile(expr, ctx))
+                })
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| window_expr_contains_volatile(expr, ctx))
+                || case_expr.args.iter().any(|arm| {
+                    window_expr_contains_volatile(&arm.expr, ctx)
+                        || window_expr_contains_volatile(&arm.result, ctx)
+                })
+                || window_expr_contains_volatile(&case_expr.defresult, ctx)
+        }
+        Expr::SetReturning(_) | Expr::SubLink(_) | Expr::SubPlan(_) => true,
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|expr| window_expr_contains_volatile(expr, ctx)),
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| window_expr_contains_volatile(expr, ctx)),
+        _ => false,
+    }
+}
+
 fn evaluate_rank_like_window(
     func: BuiltinWindowFunction,
     partition_rows: &[PreparedWindowRow],
@@ -1528,7 +1707,9 @@ fn evaluate_aggregate_window(
     // PostgreSQL advances aggregate state incrementally for nonshrinking frames.
     // Match that behavior for prefix-style frames so running totals do not
     // devolve into per-row full-frame rescans.
-    if frame_uses_prefix_accumulation(clause, partition_rows, ctx, aggref)? {
+    if !runtime.supports_moving_transition()
+        && frame_uses_prefix_accumulation(clause, partition_rows, ctx, aggref)?
+    {
         let mut values = Vec::with_capacity(partition_rows.len());
         let mut state = runtime.initialize_state(&accum);
         let mut advanced_end = 0usize;
@@ -1546,6 +1727,12 @@ fn evaluate_aggregate_window(
             }
             values.push(runtime.finalize(&accum, &state, &[], &[], ctx)?);
         }
+        return Ok(values);
+    }
+
+    if let Some(values) =
+        evaluate_moving_aggregate_window(ctx, clause, aggref, partition_rows, &runtime)?
+    {
         return Ok(values);
     }
 
@@ -1572,6 +1759,108 @@ fn evaluate_aggregate_window(
         values.push(runtime.finalize(&accum, &state, &[], &[], ctx)?);
     }
     Ok(values)
+}
+
+fn evaluate_moving_aggregate_window(
+    ctx: &mut ExecutorContext,
+    clause: &WindowClause,
+    aggref: &Aggref,
+    partition_rows: &mut [PreparedWindowRow],
+    runtime: &AggregateRuntime,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    let frame = &clause.spec.frame;
+    if !runtime.supports_moving_transition()
+        || !matches!(frame.mode, WindowFrameMode::Rows)
+        || frame.exclusion != WindowFrameExclusion::NoOthers
+        || aggref.aggdistinct
+        || !aggref.aggorder.is_empty()
+        || matches!(
+            (&frame.start_bound, &frame.end_bound),
+            (WindowFrameBound::CurrentRow, WindowFrameBound::CurrentRow)
+        )
+        || aggref
+            .aggfilter
+            .as_ref()
+            .is_some_and(|expr| window_expr_contains_volatile(expr, ctx))
+        || aggref
+            .args
+            .iter()
+            .any(|expr| window_expr_contains_volatile(expr, ctx))
+    {
+        return Ok(None);
+    }
+
+    let mut ranges = Vec::with_capacity(partition_rows.len());
+    let mut previous_start = 0usize;
+    let mut previous_end = 0usize;
+    for row_index in 0..partition_rows.len() {
+        let (frame_start, frame_end) =
+            evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
+        if frame_start < previous_start || frame_end < previous_end {
+            return Ok(None);
+        }
+        previous_start = frame_start;
+        previous_end = frame_end;
+        ranges.push((frame_start, frame_end));
+    }
+
+    let mut state = runtime.initialize_moving_state();
+    let mut values = Vec::with_capacity(partition_rows.len());
+    let mut current_start = 0usize;
+    let mut current_end = 0usize;
+    let track_strict_contributors = runtime.moving_transition_is_strict();
+    let mut strict_contributors = 0usize;
+
+    for (target_start, target_end) in ranges {
+        while current_start < target_start {
+            let outgoing_contributed = if track_strict_contributors {
+                moving_window_row_contributes(ctx, &mut partition_rows[current_start].row, aggref)?
+            } else {
+                false
+            };
+            if outgoing_contributed && strict_contributors <= 1 {
+                state = runtime.initialize_moving_state();
+                strict_contributors = 0;
+                current_start += 1;
+                current_end = current_start;
+                continue;
+            }
+            let inverse_succeeded = inverse_window_aggregate(
+                ctx,
+                runtime,
+                &mut state,
+                &mut partition_rows[current_start].row,
+                aggref,
+            )?;
+            current_start += 1;
+            if outgoing_contributed {
+                strict_contributors = strict_contributors.saturating_sub(1);
+            }
+            if !inverse_succeeded {
+                state = runtime.initialize_moving_state();
+                strict_contributors = 0;
+                current_start = target_start;
+                current_end = target_start;
+                break;
+            }
+        }
+        while current_end < target_end {
+            let contributed = advance_window_moving_aggregate(
+                ctx,
+                runtime,
+                &mut state,
+                &mut partition_rows[current_end].row,
+                aggref,
+            )?;
+            if track_strict_contributors && contributed {
+                strict_contributors += 1;
+            }
+            current_end += 1;
+        }
+        values.push(runtime.finalize_moving(&state, ctx)?);
+    }
+
+    Ok(Some(values))
 }
 
 fn window_aggref_accum(aggref: &Aggref) -> AggAccum {

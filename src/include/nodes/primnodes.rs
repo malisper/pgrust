@@ -738,6 +738,7 @@ pub enum BuiltinScalarFunction {
     ParseIdent,
     QuoteIdent,
     QuoteLiteral,
+    QuoteNullable,
     Replace,
     SplitPart,
     Translate,
