@@ -34,6 +34,7 @@ use crate::backend::parser::{
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::cache::syscache::backend_catcache;
+use crate::backend::utils::cache::system_views::format_pg_get_expr_policy_sql;
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
@@ -5623,8 +5624,8 @@ fn psql_describe_policy_query(
                 Value::Text(policy.polname.into()),
                 Value::Bool(policy.polpermissive),
                 roles,
-                optional_text_query_value(policy.polqual),
-                optional_text_query_value(policy.polwithcheck),
+                optional_policy_expr_query_value(policy.polqual),
+                optional_policy_expr_query_value(policy.polwithcheck),
                 psql_describe_policy_command_value(policy.polcmd),
             ]
         })
@@ -5632,9 +5633,9 @@ fn psql_describe_policy_query(
     (columns, rows)
 }
 
-fn optional_text_query_value(value: Option<String>) -> Value {
+fn optional_policy_expr_query_value(value: Option<String>) -> Value {
     value
-        .map(|text| Value::Text(text.into()))
+        .map(|text| Value::Text(format_pg_get_expr_policy_sql(&text).into()))
         .unwrap_or(Value::Null)
 }
 
@@ -5711,11 +5712,11 @@ fn format_policy_column_value(
             text.push(':');
             if let Some(qual) = &policy.polqual {
                 text.push_str("\n  (u): ");
-                text.push_str(qual);
+                text.push_str(&format_pg_get_expr_policy_sql(qual));
             }
             if let Some(with_check) = &policy.polwithcheck {
                 text.push_str("\n  (c): ");
-                text.push_str(with_check);
+                text.push_str(&format_pg_get_expr_policy_sql(with_check));
             }
             if policy.polroles.as_slice() != [0] {
                 let mut names = policy
@@ -12394,7 +12395,7 @@ ORDER BY 1, 2;";
         match &rows[0][5] {
             Value::Text(policies) => {
                 assert!(policies.contains("p1 (RESTRICTIVE):"));
-                assert!(policies.contains("(u): id > 0"));
+                assert!(policies.contains("(u): (id > 0)"));
                 assert!(policies.contains("to: app_role"));
                 assert!(
                     policies.find("p2 (RESTRICTIVE):").unwrap()
@@ -12487,7 +12488,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
                     Value::Text("p1".into()),
                     Value::Bool(true),
                     Value::Null,
-                    Value::Text("id > 0".into()),
+                    Value::Text("(id > 0)".into()),
                     Value::Null,
                     Value::Null,
                 ],
@@ -12495,8 +12496,8 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
                     Value::Text("p2".into()),
                     Value::Bool(false),
                     Value::Text("app_role".into()),
-                    Value::Text("id > 1".into()),
-                    Value::Text("id < 10".into()),
+                    Value::Text("(id > 1)".into()),
+                    Value::Text("(id < 10)".into()),
                     Value::Text("UPDATE".into()),
                 ],
             ]

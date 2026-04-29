@@ -648,3 +648,24 @@ psql FK describe visibility bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `721/774` matched, `53` mismatches, `945` diff lines, `50` hunks. New diff
   copied to `/tmp/diffs/rowsecurity.diff`.
+
+Policy expression display bucket:
+- `pg_policies`, `\dp`, and `\d` policy-detail output now pass policy
+  expressions through a narrow PostgreSQL-style `pg_get_expr` formatter for the
+  simple predicate, top-level `AND`, and `CURRENT_USER` subquery shapes used by
+  `rowsecurity`.
+- Raw `pg_policy.polqual`/`polwithcheck` storage remains the existing readable
+  SQL string; only SQL-visible `pg_get_expr`-like views/describe shortcuts are
+  formatted.
+- Updated focused catalog/describe tests for the PostgreSQL-style parenthesized
+  `pg_policies` output.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  psql_describe_policy_query_returns_policy_rows` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet pg_policies` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  create_alter_and_drop_policy_updates_pg_policy` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `725/774` matched, `49` mismatches, `860` diff lines, `46` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.

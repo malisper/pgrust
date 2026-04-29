@@ -43957,7 +43957,7 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         vec![vec![
             Value::Text("p1".into()),
             typed_text_array_value(&["app_role"], crate::include::catalog::NAME_TYPE_OID),
-            Value::Text("a > 0".into()),
+            Value::Text("(a > 0)".into()),
             Value::Null,
         ]]
     );
@@ -44004,8 +44004,8 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         vec![vec![
             Value::Text("p2".into()),
             typed_text_array_value(&["app_role"], crate::include::catalog::NAME_TYPE_OID),
-            Value::Text("a > 1".into()),
-            Value::Text("a > 2".into()),
+            Value::Text("(a > 1)".into()),
+            Value::Text("(a > 2)".into()),
         ]]
     );
 
@@ -45270,7 +45270,7 @@ fn pg_policies_exposes_public_and_named_role_policies() {
                     crate::include::catalog::NAME_TYPE_OID,
                 ),
                 Value::Text("SELECT".into()),
-                Value::Text("a > 0".into()),
+                Value::Text("(a > 0)".into()),
                 Value::Null,
             ],
             vec![
@@ -45281,7 +45281,7 @@ fn pg_policies_exposes_public_and_named_role_policies() {
                 typed_text_array_value(&["public"], crate::include::catalog::NAME_TYPE_OID),
                 Value::Text("INSERT".into()),
                 Value::Null,
-                Value::Text("a > 1".into()),
+                Value::Text("(a > 1)".into()),
             ],
         ]
     );
