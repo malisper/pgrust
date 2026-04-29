@@ -11,7 +11,9 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
-use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{
+    Query, QueryRowMark, RangeTblEntryKind, TableSampleClause,
+};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
 use crate::include::nodes::plannodes::{
     ExecParamSource, IndexScanKey, IndexScanKeyArgument, Plan, PlanEstimate, PlanRowMark,
@@ -122,10 +124,25 @@ pub(super) fn create_plan_with_param_base(
         ext_params: Vec::new(),
     };
     validate_planner_path(&path);
-    let plan = set_plan_refs(&mut ctx, path);
+    let plan = maybe_wrap_parallel_gather(root, set_plan_refs(&mut ctx, path));
     let allowed_params = exec_param_sources(&ctx.ext_params);
     validate_executable_plan_with_params(&plan, &allowed_params);
     (plan, ctx.ext_params, ctx.next_param_id)
+}
+
+fn maybe_wrap_parallel_gather(root: &PlannerInfo, plan: Plan) -> Plan {
+    if root.config.force_parallel_gather
+        && root.config.max_parallel_workers_per_gather > 0
+        && root.parse.limit_count.is_some()
+    {
+        return Plan::Gather {
+            plan_info: plan.plan_info(),
+            input: Box::new(plan),
+            workers_planned: root.config.max_parallel_workers_per_gather,
+            single_copy: true,
+        };
+    }
+    plan
 }
 
 pub(super) fn create_plan_without_root(path: Path) -> Plan {
@@ -3411,6 +3428,8 @@ fn collect_plan_external_exec_paramids(
         }
         Plan::Unique { input, .. }
         | Plan::IncrementalSort { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::CteScan {
@@ -3954,12 +3973,18 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
             });
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
+        Plan::Materialize { input, .. } => {
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
         Plan::Memoize {
             input, cache_keys, ..
         } => {
             cache_keys.iter().for_each(|expr| {
                 validate_executable_expr(expr, "Memoize", "cache_keys", allowed_exec_params)
             });
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::Gather { input, .. } => {
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::NestedLoopJoin {
@@ -4904,6 +4929,7 @@ fn set_set_op_references(
 }
 
 fn set_seq_scan_references(
+    ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     source_id: usize,
     rel: crate::RelFileLocator,
@@ -4913,8 +4939,20 @@ fn set_seq_scan_references(
     relispopulated: bool,
     disabled: bool,
     toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: crate::include::nodes::primnodes::RelationDesc,
 ) -> Plan {
+    let tablesample = tablesample.map(|sample| TableSampleClause {
+        method: sample.method,
+        args: sample
+            .args
+            .into_iter()
+            .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar))
+            .collect(),
+        repeatable: sample
+            .repeatable
+            .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar)),
+    });
     Plan::SeqScan {
         plan_info,
         source_id,
@@ -4925,6 +4963,7 @@ fn set_seq_scan_references(
         relispopulated,
         disabled,
         toast,
+        tablesample,
         desc,
     }
 }
@@ -5169,7 +5208,8 @@ fn set_nested_loop_join_references(
             (plan, params)
         }
     };
-    let right_plan = maybe_wrap_memoize(ctx.root, right_plan, &nest_params, left_rows);
+    let right_plan =
+        maybe_wrap_nested_loop_inner_plan(ctx.root, kind, right_plan, &nest_params, left_rows);
     let left_plan = set_plan_refs(ctx, *left);
     Plan::NestedLoopJoin {
         plan_info,
@@ -5182,12 +5222,26 @@ fn set_nested_loop_join_references(
     }
 }
 
-fn maybe_wrap_memoize(
+fn maybe_wrap_nested_loop_inner_plan(
     root: Option<&PlannerInfo>,
+    kind: crate::include::nodes::primnodes::JoinType,
     mut right_plan: Plan,
     nest_params: &[ExecParamSource],
     _outer_rows: f64,
 ) -> Plan {
+    if matches!(
+        kind,
+        crate::include::nodes::primnodes::JoinType::Inner
+            | crate::include::nodes::primnodes::JoinType::Cross
+    ) && nest_params.is_empty()
+        && plan_is_plain_seq_scan(&right_plan)
+    {
+        return Plan::Materialize {
+            plan_info: right_plan.plan_info(),
+            input: Box::new(right_plan),
+        };
+    }
+
     if !root.is_some_and(|root| root.config.enable_memoize) || nest_params.is_empty() {
         return right_plan;
     }
@@ -5278,7 +5332,9 @@ fn annotate_runtime_index_labels(plan: &mut Plan, param_labels: &BTreeMap<usize,
             annotate_runtime_index_labels(bitmapqual, param_labels);
         }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -5345,7 +5401,9 @@ fn runtime_label_for_single_param(
             runtime_label_for_single_param(bitmapqual, paramid, param_labels)
         }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -5479,7 +5537,9 @@ fn memoize_uses_binary_mode(plan: &Plan) -> bool {
         }
         Plan::Projection { .. } | Plan::Limit { .. } => true,
         Plan::Filter { input, .. }
+        | Plan::Materialize { input, .. }
         | Plan::SubqueryScan { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::LockRows { input, .. } => memoize_uses_binary_mode(input),
         Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
             children.iter().any(memoize_uses_binary_mode)
@@ -5488,6 +5548,15 @@ fn memoize_uses_binary_mode(plan: &Plan) -> bool {
     }
 }
 
+fn plan_is_plain_seq_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::SeqScan { .. } => true,
+        Plan::Filter { input, .. } | Plan::Projection { input, .. } => {
+            plan_is_plain_seq_scan(input)
+        }
+        _ => false,
+    }
+}
 fn set_hash_join_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -6322,9 +6391,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
             ..
         } => set_seq_scan_references(
+            ctx,
             plan_info,
             source_id,
             rel,
@@ -6334,6 +6405,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
         ),
         Path::IndexOnlyScan {

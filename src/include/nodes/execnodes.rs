@@ -639,6 +639,22 @@ pub struct HashState {
 }
 
 #[derive(Debug)]
+pub struct MaterializeState {
+    pub(crate) input: PlanState,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct GatherState {
+    pub(crate) input: PlanState,
+    pub(crate) workers_planned: usize,
+    pub(crate) single_copy: bool,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
 pub struct HashJoinState {
     pub(crate) left: PlanState,
     pub(crate) right: Box<HashState>,

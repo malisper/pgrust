@@ -3110,6 +3110,12 @@ fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerC
         retain_partial_index_filters: false,
         enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
         enable_sort: bool_executor_guc(gucs, "enable_sort", true),
+        force_parallel_gather: bool_executor_guc(gucs, "debug_parallel_query", false),
+        max_parallel_workers_per_gather: usize_executor_guc(
+            gucs,
+            "max_parallel_workers_per_gather",
+            2,
+        ),
     }
 }
 
@@ -3120,6 +3126,12 @@ fn bool_executor_guc(gucs: &HashMap<String, String>, name: &str, default: bool) 
             "off" | "false" | "no" | "0" | "f" => Some(false),
             _ => None,
         })
+        .unwrap_or(default)
+}
+
+fn usize_executor_guc(gucs: &HashMap<String, String>, name: &str, default: usize) -> usize {
+    gucs.get(name)
+        .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(default)
 }
 

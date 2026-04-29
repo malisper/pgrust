@@ -33,6 +33,7 @@ use crate::include::nodes::datetime::{TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND};
 use crate::include::nodes::datum::{
     ArrayValue, IntervalValue, NumericValue, RecordValue, Value as DatumValue,
 };
+use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RestrictInfo,
 };
@@ -245,6 +246,7 @@ pub(super) fn optimize_path_with_config(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 ..
             } => {
@@ -261,6 +263,7 @@ pub(super) fn optimize_path_with_config(
                     relispopulated,
                     disabled,
                     toast,
+                    tablesample,
                     desc,
                 }
             }
@@ -1041,6 +1044,7 @@ fn try_optimize_access_subtree(
         relispopulated,
         disabled,
         toast,
+        tablesample,
         desc,
         filter,
         order_items,
@@ -1055,6 +1059,7 @@ fn try_optimize_access_subtree(
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
             ..
         } => (
@@ -1066,6 +1071,7 @@ fn try_optimize_access_subtree(
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
             None,
             None,
@@ -1083,6 +1089,7 @@ fn try_optimize_access_subtree(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 ..
             } => (
@@ -1094,6 +1101,7 @@ fn try_optimize_access_subtree(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 Some(predicate),
                 None,
@@ -1123,6 +1131,7 @@ fn try_optimize_access_subtree(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 ..
             } => (
@@ -1134,6 +1143,7 @@ fn try_optimize_access_subtree(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 None,
                 Some(items),
@@ -1151,6 +1161,7 @@ fn try_optimize_access_subtree(
                     relispopulated,
                     disabled,
                     toast,
+                    tablesample,
                     desc,
                     ..
                 } => (
@@ -1162,6 +1173,7 @@ fn try_optimize_access_subtree(
                     relispopulated,
                     disabled,
                     toast,
+                    tablesample,
                     desc,
                     Some(predicate),
                     Some(items),
@@ -1209,6 +1221,7 @@ fn try_optimize_access_subtree(
         relkind,
         relispopulated,
         toast,
+        tablesample,
         desc.clone(),
         &stats,
         filter.clone(),
@@ -1514,6 +1527,7 @@ pub(super) fn estimate_seqscan_candidate(
     relkind: char,
     relispopulated: bool,
     toast: Option<ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: RelationDesc,
     stats: &RelationStats,
     filter: Option<Expr>,
@@ -1535,6 +1549,7 @@ pub(super) fn estimate_seqscan_candidate(
         relkind,
         relispopulated,
         toast,
+        tablesample,
         desc: desc.clone(),
         disabled,
     };
@@ -4216,7 +4231,7 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
 }
 
 fn estimate_nested_loop_join_internal(
-    _root: Option<&PlannerInfo>,
+    root: Option<&PlannerInfo>,
     left: Path,
     right: Path,
     kind: JoinType,
@@ -4224,6 +4239,11 @@ fn estimate_nested_loop_join_internal(
     pathtarget: PathTarget,
     output_columns: Vec<QueryColumn>,
 ) -> Path {
+    let left = if nested_loop_should_preserve_desc_limit_order(root, kind, &right) {
+        backward_full_index_scan_path(left)
+    } else {
+        left
+    };
     let left_info = left.plan_info();
     let right_info = right.plan_info();
     let left_rows = clamp_rows(left_info.plan_rows.as_f64());
@@ -4257,6 +4277,150 @@ fn estimate_nested_loop_join_internal(
         right: Box::new(right),
         kind,
         restrict_clauses,
+    }
+}
+
+fn nested_loop_should_preserve_desc_limit_order(
+    root: Option<&PlannerInfo>,
+    kind: JoinType,
+    right: &Path,
+) -> bool {
+    let Some(root) = root else {
+        return false;
+    };
+    root.parse.limit_count.is_some()
+        && root.query_pathkeys.iter().any(|pathkey| pathkey.descending)
+        && matches!(kind, JoinType::Inner | JoinType::Left)
+        && path_contains_runtime_index_arg(right)
+}
+
+fn backward_full_index_scan_path(path: Path) -> Path {
+    match path {
+        Path::IndexOnlyScan {
+            plan_info,
+            pathtarget,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
+            mut pathkeys,
+        } if keys.is_empty()
+            && order_by_keys.is_empty()
+            && !pathkeys.is_empty()
+            && !matches!(
+                direction,
+                crate::include::access::relscan::ScanDirection::Backward
+            ) =>
+        {
+            for pathkey in &mut pathkeys {
+                pathkey.descending = !pathkey.descending;
+            }
+            Path::IndexOnlyScan {
+                plan_info,
+                pathtarget,
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                index_rel,
+                index_name,
+                am_oid,
+                toast,
+                desc,
+                index_desc,
+                index_meta,
+                keys,
+                order_by_keys,
+                direction: crate::include::access::relscan::ScanDirection::Backward,
+                pathkeys,
+            }
+        }
+        Path::IndexScan {
+            plan_info,
+            pathtarget,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
+            index_only,
+            mut pathkeys,
+        } if keys.is_empty()
+            && order_by_keys.is_empty()
+            && !pathkeys.is_empty()
+            && !matches!(
+                direction,
+                crate::include::access::relscan::ScanDirection::Backward
+            ) =>
+        {
+            for pathkey in &mut pathkeys {
+                pathkey.descending = !pathkey.descending;
+            }
+            Path::IndexScan {
+                plan_info,
+                pathtarget,
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                index_rel,
+                index_name,
+                am_oid,
+                toast,
+                desc,
+                index_desc,
+                index_meta,
+                keys,
+                order_by_keys,
+                direction: crate::include::access::relscan::ScanDirection::Backward,
+                index_only,
+                pathkeys,
+            }
+        }
+        Path::Projection {
+            plan_info,
+            pathtarget,
+            slot_id,
+            input,
+            targets,
+        } => Path::Projection {
+            plan_info,
+            pathtarget,
+            slot_id,
+            input: Box::new(backward_full_index_scan_path(*input)),
+            targets,
+        },
+        Path::Filter {
+            plan_info,
+            pathtarget,
+            input,
+            predicate,
+        } => Path::Filter {
+            plan_info,
+            pathtarget,
+            input: Box::new(backward_full_index_scan_path(*input)),
+            predicate,
+        },
+        other => other,
     }
 }
 

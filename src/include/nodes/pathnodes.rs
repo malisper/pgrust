@@ -4,6 +4,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::parsenodes::SetOperator;
+use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKey, PlanEstimate,
@@ -47,6 +48,8 @@ pub struct PlannerConfig {
     pub retain_partial_index_filters: bool,
     pub enable_hashagg: bool,
     pub enable_sort: bool,
+    pub force_parallel_gather: bool,
+    pub max_parallel_workers_per_gather: usize,
 }
 
 impl Default for PlannerConfig {
@@ -65,6 +68,8 @@ impl Default for PlannerConfig {
             retain_partial_index_filters: false,
             enable_hashagg: true,
             enable_sort: true,
+            force_parallel_gather: false,
+            max_parallel_workers_per_gather: 2,
         }
     }
 }
@@ -467,6 +472,7 @@ pub enum Path {
         relkind: char,
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
+        tablesample: Option<TableSampleClause>,
         desc: RelationDesc,
         disabled: bool,
     },

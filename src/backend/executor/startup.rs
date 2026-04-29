@@ -3,12 +3,12 @@ use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanState, HashJoinState, HashState,
-    IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MemoizeState, MergeAppendState, MergeJoinState, NestedLoopJoinState, NodeExecStats,
-    OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable,
-    ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState, ValuesState,
-    WindowAggState, WorkTableScanState,
+    BitmapQualState, CteScanState, FilterState, FunctionScanState, GatherState, HashJoinState,
+    HashState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
+    MaterializeState, MemoizeState, MergeAppendState, MergeJoinState, NestedLoopJoinState,
+    NodeExecStats, OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState,
+    RecursiveWorkTable, ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
@@ -258,9 +258,11 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Hash {
             input, hash_keys, ..
         } => plan_uses_outer_columns(input) || hash_keys.iter().any(expr_uses_outer_columns),
+        Plan::Materialize { input, .. } => plan_uses_outer_columns(input),
         Plan::Memoize {
             input, cache_keys, ..
         } => plan_uses_outer_columns(input) || cache_keys.iter().any(expr_uses_outer_columns),
+        Plan::Gather { input, .. } => plan_uses_outer_columns(input),
         Plan::NestedLoopJoin {
             left,
             right,
@@ -442,6 +444,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             relispopulated,
             disabled,
             toast,
+            tablesample: _,
             desc,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -698,6 +701,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             input,
             hash_keys,
         } => Box::new(build_hash_state(plan_info, *input, hash_keys)),
+        Plan::Materialize { plan_info, input } => Box::new(MaterializeState {
+            input: executor_start(*input),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
         Plan::Memoize {
             plan_info,
             input,
@@ -736,6 +744,18 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 memoize_stats: Default::default(),
             })
         }
+        Plan::Gather {
+            plan_info,
+            input,
+            workers_planned,
+            single_copy,
+        } => Box::new(GatherState {
+            input: executor_start(*input),
+            workers_planned,
+            single_copy,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
         Plan::NestedLoopJoin {
             plan_info,
             left,
@@ -947,6 +967,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relispopulated,
                 disabled,
                 toast,
+                tablesample: _,
                 desc,
             } = *input
             else {

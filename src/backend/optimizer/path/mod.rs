@@ -9,6 +9,7 @@ use crate::RelFileLocator;
 use crate::backend::optimizer::{AccessCandidate, IndexPathSpec, RelationStats};
 use crate::backend::parser::BoundIndexRelation;
 use crate::backend::parser::CatalogLookup;
+use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PlannerConfig, PlannerInfo, RelOptInfo, RestrictInfo,
 };
@@ -75,6 +76,7 @@ pub(super) fn estimate_seqscan_candidate(
     relkind: char,
     relispopulated: bool,
     toast: Option<ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: RelationDesc,
     stats: &RelationStats,
     filter: Option<Expr>,
@@ -89,6 +91,7 @@ pub(super) fn estimate_seqscan_candidate(
         relkind,
         relispopulated,
         toast,
+        tablesample,
         desc,
         stats,
         filter,

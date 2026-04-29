@@ -60,6 +60,8 @@ fn direct_guc_default(name: &str) -> Option<&'static str> {
         | "enable_memoize"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
+        "debug_parallel_query" => Some("off"),
+        "max_parallel_workers_per_gather" => Some("2"),
         _ => None,
     }
 }
@@ -71,6 +73,16 @@ fn direct_bool_config(
 ) -> bool {
     gucs.get(name)
         .and_then(|value| parse_direct_bool_guc(value))
+        .unwrap_or(default)
+}
+
+fn direct_usize_config(
+    gucs: &std::collections::HashMap<String, String>,
+    name: &str,
+    default: usize,
+) -> usize {
+    gucs.get(name)
+        .and_then(|value| value.trim().trim_matches('\'').parse::<usize>().ok())
         .unwrap_or(default)
 }
 
@@ -93,6 +105,12 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
         retain_partial_index_filters: false,
         enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
         enable_sort: direct_bool_config(gucs, "enable_sort", true),
+        force_parallel_gather: direct_bool_config(gucs, "debug_parallel_query", false),
+        max_parallel_workers_per_gather: direct_usize_config(
+            gucs,
+            "max_parallel_workers_per_gather",
+            2,
+        ),
     }
 }
 
@@ -159,7 +177,9 @@ fn reject_restricted_views_in_from_item(
             reject_restricted_views_in_from_item(left, catalog)?;
             reject_restricted_views_in_from_item(right, catalog)
         }
-        FromItem::Alias { source, .. } | FromItem::Lateral(source) => {
+        FromItem::Alias { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::TableSample { source, .. } => {
             reject_restricted_views_in_from_item(source, catalog)
         }
         FromItem::Values { .. }
