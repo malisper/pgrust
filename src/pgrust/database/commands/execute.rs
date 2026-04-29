@@ -12,6 +12,7 @@ use crate::backend::parser::{
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::push_warning_with_hint;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::ReplicaIdentityKind;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::QueryColumn;
@@ -25,6 +26,96 @@ fn restrict_nonsystem_view_enabled(gucs: &std::collections::HashMap<String, Stri
                 .any(|part| part.trim().trim_matches('\'').eq_ignore_ascii_case("view"))
         })
         .unwrap_or(false)
+}
+
+fn normalize_direct_guc_name(name: &str) -> String {
+    name.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_ascii_lowercase()
+}
+
+fn parse_direct_bool_guc(value: &str) -> Option<bool> {
+    match value
+        .trim()
+        .trim_matches('\'')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "on" | "true" | "yes" | "1" | "t" => Some(true),
+        "off" | "false" | "no" | "0" | "f" => Some(false),
+        _ => None,
+    }
+}
+
+fn direct_guc_default(name: &str) -> Option<&'static str> {
+    match name {
+        "enable_partitionwise_join" => Some("off"),
+        "enable_partitionwise_aggregate" => Some("off"),
+        "enable_seqscan"
+        | "enable_indexscan"
+        | "enable_indexonlyscan"
+        | "enable_bitmapscan"
+        | "enable_nestloop"
+        | "enable_hashjoin"
+        | "enable_mergejoin"
+        | "enable_memoize"
+        | "enable_material"
+        | "enable_hashagg"
+        | "enable_sort" => Some("on"),
+        "debug_parallel_query" => Some("off"),
+        "max_parallel_workers_per_gather" => Some("2"),
+        _ => None,
+    }
+}
+
+fn direct_bool_config(
+    gucs: &std::collections::HashMap<String, String>,
+    name: &str,
+    default: bool,
+) -> bool {
+    gucs.get(name)
+        .and_then(|value| parse_direct_bool_guc(value))
+        .unwrap_or(default)
+}
+
+fn direct_usize_config(
+    gucs: &std::collections::HashMap<String, String>,
+    name: &str,
+    default: usize,
+) -> usize {
+    gucs.get(name)
+        .and_then(|value| value.trim().trim_matches('\'').parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> PlannerConfig {
+    PlannerConfig {
+        enable_partitionwise_join: direct_bool_config(gucs, "enable_partitionwise_join", false),
+        enable_partitionwise_aggregate: direct_bool_config(
+            gucs,
+            "enable_partitionwise_aggregate",
+            false,
+        ),
+        enable_seqscan: direct_bool_config(gucs, "enable_seqscan", true),
+        enable_indexscan: direct_bool_config(gucs, "enable_indexscan", true),
+        enable_indexonlyscan: direct_bool_config(gucs, "enable_indexonlyscan", true),
+        enable_bitmapscan: direct_bool_config(gucs, "enable_bitmapscan", true),
+        enable_nestloop: direct_bool_config(gucs, "enable_nestloop", true),
+        enable_hashjoin: direct_bool_config(gucs, "enable_hashjoin", true),
+        enable_mergejoin: direct_bool_config(gucs, "enable_mergejoin", true),
+        enable_memoize: direct_bool_config(gucs, "enable_memoize", true),
+        enable_material: direct_bool_config(gucs, "enable_material", true),
+        retain_partial_index_filters: false,
+        enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
+        enable_sort: direct_bool_config(gucs, "enable_sort", true),
+        force_parallel_gather: direct_bool_config(gucs, "debug_parallel_query", false),
+        max_parallel_workers_per_gather: direct_usize_config(
+            gucs,
+            "max_parallel_workers_per_gather",
+            2,
+        ),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -597,6 +688,70 @@ impl Database {
         )
     }
 
+    fn direct_gucs_for_client(
+        &self,
+        client_id: ClientId,
+    ) -> std::collections::HashMap<String, String> {
+        self.session_guc_states
+            .read()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn apply_direct_guc_statement(
+        &self,
+        client_id: ClientId,
+        stmt: &Statement,
+    ) -> Result<Option<StatementResult>, ExecError> {
+        match stmt {
+            Statement::Set(set_stmt) => {
+                let name = normalize_direct_guc_name(&set_stmt.name);
+                if direct_guc_default(&name).is_some() {
+                    let mut states = self.session_guc_states.write();
+                    let gucs = states.entry(client_id).or_default();
+                    if let Some(value) = set_stmt.value.as_ref() {
+                        if parse_direct_bool_guc(value).is_none() {
+                            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                                value.clone(),
+                            )));
+                        }
+                        gucs.insert(name, value.trim().trim_matches('\'').to_ascii_lowercase());
+                    } else {
+                        gucs.remove(&name);
+                    }
+                }
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            Statement::Reset(reset_stmt) => {
+                let mut states = self.session_guc_states.write();
+                if let Some(name) = reset_stmt.name.as_ref() {
+                    let name = normalize_direct_guc_name(name);
+                    if let Some(gucs) = states.get_mut(&client_id) {
+                        gucs.remove(&name);
+                    }
+                } else {
+                    states.remove(&client_id);
+                }
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            Statement::Show(show_stmt) => {
+                let name = normalize_direct_guc_name(&show_stmt.name);
+                let Some(default) = direct_guc_default(&name) else {
+                    return Ok(Some(StatementResult::AffectedRows(0)));
+                };
+                let gucs = self.direct_gucs_for_client(client_id);
+                let value = gucs.get(&name).map(String::as_str).unwrap_or(default);
+                Ok(Some(StatementResult::Query {
+                    columns: vec![QueryColumn::text(show_stmt.name.clone())],
+                    column_names: vec![show_stmt.name.clone()],
+                    rows: vec![vec![Value::Text(value.into())]],
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(crate) fn execute_with_search_path(
         &self,
         client_id: ClientId,
@@ -627,11 +782,18 @@ impl Database {
                         ..ParseOptions::default()
                     },
                 )?;
-                self.execute_statement_with_search_path_and_datetime_config(
+                if let Some(result) = self.apply_direct_guc_statement(client_id, &stmt)? {
+                    return Ok(result);
+                }
+                let gucs = self.direct_gucs_for_client(client_id);
+                let planner_config = direct_planner_config(&gucs);
+                self.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
                     client_id,
                     stmt,
                     configured_search_path,
                     datetime_config,
+                    &gucs,
+                    planner_config,
                 )
             })
         })

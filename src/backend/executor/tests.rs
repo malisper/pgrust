@@ -5517,6 +5517,8 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
         &catalog,
         PlannerConfig {
             enable_partitionwise_join: true,
+            enable_nestloop: false,
+            enable_mergejoin: false,
             ..PlannerConfig::default()
         },
     )
@@ -5592,14 +5594,18 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
     );
 
     match session
-        .execute(
-            &db,
-            "explain (costs off)
+        .execute(&db, "set enable_nestloop to false")
+        .and_then(|_| session.execute(&db, "set enable_mergejoin to false"))
+        .and_then(|_| {
+            session.execute(
+                &db,
+                "explain (costs off)
              select t1.a, t1.c, t2.b, t2.c
              from prt1 t1, prt2 t2
              where t1.a = t2.b and t1.b = 0
              order by t1.a, t2.b",
-        )
+            )
+        })
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {

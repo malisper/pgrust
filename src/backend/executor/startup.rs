@@ -16,6 +16,7 @@ use crate::include::nodes::primnodes::{
     set_returning_call_exprs,
 };
 
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 fn expr_uses_outer_columns(expr: &Expr) -> bool {
@@ -762,12 +763,40 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             input,
             cache_keys,
-        } => Box::new(MemoizeState {
-            input: executor_start(*input),
-            cache_keys,
-            plan_info,
-            stats: NodeExecStats::default(),
-        }),
+            cache_key_labels,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        } => {
+            let input_plan = *input;
+            let column_names = input_plan.column_names();
+            let ncols = column_names.len();
+            Box::new(MemoizeState {
+                input: executor_start(input_plan.clone()),
+                input_plan,
+                cache_keys,
+                cache_key_labels,
+                key_paramids,
+                dependent_paramids,
+                binary_mode,
+                single_row,
+                est_entries,
+                cache: HashMap::new(),
+                lru: VecDeque::new(),
+                active_rows: Vec::new(),
+                active_index: 0,
+                scan_prepared: false,
+                last_nonkey_dependents: None,
+                slot: TupleSlot::empty(ncols),
+                current_bindings: Vec::new(),
+                column_names,
+                plan_info,
+                stats: NodeExecStats::default(),
+                memoize_stats: Default::default(),
+            })
+        }
         Plan::Gather {
             plan_info,
             input,

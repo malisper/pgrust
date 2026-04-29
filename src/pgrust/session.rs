@@ -2203,6 +2203,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_nestloop"
         | "enable_hashjoin"
         | "enable_mergejoin"
+        | "enable_memoize"
         | "enable_material"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
@@ -2732,6 +2733,11 @@ impl Session {
             enable_mergejoin: self
                 .gucs
                 .get("enable_mergejoin")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_memoize: self
+                .gucs
+                .get("enable_memoize")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
             enable_material: self
@@ -12907,6 +12913,7 @@ impl Session {
                 | "enable_nestloop"
                 | "enable_hashjoin"
                 | "enable_mergejoin"
+                | "enable_memoize"
                 | "enable_material"
                 | "enable_hashagg"
                 | "enable_sort"
@@ -15005,6 +15012,7 @@ fn apply_guc_value_to_state(
         | "enable_nestloop"
         | "enable_hashjoin"
         | "enable_mergejoin"
+        | "enable_memoize"
         | "enable_material"
         | "enable_hashagg"
         | "enable_sort"

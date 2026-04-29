@@ -4112,7 +4112,7 @@ fn analyze_sql_function_target_only_body(
         sort_clause: Vec::new(),
         constraint_deps: Vec::new(),
         limit_count: stmt.limit,
-        limit_offset: stmt.offset.unwrap_or(0),
+        limit_offset: stmt.offset,
         locking_clause: None,
         locking_targets: Vec::new(),
         row_marks: Vec::new(),
