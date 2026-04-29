@@ -15,10 +15,10 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen,
-    Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, ScalarFunctionImpl,
-    SetReturningCall, SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior,
-    SqlJsonTablePassingArg, SubLinkType, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
-    WindowFuncExpr, WindowFuncKind, XmlExpr, expr_sql_type_hint,
+    Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, RowsFromSource,
+    ScalarFunctionImpl, SetReturningCall, SortGroupClause, SqlJsonQueryFunction,
+    SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLinkType, TargetEntry, WindowClause,
+    WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, XmlExpr, expr_sql_type_hint,
 };
 
 pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
@@ -237,6 +237,37 @@ fn simplify_order_by_entry(item: OrderByEntry) -> Result<OrderByEntry, ParseErro
 
 fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCall, ParseError> {
     Ok(match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| {
+                    Ok(crate::include::nodes::primnodes::RowsFromItem {
+                        source: match item.source {
+                            RowsFromSource::Function(call) => {
+                                RowsFromSource::Function(simplify_set_returning_call(call)?)
+                            }
+                            RowsFromSource::Project {
+                                output_exprs,
+                                output_columns,
+                            } => RowsFromSource::Project {
+                                output_exprs: output_exprs
+                                    .into_iter()
+                                    .map(|expr| simplify_expr(expr, None))
+                                    .collect::<Result<Vec<_>, ParseError>>()?,
+                                output_columns,
+                            },
+                        },
+                        column_definitions: item.column_definitions,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -418,6 +449,7 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -425,6 +457,9 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             function_name,
             func_variadic,
             args: simplify_exprs(args)?,
+            inlined_expr: inlined_expr
+                .map(|expr| simplify_expr(*expr, None).map(Box::new))
+                .transpose()?,
             output_columns,
             with_ordinality,
         },
@@ -807,21 +842,57 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
             array_type,
         }),
         Expr::Row { descriptor, fields } => Ok(Expr::Row {
-            descriptor,
+            descriptor: descriptor.clone(),
             fields: fields
                 .into_iter()
                 .map(|(name, expr)| Ok((name, simplify_expr(expr, case_test_value)?)))
                 .collect::<Result<Vec<_>, ParseError>>()?,
+        })
+        .and_then(|expr| {
+            if let Expr::Row { descriptor, fields } = expr {
+                if let Some(values) = fields
+                    .iter()
+                    .map(|(_, expr)| const_expr_value(expr).cloned())
+                    .collect::<Option<Vec<_>>>()
+                {
+                    return Ok(Expr::Const(Value::Record(
+                        crate::include::nodes::datum::RecordValue::from_descriptor(
+                            descriptor, values,
+                        ),
+                    )));
+                }
+                Ok(Expr::Row { descriptor, fields })
+            } else {
+                Ok(expr)
+            }
         }),
         Expr::FieldSelect {
             expr,
             field,
             field_type,
-        } => Ok(Expr::FieldSelect {
-            expr: Box::new(simplify_expr(*expr, case_test_value)?),
-            field,
-            field_type,
-        }),
+        } => {
+            let expr = simplify_expr(*expr, case_test_value)?;
+            if let Expr::Row { fields, .. } = &expr
+                && let Some((_, selected)) = fields
+                    .iter()
+                    .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&field))
+            {
+                return Ok(selected.clone());
+            }
+            if let Expr::Cast(inner, _) = &expr
+                && let Expr::Row { fields, .. } = inner.as_ref()
+                && let Some((_, selected)) = fields
+                    .iter()
+                    .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&field))
+            {
+                return Ok(selected.clone());
+            }
+            Ok(Expr::FieldSelect {
+                expr: Box::new(expr),
+                field,
+                field_type,
+            })
+        }
         Expr::Coalesce(left, right) => simplify_coalesce_expr(*left, *right, case_test_value),
         Expr::ArraySubscript { array, subscripts } => Ok(Expr::ArraySubscript {
             array: Box::new(simplify_expr(*array, case_test_value)?),

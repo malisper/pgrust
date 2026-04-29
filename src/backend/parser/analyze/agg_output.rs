@@ -374,9 +374,9 @@ fn query_references_local_cte(
                     | SetReturningCall::StringTableFunction { args, .. }
                     | SetReturningCall::TextSearchTableFunction { args, .. }
                     | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
-                    SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
-                        set_returning_call_exprs(call)
-                    }
+                    SetReturningCall::RowsFrom { .. }
+                    | SetReturningCall::SqlJsonTable(_)
+                    | SetReturningCall::SqlXmlTable(_) => set_returning_call_exprs(call),
                 };
                 if let Some(name) = args
                     .into_iter()
@@ -3657,6 +3657,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
         }),
         SqlExpr::LocalTimestamp { precision } => Ok(Expr::LocalTimestamp {
             precision: *precision,
+        }),
+        SqlExpr::ParamRef(index) => Err(ParseError::DetailedError {
+            message: format!("there is no parameter ${index}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P02",
         }),
     }
 }

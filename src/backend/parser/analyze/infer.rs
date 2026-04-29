@@ -1,3 +1,4 @@
+use super::expr::resolve_bound_field_select_type;
 use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::multiranges::infer_multirange_special_expr_type_with_ctes;
 use super::ranges::infer_range_special_expr_type_with_ctes;
@@ -115,6 +116,16 @@ fn signed_integer_literal_type(expr: &SqlExpr) -> Option<SqlTypeKind> {
     } else {
         None
     }
+}
+
+fn infer_sql_function_inline_named_field_type(
+    name: &str,
+    catalog: &dyn CatalogLookup,
+) -> Option<SqlType> {
+    let (arg_name, field) = name.split_once('.')?;
+    let arg = current_sql_function_inline_named_arg(arg_name)
+        .or_else(current_sql_function_inline_single_arg)?;
+    resolve_bound_field_select_type(&arg.expr, field, catalog).ok()
 }
 
 fn infer_random_function_return_type_with_ctes(
@@ -418,6 +429,21 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                                 .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
                             Err(ParseError::UnknownColumn(_)) => {
                                 infer_relation_row_expr_type(scope, catalog, outer_scopes, name)
+                                    .or_else(|| {
+                                        current_sql_function_inline_named_arg(name)
+                                            .map(|arg| arg.sql_type)
+                                            .or_else(|| {
+                                                (!name.contains('.'))
+                                                    .then(current_sql_function_inline_single_arg)
+                                                    .flatten()
+                                                    .map(|arg| arg.sql_type)
+                                            })
+                                            .or_else(|| {
+                                                infer_sql_function_inline_named_field_type(
+                                                    name, catalog,
+                                                )
+                                            })
+                                    })
                             }
                             Err(_) => None,
                         }
@@ -425,10 +451,14 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     .unwrap_or(SqlType::new(SqlTypeKind::Text))
             }
         }
+        SqlExpr::ParamRef(index) => current_sql_function_inline_arg(*index)
+            .map(|arg| arg.sql_type)
+            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Default => SqlType::new(SqlTypeKind::Text),
-        SqlExpr::Parameter(index) => {
-            external_param_type(*index).unwrap_or_else(|| SqlType::new(SqlTypeKind::Text))
-        }
+        SqlExpr::Parameter(index) => current_sql_function_inline_arg(*index)
+            .map(|arg| arg.sql_type)
+            .or_else(|| external_param_type(*index))
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
@@ -1502,6 +1532,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::Factorial) => SqlType::new(SqlTypeKind::Numeric),
                 Some(
                     BuiltinScalarFunction::Cbrt
+                    | BuiltinScalarFunction::Sin
                     | BuiltinScalarFunction::Sinh
                     | BuiltinScalarFunction::Cosh
                     | BuiltinScalarFunction::Tanh

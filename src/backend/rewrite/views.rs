@@ -1,7 +1,7 @@
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{parse_interval_text_value, render_interval_text_with_config};
-use crate::backend::parser::analyze::analyze_select_query_with_outer;
+use crate::backend::parser::analyze::{analyze_select_query_with_outer, sql_type_name};
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, SubqueryComparisonOp,
 };
@@ -20,12 +20,13 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExpr, OpExprKind,
-    RelationDesc, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SetReturningCall, SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTable,
-    SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePlan,
-    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind, SubLink,
-    SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause, WindowFrameBound,
-    WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint, user_attrno,
+    QueryColumn, RelationDesc, RowsFromItem, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO,
+    ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SqlJsonQueryFunction,
+    SqlJsonQueryFunctionKind, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
+    SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
+    SqlXmlTableColumnKind, SubLink, SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause,
+    WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
+    user_attrno,
 };
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -271,6 +272,7 @@ fn normalize_deparsed_view_sql_for_parser(sql: &str) -> String {
         "SHARE",
         "SKIP",
         "UNION",
+        "UNNEST",
         "UPDATE",
         "USING",
         "VALUES",
@@ -371,9 +373,15 @@ fn validate_view_shape(
     query: &mut Query,
     relation_desc: &RelationDesc,
     display_name: &str,
+    catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {
     let actual_columns = query.columns();
     if actual_columns.len() != relation_desc.columns.len() {
+        if actual_columns.len() > relation_desc.columns.len()
+            && prune_added_view_columns_by_name(query, &actual_columns, relation_desc)
+        {
+            return validate_view_shape(query, relation_desc, display_name, catalog);
+        }
         return Err(ParseError::UnexpectedToken {
             expected: "view query width matching stored view columns",
             actual: format!("stale view definition for {display_name}"),
@@ -384,10 +392,43 @@ fn validate_view_shape(
         .zip(relation_desc.columns.iter())
         .enumerate()
     {
+        if actual_column.name != stored_column.name
+            && !query
+                .columns()
+                .iter()
+                .skip(index)
+                .any(|column| column.name == stored_column.name)
+        {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "attribute {} of type record has been dropped",
+                    dropped_view_attribute_number(
+                        query,
+                        catalog,
+                        query.target_list.get(index),
+                        index,
+                        &stored_column.name,
+                        &actual_column.name,
+                    )
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
+        }
         if actual_column.sql_type != stored_column.sql_type {
-            return Err(ParseError::UnexpectedToken {
-                expected: "view query columns matching stored view descriptor",
-                actual: format!("stale view definition for {display_name}"),
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "attribute {} of type record has wrong type",
+                    index.saturating_add(1)
+                ),
+                detail: Some(format!(
+                    "Table has type {}, but query expects {}.",
+                    sql_type_name(actual_column.sql_type),
+                    sql_type_name(stored_column.sql_type)
+                )),
+                hint: None,
+                sqlstate: "42804",
             });
         }
         if let Some(target) = query.target_list.get_mut(index) {
@@ -395,6 +436,181 @@ fn validate_view_shape(
         }
     }
     Ok(())
+}
+
+fn dropped_view_attribute_number(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    target: Option<&TargetEntry>,
+    index: usize,
+    stored_name: &str,
+    actual_name: &str,
+) -> usize {
+    if let Some(attr_index) = dropped_attr_from_query_function_call(
+        query,
+        catalog,
+        target,
+        index,
+        stored_name,
+        actual_name,
+    ) {
+        return attr_index.saturating_add(1);
+    }
+    if let Some(Expr::Var(var)) = target.map(|target| &target.expr)
+        && var.varno > 0
+        && let Some(rte) = query.rtable.get(var.varno.saturating_sub(1))
+    {
+        if let Some(attr_index) = dropped_attr_before_actual_column(&rte.desc, actual_name) {
+            return attr_index.saturating_add(1);
+        }
+        if let Some((attr_index, _)) = rte
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.dropped && column.name == stored_name)
+        {
+            return attr_index.saturating_add(1);
+        }
+    }
+    if let Some(attr_index) = query
+        .rtable
+        .iter()
+        .filter_map(|rte| dropped_attr_before_actual_column(&rte.desc, actual_name))
+        .next()
+    {
+        return attr_index.saturating_add(1);
+    }
+    index.saturating_add(1)
+}
+
+fn dropped_attr_from_query_function_call(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    target: Option<&TargetEntry>,
+    index: usize,
+    stored_name: &str,
+    actual_name: &str,
+) -> Option<usize> {
+    if let Some(Expr::Var(var)) = target.map(|target| &target.expr)
+        && var.varno > 0
+        && let Some(rte) = query.rtable.get(var.varno.saturating_sub(1))
+    {
+        if let RangeTblEntryKind::Function { call } = &rte.kind {
+            let rte_index = attrno_index(var.varattno).unwrap_or(index);
+            if let Some(attr_index) =
+                dropped_attr_from_call(call, catalog, rte_index, stored_name, actual_name)
+            {
+                return Some(attr_index);
+            }
+        }
+    }
+    query.rtable.iter().find_map(|rte| match &rte.kind {
+        RangeTblEntryKind::Function { call } => {
+            dropped_attr_from_call(call, catalog, index, stored_name, actual_name)
+        }
+        _ => None,
+    })
+}
+
+fn dropped_attr_from_call(
+    call: &SetReturningCall,
+    catalog: &dyn CatalogLookup,
+    index: usize,
+    stored_name: &str,
+    actual_name: &str,
+) -> Option<usize> {
+    match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            let mut offset = 0usize;
+            for item in items {
+                let width = item.output_columns().len();
+                if index < offset.saturating_add(width) {
+                    return match &item.source {
+                        RowsFromSource::Function(call) => dropped_attr_from_call(
+                            call,
+                            catalog,
+                            index.saturating_sub(offset),
+                            stored_name,
+                            actual_name,
+                        ),
+                        RowsFromSource::Project { .. } => None,
+                    };
+                }
+                offset = offset.saturating_add(width);
+            }
+            None
+        }
+        SetReturningCall::UserDefined { proc_oid, .. } => {
+            dropped_attr_from_proc_return(catalog, *proc_oid, stored_name, actual_name)
+        }
+        _ => None,
+    }
+}
+
+fn dropped_attr_from_proc_return(
+    catalog: &dyn CatalogLookup,
+    proc_oid: u32,
+    stored_name: &str,
+    actual_name: &str,
+) -> Option<usize> {
+    let proc_row = catalog.proc_row_by_oid(proc_oid)?;
+    let return_type = catalog.type_by_oid(proc_row.prorettype)?;
+    let relation = catalog.relation_by_oid(return_type.typrelid)?;
+    dropped_attr_before_actual_column(&relation.desc, actual_name).or_else(|| {
+        relation
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.dropped && column.name == stored_name)
+            .map(|(index, _)| index)
+    })
+}
+
+fn dropped_attr_before_actual_column(desc: &RelationDesc, actual_name: &str) -> Option<usize> {
+    let actual_index = desc
+        .columns
+        .iter()
+        .position(|column| !column.dropped && column.name == actual_name)?;
+    desc.columns
+        .iter()
+        .enumerate()
+        .take(actual_index)
+        .rev()
+        .find_map(|(index, column)| column.dropped.then_some(index))
+}
+
+fn prune_added_view_columns_by_name(
+    query: &mut Query,
+    actual_columns: &[QueryColumn],
+    relation_desc: &RelationDesc,
+) -> bool {
+    let mut keep_visible_indexes = Vec::with_capacity(relation_desc.columns.len());
+    let mut search_from = 0usize;
+    for stored in &relation_desc.columns {
+        let Some((index, _)) = actual_columns
+            .iter()
+            .enumerate()
+            .skip(search_from)
+            .find(|(_, actual)| actual.name == stored.name && actual.sql_type == stored.sql_type)
+        else {
+            return false;
+        };
+        keep_visible_indexes.push(index);
+        search_from = index.saturating_add(1);
+    }
+
+    let mut visible_index = 0usize;
+    query.target_list.retain(|target| {
+        if target.resjunk {
+            return true;
+        }
+        let keep = keep_visible_indexes.contains(&visible_index);
+        visible_index += 1;
+        keep
+    });
+    true
 }
 
 fn apply_relation_desc_target_names(query: &mut Query, relation_desc: &RelationDesc) {
@@ -425,7 +641,7 @@ pub(crate) fn load_view_return_query(
     let (mut query, _) =
         analyze_select_query_with_outer(&select, catalog, &[], None, None, &[], &next_views)?;
     let display_name = view_display_name(relation_oid, alias);
-    validate_view_shape(&mut query, relation_desc, &display_name)?;
+    validate_view_shape(&mut query, relation_desc, &display_name, catalog)?;
     Ok(query)
 }
 
@@ -591,7 +807,9 @@ fn render_target_entry(
         && matches!(&target.expr, Expr::Var(_) | Expr::FieldSelect { .. })
         && expr_output_name(&target.expr, ctx)
             .is_some_and(|name| name.eq_ignore_ascii_case(target_name));
-    if rendered == quote_identifier_if_needed(target_name) || natural_output_matches {
+    if natural_output_matches && visible_source_count(ctx.query) == 1 {
+        quote_identifier_if_needed(target_name)
+    } else if rendered == quote_identifier_if_needed(target_name) || natural_output_matches {
         rendered
     } else {
         format!("{rendered} AS {}", quote_identifier_if_needed(target_name))
@@ -629,23 +847,37 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
             let constraint = if *kind == JoinType::Cross {
                 String::new()
             } else if using_cols.is_empty() {
-                format!(" ON {}", render_expr(quals, ctx))
+                format!(" ON (({}))", render_join_qual_expr(quals, ctx))
             } else {
                 format!(" USING ({})", using_cols.join(", "))
             };
-            let joined_body = format!(
-                "{left_sql}\n{}{} JOIN {}{}",
-                " ".repeat(indent + 3),
-                render_join_type(*kind),
-                right_sql,
-                constraint
-            );
-            let needs_parentheses = indent != 3
+            let join_type = render_join_type(*kind);
+            let join_keyword = if join_type.is_empty() {
+                "JOIN".to_string()
+            } else {
+                format!("{join_type} JOIN")
+            };
+            let needs_parentheses = indent > 3
                 || ctx
                     .query
                     .rtable
                     .get(rtindex.saturating_sub(1))
-                    .is_some_and(|rte| rte.alias.is_some());
+                    .and_then(|rte| rte.alias.as_ref())
+                    .is_some()
+                || join_operand_requires_outer_parentheses(ctx, left)
+                || join_operand_requires_outer_parentheses(ctx, right);
+            let join_indent = if needs_parentheses {
+                indent + 2
+            } else {
+                indent + 3
+            };
+            let joined_body = format!(
+                "{left_sql}\n{}{} {}{}",
+                " ".repeat(join_indent),
+                join_keyword,
+                right_sql,
+                constraint
+            );
             let joined = if needs_parentheses {
                 format!("({joined_body})")
             } else {
@@ -654,6 +886,19 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
             append_join_alias(ctx, *rtindex, joined)
         }
     }
+}
+
+fn join_operand_requires_outer_parentheses(
+    ctx: &ViewDeparseContext<'_>,
+    node: &JoinTreeNode,
+) -> bool {
+    let JoinTreeNode::RangeTblRef(index) = node else {
+        return false;
+    };
+    ctx.query
+        .rtable
+        .get(index.saturating_sub(1))
+        .is_some_and(|rte| !matches!(rte.kind, RangeTblEntryKind::Relation { .. }))
 }
 
 fn render_rte(ctx: &ViewDeparseContext<'_>, index: usize) -> String {
@@ -818,6 +1063,30 @@ fn render_function_rte(
 }
 
 fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'_>) -> String {
+    if let SetReturningCall::RowsFrom {
+        items,
+        with_ordinality,
+        ..
+    } = call
+    {
+        if items.len() == 1
+            && let RowsFromSource::Function(function_call @ SetReturningCall::Unnest { .. }) =
+                &items[0].source
+            && !items[0].column_definitions
+        {
+            let mut rendered = render_set_returning_call(function_call, ctx);
+            if *with_ordinality {
+                rendered.push_str(" WITH ORDINALITY");
+            }
+            return rendered;
+        }
+        let rendered_items = render_rows_from_items(items, ctx).join(", ");
+        let mut rendered = format!("ROWS FROM({rendered_items})");
+        if *with_ordinality {
+            rendered.push_str(" WITH ORDINALITY");
+        }
+        return rendered;
+    }
     if let SetReturningCall::SqlJsonTable(table) = call {
         return render_sql_json_table_call(table, ctx);
     }
@@ -866,7 +1135,7 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
             with_ordinality,
             ..
         } => (
-            "unnest".to_string(),
+            "UNNEST".to_string(),
             args.iter()
                 .map(|arg| render_wrapped_expr(arg, ctx))
                 .collect(),
@@ -984,12 +1253,92 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
         SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
             unreachable!("handled above")
         }
+        SetReturningCall::RowsFrom { .. } => unreachable!("handled above"),
     };
-    let mut rendered = format!("{}({})", quote_identifier_if_needed(&name), args.join(", "));
+    let rendered_name = if name == "UNNEST" {
+        name
+    } else {
+        quote_identifier_if_needed(&name)
+    };
+    let mut rendered = format!("{rendered_name}({})", args.join(", "));
     if with_ordinality {
         rendered.push_str(" WITH ORDINALITY");
     }
     rendered
+}
+
+fn render_rows_from_items(items: &[RowsFromItem], ctx: &ViewDeparseContext<'_>) -> Vec<String> {
+    let mut rendered = Vec::new();
+    for item in items {
+        if !item.column_definitions
+            && let RowsFromSource::Function(SetReturningCall::Unnest { args, .. }) = &item.source
+            && args.len() > 1
+        {
+            rendered.extend(
+                args.iter()
+                    .map(|arg| format!("unnest({})", render_wrapped_expr(arg, ctx))),
+            );
+        } else {
+            rendered.push(render_rows_from_item(item, ctx));
+        }
+    }
+    rendered
+}
+
+fn render_rows_from_item(item: &RowsFromItem, ctx: &ViewDeparseContext<'_>) -> String {
+    let mut rendered = match &item.source {
+        RowsFromSource::Function(call) => match call {
+            SetReturningCall::Unnest { .. } => render_set_returning_call(call, ctx)
+                .strip_prefix("UNNEST")
+                .map(|suffix| format!("unnest{suffix}"))
+                .unwrap_or_else(|| render_set_returning_call(call, ctx)),
+            _ => render_set_returning_call(call, ctx),
+        },
+        RowsFromSource::Project { output_exprs, .. } => {
+            render_rows_from_project_item(output_exprs, ctx)
+        }
+    };
+    if item.column_definitions {
+        let definitions = item
+            .output_columns()
+            .iter()
+            .map(|column| {
+                format!(
+                    "{} {}",
+                    quote_identifier_if_needed(&column.name),
+                    render_sql_type_with_catalog(column.sql_type, ctx.catalog)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        rendered.push_str(&format!(" AS ({definitions})"));
+    }
+    rendered
+}
+
+fn render_rows_from_project_item(output_exprs: &[Expr], ctx: &ViewDeparseContext<'_>) -> String {
+    if let Some(base_expr) = rows_from_project_base_expr(output_exprs) {
+        return render_wrapped_expr(base_expr, ctx);
+    }
+    output_exprs
+        .iter()
+        .map(|expr| render_wrapped_expr(expr, ctx))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rows_from_project_base_expr(output_exprs: &[Expr]) -> Option<&Expr> {
+    match output_exprs {
+        [expr] => Some(expr),
+        [Expr::FieldSelect { expr: first, .. }, rest @ ..]
+            if rest.iter().all(|expr| {
+                matches!(expr, Expr::FieldSelect { expr, .. } if expr.as_ref() == first.as_ref())
+            }) =>
+        {
+            Some(first)
+        }
+        _ => None,
+    }
 }
 
 fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) -> String {
@@ -1526,11 +1875,14 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
             render_expr(left, ctx),
             render_expr(right, ctx)
         ),
-        Expr::ArrayLiteral { elements, .. } => format!(
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => format!(
             "ARRAY[{}]",
             elements
                 .iter()
-                .map(|element| render_expr(element, ctx))
+                .map(|element| render_array_element_expr(element, array_type.element_type(), ctx))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -1587,6 +1939,37 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
         }
         _ => format!("{expr:?}"),
     }
+}
+
+fn render_array_element_expr(
+    element: &Expr,
+    element_type: SqlType,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    let rendered = render_expr(element, ctx);
+    if element_type.kind == SqlTypeKind::Text
+        && !element_type.is_array
+        && matches!(
+            element,
+            Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))
+        )
+        && !rendered.contains("::")
+    {
+        format!("{rendered}::text")
+    } else {
+        rendered
+    }
+}
+
+fn render_join_qual_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    strip_view_join_implicit_casts(&render_expr(expr, ctx))
+}
+
+fn strip_view_join_implicit_casts(rendered: &str) -> String {
+    rendered
+        .replace("::bigint", "")
+        .replace("::integer", "")
+        .replace("::smallint", "")
 }
 
 fn render_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
@@ -2445,7 +2828,7 @@ fn render_subquery_op(op: SubqueryComparisonOp) -> &'static str {
 
 fn render_join_type(kind: JoinType) -> &'static str {
     match kind {
-        JoinType::Inner => "INNER",
+        JoinType::Inner => "",
         JoinType::Cross => "CROSS",
         JoinType::Left => "LEFT",
         JoinType::Right => "RIGHT",

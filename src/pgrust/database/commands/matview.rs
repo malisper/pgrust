@@ -554,6 +554,7 @@ impl Database {
             pending_table_locks: Vec::new(),
             catalog,
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: HashMap::new(),

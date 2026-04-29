@@ -1,15 +1,19 @@
-use super::expr::{bind_legacy_scalar_function_call, bind_resolved_scalar_function_call};
+use super::expr::bind_legacy_scalar_function_call;
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
+use crate::backend::parser::parse_statement;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
-use crate::include::catalog::{ANYOID, PG_CATALOG_NAMESPACE_OID, PgPartitionedTableRow};
+use crate::include::catalog::{
+    ANYOID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PgPartitionedTableRow, PgProcRow,
+};
+use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
-    AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable,
-    SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg,
-    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn,
-    SqlXmlTableColumnKind, SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint,
-    user_attrno,
+    AttrNumber, BoolExpr, CaseExpr, CaseWhen, ColumnDesc, FuncExpr, JoinType, JsonRecordFunction,
+    RowsFromItem, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable, SqlJsonTableBehavior,
+    SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
+    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
+    SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint, user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -677,6 +681,7 @@ fn from_item_is_lateral(item: &FromItem) -> bool {
     match item {
         FromItem::Lateral(_) => true,
         FromItem::FunctionCall { .. } => true,
+        FromItem::RowsFrom { .. } => true,
         FromItem::JsonTable(_) => true,
         FromItem::XmlTable(_) => true,
         FromItem::Alias { source, .. } => from_item_is_lateral(source),
@@ -841,6 +846,17 @@ pub(super) fn bind_from_item_with_ctes(
             )?;
             Ok((plan, scope))
         }
+        FromItem::RowsFrom {
+            functions,
+            with_ordinality,
+        } => bind_rows_from_item_with_ctes(
+            functions,
+            *with_ordinality,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
         FromItem::JsonTable(table) => bind_sql_json_table_from_item_with_ctes(
             table,
             catalog,
@@ -1122,6 +1138,80 @@ fn attach_table_sample(
     };
     *tablesample = Some(sample);
     Ok(())
+}
+
+fn bind_rows_from_item_with_ctes(
+    functions: &[RowsFromFunction],
+    with_ordinality: bool,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    let mut items = Vec::with_capacity(functions.len());
+    let mut output_columns = Vec::new();
+    for function in functions {
+        let typed_defs = (!function.column_definitions.is_empty())
+            .then_some(function.column_definitions.as_slice());
+        let (plan, _, _) = bind_function_from_item_with_ctes(
+            &function.name,
+            &function.args,
+            function.func_variadic,
+            false,
+            typed_defs,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        let source = match plan.rtable.as_slice() {
+            [rte] => match &rte.kind {
+                RangeTblEntryKind::Function { call } => RowsFromSource::Function(call.clone()),
+                RangeTblEntryKind::Subquery { query } => RowsFromSource::Project {
+                    output_exprs: query
+                        .target_list
+                        .iter()
+                        .map(|target| target.expr.clone())
+                        .collect(),
+                    output_columns: plan.output_columns.clone(),
+                },
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "function scan or single-row function projection",
+                        actual: "ROWS FROM item".into(),
+                    });
+                }
+            },
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "function scan or single-row function projection",
+                    actual: "ROWS FROM item".into(),
+                });
+            }
+        };
+        output_columns.extend(plan.output_columns.iter().cloned());
+        items.push(RowsFromItem {
+            source,
+            column_definitions: !function.column_definitions.is_empty(),
+        });
+    }
+    if with_ordinality {
+        output_columns.push(QueryColumn {
+            name: "ordinality".to_string(),
+            sql_type: SqlType::new(SqlTypeKind::Int8),
+            wire_type_oid: None,
+        });
+    }
+    let plan = AnalyzedFrom::function(SetReturningCall::RowsFrom {
+        items,
+        output_columns,
+        with_ordinality,
+    });
+    let desc = synthetic_desc_from_analyzed_from(&plan);
+    Ok((
+        plan.clone(),
+        scope_with_output_exprs(scope_for_relation(None, &desc), &plan.output_exprs),
+    ))
 }
 
 struct SqlJsonTableBindState {
@@ -1844,6 +1934,7 @@ fn sql_expr_contains_set_returning_call(
     match expr {
         SqlExpr::Column(_)
         | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
@@ -2529,7 +2620,7 @@ fn bind_function_from_item_with_ctes(
                     with_ordinality,
                 }),
                 scope,
-                !with_ordinality,
+                true,
             ))
         }
         "generate_subscripts" => {
@@ -2640,7 +2731,7 @@ fn bind_function_from_item_with_ctes(
                     with_ordinality,
                 }),
                 scope,
-                !with_ordinality,
+                true,
             ))
         }
         "unnest" => {
@@ -2659,7 +2750,7 @@ fn bind_function_from_item_with_ctes(
             let mut bound_args = Vec::with_capacity(args.len());
             let mut output_columns = Vec::with_capacity(args.len());
             let mut desc_columns = Vec::with_capacity(args.len());
-            for (idx, arg) in args.iter().enumerate() {
+            for (_idx, arg) in args.iter().enumerate() {
                 let arg_type = infer_sql_expr_type_with_ctes(
                     arg,
                     &call_scope,
@@ -2709,28 +2800,6 @@ fn bind_function_from_item_with_ctes(
                         actual: format!("{arg:?}"),
                     });
                 };
-                if args.len() == 1
-                    && let Some(columns) = unnest_composite_output_columns(element_type, catalog)?
-                {
-                    bound_args.push(bind_expr_with_outer_and_ctes(
-                        arg,
-                        &call_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?);
-                    for column in columns {
-                        desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
-                        output_columns.push(column);
-                    }
-                    continue;
-                }
-                let column_name = if idx == 0 {
-                    "unnest".to_string()
-                } else {
-                    format!("unnest_{}", idx + 1)
-                };
                 bound_args.push(bind_expr_with_outer_and_ctes(
                     arg,
                     &call_scope,
@@ -2739,6 +2808,17 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     ctes,
                 )?);
+                if args.len() == 1
+                    && let Some(columns) =
+                        output_columns_for_unnest_composite_element(element_type, catalog)?
+                {
+                    for column in columns {
+                        desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
+                        output_columns.push(column);
+                    }
+                    continue;
+                }
+                let column_name = "unnest".to_string();
                 output_columns.push(QueryColumn {
                     name: column_name.clone(),
                     sql_type: element_type,
@@ -2755,7 +2835,8 @@ fn bind_function_from_item_with_ctes(
                 columns: desc_columns,
             };
             let scope = scope_for_relation(Some(name), &desc);
-            let alias_single_function_output = output_columns.len() == 1;
+            let alias_single_function_output =
+                output_columns.len() == 1 || (with_ordinality && output_columns.len() == 2);
             Ok((
                 AnalyzedFrom::function(SetReturningCall::Unnest {
                     func_oid: resolved_proc_oid,
@@ -3376,6 +3457,21 @@ fn bind_function_from_item_with_ctes(
                     &mut output_columns,
                     &mut desc_columns,
                 );
+                if let Some((plan, scope, alias_single_function_output)) =
+                    try_inline_sql_set_function_from_item(
+                        name,
+                        &resolved,
+                        &bound_args,
+                        output_columns.clone(),
+                        with_ordinality,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?
+                {
+                    return Ok((plan, scope, alias_single_function_output));
+                }
                 let desc = RelationDesc {
                     columns: desc_columns,
                 };
@@ -3386,6 +3482,7 @@ fn bind_function_from_item_with_ctes(
                         function_name: name.to_string(),
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
+                        inlined_expr: None,
                         output_columns,
                         with_ordinality,
                     }),
@@ -3402,13 +3499,68 @@ fn bind_function_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )? {
+                if let Some(mut output_columns) = resolved_row_columns.clone() {
+                    let returned_columns =
+                        output_columns_for_unnest_composite_element(typed.sql_type, catalog)?
+                            .ok_or_else(|| {
+                                function_coldeflist_error(
+                                    "a column definition list is only allowed for functions returning \"record\"",
+                                )
+                            })?;
+                    validate_json_record_coldef_compatibility(&returned_columns, &output_columns)?;
+                    let mut targets =
+                        Vec::with_capacity(output_columns.len() + usize::from(with_ordinality));
+                    for (index, (returned, expected)) in returned_columns
+                        .iter()
+                        .zip(output_columns.iter())
+                        .enumerate()
+                    {
+                        let field_expr = Expr::FieldSelect {
+                            expr: Box::new(typed.expr.clone()),
+                            field: returned.name.clone(),
+                            field_type: returned.sql_type,
+                        };
+                        targets.push(TargetEntry::new(
+                            expected.name.clone(),
+                            coerce_bound_expr(field_expr, returned.sql_type, expected.sql_type),
+                            expected.sql_type,
+                            index + 1,
+                        ));
+                    }
+                    if with_ordinality {
+                        let ordinality_type = SqlType::new(SqlTypeKind::Int8);
+                        output_columns.push(QueryColumn {
+                            name: "ordinality".into(),
+                            sql_type: ordinality_type,
+                            wire_type_oid: None,
+                        });
+                        targets.push(TargetEntry::new(
+                            "ordinality",
+                            Expr::Const(Value::Int64(1)),
+                            ordinality_type,
+                            output_columns.len(),
+                        ));
+                    }
+                    let plan = AnalyzedFrom::result().with_projection(targets);
+                    let desc = RelationDesc {
+                        columns: output_columns
+                            .iter()
+                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                            .collect(),
+                    };
+                    let scope = scope_with_output_exprs(
+                        scope_for_relation(Some(other), &desc),
+                        &plan.output_exprs,
+                    );
+                    return Ok((plan, scope, false));
+                }
                 let mut plan = AnalyzedFrom::result().with_projection(vec![TargetEntry::new(
                     other.to_string(),
                     typed.expr,
                     typed.sql_type,
                     1,
                 )]);
-                let alias_single_function_output = !with_ordinality;
+                let alias_single_function_output = true;
                 if with_ordinality {
                     let base_expr = plan.output_exprs[0].clone();
                     let ordinality_type = SqlType::new(SqlTypeKind::Int8);
@@ -3453,48 +3605,44 @@ fn unnest_element_type(arg_type: SqlType) -> Option<SqlType> {
     }
 }
 
-fn unnest_composite_output_columns(
+fn output_columns_for_unnest_composite_element(
     element_type: SqlType,
     catalog: &dyn CatalogLookup,
 ) -> Result<Option<Vec<QueryColumn>>, ParseError> {
-    let fields =
-        if matches!(element_type.kind, SqlTypeKind::Composite) && element_type.typrelid != 0 {
+    match element_type.kind {
+        SqlTypeKind::Composite if element_type.typrelid != 0 => {
             let relation = catalog
                 .lookup_relation_by_oid(element_type.typrelid)
-                .ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "named composite type",
-                    actual: format!("type relation {} not found", element_type.typrelid),
-                })?;
-            relation
-                .desc
-                .columns
-                .into_iter()
-                .filter(|column| !column.dropped)
-                .map(|column| (column.name, column.sql_type))
-                .collect::<Vec<_>>()
-        } else if matches!(element_type.kind, SqlTypeKind::Record)
-            && element_type.typmod > 0
-            && let Some(descriptor) = lookup_anonymous_record_descriptor(element_type.typmod)
-        {
-            descriptor
-                .fields
-                .into_iter()
-                .map(|field| (field.name, field.sql_type))
-                .collect::<Vec<_>>()
-        } else {
-            return Ok(None);
-        };
-
-    Ok(Some(
-        fields
-            .into_iter()
-            .map(|(name, sql_type)| QueryColumn {
-                name,
-                sql_type,
-                wire_type_oid: None,
-            })
-            .collect(),
-    ))
+                .ok_or_else(|| ParseError::UnknownTable(element_type.typrelid.to_string()))?;
+            Ok(Some(
+                relation
+                    .desc
+                    .columns
+                    .into_iter()
+                    .filter(|column| !column.dropped)
+                    .map(|column| QueryColumn {
+                        name: column.name,
+                        sql_type: column.sql_type,
+                        wire_type_oid: None,
+                    })
+                    .collect(),
+            ))
+        }
+        SqlTypeKind::Record => Ok(lookup_anonymous_record_descriptor(element_type.typmod).map(
+            |descriptor| {
+                descriptor
+                    .fields
+                    .into_iter()
+                    .map(|field| QueryColumn {
+                        name: field.name,
+                        sql_type: field.sql_type,
+                        wire_type_oid: None,
+                    })
+                    .collect()
+            },
+        )),
+        _ => Ok(None),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3661,6 +3809,21 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
         .map(|col| column_desc(col.name.clone(), col.sql_type, true))
         .collect::<Vec<_>>();
     maybe_append_function_ordinality(with_ordinality, &mut output_columns, &mut desc_columns);
+    if let Some((plan, scope, alias_single_function_output)) =
+        try_inline_sql_set_function_from_item(
+            name,
+            &resolved,
+            &bound_args,
+            output_columns.clone(),
+            with_ordinality,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?
+    {
+        return Ok((plan, scope, alias_single_function_output));
+    }
     let desc = RelationDesc {
         columns: desc_columns,
     };
@@ -3671,6 +3834,7 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
             function_name: name.to_string(),
             func_variadic: resolved.func_variadic,
             args: bound_args,
+            inlined_expr: None,
             output_columns,
             with_ordinality,
         }),
@@ -3688,7 +3852,7 @@ fn bind_single_row_function_from_item_with_ctes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    ctes: &[BoundCte],
+    _ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
     if resolved_row_columns.is_none() && matches!(resolved.result_type.kind, SqlTypeKind::AnyArray)
     {
@@ -3718,12 +3882,15 @@ fn bind_single_row_function_from_item_with_ctes(
         };
         let scope = scope_for_relation(Some(name), &desc);
         let alias_single_function_output = output_columns.len() == 1;
+        let inlined_expr =
+            try_inline_sql_scalar_function_scan_expr(resolved, &bound_args, catalog)?;
         return Ok((
             AnalyzedFrom::function(SetReturningCall::UserDefined {
                 proc_oid: resolved.proc_oid,
                 function_name: name.to_string(),
                 func_variadic: resolved.func_variadic,
                 args: bound_args,
+                inlined_expr: inlined_expr.map(Box::new),
                 output_columns,
                 with_ordinality,
             }),
@@ -3732,68 +3899,652 @@ fn bind_single_row_function_from_item_with_ctes(
         ));
     }
 
-    let function_expr = bind_resolved_scalar_function_call(
-        resolved,
+    let bound_args = bind_resolved_user_defined_table_function_args(
         args,
         &empty_scope(),
         catalog,
         outer_scopes,
         grouped_outer,
-        ctes,
+        resolved,
     )?;
-    let mut plan = AnalyzedFrom::result().with_projection(vec![TargetEntry::new(
-        name.to_string(),
-        function_expr,
-        resolved.result_type,
-        1,
-    )]);
+    let mut output_columns = vec![QueryColumn {
+        name: name.to_string(),
+        sql_type: resolved.result_type,
+        wire_type_oid: None,
+    }];
+    let mut desc_columns = output_columns
+        .iter()
+        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+        .collect::<Vec<_>>();
+    maybe_append_function_ordinality(with_ordinality, &mut output_columns, &mut desc_columns);
+    let desc = RelationDesc {
+        columns: desc_columns,
+    };
+    let scope = scope_for_relation(Some(name), &desc);
+    let inlined_expr = try_inline_sql_scalar_function_scan_expr(resolved, &bound_args, catalog)?;
+    Ok((
+        AnalyzedFrom::function(SetReturningCall::UserDefined {
+            proc_oid: resolved.proc_oid,
+            function_name: name.to_string(),
+            func_variadic: resolved.func_variadic,
+            args: bound_args,
+            inlined_expr: inlined_expr.map(Box::new),
+            output_columns,
+            with_ordinality,
+        }),
+        scope,
+        true,
+    ))
+}
 
-    let alias_single_function_output = resolved_row_columns.is_none() && !with_ordinality;
-    if let Some(output_columns) = resolved_row_columns {
-        let base_expr = plan.output_exprs[0].clone();
-        let mut targets = output_columns
+#[allow(clippy::too_many_arguments)]
+fn try_inline_sql_set_function_from_item(
+    name: &str,
+    resolved: &ResolvedFunctionCall,
+    bound_args: &[Expr],
+    output_columns: Vec<QueryColumn>,
+    with_ordinality: bool,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Option<(AnalyzedFrom, BoundScope, bool)>, ParseError> {
+    let Some(row) = catalog.proc_row_by_oid(resolved.proc_oid) else {
+        return Ok(None);
+    };
+    if !sql_function_is_set_inline_candidate(&row, with_ordinality) {
+        return Ok(None);
+    }
+    let Some(stmt) = parse_sql_function_select_body(&row.prosrc)? else {
+        return Ok(None);
+    };
+    if matches!(resolved.result_type.kind, SqlTypeKind::Composite) && stmt.from.is_some() {
+        return Ok(None);
+    }
+    let has_target_function_call = stmt
+        .targets
+        .iter()
+        .any(|target| matches!(target.expr, SqlExpr::FuncCall { .. }));
+    if has_target_function_call && !sql_function_target_only_body_can_inline(&stmt) {
+        return Ok(None);
+    }
+    let inline_args = sql_function_inline_args(&row, bound_args, &resolved.declared_arg_types);
+    let (query, _) = with_sql_function_inline_args(inline_args, || {
+        if has_target_function_call
+            && let Some(query) = analyze_sql_function_target_only_body(&stmt, catalog)?
+        {
+            Ok((query, empty_scope()))
+        } else {
+            analyze_select_query_with_outer(
+                &stmt,
+                catalog,
+                outer_scopes,
+                grouped_outer.cloned(),
+                None,
+                ctes,
+                &[],
+            )
+        }
+    })?;
+    if has_target_function_call
+        && stmt.offset.is_none()
+        && query.rtable.is_empty()
+        && query.jointree.is_none()
+        && query.target_list.len() == output_columns.len()
+    {
+        let plan = AnalyzedFrom {
+            rtable: Vec::new(),
+            jointree: None,
+            output_exprs: query
+                .target_list
+                .iter()
+                .zip(output_columns.iter())
+                .map(|(target, column)| {
+                    let expr = decrement_inline_expr_varlevels(target.expr.clone());
+                    coerce_bound_expr(expr, target.sql_type, column.sql_type)
+                })
+                .collect(),
+            output_columns,
+        };
+        let desc = plan.desc();
+        let scope =
+            scope_with_output_exprs(scope_for_relation(Some(name), &desc), &plan.output_exprs);
+        return Ok(Some((plan, scope, false)));
+    }
+    let preserve_body_names = query.set_operation.is_some() && !query.sort_clause.is_empty();
+    let mut plan = AnalyzedFrom::subquery(query);
+    if output_columns.len() == plan.output_columns.len() {
+        let coerce_targets = matches!(resolved.result_type.kind, SqlTypeKind::Composite)
+            && resolved.result_type.typrelid != 0
+            || matches!(resolved.result_type.kind, SqlTypeKind::Record);
+        if coerce_targets {
+            validate_sql_function_inline_output_assignments(
+                &row.proname,
+                &plan.output_columns,
+                &output_columns,
+                catalog,
+            )?;
+        }
+        retarget_analyzed_from_output_columns(
+            &mut plan,
+            output_columns,
+            coerce_targets,
+            preserve_body_names,
+        );
+    }
+    if preserve_body_names && let Some(rte) = plan.rtable.last_mut() {
+        rte.alias = Some("*SELECT*".into());
+        rte.eref.aliasname = "*SELECT*".into();
+    }
+    let desc = plan.desc();
+    let scope = scope_with_output_exprs(scope_for_relation(Some(name), &desc), &plan.output_exprs);
+    Ok(Some((plan, scope, false)))
+}
+
+fn validate_sql_function_inline_output_assignments(
+    function_name: &str,
+    actual_columns: &[QueryColumn],
+    output_columns: &[QueryColumn],
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if actual_columns.len() != output_columns.len() {
+        return Ok(());
+    }
+    for (index, (actual, expected)) in actual_columns.iter().zip(output_columns.iter()).enumerate()
+    {
+        if sql_function_output_assignment_is_allowed(actual.sql_type, expected.sql_type, catalog) {
+            continue;
+        }
+        return Err(ParseError::DetailedError {
+            message: "return type mismatch in function declared to return record".into(),
+            detail: Some(format!(
+                "Final statement returns {} instead of {} at column {}.",
+                sql_type_name(actual.sql_type),
+                sql_type_name(expected.sql_type),
+                index + 1
+            )),
+            hint: None,
+            sqlstate: "42804",
+        }
+        .with_context(format!("SQL function \"{function_name}\" during inlining")));
+    }
+    Ok(())
+}
+
+fn sql_function_target_only_body_can_inline(stmt: &SelectStatement) -> bool {
+    !stmt.with_recursive
+        && stmt.with.is_empty()
+        && stmt.from.is_none()
+        && stmt.where_clause.is_none()
+        && stmt.group_by.is_empty()
+        && stmt.having.is_none()
+        && stmt.window_clauses.is_empty()
+        && stmt.order_by.is_empty()
+        && stmt.limit.is_none()
+        && stmt.locking_clause.is_none()
+        && stmt.set_operation.is_none()
+}
+
+fn analyze_sql_function_target_only_body(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Query>, ParseError> {
+    if !sql_function_target_only_body_can_inline(stmt) {
+        return Ok(None);
+    }
+    let empty = empty_scope();
+    let bound_targets = bind_select_targets(&stmt.targets, &empty, catalog, &[], None, &[])?;
+    let BoundSelectTargets::Plain(targets) = bound_targets;
+    Ok(Some(Query {
+        command_type: crate::include::executor::execdesc::CommandType::Select,
+        depends_on_row_security: false,
+        rtable: Vec::new(),
+        jointree: None,
+        target_list: normalize_target_list(targets),
+        distinct: false,
+        distinct_on: Vec::new(),
+        where_qual: None,
+        group_by: Vec::new(),
+        grouping_sets: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause: Vec::new(),
+        constraint_deps: Vec::new(),
+        limit_count: stmt.limit,
+        limit_offset: stmt.offset.unwrap_or(0),
+        locking_clause: None,
+        locking_targets: Vec::new(),
+        row_marks: Vec::new(),
+        has_target_srfs: false,
+        recursive_union: None,
+        set_operation: None,
+    }))
+}
+
+fn decrement_inline_expr_varlevels(expr: Expr) -> Expr {
+    match expr {
+        Expr::Var(mut var) if var.varlevelsup > 0 => {
+            var.varlevelsup -= 1;
+            Expr::Var(var)
+        }
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(decrement_inline_expr_varlevels)
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(decrement_inline_expr_varlevels(*arg))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| CaseWhen {
+                    expr: decrement_inline_expr_varlevels(arm.expr),
+                    result: decrement_inline_expr_varlevels(arm.result),
+                })
+                .collect(),
+            defresult: Box::new(decrement_inline_expr_varlevels(*case_expr.defresult)),
+            ..*case_expr
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(decrement_inline_expr_varlevels(*inner)), ty),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(decrement_inline_expr_varlevels(*inner))),
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(decrement_inline_expr_varlevels(*inner)))
+        }
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(decrement_inline_expr_varlevels(*expr)),
+            field,
+            field_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, decrement_inline_expr_varlevels(expr)))
+                .collect(),
+        },
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(decrement_inline_expr_varlevels)
+                .collect(),
+            ..*func
+        })),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(decrement_inline_expr_varlevels(*left)),
+            Box::new(decrement_inline_expr_varlevels(*right)),
+        ),
+        other => other,
+    }
+}
+
+fn sql_function_output_assignment_is_allowed(
+    actual: SqlType,
+    expected: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let Some(actual_oid) = catalog.type_oid_for_sql_type(actual) else {
+        return false;
+    };
+    let Some(expected_oid) = catalog.type_oid_for_sql_type(expected) else {
+        return false;
+    };
+    if actual_oid == expected_oid {
+        return true;
+    }
+    catalog
+        .cast_by_source_target(actual_oid, expected_oid)
+        .is_some_and(|row| matches!(row.castcontext, 'i' | 'a'))
+}
+
+fn try_inline_sql_scalar_function_scan_expr(
+    resolved: &ResolvedFunctionCall,
+    bound_args: &[Expr],
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let Some(row) = catalog.proc_row_by_oid(resolved.proc_oid) else {
+        return Ok(None);
+    };
+    if !sql_function_is_scalar_inline_candidate(&row) {
+        return Ok(None);
+    }
+    let Some(stmt) = parse_sql_function_select_body(&row.prosrc)? else {
+        return Ok(None);
+    };
+    if !select_body_is_simple_scalar_inline(&stmt) {
+        return Ok(None);
+    }
+    let inline_args = sql_function_inline_args(&row, bound_args, &resolved.declared_arg_types);
+    let empty = empty_scope();
+    let bound_targets = with_sql_function_inline_args(inline_args, || {
+        bind_select_targets(&stmt.targets, &empty, catalog, &[], None, &[])
+    })?;
+    let BoundSelectTargets::Plain(targets) = bound_targets;
+    if matches!(
+        resolved.result_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Record
+    ) && targets.len() != 1
+    {
+        let Some((descriptor, columns)) =
+            sql_function_record_result_descriptor(&row, resolved.result_type, catalog)
+        else {
+            return Ok(None);
+        };
+        if targets.len() != columns.len() {
+            return Ok(None);
+        }
+        let fields = targets
+            .into_iter()
+            .zip(columns.iter())
+            .map(|(target, column)| {
+                (
+                    column.name.clone(),
+                    coerce_bound_expr(target.expr, target.sql_type, column.sql_type),
+                )
+            })
+            .collect();
+        return Ok(Some(Expr::Row { descriptor, fields }));
+    }
+    let Ok([target]) = <Vec<TargetEntry> as TryInto<[TargetEntry; 1]>>::try_into(targets) else {
+        return Ok(None);
+    };
+    Ok(Some(coerce_bound_expr(
+        target.expr,
+        target.sql_type,
+        resolved.result_type,
+    )))
+}
+
+fn sql_function_is_set_inline_candidate(row: &PgProcRow, with_ordinality: bool) -> bool {
+    row.prolang == PG_LANGUAGE_SQL_OID
+        && row.prokind == 'f'
+        && row.proretset
+        && !with_ordinality
+        && !row.proisstrict
+        && row.provolatile != 'v'
+        && !row.prosecdef
+        && row.proconfig.is_none()
+}
+
+fn sql_function_is_scalar_inline_candidate(row: &PgProcRow) -> bool {
+    row.prolang == PG_LANGUAGE_SQL_OID
+        && row.prokind == 'f'
+        && !row.proretset
+        && !row.prosecdef
+        && row.proconfig.is_none()
+        && row.provolatile == 'i'
+}
+
+fn parse_sql_function_select_body(source: &str) -> Result<Option<SelectStatement>, ParseError> {
+    let body = source.trim().trim_end_matches(';').trim();
+    match parse_statement(body)? {
+        Statement::Select(stmt) => Ok(Some(stmt)),
+        Statement::Values(values) => {
+            Ok(Some(crate::backend::parser::wrap_values_as_select(values)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn select_body_is_simple_scalar_inline(stmt: &SelectStatement) -> bool {
+    !stmt.with_recursive
+        && stmt.with.is_empty()
+        && stmt.from.is_none()
+        && stmt.where_clause.is_none()
+        && stmt.group_by.is_empty()
+        && stmt.having.is_none()
+        && stmt.window_clauses.is_empty()
+        && stmt.order_by.is_empty()
+        && stmt.limit.is_none()
+        && stmt.offset.is_none()
+        && stmt.locking_clause.is_none()
+        && stmt.set_operation.is_none()
+}
+
+fn sql_function_record_result_descriptor(
+    row: &PgProcRow,
+    result_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Option<(RecordDescriptor, Vec<QueryColumn>)> {
+    if matches!(result_type.kind, SqlTypeKind::Composite) && result_type.typrelid != 0 {
+        let relation = catalog.lookup_relation_by_oid(result_type.typrelid)?;
+        let columns = relation
+            .desc
+            .columns
+            .into_iter()
+            .filter(|column| !column.dropped)
+            .map(|column| QueryColumn {
+                name: column.name,
+                sql_type: column.sql_type,
+                wire_type_oid: None,
+            })
+            .collect::<Vec<_>>();
+        let descriptor = RecordDescriptor::named(
+            row.prorettype,
+            result_type.typrelid,
+            result_type.typmod,
+            columns
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        );
+        return Some((descriptor, columns));
+    }
+    None
+}
+
+fn sql_function_inline_args(
+    row: &PgProcRow,
+    coerced_args: &[Expr],
+    declared_arg_types: &[SqlType],
+) -> Vec<SqlFunctionInlineArg> {
+    let names = sql_function_input_arg_names(row);
+    coerced_args
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, expr)| SqlFunctionInlineArg {
+            name: names.get(index).cloned().flatten(),
+            sql_type: declared_arg_types
+                .get(index)
+                .copied()
+                .or_else(|| expr_sql_type_hint(&expr))
+                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            expr,
+        })
+        .collect()
+}
+
+fn sql_function_input_arg_names(row: &PgProcRow) -> Vec<Option<String>> {
+    let names = row.proargnames.as_deref().unwrap_or(&[]);
+    let Some(modes) = row.proargmodes.as_ref() else {
+        return (0..row.pronargs.max(0) as usize)
+            .map(|index| names.get(index).filter(|name| !name.is_empty()).cloned())
+            .collect();
+    };
+    modes
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(index, mode)| {
+            matches!(mode, b'i' | b'b' | b'v')
+                .then(|| names.get(index).filter(|name| !name.is_empty()).cloned())
+        })
+        .collect()
+}
+
+fn retarget_analyzed_from_output_columns(
+    plan: &mut AnalyzedFrom,
+    output_columns: Vec<QueryColumn>,
+    coerce_targets: bool,
+    preserve_rte_names: bool,
+) {
+    let preserved_names = plan
+        .rtable
+        .last()
+        .map(|rte| {
+            rte.desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let preserved_names = if preserve_rte_names {
+        uniquify_preserved_output_names(preserved_names)
+    } else {
+        preserved_names
+    };
+    let desc = RelationDesc {
+        columns: output_columns
             .iter()
             .enumerate()
             .map(|(index, column)| {
-                TargetEntry::new(
-                    column.name.clone(),
-                    Expr::FieldSelect {
-                        expr: Box::new(base_expr.clone()),
-                        field: column.name.clone(),
-                        field_type: column.sql_type,
-                    },
-                    column.sql_type,
-                    index + 1,
-                )
+                let name = if preserve_rte_names {
+                    preserved_names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| column.name.clone())
+                } else {
+                    column.name.clone()
+                };
+                column_desc(name, column.sql_type, true)
             })
-            .collect::<Vec<_>>();
-        if with_ordinality {
-            let ordinality_type = SqlType::new(SqlTypeKind::Int8);
-            targets.push(TargetEntry::new(
-                "ordinality",
-                Expr::Const(Value::Int64(1)),
-                ordinality_type,
-                targets.len() + 1,
-            ));
+            .collect(),
+    };
+    let rtindex = plan.rtable.len();
+    if let Some(rte) = plan.rtable.last_mut() {
+        if let RangeTblEntryKind::Subquery { query } = &mut rte.kind {
+            retarget_query_output_columns(
+                query,
+                &output_columns,
+                coerce_targets,
+                preserve_rte_names,
+            );
         }
-        plan = plan.with_projection(targets);
-    } else if with_ordinality {
-        let base_expr = plan.output_exprs[0].clone();
-        let ordinality_type = SqlType::new(SqlTypeKind::Int8);
-        plan = plan.with_projection(vec![
-            TargetEntry::new(name.to_string(), base_expr, resolved.result_type, 1),
-            TargetEntry::new(
-                "ordinality",
-                Expr::Const(Value::Int64(1)),
-                ordinality_type,
-                2,
-            ),
-        ]);
+        rte.desc = desc;
+        rte.eref.colnames = rte
+            .desc
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
     }
+    plan.output_exprs = output_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno: rtindex,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect();
+    plan.output_columns = output_columns;
+}
 
-    let desc = plan.desc();
-    let scope = scope_with_output_exprs(scope_for_relation(Some(name), &desc), &plan.output_exprs);
-    Ok((plan, scope, alias_single_function_output))
+fn uniquify_preserved_output_names(names: Vec<String>) -> Vec<String> {
+    let mut output = Vec::with_capacity(names.len());
+    for name in names {
+        if output.iter().any(|existing| existing == &name) {
+            let mut suffix = 1usize;
+            loop {
+                let candidate = format!("{name}_{suffix}");
+                if !output.iter().any(|existing| existing == &candidate) {
+                    output.push(candidate);
+                    break;
+                }
+                suffix += 1;
+            }
+        } else {
+            output.push(name);
+        }
+    }
+    output
+}
+
+fn retarget_query_output_columns(
+    query: &mut Query,
+    output_columns: &[QueryColumn],
+    coerce_targets: bool,
+    preserve_names: bool,
+) {
+    if coerce_targets && query.target_list.len() == output_columns.len() {
+        let can_retarget_output_vars = query.rtable.is_empty() && query.jointree.is_none();
+        for (target, column) in query.target_list.iter_mut().zip(output_columns.iter()) {
+            let expr = if can_retarget_output_vars {
+                retarget_output_var_type(target.expr.clone(), output_columns)
+            } else {
+                target.expr.clone()
+            };
+            target.expr = if expr_sql_type_hint(&expr) == Some(column.sql_type) {
+                expr
+            } else {
+                coerce_bound_expr(expr, target.sql_type, column.sql_type)
+            };
+            if !preserve_names {
+                target.name = column.name.clone();
+            }
+            target.sql_type = column.sql_type;
+        }
+    }
+    if query.rtable.is_empty() && query.jointree.is_none() {
+        for item in &mut query.sort_clause {
+            item.expr = retarget_output_var_type(item.expr.clone(), output_columns);
+        }
+    }
+    if let Some(set_operation) = &mut query.set_operation {
+        if coerce_targets {
+            for (index, column) in output_columns.iter().enumerate() {
+                let Some(desc_column) = set_operation.output_desc.columns.get_mut(index) else {
+                    continue;
+                };
+                if !preserve_names {
+                    desc_column.name = column.name.clone();
+                }
+                desc_column.sql_type = column.sql_type;
+            }
+            for input in &mut set_operation.inputs {
+                retarget_query_output_columns(
+                    input,
+                    output_columns,
+                    coerce_targets,
+                    preserve_names,
+                );
+            }
+        }
+    }
+}
+
+fn retarget_output_var_type(expr: Expr, output_columns: &[QueryColumn]) -> Expr {
+    match expr {
+        Expr::Var(mut var)
+            if var.varno == 1
+                && var.varlevelsup == 0
+                && let Some(index) =
+                    crate::include::nodes::primnodes::attrno_index(var.varattno)
+                && let Some(column) = output_columns.get(index) =>
+        {
+            var.vartype = column.sql_type;
+            Expr::Var(var)
+        }
+        other => other,
+    }
 }
 
 fn maybe_append_function_ordinality(
@@ -4182,9 +4933,10 @@ fn resolve_function_row_columns(
                         "a column definition list is redundant for a function returning a named composite type",
                     ))
                 }
-                Some(ResolvedFunctionRowShape::None) | None => Err(function_coldeflist_error(
+                Some(ResolvedFunctionRowShape::None) => Err(function_coldeflist_error(
                     "a column definition list is only allowed for functions returning \"record\"",
                 )),
+                None => Ok(Some(columns)),
             }
         }
         None => match resolved.map(|call| &call.row_shape) {
@@ -4751,8 +5503,23 @@ fn apply_relation_alias(
         rte.eref.aliasname = alias.to_string();
     }
 
-    if alias_single_function_output && column_aliases.is_empty() && visible_positions.len() == 1 {
-        let column_index = visible_positions[0];
+    let aliasable_single_function_column =
+        if alias_single_function_output && column_aliases.is_empty() {
+            if visible_positions.len() == 1 {
+                Some(visible_positions[0])
+            } else if visible_positions.len() == 2
+                && desc.columns[visible_positions[1]]
+                    .name
+                    .eq_ignore_ascii_case("ordinality")
+            {
+                Some(visible_positions[0])
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+    if let Some(column_index) = aliasable_single_function_column {
         let column = &mut columns[column_index];
         renamed |= column.output_name != alias;
         column.output_name = alias.to_string();

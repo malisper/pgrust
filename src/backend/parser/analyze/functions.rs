@@ -69,6 +69,7 @@ pub(crate) struct ResolvedFunctionCall {
     pub prokind: char,
     pub proretset: bool,
     pub result_type: SqlType,
+    pub declared_arg_oids: Vec<u32>,
     pub declared_arg_types: Vec<SqlType>,
     pub nvargs: usize,
     pub vatype_oid: u32,
@@ -180,6 +181,7 @@ fn resolved_function_call_for_candidate(
     }
     let result_type = resolve_proc_result_type(catalog, row, candidate)?;
     let row_shape = resolve_function_row_shape(catalog, row, candidate, result_type)?;
+    let declared_arg_oids = candidate_declared_arg_oids(row, candidate)?;
     let declared_arg_types = concrete_declared_arg_types_for_candidate(row, candidate)
         .unwrap_or_else(|| candidate.declared_arg_types.clone());
     let result_type = match (&result_type.kind, &row_shape) {
@@ -200,6 +202,7 @@ fn resolved_function_call_for_candidate(
         prokind: row.prokind,
         proretset: row.proretset,
         result_type,
+        declared_arg_oids,
         declared_arg_types,
         nvargs: candidate.nvargs,
         vatype_oid: candidate.vatype_oid,
@@ -1944,6 +1947,9 @@ fn merge_loose_compatible_type(
     match existing {
         None => Some(Some(next)),
         Some(existing) if existing == next => Some(Some(existing)),
+        Some(existing) if integer_common_supertype(existing, next).is_some() => {
+            Some(integer_common_supertype(existing, next))
+        }
         Some(existing)
             if matches!(
                 existing.kind,
@@ -1968,6 +1974,23 @@ fn merge_loose_compatible_type(
             Some(Some(next))
         }
         Some(_) => None,
+    }
+}
+
+fn integer_common_supertype(left: SqlType, right: SqlType) -> Option<SqlType> {
+    fn rank(ty: SqlType) -> Option<u8> {
+        match ty.kind {
+            SqlTypeKind::Int2 if !ty.is_array => Some(1),
+            SqlTypeKind::Int4 if !ty.is_array => Some(2),
+            SqlTypeKind::Int8 if !ty.is_array => Some(3),
+            _ => None,
+        }
+    }
+    match rank(left)?.max(rank(right)?) {
+        1 => Some(SqlType::new(SqlTypeKind::Int2)),
+        2 => Some(SqlType::new(SqlTypeKind::Int4)),
+        3 => Some(SqlType::new(SqlTypeKind::Int8)),
+        _ => None,
     }
 }
 
@@ -2166,6 +2189,7 @@ pub(super) fn validate_scalar_function_arity(
                 matches!(args.len(), 2 | 3)
             }
             BuiltinScalarFunction::Pi => args.is_empty(),
+            BuiltinScalarFunction::Sin => args.len() == 1,
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
             }
@@ -3404,6 +3428,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("setseed", BuiltinScalarFunction::SetSeed),
         ("pi", BuiltinScalarFunction::Pi),
         ("dpi", BuiltinScalarFunction::Pi),
+        ("sin", BuiltinScalarFunction::Sin),
+        ("dsin", BuiltinScalarFunction::Sin),
         ("uuid_in", BuiltinScalarFunction::UuidIn),
         ("uuid_out", BuiltinScalarFunction::UuidOut),
         ("uuid_recv", BuiltinScalarFunction::UuidRecv),
@@ -4866,6 +4892,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("numeric_exp", BuiltinScalarFunction::Exp),
         ("ln", BuiltinScalarFunction::Ln),
         ("numeric_ln", BuiltinScalarFunction::Ln),
+        ("sin", BuiltinScalarFunction::Sin),
+        ("dsin", BuiltinScalarFunction::Sin),
         ("sinh", BuiltinScalarFunction::Sinh),
         ("cosh", BuiltinScalarFunction::Cosh),
         ("tanh", BuiltinScalarFunction::Tanh),

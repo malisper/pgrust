@@ -2985,10 +2985,15 @@ pub(crate) fn eval_pg_describe_object(
                 return Ok(Value::Null);
             };
             let objsubid = i32::try_from(objsubid).map_err(|_| ExecError::OidOutOfRange)?;
-            if objsubid != 0 {
-                return Ok(Value::Null);
-            }
             let description = match class_row.relname.as_str() {
+                "pg_class" if objsubid > 0 => catalog.class_row_by_oid(objid).and_then(|row| {
+                    let attr = catalog
+                        .attribute_rows_for_relation(objid)
+                        .into_iter()
+                        .find(|attr| i32::from(attr.attnum) == objsubid)?;
+                    Some(format!("column {} of table {}", attr.attname, row.relname))
+                }),
+                _ if objsubid != 0 => None,
                 "pg_namespace" => catalog
                     .namespace_row_by_oid(objid)
                     .map(|row| format!("schema {}", row.nspname)),
@@ -3018,12 +3023,27 @@ pub(crate) fn eval_pg_describe_object(
                 "pg_event_trigger" => catalog
                     .event_trigger_row_by_oid(objid)
                     .map(|row| format!("event trigger {}", quote_identifier(&row.evtname))),
+                "pg_rewrite" => catalog
+                    .rewrite_rows()
+                    .into_iter()
+                    .find(|row| row.oid == objid)
+                    .and_then(|row| {
+                        let class = catalog.class_row_by_oid(row.ev_class)?;
+                        Some(format!("rule {} on view {}", row.rulename, class.relname))
+                    }),
                 "pg_statistic_ext" => catalog.statistic_ext_row_by_oid(objid).and_then(|row| {
                     let namespace = catalog.namespace_row_by_oid(row.stxnamespace)?;
                     Some(format!(
                         "statistics object {}",
                         quote_qualified_identifier(&namespace.nspname, &row.stxname)
                     ))
+                }),
+                "pg_constraint" => catalog.constraint_row_by_oid(objid).map(|row| {
+                    let relation_name = catalog
+                        .class_row_by_oid(row.conrelid)
+                        .map(|class| class.relname)
+                        .unwrap_or_else(|| row.conrelid.to_string());
+                    format!("constraint {} on table {}", row.conname, relation_name)
                 }),
                 _ => None,
             };
@@ -4535,12 +4555,14 @@ fn append_constraint_deferrability(
     def: &mut String,
     row: &crate::include::catalog::PgConstraintRow,
 ) {
-    if !row.condeferrable {
-        return;
+    if row.condeferrable {
+        def.push_str(" DEFERRABLE");
+        if row.condeferred {
+            def.push_str(" INITIALLY DEFERRED");
+        }
     }
-    def.push_str(" DEFERRABLE");
-    if row.condeferred {
-        def.push_str(" INITIALLY DEFERRED");
+    if !row.conenforced {
+        def.push_str(" NOT ENFORCED");
     }
 }
 
@@ -8874,7 +8896,14 @@ fn eval_plpgsql_builtin_function(
     {
         return result;
     }
-    if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
+    if let Some(result) = eval_range_function(
+        func,
+        &values,
+        result_type,
+        func_variadic,
+        None,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    ) {
         return result;
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
@@ -9393,6 +9422,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::Power
         | BuiltinScalarFunction::Exp
         | BuiltinScalarFunction::Ln
+        | BuiltinScalarFunction::Sin
         | BuiltinScalarFunction::Sinh
         | BuiltinScalarFunction::Cosh
         | BuiltinScalarFunction::Tanh
@@ -9788,6 +9818,38 @@ fn eval_text_search_builtin_function(
         })
     };
     let catalog = catalog_lookup(ctx);
+    let arg_config_name =
+        |values: &[Value], index: usize, op: &'static str| -> Result<Option<String>, ExecError> {
+            let Some(value) = values.get(index) else {
+                return Ok(None);
+            };
+            if matches!(value, Value::Null) {
+                return Ok(None);
+            }
+            if let Some(text) = value.as_text() {
+                return Ok(Some(text.to_string()));
+            }
+            let oid = match value {
+                Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
+                Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
+                _ => None,
+            };
+            if let Some(oid) = oid
+                && let Some(row) = catalog.and_then(|catalog| {
+                    catalog
+                        .ts_config_rows()
+                        .into_iter()
+                        .find(|row| row.oid == oid)
+                })
+            {
+                return Ok(Some(row.cfgname));
+            }
+            Err(ExecError::TypeMismatch {
+                op,
+                left: value.clone(),
+                right: Value::Null,
+            })
+        };
 
     match func {
         BuiltinScalarFunction::TsMatch => {
@@ -9816,7 +9878,7 @@ fn eval_text_search_builtin_function(
                     catalog,
                 ),
                 [_, _] => crate::backend::tsearch::to_tsvector_with_config_name(
-                    arg_text(values, 0, "to_tsvector")?.as_deref(),
+                    arg_config_name(values, 0, "to_tsvector")?.as_deref(),
                     arg_text(values, 1, "to_tsvector")?
                         .as_deref()
                         .unwrap_or_default(),
@@ -9840,7 +9902,7 @@ fn eval_text_search_builtin_function(
                 jsonb_to_tsvector_value(default_config_name(), &values[0], values.get(1), catalog)
             }
             [_, Value::Jsonb(_), _] => jsonb_to_tsvector_value(
-                arg_text(values, 0, "jsonb_to_tsvector")?.as_deref(),
+                arg_config_name(values, 0, "jsonb_to_tsvector")?.as_deref(),
                 &values[1],
                 values.get(2),
                 catalog,
@@ -9859,7 +9921,7 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "to_tsquery")?,
                 ),
                 [_, _] => (
-                    arg_text(values, 0, "to_tsquery")?,
+                    arg_config_name(values, 0, "to_tsquery")?,
                     arg_text(values, 1, "to_tsquery")?,
                 ),
                 _ => unreachable!(),
@@ -9892,7 +9954,7 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "plainto_tsquery")?,
                 ),
                 [_, _] => (
-                    arg_text(values, 0, "plainto_tsquery")?,
+                    arg_config_name(values, 0, "plainto_tsquery")?,
                     arg_text(values, 1, "plainto_tsquery")?,
                 ),
                 _ => unreachable!(),
@@ -9918,7 +9980,7 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "phraseto_tsquery")?,
                 ),
                 [_, _] => (
-                    arg_text(values, 0, "phraseto_tsquery")?,
+                    arg_config_name(values, 0, "phraseto_tsquery")?,
                     arg_text(values, 1, "phraseto_tsquery")?,
                 ),
                 _ => unreachable!(),
@@ -9944,7 +10006,7 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "websearch_to_tsquery")?,
                 ),
                 [_, _] => (
-                    arg_text(values, 0, "websearch_to_tsquery")?,
+                    arg_config_name(values, 0, "websearch_to_tsquery")?,
                     arg_text(values, 1, "websearch_to_tsquery")?,
                 ),
                 _ => unreachable!(),
@@ -10542,6 +10604,9 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
         }
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Bool(false)),
+        func if is_text_search_builtin_function(func) => {
+            eval_text_search_builtin_function(func, values, Some(ctx))
+        }
         _ => execute_builtin_scalar_function_value_call(func, values),
     }
 }
@@ -10687,7 +10752,14 @@ pub(crate) fn eval_builtin_function(
     {
         return result;
     }
-    if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
+    if let Some(result) = eval_range_function(
+        func,
+        &values,
+        result_type,
+        func_variadic,
+        ctx.catalog.as_deref(),
+        &ctx.datetime_config,
+    ) {
         return result;
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
@@ -11434,6 +11506,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Power => eval_power_function(&values),
         BuiltinScalarFunction::Exp => eval_exp_function(&values),
         BuiltinScalarFunction::Ln => eval_ln_function(&values),
+        BuiltinScalarFunction::Sin => eval_unary_float_function("sin", &values, |v| Ok(v.sin())),
         BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
         BuiltinScalarFunction::Cosh => eval_unary_float_function("cosh", &values, |v| Ok(v.cosh())),
         BuiltinScalarFunction::Tanh => eval_unary_float_function("tanh", &values, |v| Ok(v.tanh())),

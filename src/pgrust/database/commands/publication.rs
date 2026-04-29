@@ -1696,6 +1696,7 @@ fn validate_publication_filter_types(
         ScalarSubquery(_)
         | ArraySubquery(_)
         | Exists(_)
+        | ParamRef(_)
         | Default
         | Const(_)
         | IntegerLiteral(_)
@@ -1954,6 +1955,7 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
             }
         }
         Column(_)
+        | ParamRef(_)
         | Default
         | Const(_)
         | IntegerLiteral(_)

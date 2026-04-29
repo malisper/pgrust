@@ -163,6 +163,7 @@ fn toast_executor_context(
         pending_table_locks: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
