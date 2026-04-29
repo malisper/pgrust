@@ -5070,6 +5070,9 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetUserById
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgDescribeObject
+            | BuiltinScalarFunction::PgIdentifyObject
+            | BuiltinScalarFunction::PgIdentifyObjectAsAddress
+            | BuiltinScalarFunction::PgGetObjectAddress
             | BuiltinScalarFunction::PgGetFunctionArguments
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
