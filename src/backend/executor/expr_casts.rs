@@ -495,7 +495,7 @@ fn cast_text_to_regclass(
     let relation_oid = catalog
         .lookup_any_relation(text)
         .map(|entry| entry.relation_oid)
-        .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(text.into())))?;
+        .ok_or_else(|| expr_reg::regclass_lookup_error(text, Some(catalog)))?;
     Ok(Value::Int64(relation_oid as i64))
 }
 

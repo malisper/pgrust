@@ -6501,11 +6501,30 @@ fn bind_regclass_literal_cast(
                 .lookup_any_relation(relation_name)
                 .map(|entry| entry.relation_oid)
         })
-        .ok_or_else(|| ParseError::UnknownTable(relation_name.to_string()))?;
+        .ok_or_else(|| missing_regclass_literal_error(relation_name, catalog))?;
     Ok(Some(Expr::Cast(
         Box::new(Expr::Const(Value::Int64(relation_oid as i64))),
         target_type,
     )))
+}
+
+fn missing_regclass_literal_error(name: &str, catalog: &dyn CatalogLookup) -> ParseError {
+    if let Some((schema, _relation)) = name.rsplit_once('.') {
+        let schema = schema.trim_matches('"').to_ascii_lowercase();
+        if !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname == schema)
+        {
+            return ParseError::DetailedError {
+                message: format!("schema \"{schema}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "3F000",
+            };
+        }
+    }
+    ParseError::UnknownTable(name.to_string())
 }
 
 fn bind_regtype_literal_cast(

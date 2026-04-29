@@ -2782,6 +2782,9 @@ fn exec_error_detailed_message_sqlstate(err: &ExecError) -> Option<(&str, &'stat
         ExecError::DetailedError {
             message, sqlstate, ..
         } => Some((message.as_str(), *sqlstate)),
+        ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        }) => Some((message.as_str(), *sqlstate)),
         _ => None,
     }
 }
@@ -19955,6 +19958,20 @@ fn regclass_cast_resolves_text_expression() {
             crate::include::catalog::PG_OPERATOR_RELATION_OID as i64
         )]]
     );
+}
+
+#[test]
+fn regclass_cast_reports_missing_schema_for_qualified_name() {
+    let base = temp_dir("regclass_missing_schema");
+    let db = Database::open(&base, 16).unwrap();
+
+    let err = db
+        .execute(1, "select 'nonexistent.stuffs'::regclass")
+        .unwrap_err();
+    let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+        .unwrap_or_else(|| panic!("expected detailed regclass lookup error, got {err:?}"));
+    assert_eq!(message, "schema \"nonexistent\" does not exist");
+    assert_eq!(sqlstate, "3F000");
 }
 
 #[test]

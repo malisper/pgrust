@@ -2433,7 +2433,7 @@ fn eval_text_to_regclass_function(
             })?;
     let relation = catalog
         .lookup_any_relation(text)
-        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(text.to_string())))?;
+        .ok_or_else(|| expr_reg::regclass_lookup_error(text, Some(catalog)))?;
     Ok(Value::Int64(i64::from(relation.relation_oid)))
 }
 
