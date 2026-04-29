@@ -1912,8 +1912,11 @@ impl Database {
         let range_types_guard = self.range_types.read();
         let mut drops = Vec::new();
         for domain_name in &domain_names {
-            let (normalized, _, _) =
-                self.normalize_domain_name_for_create(domain_name, configured_search_path)?;
+            let (normalized, _, _) = self.normalize_domain_name_for_create(
+                client_id,
+                domain_name,
+                configured_search_path,
+            )?;
             let Some(domain) = domains_guard.get(&normalized).cloned() else {
                 if drop_stmt.if_exists {
                     continue;
@@ -2483,7 +2486,6 @@ impl Database {
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
         let mut dropped = 0usize;
-        let mut cascade_notice_groups = Vec::new();
         for schema_name in &drop_stmt.schema_names {
             let maybe_schema = catcache
                 .namespace_by_name(schema_name)
@@ -2557,25 +2559,6 @@ impl Database {
                     &auth_catalog,
                 );
 
-                let mut proc_rows = catcache
-                    .proc_rows()
-                    .into_iter()
-                    .filter(|row| row.pronamespace == schema.oid)
-                    .collect::<Vec<_>>();
-                proc_rows.sort_by_key(|row| row.oid);
-                for proc_row in proc_rows {
-                    let signature = drop_proc_signature_text(&proc_row, &catalog);
-                    notices.push(format!(
-                        "drop cascades to function {}",
-                        drop_schema_display_signature_name(
-                            &catcache,
-                            &visible_namespaces,
-                            proc_row.pronamespace,
-                            &signature
-                        )
-                    ));
-                }
-
                 let mut conversion_rows = catcache
                     .conversion_rows()
                     .into_iter()
@@ -2642,8 +2625,13 @@ impl Database {
                 let mut relation_notice_rows = relation_rows
                     .iter()
                     .filter(|row| {
-                        !row.relispartition
+                        (!row.relispartition
+                            || !partition_has_parent_in_schema(&catcache, row.oid, schema.oid))
                             && matches!(row.relkind, 'c' | 'f' | 'r' | 'p' | 'm' | 'S' | 'v')
+                            && (row.relkind != 'S'
+                                || !sequence_is_owned_by_relation_in_schema(
+                                    &catcache, row.oid, schema.oid,
+                                ))
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -2747,8 +2735,46 @@ impl Database {
                     ));
                 }
 
-                if !notices.is_empty() {
-                    cascade_notice_groups.push(notices);
+                let mut tail_notices = Vec::new();
+                for row in catcache.type_rows().into_iter().filter(|row| {
+                    row.typnamespace == schema.oid && matches!(row.typtype, 'd' | 'e')
+                }) {
+                    tail_notices.push((
+                        row.oid,
+                        format!(
+                            "drop cascades to type {}",
+                            drop_schema_display_object_name(
+                                &catcache,
+                                &visible_namespaces,
+                                row.typnamespace,
+                                &row.typname
+                            )
+                        ),
+                    ));
+                }
+                for proc_row in catcache
+                    .proc_rows()
+                    .into_iter()
+                    .filter(|row| row.pronamespace == schema.oid)
+                {
+                    tail_notices.push((
+                        proc_row.oid,
+                        format!(
+                            "drop cascades to function {}",
+                            drop_proc_signature_text(&proc_row, &catalog)
+                        ),
+                    ));
+                }
+                tail_notices.sort_by_key(|(oid, _)| *oid);
+                notices.extend(tail_notices.into_iter().map(|(_, notice)| notice));
+
+                match notices.as_slice() {
+                    [] => {}
+                    [notice] => push_notice(notice.clone()),
+                    notices => push_notice_with_detail(
+                        format!("drop cascades to {} other objects", notices.len()),
+                        notices.join("\n"),
+                    ),
                 }
             }
             let mut namespace_cid = cid;
@@ -2783,19 +2809,6 @@ impl Database {
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             dropped += 1;
-        }
-        let cascade_notices = cascade_notice_groups
-            .into_iter()
-            .rev()
-            .flatten()
-            .collect::<Vec<_>>();
-        match cascade_notices.as_slice() {
-            [] => {}
-            [notice] => push_notice(notice.clone()),
-            notices => push_notice_with_detail(
-                format!("drop cascades to {} other objects", notices.len()),
-                notices.join("\n"),
-            ),
         }
         Ok(StatementResult::AffectedRows(dropped))
     }

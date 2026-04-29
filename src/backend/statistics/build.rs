@@ -152,7 +152,7 @@ fn build_mcv_payload(
         });
         let frequency = rounded_stat_frequency(count as f64 / sample_total as f64);
         let base_frequency = rounded_stat_frequency(base_frequency);
-        if count == 1 && has_repeated_group {
+        if count == 1 && (has_repeated_group || sample_total > target) {
             continue;
         }
         items.push(PgMcvItem {

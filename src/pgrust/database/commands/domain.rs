@@ -104,7 +104,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<String, ExecError> {
         let (normalized, _, _) =
-            self.normalize_domain_name_for_create(domain_name, configured_search_path)?;
+            self.normalize_domain_name_for_create(0, domain_name, configured_search_path)?;
         Ok(normalized)
     }
 

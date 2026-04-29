@@ -7,6 +7,7 @@ use crate::include::catalog::*;
 
 const BTEQUALIMAGE_PROC_OID: u32 = 5051;
 const BTVARSTREQUALIMAGE_PROC_OID: u32 = 5050;
+const BTINT4_SORTSUPPORT_PROC_OID: u32 = 3130;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgAmprocRow {
@@ -91,6 +92,15 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         });
         oid = oid.saturating_add(1);
     }
+    rows.push(PgAmprocRow {
+        oid,
+        amprocfamily: BTREE_INTEGER_FAMILY_OID,
+        amproclefttype: INT4_TYPE_OID,
+        amprocrighttype: INT4_TYPE_OID,
+        amprocnum: 2,
+        amproc: BTINT4_SORTSUPPORT_PROC_OID,
+    });
+    oid = oid.saturating_add(1);
     for (family, type_oid, proc_oid) in [
         (BTREE_BOOL_FAMILY_OID, BOOL_TYPE_OID, BTEQUALIMAGE_PROC_OID),
         (

@@ -100,6 +100,7 @@ meta = {
 
 tests = summary.get("tests", {})
 queries = summary.get("queries", {})
+shards = summary.get("shards", {})
 
 lines = []
 lines.append(f"# Regression run {run_dir.name}")
@@ -109,6 +110,8 @@ lines.append(f"- Ref: `{meta['run_ref']}`")
 lines.append(f"- Workflow run: {meta['run_url']}")
 lines.append(f"- Status: `{summary.get('status', 'unknown')}`")
 lines.append(f"- Regress script exit code: `{meta['regress_exit_code']}`")
+if shards:
+    lines.append(f"- Shards: {shards.get('present', 0)}/{shards.get('expected', 0)} present")
 lines.append("")
 lines.append("## Tests")
 lines.append("")
@@ -117,6 +120,7 @@ lines.append(f"- Total:   {tests.get('total', 0)}")
 lines.append(f"- Passed:  {tests.get('passed', 0)}")
 lines.append(f"- Failed:  {tests.get('failed', 0)}")
 lines.append(f"- Errored: {tests.get('errored', 0)}")
+lines.append(f"- Timed out: {tests.get('timed_out', 0)}")
 lines.append(f"- Pass rate: {tests.get('pass_rate_pct', 0)}%")
 lines.append("")
 lines.append("## Queries")
