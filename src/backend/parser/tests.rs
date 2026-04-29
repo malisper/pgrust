@@ -2995,6 +2995,21 @@ fn parse_create_statistics_without_explicit_name() {
 }
 
 #[test]
+fn parse_create_statistics_without_explicit_name_with_kinds() {
+    let stmt = parse_statement("create statistics (ndistinct, mcv) on a, b from items").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateStatistics(CreateStatisticsStatement {
+            if_not_exists: false,
+            statistics_name: None,
+            kinds: vec!["ndistinct".into(), "mcv".into()],
+            targets: vec!["a".into(), "b".into()],
+            from_clause: "items".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_create_statistics_function_call_targets() {
     let stmt = parse_statement(
         "create statistics s on date_trunc('day', d), public.upper(b), (a + b) from items",
@@ -5509,6 +5524,37 @@ fn parse_grant_usage_on_schema_statement() {
 }
 
 #[test]
+fn parse_grant_create_on_schema_statement() {
+    let stmt = parse_statement("grant create on schema tststats to regress_stats_user1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::CreateOnSchema,
+            columns: Vec::new(),
+            object_names: vec!["tststats".into()],
+            grantee_names: vec!["regress_stats_user1".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_create_on_schema_statement() {
+    let stmt =
+        parse_statement("revoke create on schema tststats from regress_stats_user1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::CreateOnSchema,
+            columns: Vec::new(),
+            object_names: vec!["tststats".into()],
+            grantee_names: vec!["regress_stats_user1".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_usage_on_type_statement() {
     let stmt = parse_statement("grant usage on type custom_t to public").unwrap();
     assert_eq!(
@@ -6754,6 +6800,9 @@ fn parse_expression_entrypoint_reuses_sql_expression_grammar() {
 
     let expr = parse_expr("a <% b").unwrap();
     assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "<%"));
+
+    let expr = parse_expr("a <<< b").unwrap();
+    assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "<<<"));
 }
 
 #[test]
@@ -8681,6 +8730,59 @@ fn parse_qualified_star_inside_row_expr() {
         }
         other => panic!("expected row expr, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_schema_qualified_star_inside_row_expr() {
+    let stmt = parse_select("select row(tststats.priv_test_tbl.*, 42)").unwrap();
+    assert_eq!(stmt.targets.len(), 1);
+    match &stmt.targets[0].expr {
+        SqlExpr::Row(items) => {
+            assert_eq!(items.len(), 2);
+            assert!(
+                matches!(&items[0], SqlExpr::Column(name) if name == "tststats.priv_test_tbl.*")
+            );
+            assert!(matches!(&items[1], SqlExpr::IntegerLiteral(value) if value == "42"));
+        }
+        other => panic!("expected row expr, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_whole_row_comparison_with_is_not_null() {
+    let stmt = parse_select(
+        "select * from tststats.priv_test_tbl \
+         where tststats.priv_test_tbl.* > (1, 1) is not null",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt.where_clause,
+        Some(SqlExpr::IsNotNull(inner))
+            if matches!(
+                inner.as_ref(),
+                SqlExpr::Gt(left, right)
+                    if matches!(left.as_ref(), SqlExpr::Column(name) if name == "tststats.priv_test_tbl.*")
+                        && matches!(right.as_ref(), SqlExpr::Row(items) if items.len() == 2)
+            )
+    ));
+}
+
+#[test]
+fn parse_custom_whole_row_operator_with_is_not_null() {
+    let stmt =
+        parse_select("select * from tststats.priv_test_tbl t where t.* <<< (1, 1) is not null")
+            .unwrap();
+    assert!(matches!(
+        stmt.where_clause,
+        Some(SqlExpr::IsNotNull(inner))
+            if matches!(
+                inner.as_ref(),
+                SqlExpr::BinaryOperator { op, left, right }
+                    if op == "<<<"
+                        && matches!(left.as_ref(), SqlExpr::Column(name) if name == "t.*")
+                        && matches!(right.as_ref(), SqlExpr::Row(items) if items.len() == 2)
+            )
+    ));
 }
 
 #[test]

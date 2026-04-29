@@ -3140,11 +3140,11 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         catalog,
     )?;
     let predicate = and_predicates(
+        resolved.combined_predicate.clone(),
         target
             .predicate
             .as_ref()
             .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &input_output_exprs)),
-        resolved.combined_predicate.clone(),
     );
     let predicate = prepend_visibility_quals(base_rls.visibility_quals.clone(), predicate);
     let rls_write_checks = base_rls
@@ -3277,10 +3277,10 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         catalog,
     )?;
     let predicate = and_predicates(
+        resolved.combined_predicate.clone(),
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
         }),
-        resolved.combined_predicate.clone(),
     );
     let predicate = prepend_visibility_quals(base_rls.visibility_quals.clone(), predicate);
 

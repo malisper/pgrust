@@ -21371,6 +21371,10 @@ fn alter_table_alter_column_type_rebuilds_indexed_target_column() {
         .unwrap();
 
     assert_eq!(
+        query_rows(&db, 1, "select id from items where note = 20 order by id"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
         query_rows(&db, 1, "select note from items where note = 20"),
         vec![vec![Value::Int64(20)]]
     );
@@ -22574,6 +22578,99 @@ fn create_statistics_rejects_xid_column_with_postgres_message() {
             assert_eq!(sqlstate, "0A000");
         }
         other => panic!("expected xid CREATE STATISTICS rejection, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_statistics_rejects_virtual_generated_and_system_column_expressions() {
+    let base = temp_dir("create_statistics_generated_system_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table ext_stats_test1 (x int, y int, z int generated always as (x + y) virtual)",
+    )
+    .unwrap();
+
+    for sql in [
+        "create statistics tst on z from ext_stats_test1",
+        "create statistics tst on (z + 1) from ext_stats_test1",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+                message,
+                "statistics creation on virtual generated columns is not supported"
+            ),
+            other => panic!("expected generated-column CREATE STATISTICS rejection, got {other:?}"),
+        }
+    }
+
+    match db.execute(
+        1,
+        "create statistics tst on (tableoid::int + 1) from ext_stats_test1",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+            message,
+            "statistics creation on system columns is not supported"
+        ),
+        other => panic!("expected system-column CREATE STATISTICS rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_statistics_reports_postgres_relation_kind_errors() {
+    let base = temp_dir("create_statistics_relation_kind_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema tststats").unwrap();
+    db.execute(1, "create table tststats.t (a int, b int)")
+        .unwrap();
+    db.execute(1, "create index ti on tststats.t (a, b)")
+        .unwrap();
+    db.execute(1, "create sequence tststats.s").unwrap();
+    db.execute(1, "create view tststats.v as select * from tststats.t")
+        .unwrap();
+    db.execute(1, "create type tststats.ty as (a int, b int)")
+        .unwrap();
+
+    for (sql, relation, detail) in [
+        (
+            "create statistics tststats.s2 on a, b from tststats.ti",
+            "ti",
+            "This operation is not supported for indexes.",
+        ),
+        (
+            "create statistics tststats.s3 on a, b from tststats.s",
+            "s",
+            "This operation is not supported for sequences.",
+        ),
+        (
+            "create statistics tststats.s4 on a, b from tststats.v",
+            "v",
+            "This operation is not supported for views.",
+        ),
+        (
+            "create statistics tststats.s6 on a, b from tststats.ty",
+            "ty",
+            "This operation is not supported for composite types.",
+        ),
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message,
+                detail: actual_detail,
+                sqlstate,
+                ..
+            }) => {
+                assert_eq!(
+                    message,
+                    format!("cannot define statistics for relation \"{relation}\"")
+                );
+                assert_eq!(actual_detail.as_deref(), Some(detail));
+                assert_eq!(sqlstate, "42809");
+            }
+            other => panic!("expected relation-kind CREATE STATISTICS rejection, got {other:?}"),
+        }
     }
 }
 
@@ -24336,6 +24433,330 @@ fn pg_stats_ext_views_exist_and_bind_columns() {
              where statistics_name = 'stats_ext_view_stat'",
         ),
         Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn pg_mcv_list_items_decodes_extended_statistics_payload() {
+    let base = temp_dir("pg_mcv_list_items_statistics");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table stats_mcv_items (a int4, b int4, c int4)")
+        .unwrap();
+    db.execute(1, "insert into stats_mcv_items values (1, 2, 3), (1, 2, 3)")
+        .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_items_stat (mcv) on a, b, c from stats_mcv_items",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_items").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select m.index, m.values, m.nulls, m.frequency, m.base_frequency \
+             from pg_statistic_ext s \
+             join pg_statistic_ext_data d on d.stxoid = s.oid, \
+                  pg_mcv_list_items(d.stxdmcv) m \
+             where s.stxname = 'stats_mcv_items_stat'",
+        ),
+        vec![vec![
+            Value::Int32(0),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Text("1".into()),
+                    Value::Text("2".into()),
+                    Value::Text("3".into()),
+                ])
+                .with_element_type_oid(TEXT_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Bool(false),
+                    Value::Bool(false),
+                    Value::Bool(false)
+                ])
+                .with_element_type_oid(crate::include::catalog::BOOL_TYPE_OID),
+            ),
+            Value::Float64(1.0),
+            Value::Float64(1.0),
+        ]]
+    );
+}
+
+#[test]
+fn analyze_warns_when_extended_statistics_cannot_be_computed() {
+    let base = temp_dir("analyze_extended_statistics_warning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table stats_warn (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "alter table stats_warn alter a set statistics 0")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_warn select i, i % 23 from generate_series(1, 1000) i",
+    )
+    .unwrap();
+    db.execute(1, "create statistics stats_warn_ab on a, b from stats_warn")
+        .unwrap();
+
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            "statistics object \"public.stats_warn_ab\" could not be computed for relation \"public.stats_warn\""
+                .to_string()
+        ]
+    );
+
+    db.execute(1, "alter table stats_warn alter a set statistics -1")
+        .unwrap();
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn (a)").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            "statistics object \"public.stats_warn_ab\" could not be computed for relation \"public.stats_warn\""
+                .to_string()
+        ]
+    );
+
+    db.execute(1, "alter statistics stats_warn_ab set statistics 0")
+        .unwrap();
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn").unwrap();
+    assert!(take_backend_notice_messages().is_empty());
+}
+
+#[test]
+fn stats_ext_dependencies_use_postgres_selectivity_formula() {
+    let base = temp_dir("stats_ext_dependencies_selectivity");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table stats_fd (filler1 text, filler2 numeric, a int4, b text, filler3 date, c int4, d text) \
+         with (autovacuum_enabled = off)",
+    )
+    .unwrap();
+    db.execute(1, "create index stats_fd_ab_idx on stats_fd (a, b)")
+        .unwrap();
+    db.execute(1, "create index stats_fd_abc_idx on stats_fd (a, b, c)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_fd (a, b, c, filler1) \
+         select mod(i,100), mod(i,50)::text, mod(i,25), i \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_fd_dep (dependencies) on a, b, c from stats_fd",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_fd").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where a = any (array[1, 51]) and b = any (array['1', '2'])",
+        ),
+        100
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where (a = 1 or a = 51) and b = '1'",
+        ),
+        99
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where a < any (array[1, 51]) and b > '1'",
+        ),
+        2472
+    );
+}
+
+#[test]
+fn stats_ext_mcv_or_and_array_selectivity_match_postgres_shapes() {
+    let base = temp_dir("stats_ext_mcv_selectivity");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table stats_mcv (a int4, b text, c int4, d text, ia int4[]) \
+         with (autovacuum_enabled = off)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv (a, b, c, d, ia) \
+         select mod(i,100), mod(i,50)::text, mod(i,25), null, \
+                array[mod(i,25)] \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_abcia (mcv) on a, b, c, ia from stats_mcv",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a = 1 or b = '1' or c = 1",
+        ),
+        200
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a in (1, 2, 51, 52) and b in ('1', '2')",
+        ),
+        200
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a <= any (array[1, 2, 3]) and b in ('1', '2', '3')",
+        ),
+        150
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a = any (array[4, 5]) and 4 = any (ia)",
+        ),
+        4
+    );
+
+    db.execute(1, "create table stats_mcv_partial (a int4, b int4, c int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select mod(i,10), mod(i,10), mod(i,10) \
+         from generate_series(0,999) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select i, i, i \
+         from generate_series(0,99) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select i, i, i \
+         from generate_series(0,3999) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_partial_mcv (mcv) on a, b, c from stats_mcv_partial",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_partial").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 0 and b = 0 and c = 0",
+        ),
+        102
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 0 or b = 0 or c = 0",
+        ),
+        96
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 10 or b = 10 or c = 10",
+        ),
+        2
+    );
+
+    db.execute(
+        1,
+        "create table stats_mcv_multi (a int4, b int4, c int4, d int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_multi (a, b, c, d) \
+         select mod(i,5), mod(i,5), mod(i,7), mod(i,7) \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_multi").unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_multi_ab (mcv) on a, b from stats_mcv_multi",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_multi_cd (mcv) on c, d from stats_mcv_multi",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_multi").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_multi where a = 0 or b = 0 or c = 0 or d = 0",
+        ),
+        1571
+    );
+}
+
+#[test]
+fn grouping_subquery_left_join_estimates_outer_rows() {
+    let base = temp_dir("grouping_subquery_left_join_estimate");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table grouping_unique (x integer)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into grouping_unique (x) select gs from generate_series(1,1000) as gs",
+    )
+    .unwrap();
+    db.execute(1, "analyze grouping_unique").unwrap();
+
+    let sql = "select * from generate_series(1, 1) t1 left join \
+               (select x from grouping_unique t2 group by x) as q1 on t1.t1 = q1.x";
+    assert_eq!(
+        explain_estimated_rows(&db, 1, sql),
+        1,
+        "{:?}",
+        explain_lines(&db, 1, sql)
     );
 }
 
@@ -46437,6 +46858,60 @@ fn plpgsql_runtime_errors_include_statement_context() {
         }
         other => panic!("expected PL/pgSQL context, got {other:?}"),
     }
+}
+
+#[test]
+fn plpgsql_decl_default_accepts_query_expression() {
+    let dir = temp_dir("plpgsql_decl_default_query");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table decl_default_src (label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into decl_default_src values ('ok')")
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "do $$ \
+             declare \
+               loaded text := label from decl_default_src; \
+               rel_name text := oid::regclass from pg_class where relname = 'decl_default_src'; \
+             begin \
+               raise notice 'label % relation %', loaded, rel_name; \
+             end \
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["label ok relation decl_default_src".to_string()]
+    );
+
+    session
+        .execute(&db, "create view decl_default_view as select 1::int4 as a")
+        .unwrap();
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "do $$ \
+             begin \
+               execute 'create statistics decl_default_bad_stats on a from decl_default_view'; \
+             exception when wrong_object_type then \
+               raise notice 'caught wrong object'; \
+             end \
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["caught wrong object".to_string()]
+    );
 }
 
 #[test]

@@ -346,7 +346,7 @@ pub const INT4_UMINUS_PROC_OID: u32 = 212;
 pub const INFORMATION_SCHEMA_EXPANDARRAY_PROC_OID: u32 = 78220;
 pub const INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID: u32 = 78221;
 pub const EQSEL_PROC_OID: u32 = 101;
-pub const SCALARLTSEL_PROC_OID: u32 = 103;
+pub const SCALARLTSEL_PROC_OID: u32 = 102;
 pub const EQJOINSEL_PROC_OID: u32 = 105;
 pub const AGG_TRANSITION_PROC_OID_BASE: u32 = 880_000;
 
@@ -2924,6 +2924,38 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        PgProcRow {
+            prorows: 1000.0,
+            proallargtypes: Some(vec![
+                PG_MCV_LIST_TYPE_OID,
+                INT4_TYPE_OID,
+                TEXT_ARRAY_TYPE_OID,
+                BOOL_ARRAY_TYPE_OID,
+                FLOAT8_TYPE_OID,
+                FLOAT8_TYPE_OID,
+            ]),
+            proargmodes: Some(vec![b'i', b'o', b'o', b'o', b'o', b'o']),
+            proargnames: Some(vec![
+                "mcv_list".into(),
+                "index".into(),
+                "values".into(),
+                "nulls".into(),
+                "frequency".into(),
+                "base_frequency".into(),
+            ]),
+            ..proc_row(
+                3427,
+                "pg_mcv_list_items",
+                RECORD_TYPE_OID,
+                &oid_argtypes(&[PG_MCV_LIST_TYPE_OID]),
+                "pg_stats_ext_mcvlist_items",
+                1,
+                true,
+                true,
+                'f',
+                's',
+            )
+        },
         proc_row(
             2092,
             "array_upper",

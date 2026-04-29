@@ -110,10 +110,11 @@ elif run_attempt > 1:
 
 lines = [
     f"*Status:* `{status or 'unknown'}`  *Commit:* `{sha}`",
+    f"*Run ID:* `{run_dir}`  *Branch:* `regression-history`",
     attempt_line,
     f"*Tests:* {passed}/{total} passed ({pass_pct}%){passed_delta}",
     f"*Queries:* {q_matched:,}/{q_total:,} matched ({q_pct}%){matched_delta}",
-    f"*Full output:* <{history_url}|runs/{run_dir}>  •  <{latest_url}|runs/latest>",
+    f":mag: *Investigate this run:* <{history_url}|runs/{run_dir}>  •  <{latest_url}|runs/latest>",
     f"*Workflow run:* <{run_url}|view in Actions>",
 ]
 if prev_dir:
@@ -140,10 +141,13 @@ if hotspots:
         shard = h.get("shard")
         suffix = f" ({dur}s, shard {shard})" if shard is not None else f" ({dur}s)"
         hotspot_lines.append(f"• `{test}` — peak {_fmt_size(peak_mb)}{suffix}")
+        hotspot_lines.append(
+            f"  └─ `runs/{run_dir}/output/{test}.out` • `runs/{run_dir}/diff/{test}.diff` (on `regression-history`)"
+        )
     if len(hotspots) > 5:
         hotspot_lines.append(f"_...and {len(hotspots) - 5} more above {HOTSPOT_THRESHOLD_MB} MB._")
     hotspot_lines.append(
-        "_Upstream PG holds these tests well under 100MB — peaks above ~1GB suggest a pgrust memory regression worth investigating._"
+        "_Upstream PG holds these tests well under 100MB — peaks above ~1GB suggest a pgrust memory regression worth investigating. To dig in: `git fetch origin regression-history && git show origin/regression-history:runs/" + run_dir + "/output/<test>.out`._"
     )
     blocks.append(
         {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(hotspot_lines)}}

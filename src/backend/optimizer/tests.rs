@@ -3281,6 +3281,32 @@ fn planner_estimates_constant_generate_series_rows() {
 }
 
 #[test]
+fn planner_estimates_left_join_to_grouped_subquery_as_outer_rows() {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "grouping_unique",
+            RelationDesc {
+                columns: vec![column_desc("x", int4(), false)],
+            },
+        )
+        .expect("create grouping_unique");
+    catalog
+        .set_relation_stats(table.relation_oid, 10, 1000.0)
+        .expect("seed grouping_unique stats");
+
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from generate_series(1, 1) t1 left join \
+         (select x from grouping_unique t2 group by x) as q1 on t1.t1 = q1.x",
+        &catalog,
+    );
+    assert_eq!(
+        planned.plan_tree.plan_info().plan_rows.as_f64().round() as u64,
+        1
+    );
+}
+
+#[test]
 fn planner_places_lock_rows_between_order_by_and_limit() {
     let mut catalog = Catalog::default();
     catalog

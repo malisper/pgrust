@@ -367,7 +367,7 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
                 && column
                     .relation_names
                     .iter()
-                    .any(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
+                    .any(|visible_relation| relation_name_matches(visible_relation, relation))
                 && column.output_name.eq_ignore_ascii_case(column_name)
         });
         if let Some(first) = matches.next() {
@@ -637,7 +637,7 @@ fn resolve_relation_row_expr_in_scope(
         relation
             .relation_names
             .iter()
-            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+            .any(|relation_name| relation_name_matches(relation_name, name))
     });
     let relation_exists = matched_relation.is_some();
     let mut matched = false;
@@ -650,7 +650,7 @@ fn resolve_relation_row_expr_in_scope(
                 || !column
                     .relation_names
                     .iter()
-                    .any(|relation| relation.eq_ignore_ascii_case(name))
+                    .any(|relation| relation_name_matches(relation, name))
             {
                 return None;
             }
@@ -662,6 +662,15 @@ fn resolve_relation_row_expr_in_scope(
         fields,
         relation_oid: matched_relation.and_then(|relation| relation.relation_oid),
     })
+}
+
+fn relation_name_matches(visible_relation: &str, requested_relation: &str) -> bool {
+    if visible_relation.eq_ignore_ascii_case(requested_relation) {
+        return true;
+    }
+    requested_relation
+        .rsplit_once('.')
+        .is_some_and(|(_, requested_base)| visible_relation.eq_ignore_ascii_case(requested_base))
 }
 
 fn from_item_is_lateral(item: &FromItem) -> bool {

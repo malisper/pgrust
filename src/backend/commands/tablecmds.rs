@@ -87,11 +87,11 @@ use crate::include::catalog::{
     PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
-    PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow,
-    PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_pg_am_rows, builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow,
+    PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
+    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -6725,7 +6725,13 @@ pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u3
         .catalog
         .as_deref()
         .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
-        .map(|row| row.relname)
+        .map(|row| {
+            if row.relnamespace == PG_TOAST_NAMESPACE_OID {
+                format!("pg_toast.{}", row.relname)
+            } else {
+                row.relname
+            }
+        })
         .unwrap_or_else(|| relation_oid.to_string());
     ExecError::DetailedError {
         message: format!("permission denied for table {relation_name}"),
@@ -6743,11 +6749,17 @@ fn relation_permission_denied_for_requirement(
     } else {
         "table"
     };
+    let relation_name = if requirement.relation_name.starts_with("pg_toast.") {
+        requirement.relation_name.as_str()
+    } else {
+        requirement
+            .relation_name
+            .rsplit_once('.')
+            .map(|(_, name)| name)
+            .unwrap_or(&requirement.relation_name)
+    };
     ExecError::DetailedError {
-        message: format!(
-            "permission denied for {relation_kind} {}",
-            requirement.relation_name
-        ),
+        message: format!("permission denied for {relation_kind} {relation_name}"),
         detail: None,
         hint: None,
         sqlstate: "42501",

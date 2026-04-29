@@ -14,6 +14,7 @@ use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_ne
 use crate::backend::access::index::buildkeys::materialize_heap_row_values;
 use crate::backend::commands::partition::{partition_ancestor_oids, partition_tree_entries};
 use crate::backend::parser::{CatalogLookup, SqlTypeKind};
+use crate::backend::statistics::types::decode_pg_mcv_list_payload;
 use crate::backend::utils::cache::system_views::{
     build_pg_get_publication_tables_rows, build_pg_stat_io_rows,
 };
@@ -22,11 +23,11 @@ use crate::backend::utils::time::datetime::{
     current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
-use crate::include::catalog::builtin_scalar_function_for_proc_oid;
+use crate::include::catalog::{BOOL_TYPE_OID, TEXT_TYPE_OID, builtin_scalar_function_for_proc_oid};
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
-use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, NumericValue, RecordValue};
 use crate::include::nodes::primnodes::{TextSearchTableFunction, expr_sql_type_hint};
 use crate::include::nodes::tsearch::TsWeight;
 use crate::pl::plpgsql::{
@@ -262,6 +263,7 @@ fn execute_native_set_returning_function(
         "pg_get_publication_tables" => Some(eval_pg_get_publication_tables(&values, ctx)?),
         "pg_event_trigger_ddl_commands" => Some(eval_pg_event_trigger_ddl_commands()),
         "pg_event_trigger_dropped_objects" => Some(eval_pg_event_trigger_dropped_objects()),
+        "pg_stats_ext_mcvlist_items" => Some(eval_pg_mcv_list_items(&values)?),
         _ => {
             if let Some(func) = builtin_scalar_function_for_proc_oid(row.oid) {
                 let value = eval_native_builtin_scalar_value_call(func, &values, false, ctx)?;
@@ -355,6 +357,48 @@ fn eval_pg_event_trigger_ddl_commands() -> Vec<TupleSlot> {
             ])
         })
         .collect()
+}
+
+fn eval_pg_mcv_list_items(values: &[Value]) -> Result<Vec<TupleSlot>, ExecError> {
+    let [Value::Bytea(bytes)] = values else {
+        return Ok(Vec::new());
+    };
+    let payload =
+        decode_pg_mcv_list_payload(bytes).map_err(|message| ExecError::DetailedError {
+            message: "could not decode pg_mcv_list".into(),
+            detail: Some(message),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    Ok(payload
+        .items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let values = item
+                .values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_ref()
+                        .map(|value| Value::Text(value.clone().into()))
+                        .unwrap_or(Value::Null)
+                })
+                .collect::<Vec<_>>();
+            let nulls = item
+                .values
+                .iter()
+                .map(|value| Value::Bool(value.is_none()))
+                .collect::<Vec<_>>();
+            TupleSlot::virtual_row(vec![
+                Value::Int32(index as i32),
+                Value::PgArray(ArrayValue::from_1d(values).with_element_type_oid(TEXT_TYPE_OID)),
+                Value::PgArray(ArrayValue::from_1d(nulls).with_element_type_oid(BOOL_TYPE_OID)),
+                Value::Float64(item.frequency),
+                Value::Float64(item.base_frequency),
+            ])
+        })
+        .collect())
 }
 
 fn eval_pg_get_publication_tables(
