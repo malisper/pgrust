@@ -1681,6 +1681,9 @@ impl Database {
                 .map(|(_, effect)| effect)
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
+            self.session_stats_state(client_id)
+                .write()
+                .note_function_drop(dependent_aggregate_oid, &self.stats);
             next_cid = next_cid.saturating_add(1);
         }
         let target_ctx = CatalogWriteContext {
@@ -1694,6 +1697,9 @@ impl Database {
             .map(|(_, effect)| effect)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
+        self.session_stats_state(client_id)
+            .write()
+            .note_function_drop(proc_row.oid, &self.stats);
         Ok(StatementResult::AffectedRows(0))
     }
 

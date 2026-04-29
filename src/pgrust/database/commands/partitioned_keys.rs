@@ -774,6 +774,12 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     constraint_name: desired_constraint_name.map(str::to_string),
                     existing_index_name: None,
                     columns: spec.columns.clone(),
+                    index_columns: spec
+                        .columns
+                        .iter()
+                        .cloned()
+                        .map(crate::backend::parser::IndexColumnDef::from)
+                        .collect(),
                     include_columns: Vec::new(),
                     primary: spec.primary,
                     exclusion: false,
@@ -922,7 +928,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 self.create_index_inheritance(index_entry.relation_oid, parent.index_oid)?;
                 (parent.constraint.oid, false, 1, false)
             } else {
-                (0, true, 0, false)
+                (0, true, 0, true)
             };
             let constraint = self.create_key_constraint(
                 relation.relation_oid,

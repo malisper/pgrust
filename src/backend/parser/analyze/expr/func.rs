@@ -842,14 +842,21 @@ fn bind_scalar_function_call_from_bound_args(
                 args,
             ))
         }
-        BuiltinScalarFunction::PgSleep => Ok(build_func(
-            false,
-            vec![coerce_bound_expr(
-                bound_args[0].clone(),
-                arg_types[0],
-                SqlType::new(SqlTypeKind::Float8),
-            )],
-        )),
+        BuiltinScalarFunction::PgSleep => {
+            let target_type = declared_arg_types
+                .first()
+                .copied()
+                .filter(|ty| matches!(ty.kind, SqlTypeKind::Interval))
+                .unwrap_or_else(|| SqlType::new(SqlTypeKind::Float8));
+            Ok(build_func(
+                false,
+                vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    target_type,
+                )],
+            ))
+        }
         BuiltinScalarFunction::JustifyDays
         | BuiltinScalarFunction::JustifyHours
         | BuiltinScalarFunction::JustifyInterval => Ok(build_func(

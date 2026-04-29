@@ -1366,6 +1366,95 @@ fn recursive_cte_intermediate_setop_with_can_read_worktable() {
 }
 
 #[test]
+fn recursive_cte_coerces_oid_recursive_term_to_regclass_anchor() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "with recursive r(inhrelid) as (
+            select 'pg_class'::regclass
+            union all
+            select c.oid from pg_class c, r where false
+        )
+        select inhrelid::text from r",
+    );
+    assert_eq!(rows, vec![vec![Value::Text("pg_class".into())]]);
+}
+
+#[test]
+fn correlated_set_operation_derived_table_can_see_outer_alias() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select array(
+            select f.i from (
+                (select d + g.i from generate_series(4, 30, 3) d order by 1)
+                union all
+                (select d + g.i from generate_series(0, 30, 5) d order by 1)
+            ) f(i)
+            order by f.i limit 10
+        )
+        from generate_series(1, 3) g(i)",
+    );
+
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(5),
+                    Value::Int32(6),
+                    Value::Int32(8),
+                    Value::Int32(11),
+                    Value::Int32(11),
+                    Value::Int32(14),
+                    Value::Int32(16),
+                    Value::Int32(17),
+                    Value::Int32(20),
+                ])
+                .with_element_type_oid(INT4_TYPE_OID)
+            )],
+            vec![Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Int32(2),
+                    Value::Int32(6),
+                    Value::Int32(7),
+                    Value::Int32(9),
+                    Value::Int32(12),
+                    Value::Int32(12),
+                    Value::Int32(15),
+                    Value::Int32(17),
+                    Value::Int32(18),
+                    Value::Int32(21),
+                ])
+                .with_element_type_oid(INT4_TYPE_OID)
+            )],
+            vec![Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Int32(3),
+                    Value::Int32(7),
+                    Value::Int32(8),
+                    Value::Int32(10),
+                    Value::Int32(13),
+                    Value::Int32(13),
+                    Value::Int32(16),
+                    Value::Int32(18),
+                    Value::Int32(19),
+                    Value::Int32(22),
+                ])
+                .with_element_type_oid(INT4_TYPE_OID)
+            )],
+        ]
+    );
+}
+
+#[test]
 fn recursive_cte_nested_union_ctes_inside_recursive_term_execute() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -3539,6 +3628,181 @@ fn update_from_updates_inherited_children() {
 }
 
 #[test]
+fn row_assignment_updates_inherited_children() {
+    let dir = temp_dir("row_assignment_inherited_update");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table row_parent (id int, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table row_child (extra int) inherits (row_parent)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into row_child values (1, 'old', 7)")
+        .unwrap();
+
+    assert!(matches!(
+        session
+            .execute(
+                &db,
+                "update row_parent p set (id, note) = (select p.id + 10, p.note || '-x')",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(1)
+    ));
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id, note, extra from row_child"),
+        vec![vec![
+            Value::Int32(11),
+            Value::Text("old-x".into()),
+            Value::Int32(7),
+        ]]
+    );
+}
+
+#[test]
+fn on_conflict_row_assignment_updates_columns() {
+    let dir = temp_dir("on_conflict_row_assignment");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table row_upsert (id int primary key, note text)")
+        .unwrap();
+    db.execute(1, "insert into row_upsert values (1, 'old')")
+        .unwrap();
+    assert!(matches!(
+        db.execute(
+            1,
+            "insert into row_upsert as r values (1, 'new') \
+             on conflict (id) do update set (id, note) = (select r.id + 1, r.note || '-x')",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    ));
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from row_upsert"),
+        vec![vec![Value::Int32(2), Value::Text("old-x".into())]]
+    );
+}
+
+#[test]
+fn inherited_child_row_cast_projects_parent_composite_fields() {
+    let dir = temp_dir("inherited_child_parent_composite_cast");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table cast_p1 (f1 int)").unwrap();
+    db.execute(1, "create table cast_p2 (f2 text)").unwrap();
+    db.execute(
+        1,
+        "create table cast_c1 (f3 int) inherits (cast_p1, cast_p2)",
+    )
+    .unwrap();
+    db.execute(1, "insert into cast_c1 values (1, 'hi', 42)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function cast_p2text(cast_p2) returns text \
+         language sql immutable as 'select $1.f2'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select cast_p2text(cast_c1.*) from cast_c1"),
+        vec![vec![Value::Text("hi".into())]]
+    );
+}
+
+#[test]
+fn update_from_updates_partitioned_targets_from_appendrel_source() {
+    let dir = temp_dir("update_from_partitioned_appendrel_source");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table source_base (a int)")
+        .unwrap();
+    session
+        .execute(&db, "insert into source_base values (0)")
+        .unwrap();
+    session
+        .execute(&db, "create table source_child () inherits (source_base)")
+        .unwrap();
+    session
+        .execute(&db, "insert into source_child values (1)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_target (a int, b char) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_target_1 partition of parted_target for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_target_2 partition of parted_target for values in (2)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_target_3 partition of parted_target for values in (3)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into parted_target values (1, 'a'), (2, 'a'), (3, 'a')",
+        )
+        .unwrap();
+
+    assert!(matches!(
+        session
+            .execute(
+                &db,
+                "update parted_target set b = 'b'
+                 from (select a from source_base union all select a + 1 from source_base) ss(a)
+                 where parted_target.a = ss.a",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(2)
+    ));
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select tableoid::regclass::text, a, b from parted_target order by 1, 2",
+        ),
+        vec![
+            vec![
+                Value::Text("parted_target_1".into()),
+                Value::Int32(1),
+                Value::Text("b".into()),
+            ],
+            vec![
+                Value::Text("parted_target_2".into()),
+                Value::Int32(2),
+                Value::Text("b".into()),
+            ],
+            vec![
+                Value::Text("parted_target_3".into()),
+                Value::Int32(3),
+                Value::Text("a".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn update_from_duplicate_source_matches_only_updates_once() {
     let dir = temp_dir("update_from_duplicate_matches");
     let db = Database::open(&dir, 128).unwrap();
@@ -3576,7 +3840,7 @@ fn update_from_duplicate_source_matches_only_updates_once() {
 }
 
 #[test]
-fn update_from_rejects_view_targets() {
+fn update_from_rewrites_auto_updatable_view_targets() {
     let dir = temp_dir("update_from_view_target");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -3593,18 +3857,27 @@ fn update_from_rejects_view_targets() {
     session
         .execute(&db, "create table src_view_target (id int, name text)")
         .unwrap();
+    session
+        .execute(&db, "insert into base_view_target values (1, 'old')")
+        .unwrap();
+    session
+        .execute(&db, "insert into src_view_target values (1, 'new')")
+        .unwrap();
 
-    let err = session
+    match session
         .execute(
             &db,
             "update view_target v set name = s.name from src_view_target s where s.id = v.id",
         )
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
-            if message == "UPDATE ... FROM is not yet supported for views"
-    ));
+        .unwrap()
+    {
+        StatementResult::AffectedRows(1) => {}
+        other => panic!("expected one rewritten view update, got {other:?}"),
+    }
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id, name from base_view_target"),
+        vec![vec![Value::Int32(1), Value::Text("new".into())]]
+    );
 }
 
 #[test]
@@ -5368,7 +5641,7 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
 }
 
 #[test]
-fn analyze_in_explicit_transaction_reports_stats_only_on_commit() {
+fn analyze_in_explicit_transaction_reports_stats_even_on_rollback() {
     let dir = temp_dir("analyze_xact_stats_commit");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -5396,7 +5669,7 @@ fn analyze_in_explicit_transaction_reports_stats_only_on_commit() {
              from pg_stat_user_tables
              where relname = 'analyze_xact_t'",
         ),
-        vec![vec![Value::Int64(0), Value::Bool(true), Value::Int64(3)]]
+        vec![vec![Value::Int64(1), Value::Bool(false), Value::Int64(0)]]
     );
 
     session.execute(&db, "begin").unwrap();
@@ -5415,7 +5688,7 @@ fn analyze_in_explicit_transaction_reports_stats_only_on_commit() {
              from pg_stat_user_tables
              where relname = 'analyze_xact_t'",
         ),
-        vec![vec![Value::Int64(1), Value::Bool(true), Value::Int64(0)]]
+        vec![vec![Value::Int64(2), Value::Bool(true), Value::Int64(0)]]
     );
 }
 
@@ -6546,6 +6819,194 @@ fn partition_tuple_routing_handles_nested_and_default_partitions() {
             && sqlstate == "23514" => {}
         other => panic!("expected partition constraint violation, got {other:?}"),
     }
+}
+
+#[test]
+fn routed_partition_constraint_detail_uses_parent_column_order() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table detail_parent(partid int, shdata int, data int) partition by range(partid)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table detail_child(
+                data int not null,
+                shdata int not null,
+                partid int not null,
+                check (data < 10)
+            )",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table detail_parent attach partition detail_child for values from (20) to (30)",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "insert into detail_parent(partid, shdata, data) values (20, 1, 10)",
+    ) {
+        Err(ExecError::CheckViolation {
+            relation, detail, ..
+        }) if relation == "detail_child"
+            && detail.as_deref() == Some("Failing row contains (20, 1, 10).") => {}
+        other => panic!("expected parent-ordered check detail, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "insert into detail_parent(partid, shdata, data) values (20, 1, null)",
+    ) {
+        Err(ExecError::NotNullViolation {
+            relation, detail, ..
+        }) if relation == "detail_child"
+            && detail.as_deref() == Some("Failing row contains (20, 1, null).") => {}
+        other => panic!("expected parent-ordered not-null detail, got {other:?}"),
+    }
+}
+
+#[test]
+fn direct_leaf_partition_update_enforces_leaf_partition_constraint() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table leaf_update_parent(partid int, shdata int, data int) partition by range(partid)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table leaf_update_child(data int, shdata int, partid int)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table leaf_update_parent attach partition leaf_update_child for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into leaf_update_parent(partid, shdata, data) values (0, 1, 5)",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "update leaf_update_child set partid = 10 where partid = 0",
+    ) {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) if message
+            == "new row for relation \"leaf_update_child\" violates partition constraint"
+            && detail.as_deref() == Some("Failing row contains (5, 1, 10).") => {}
+        other => panic!("expected leaf partition constraint violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select partid, shdata, data from leaf_update_parent"
+        ),
+        vec![vec![Value::Int32(0), Value::Int32(1), Value::Int32(5)]]
+    );
+}
+
+#[test]
+fn routed_partition_update_constraint_detail_uses_parent_column_order() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table update_detail_parent(partid int, shdata int, data int) partition by range(partid)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table update_detail_child(
+                data int check (data < 10),
+                shdata int,
+                partid int
+            )",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table update_detail_parent attach partition update_detail_child for values from (20) to (30)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_detail_parent(partid, shdata, data) values (20, 1, 5)",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "update update_detail_parent set data = 10 where partid = 20",
+    ) {
+        Err(ExecError::CheckViolation {
+            relation, detail, ..
+        }) if relation == "update_detail_child"
+            && detail.as_deref() == Some("Failing row contains (20, 1, 10).") => {}
+        other => panic!("expected parent-ordered update check detail, got {other:?}"),
+    }
+}
+
+#[test]
+fn check_constraint_null_literal_coerces_to_peer_type() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cnullparent_test(f1 int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table cnullchild_test(check (f1 = 1 or f1 = null)) inherits(cnullparent_test)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into cnullchild_test values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into cnullchild_test values (2)")
+        .unwrap();
+    session
+        .execute(&db, "insert into cnullchild_test values (null)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select f1 from cnullparent_test order by f1 nulls last"
+        ),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Null]
+        ]
+    );
 }
 
 #[test]
@@ -9193,6 +9654,83 @@ fn alter_table_no_inherit_localizes_inherited_check_constraint() {
 }
 
 #[test]
+fn alter_table_add_check_merges_inherited_constraint_as_local() {
+    let dir = temp_dir("alter_table_add_check_merges_inherited");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table p1 (f1 int)").unwrap();
+    db.execute(1, "create table c1 () inherits (p1)").unwrap();
+    db.execute(1, "alter table p1 add constraint f1_pos check (f1 > 0)")
+        .unwrap();
+    db.execute(1, "alter table c1 add constraint f1_pos check (f1 > 0)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conislocal, coninhcount
+             from pg_constraint pgc
+             join pg_class c on c.oid = pgc.conrelid
+             where c.relname = 'c1' and pgc.conname = 'f1_pos'",
+        ),
+        vec![vec![Value::Bool(true), Value::Int16(1)]]
+    );
+
+    match db.execute(1, "alter table c1 drop constraint f1_pos") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot drop inherited constraint \"f1_pos\" of relation \"c1\""
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected inherited check drop rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_drop_check_constraint_updates_inherited_children() {
+    let dir = temp_dir("alter_table_drop_check_inheritance");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table p1 (f1 int constraint f1_pos check (f1 > 0))",
+    )
+    .unwrap();
+    db.execute(1, "create table c_inh () inherits (p1)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table c_local (f1 int constraint f1_pos check (f1 > 0)) inherits (p1)",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table p1 drop constraint f1_pos")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, pgc.conislocal, pgc.coninhcount
+             from pg_constraint pgc
+             join pg_class c on c.oid = pgc.conrelid
+             where c.relname in ('c_inh', 'c_local')
+             order by c.relname",
+        ),
+        vec![vec![
+            Value::Text("c_local".into()),
+            Value::Bool(true),
+            Value::Int16(0),
+        ]]
+    );
+}
+
+#[test]
 fn alter_table_no_inherit_recomputes_multi_parent_column_and_not_null_metadata() {
     let dir = temp_dir("alter_table_no_inherit_multi_parent");
     let db = Database::open(&dir, 128).unwrap();
@@ -9283,6 +9821,43 @@ fn alter_table_no_inherit_recomputes_multi_parent_column_and_not_null_metadata()
         }) if relation == "c2" && column == "a" => {}
         other => panic!("expected localized inherited not-null violation, got {other:?}"),
     }
+}
+
+#[test]
+fn inherited_not_null_constraints_with_same_name_get_unique_child_names() {
+    let dir = temp_dir("inherit_not_null_duplicate_names");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table nnp1 (a int constraint nn not null)")
+        .unwrap();
+    db.execute(1, "create table nnp2 (b int constraint nn not null)")
+        .unwrap();
+    db.execute(1, "create table nnc () inherits (nnp1, nnp2)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, conislocal, coninhcount
+             from pg_constraint pgc
+             join pg_class c on c.oid = pgc.conrelid
+             where c.relname = 'nnc'
+             order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn".into()),
+                Value::Bool(false),
+                Value::Int16(1),
+            ],
+            vec![
+                Value::Text("nnc_b_not_null".into()),
+                Value::Bool(false),
+                Value::Int16(1),
+            ],
+        ]
+    );
 }
 
 #[test]
@@ -9377,8 +9952,14 @@ fn create_table_rejects_not_null_no_inherit_on_inherited_not_null_column() {
         1,
         "create table c1 (a int not null no inherit) inherits (p1)",
     ) {
-        Err(ExecError::Parse(ParseError::InvalidTableDefinition(message)))
-            if message == "cannot define not-null constraint with NO INHERIT on column \"a\"" => {}
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message == "cannot define not-null constraint with NO INHERIT on column \"a\""
+            && detail == "The column has an inherited not-null constraint."
+            && sqlstate == "42P16" => {}
         other => panic!("expected inherited NO INHERIT conflict, got {other:?}"),
     }
 }
@@ -9401,16 +9982,65 @@ fn alter_table_set_not_null_rejects_existing_no_inherit_constraint() {
                 message,
                 "cannot change NO INHERIT status of NOT NULL constraint \"p1_a_not_null\" on relation \"p1\""
             );
-            assert_eq!(
-                hint.as_deref(),
-                Some(
-                    "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."
-                )
-            );
+            assert_eq!(hint.as_deref(), None);
             assert_eq!(sqlstate, "0A000");
         }
         other => panic!("expected existing NO INHERIT SET NOT NULL failure, got {other:?}"),
     }
+}
+
+#[test]
+fn index_backed_constraints_are_no_inherit_catalog_rows() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(
+        1,
+        "create table idx_inh_parent (a int primary key, b int unique)",
+    )
+    .unwrap();
+    db.execute(1, "create table idx_inh_child () inherits (idx_inh_parent)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype, coninhcount, conislocal, connoinherit
+             from pg_constraint c
+             join pg_class r on r.oid = c.conrelid
+             where r.relname = 'idx_inh_parent' and c.contype in ('p', 'u')
+             order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("idx_inh_parent_b_key".into()),
+                Value::Text("u".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idx_inh_parent_pkey".into()),
+                Value::Text("p".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ],
+    );
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_constraint c
+                 join pg_class r on r.oid = c.conrelid
+                 where r.relname = 'idx_inh_child' and c.contype in ('p', 'u')",
+            )[0][0],
+        ),
+        0
+    );
 }
 
 #[test]
@@ -9744,6 +10374,102 @@ fn inherited_scan_tableoid_tracks_physical_child_relation() {
              order by p.a",
         ),
         vec![vec![Value::Text("parent_inh".into()), Value::Int32(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, child_inh.a, child_inh.extra
+             from only child_inh, pg_class c
+             where child_inh.tableoid = c.oid
+             order by child_inh.a",
+        ),
+        vec![vec![
+            Value::Text("child_inh".into()),
+            Value::Int32(2),
+            Value::Int32(10),
+        ]]
+    );
+
+    session
+        .execute(&db, "create table text_parent_inh(aa text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table text_child_inh(bb text) inherits (text_parent_inh)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into text_child_inh(aa) values ('bbb'), ('bbbb'), ('bbbbb')",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, text_child_inh.aa, text_child_inh.bb
+             from only text_child_inh, pg_class c
+             where text_child_inh.tableoid = c.oid
+             order by text_child_inh.aa",
+        ),
+        vec![
+            vec![
+                Value::Text("text_child_inh".into()),
+                Value::Text("bbb".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("text_child_inh".into()),
+                Value::Text("bbbb".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("text_child_inh".into()),
+                Value::Text("bbbbb".into()),
+                Value::Null,
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, text_child_inh.aa, text_child_inh.bb
+             from only text_child_inh, pg_class c
+             where text_child_inh.tableoid = c.oid",
+        )
+        .len(),
+        3,
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, text_child_inh.*
+             from only text_child_inh, pg_class c
+             where text_child_inh.tableoid = c.oid
+             order by text_child_inh.aa",
+        ),
+        vec![
+            vec![
+                Value::Text("text_child_inh".into()),
+                Value::Text("bbb".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("text_child_inh".into()),
+                Value::Text("bbbb".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("text_child_inh".into()),
+                Value::Text("bbbbb".into()),
+                Value::Null,
+            ],
+        ]
     );
 }
 
@@ -18221,6 +18947,178 @@ fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
 }
 
 #[test]
+fn alter_table_add_column_merges_existing_child_column_and_not_null() {
+    let base = temp_dir("alter_add_column_merge_existing_child_not_null");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table inh_parent ()").unwrap();
+    session
+        .execute(&db, "create table inh_child (i int) inherits (inh_parent)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table inh_grandchild () inherits (inh_parent, inh_child)",
+        )
+        .unwrap();
+
+    clear_backend_notices();
+    session
+        .execute(&db, "alter table inh_parent add column i int not null")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            r#"merging definition of column "i" for child "inh_child""#.to_string(),
+            r#"merging definition of column "i" for child "inh_grandchild""#.to_string(),
+        ],
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, a.attname, a.attinhcount, a.attislocal
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname in ('inh_parent', 'inh_child', 'inh_grandchild') and a.attname = 'i'
+             order by 1",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_child".into()),
+                Value::Text("i".into()),
+                Value::Int16(1),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("inh_grandchild".into()),
+                Value::Text("i".into()),
+                Value::Int16(2),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_parent".into()),
+                Value::Text("i".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+            ],
+        ],
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, con.conname, con.coninhcount, con.conislocal, con.connoinherit
+             from pg_constraint con
+             join pg_class c on c.oid = con.conrelid
+             where c.relname in ('inh_parent', 'inh_child', 'inh_grandchild')
+               and con.contype = 'n'
+             order by 1",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_child".into()),
+                Value::Text("inh_parent_i_not_null".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_grandchild".into()),
+                Value::Text("inh_parent_i_not_null".into()),
+                Value::Int16(2),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_parent".into()),
+                Value::Text("inh_parent_i_not_null".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+                Value::Bool(false),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn alter_table_add_column_not_null_no_inherit_does_not_mark_children() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table nn_parent ()").unwrap();
+    session
+        .execute(&db, "create table nn_child () inherits (nn_parent)")
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "alter table nn_parent add column a int constraint parent_nn not null no inherit",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, a.attnotnull
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname in ('nn_parent', 'nn_child') and a.attname = 'a'
+             order by 1",
+        ),
+        vec![
+            vec![Value::Text("nn_child".into()), Value::Bool(false)],
+            vec![Value::Text("nn_parent".into()), Value::Bool(true)],
+        ],
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, con.conname, con.coninhcount, con.conislocal, con.connoinherit
+             from pg_constraint con
+             join pg_class c on c.oid = con.conrelid
+             where c.relname in ('nn_parent', 'nn_child') and con.contype = 'n'
+             order by 1",
+        ),
+        vec![vec![
+            Value::Text("nn_parent".into()),
+            Value::Text("parent_nn".into()),
+            Value::Int16(0),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]],
+    );
+}
+
+#[test]
+fn create_table_like_inherits_reports_column_merge_notice() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table like_base(i integer)")
+        .unwrap();
+    session
+        .execute(&db, "create table like_derived() inherits (like_base)")
+        .unwrap();
+    clear_backend_notices();
+    session
+        .execute(
+            &db,
+            "create table like_more_derived(like like_derived, b int) inherits (like_derived)",
+        )
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![r#"merging column "i" with inherited definition"#.to_string()]
+    );
+}
+
+#[test]
 fn alter_table_add_column_only_parent_with_inheritance_children_errors() {
     let base = temp_dir("alter_table_add_column_only_inherited_parent");
     let db = Database::open(&base, 16).unwrap();
@@ -18896,6 +19794,40 @@ fn alter_table_alter_column_type_rewrites_rows_with_using_expr() {
         StatementResult::Query { columns, rows, .. } => {
             assert_eq!(columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
             assert_eq!(rows, vec![vec![Value::Int32(7)], vec![Value::Int32(42)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_alter_inherited_column_type_rewrites_children_with_using_expr() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(1, "create table alter_type_parent(aa text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table alter_type_child(bb text) inherits (alter_type_parent)",
+    )
+    .unwrap();
+    db.execute(1, "insert into alter_type_child values ('test', 'child')")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table alter_type_parent alter column aa type integer using bit_length(aa)",
+    )
+    .unwrap();
+
+    match db
+        .execute(1, "select aa, bb from alter_type_child")
+        .unwrap()
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(32), Value::Text("child".into())]]
+            );
         }
         other => panic!("expected query result, got {other:?}"),
     }
@@ -21058,6 +21990,107 @@ fn range_exclusion_constraints_enforce_equal_and_overlap_columns() {
         }
         other => panic!("expected speaker exclusion violation, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_drop_exclusion_constraint_drops_backing_index() {
+    let base = temp_dir("alter_drop_exclusion_constraint");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table drop_excl_tbl(\
+             room int4range, \
+             during tsrange, \
+             constraint drop_excl_tbl_room_during_excl \
+             exclude using gist (room with =, during with &&)\
+         )",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conname = 'drop_excl_tbl_room_during_excl'",
+        ),
+        vec![vec![Value::Int64(1)]],
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'drop_excl_tbl_room_during_excl'",
+        ),
+        vec![vec![Value::Int64(1)]],
+    );
+
+    db.execute(
+        1,
+        "alter table drop_excl_tbl drop constraint drop_excl_tbl_room_during_excl",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conname = 'drop_excl_tbl_room_during_excl'",
+        ),
+        vec![vec![Value::Int64(0)]],
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'drop_excl_tbl_room_during_excl'",
+        ),
+        vec![vec![Value::Int64(0)]],
+    );
+}
+
+#[test]
+fn alter_table_add_exclusion_constraint_accepts_expression_key() {
+    let base = temp_dir("alter_add_exclusion_expression");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table add_excl_expr(a int primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table add_excl_expr add constraint add_excl_expr_excl exclude ((1) with =)",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("add_excl_expr").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "add_excl_expr_excl")
+        .unwrap();
+    assert_eq!(
+        constraint.contype,
+        crate::include::catalog::CONSTRAINT_EXCLUSION
+    );
+    assert_eq!(constraint.conkey.as_deref(), Some(&[0][..]));
+    assert_eq!(constraint.conexclop.as_ref().map(Vec::len), Some(1));
+    let index = lookup
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == constraint.conindid)
+        .unwrap();
+    assert!(index.index_meta.indisexclusion);
+    assert_eq!(index.index_meta.indkey, vec![0]);
+    assert_eq!(index.index_meta.indexprs.as_deref(), Some("[\"1\"]"));
+    drop(lookup);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid) from pg_constraint where conname = 'add_excl_expr_excl'",
+        ),
+        vec![vec![Value::Text("EXCLUDE USING gist ((1) WITH =)".into())]]
+    );
 }
 
 #[test]
@@ -23842,9 +24875,10 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
             relation,
             constraint,
             detail,
-        }) if relation == "items" && constraint == "items_id_positive" => {
-            assert_eq!(detail.as_deref(), Some("Failing row contains (0, hello)."));
-        }
+            ..
+        }) if relation == "items"
+            && constraint == "items_id_positive"
+            && detail.as_deref() == Some("Failing row contains (0, hello).") => {}
         other => panic!("expected check violation, got {other:?}"),
     }
 
@@ -26032,6 +27066,63 @@ fn create_table_check_not_enforced_skips_write_enforcement_and_cannot_validate()
 }
 
 #[test]
+fn inherited_check_rejects_not_enforced_or_not_valid_child_conflicts() {
+    let base = temp_dir("check_inherit_conflicts");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table chk_parent (a int4 constraint chk_a check (a > 0) enforced)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table chk_child (a int4 constraint chk_a check (a > 0) not enforced)",
+    )
+    .unwrap();
+    match db.execute(1, "alter table chk_child inherit chk_parent") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "constraint \"chk_a\" conflicts with NOT ENFORCED constraint on child table \"chk_child\""
+            );
+            assert_eq!(sqlstate, "42P17");
+        }
+        other => panic!("expected NOT ENFORCED child CHECK conflict, got {other:?}"),
+    }
+
+    db.execute(1, "create table chk_valid_parent (a int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table chk_invalid_child () inherits (chk_valid_parent)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table chk_invalid_child add constraint chk_valid check (a > 0) not valid",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table chk_valid_parent add constraint chk_valid check (a > 0)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "constraint \"chk_valid\" conflicts with NOT VALID constraint on relation \"chk_invalid_child\""
+            );
+            assert_eq!(sqlstate, "42P17");
+        }
+        other => panic!("expected NOT VALID child CHECK conflict, got {other:?}"),
+    }
+}
+
+#[test]
 fn update_and_copy_from_enforce_check_and_not_null_constraints() {
     let base = temp_dir("update_and_copy_constraint_checks");
     let db = Database::open(&base, 16).unwrap();
@@ -26255,11 +27346,15 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
     assert_eq!(rows[1][4], Value::Null);
 
     match db.execute(1, "alter table items validate constraint items_id_positive") {
-        Err(ExecError::CheckViolation {
-            relation,
-            constraint,
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
             ..
-        }) if relation == "items" && constraint == "items_id_positive" => {}
+        }) if message
+            == "check constraint \"items_id_positive\" of relation \"items\" is violated by some row"
+            && detail.is_none()
+            && sqlstate == "23514" => {}
         other => panic!("expected CHECK validate failure, got {other:?}"),
     }
 
@@ -26525,6 +27620,303 @@ fn not_null_inheritance_metadata_and_alter_constraint_inheritability() {
                 Value::Text("nn_inh_parent".into()),
                 Value::Bool(true),
                 Value::Int32(0),
+                Value::Bool(false),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn not_null_inheritability_recomputes_multi_parent_counts() {
+    let base = temp_dir("not_null_inheritability_multiparent_counts");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table inh_nn1 (f1 int not null no inherit)")
+        .unwrap();
+    db.execute(1, "create table inh_nn2 (f2 text, f3 int, f1 int)")
+        .unwrap();
+    db.execute(1, "alter table inh_nn2 inherit inh_nn1")
+        .unwrap();
+    db.execute(1, "create table inh_nn3 (f4 float) inherits (inh_nn2)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table inh_nn4 (f5 int, f4 float, f2 text, f3 int, f1 int)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table inh_nn4 inherit inh_nn2, inherit inh_nn1, inherit inh_nn3",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table inh_nn1 alter constraint inh_nn1_f1_not_null inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, coninhcount::int4, conislocal
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where contype = 'n'
+                and c.relname in ('inh_nn2', 'inh_nn3', 'inh_nn4')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_nn2".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_nn3".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_nn4".into()),
+                Value::Int32(3),
+                Value::Bool(false),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table inh_nn1 alter constraint inh_nn1_f1_not_null no inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, coninhcount::int4, conislocal
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where contype = 'n'
+                and c.relname in ('inh_nn2', 'inh_nn3', 'inh_nn4')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_nn2".into()),
+                Value::Int32(0),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("inh_nn3".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_nn4".into()),
+                Value::Int32(2),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    db.execute(1, "alter table inh_nn1 drop constraint inh_nn1_f1_not_null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, coninhcount::int4, conislocal
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where contype = 'n'
+                and c.relname in ('inh_nn2', 'inh_nn3', 'inh_nn4')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_nn2".into()),
+                Value::Int32(0),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("inh_nn3".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_nn4".into()),
+                Value::Int32(2),
+                Value::Bool(true),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn inherited_table_level_not_null_remains_local() {
+    let base = temp_dir("inherited_table_level_not_null_local");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table inh_nn1 (f1 int not null no inherit)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table inh_nn2 (f2 text, f3 int) inherits (inh_nn1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table inh_nn3 (f4 float, constraint nn3_f1 not null f1 no inherit) inherits (inh_nn1, inh_nn2)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conname, coninhcount::int4, conislocal, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where contype = 'n'
+                and c.relname in ('inh_nn1', 'inh_nn2', 'inh_nn3')
+              order by c.relname, conname",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_nn1".into()),
+                Value::Text("inh_nn1_f1_not_null".into()),
+                Value::Int32(0),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("inh_nn3".into()),
+                Value::Text("nn3_f1".into()),
+                Value::Int32(0),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn inherited_check_merge_validates_enforced_child_rows() {
+    let base = temp_dir("inherited_check_merge_validates_enforced_child_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table p1(f1 int)").unwrap();
+    db.execute(1, "create table p1_c1() inherits(p1)").unwrap();
+    db.execute(
+        1,
+        "alter table p1 add constraint c_check check (f1 < 10) not enforced",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table p1_c1 add constraint c_check check (f1 < 10) not valid enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conenforced, convalidated
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where conname = 'c_check'
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("p1".into()),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("p1_c1".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    db.execute(1, "create table p1_c2() inherits(p1, p1_c1)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated
+               from pg_constraint
+              where conname = 'c_check'
+                and conrelid = (select oid from pg_class where relname = 'p1_c2')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn alter_not_null_inherit_creates_missing_child_constraints() {
+    let base = temp_dir("not_null_inherit_creates_children");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_parent (a int4 not null no inherit)")
+        .unwrap();
+    db.execute(1, "create table nn_child () inherits (nn_parent)")
+        .unwrap();
+    db.execute(1, "create table nn_grandchild () inherits (nn_child)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conname, coninhcount::int4, conislocal, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_parent', 'nn_child', 'nn_grandchild')
+              order by c.relname",
+        ),
+        vec![vec![
+            Value::Text("nn_parent".into()),
+            Value::Text("nn_parent_a_not_null".into()),
+            Value::Int32(0),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "alter table nn_parent alter constraint nn_parent_a_not_null inherit",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conname, coninhcount::int4, conislocal, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_parent', 'nn_child', 'nn_grandchild')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_child".into()),
+                Value::Text("nn_parent_a_not_null".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("nn_grandchild".into()),
+                Value::Text("nn_parent_a_not_null".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("nn_parent".into()),
+                Value::Text("nn_parent_a_not_null".into()),
+                Value::Int32(0),
+                Value::Bool(true),
                 Value::Bool(false),
             ],
         ]
@@ -31961,7 +33353,7 @@ fn relation_stats_views_track_commit_flush_and_rollback() {
             &db,
             "select n_tup_ins from pg_stat_user_tables where relname = 'items'",
         ),
-        vec![vec![Value::Int64(2)]]
+        vec![vec![Value::Int64(3)]]
     );
 }
 
@@ -32026,7 +33418,7 @@ fn function_stats_respect_track_functions_and_rollback() {
             &db,
             "select pg_stat_get_function_calls('add_one(int4)'::regprocedure::oid)",
         ),
-        vec![vec![Value::Int64(2)]]
+        vec![vec![Value::Int64(3)]]
     );
 
     session_query_rows(&mut session1, &db, "select pg_stat_force_next_flush()");
@@ -32036,7 +33428,7 @@ fn function_stats_respect_track_functions_and_rollback() {
             &db,
             "select calls from pg_stat_user_functions where funcname = 'add_one'",
         ),
-        vec![vec![Value::Int64(2)]]
+        vec![vec![Value::Int64(3)]]
     );
 }
 
@@ -32065,7 +33457,7 @@ fn pg_stat_io_exposes_pg_shaped_rows() {
         session_query_rows(
             &mut session,
             &db,
-            "select reads > 0, read_bytes > 0 from pg_stat_io where backend_type = 'client backend' and object = 'relation' and context = 'bulkread'",
+            "select reads > 0, read_bytes > 0 from pg_stat_io where backend_type = 'client backend' and object = 'relation' and context = 'normal'",
         ),
         vec![vec![Value::Bool(true), Value::Bool(true)]]
     );

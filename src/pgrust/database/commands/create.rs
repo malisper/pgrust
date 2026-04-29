@@ -55,6 +55,39 @@ struct EffectiveTypeAclGrantees {
     is_superuser: bool,
 }
 
+fn constraint_index_columns_with_expr_types(
+    action: &crate::backend::parser::IndexBackedConstraintAction,
+    relation: &crate::backend::parser::BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<crate::backend::parser::IndexColumnDef>, ExecError> {
+    let mut columns = if action.index_columns.is_empty() {
+        action
+            .columns
+            .iter()
+            .cloned()
+            .map(crate::backend::parser::IndexColumnDef::from)
+            .collect::<Vec<_>>()
+    } else {
+        action.index_columns.clone()
+    };
+    for column in &mut columns {
+        if let Some(expr_sql) = column.expr_sql.as_deref()
+            && column.expr_type.is_none()
+        {
+            column.expr_type = Some(
+                crate::backend::parser::infer_relation_expr_sql_type(
+                    expr_sql,
+                    None,
+                    &relation.desc,
+                    catalog,
+                )
+                .map_err(ExecError::Parse)?,
+            );
+        }
+    }
+    Ok(columns)
+}
+
 fn validate_sql_procedure_body(
     create_stmt: &CreateProcedureStatement,
     catalog: &dyn CatalogLookup,
@@ -2006,12 +2039,8 @@ impl Database {
                     relation.namespace_oid,
                     &constraint_name,
                 )?;
-                let index_columns = action
-                    .columns
-                    .iter()
-                    .cloned()
-                    .map(crate::backend::parser::IndexColumnDef::from)
-                    .collect::<Vec<_>>();
+                let index_columns =
+                    constraint_index_columns_with_expr_types(action, relation, &catalog)?;
                 let mut storage_columns = index_columns.clone();
                 storage_columns.extend(
                     action
@@ -2022,13 +2051,12 @@ impl Database {
                 );
                 let (access_method_oid, access_method_handler, build_options) = if action.exclusion
                 {
-                    self.resolve_simple_index_build_options(
+                    self.resolve_exclusion_index_build_options(
                         client_id,
                         Some((xid, action_cid)),
                         action.access_method.as_deref().unwrap_or("gist"),
                         relation,
                         &index_columns,
-                        &[],
                     )?
                 } else if action.without_overlaps.is_some() {
                     self.resolve_temporal_index_build_options(
@@ -2097,9 +2125,9 @@ impl Database {
                     Vec::new()
                 };
                 let conexclop = if action.exclusion {
-                    Some(self.exclusion_constraint_operator_oids_for_desc(
+                    Some(self.exclusion_constraint_operator_oids_for_index_columns(
                         &relation.desc,
-                        &action.columns,
+                        &index_columns,
                         &action.exclusion_operators,
                         &catalog,
                     )?)
@@ -5240,6 +5268,20 @@ impl Database {
             xid,
             cid,
         )?;
+        {
+            let stats_state = self.session_stats_state(client_id);
+            let mut stats = stats_state.write();
+            for _ in 0..inserted {
+                stats.note_relation_insert_with_persistence(
+                    relation_oid,
+                    match create_stmt.persistence {
+                        TablePersistence::Temporary => 't',
+                        TablePersistence::Permanent | TablePersistence::Unlogged => 'p',
+                    },
+                );
+            }
+            stats.note_io_extend("client backend", "relation", "bulkwrite", 8192);
+        }
         Ok(StatementResult::AffectedRows(inserted))
     }
 

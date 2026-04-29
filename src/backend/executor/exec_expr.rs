@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::sql_deparse::{
-    normalize_index_expression_sql, normalize_index_predicate_sql,
+    normalize_check_expr_sql, normalize_index_expression_sql, normalize_index_predicate_sql,
 };
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
@@ -28,7 +28,8 @@ use super::expr_bit::{
 use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_boolor_statefunc};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
-    cast_value_with_source_type_catalog_and_config, soft_input_error_info_with_catalog_and_config,
+    cast_value_with_source_type_catalog_and_config, parse_interval_text_value,
+    soft_input_error_info_with_catalog_and_config,
 };
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
@@ -85,13 +86,14 @@ use super::expr_partition::eval_satisfies_hash_partition;
 use super::expr_range::eval_range_function;
 use super::expr_reg;
 use super::expr_string::{
-    eval_ascii_function, eval_bit_count_bytes, eval_bpchar_to_text_function, eval_bytea_overlay,
-    eval_bytea_position_function, eval_bytea_substring, eval_chr_function, eval_concat_function,
-    eval_concat_ws_function, eval_convert_from_function, eval_convert_to_function,
-    eval_crc32_function, eval_crc32c_function, eval_decode_function, eval_encode_function,
-    eval_format_function, eval_get_bit_bytes, eval_get_byte, eval_initcap_function,
-    eval_left_function, eval_length_function, eval_like, eval_lower_function, eval_lpad_function,
-    eval_md5_function, eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
+    eval_ascii_function, eval_bit_count_bytes, eval_bit_length_function,
+    eval_bpchar_to_text_function, eval_bytea_overlay, eval_bytea_position_function,
+    eval_bytea_substring, eval_chr_function, eval_concat_function, eval_concat_ws_function,
+    eval_convert_from_function, eval_convert_to_function, eval_crc32_function,
+    eval_crc32c_function, eval_decode_function, eval_encode_function, eval_format_function,
+    eval_get_bit_bytes, eval_get_byte, eval_initcap_function, eval_left_function,
+    eval_length_function, eval_like, eval_lower_function, eval_lpad_function, eval_md5_function,
+    eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
     eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
     eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
@@ -152,22 +154,23 @@ use crate::include::catalog::{
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
     DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID,
     GLOBAL_TABLESPACE_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
-    PG_AUTHID_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
-    PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_EVENT_TRIGGER_RELATION_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgConversionRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
-    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
-    default_btree_opclass_oid, default_hash_opclass_oid,
+    NAME_TYPE_OID, PG_AUTHID_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_DATABASE_OWNER_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
+    PG_EVENT_TRIGGER_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
+    POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
+    PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID,
+    TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
+    default_hash_opclass_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, RecordValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
     OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
-    attrno_index, is_executor_special_varno,
+    attrno_index, is_executor_special_varno, is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pl::plpgsql::current_event_trigger_table_rewrite;
@@ -254,6 +257,7 @@ fn relation_stats_value(
         BuiltinScalarFunction::PgStatGetTuplesFetched => Value::Int64(entry.tuples_fetched),
         BuiltinScalarFunction::PgStatGetTuplesInserted => Value::Int64(entry.tuples_inserted),
         BuiltinScalarFunction::PgStatGetTuplesUpdated => Value::Int64(entry.tuples_updated),
+        BuiltinScalarFunction::PgStatGetTuplesHotUpdated => Value::Int64(entry.tuples_hot_updated),
         BuiltinScalarFunction::PgStatGetTuplesDeleted => Value::Int64(entry.tuples_deleted),
         BuiltinScalarFunction::PgStatGetLiveTuples => Value::Int64(entry.live_tuples),
         BuiltinScalarFunction::PgStatGetDeadTuples => Value::Int64(entry.dead_tuples),
@@ -294,11 +298,12 @@ fn function_stats_value(
     oid: u32,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let Some(entry) = ctx
-        .session_stats
-        .write()
-        .visible_function_entry(&ctx.stats, oid)
-    else {
+    let mut session = ctx.session_stats.write();
+    let entry = if let Some(entry) = session.visible_function_entry(&ctx.stats, oid) {
+        entry
+    } else if session.function_xact.contains_key(&oid) {
+        crate::backend::utils::activity::FunctionStatsEntry::default()
+    } else {
         return Ok(Value::Null);
     };
     Ok(match func {
@@ -2033,6 +2038,13 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
                 .into(),
         ));
     }
+    match name.as_str() {
+        "block_size" => return Ok(Value::Text("8192".into())),
+        "fsync" => return Ok(Value::Text("on".into())),
+        "synchronous_commit" => return Ok(Value::Text("on".into())),
+        "wal_sync_method" => return Ok(Value::Text("fsync".into())),
+        _ => {}
+    }
 
     if let Some(value) = ctx
         .gucs
@@ -2067,8 +2079,13 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
     if name == "role" {
         return Ok(Value::Text("none".into()));
     }
-    if name == "server_encoding" {
-        return Ok(Value::Text("UTF8".into()));
+    match name.as_str() {
+        "block_size" => return Ok(Value::Text("8192".into())),
+        "fsync" => return Ok(Value::Text("on".into())),
+        "server_encoding" => return Ok(Value::Text("UTF8".into())),
+        "synchronous_commit" => return Ok(Value::Text("on".into())),
+        "wal_sync_method" => return Ok(Value::Text("fsync".into())),
+        _ => {}
     }
     if let Some(value) = plpgsql_guc_default_value(&name) {
         return Ok(Value::Text(value.into()));
@@ -2746,6 +2763,34 @@ fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value
     }
 }
 
+fn eval_shobj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [objoid, class_name] => {
+            let objoid = oid_arg_to_u32(objoid, "shobj_description")?;
+            let Some(class_name) = class_name.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "shobj_description",
+                    left: class_name.clone(),
+                    right: Value::Text("".into()),
+                });
+            };
+            let catalog = executor_catalog(ctx)?;
+            let Some(classoid) = catalog
+                .lookup_any_relation(class_name)
+                .map(|rel| rel.relation_oid)
+            else {
+                return Ok(Value::Null);
+            };
+            eval_obj_description_for_classoid(objoid, classoid, ctx)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "shobj_description(oid, catalog_name)",
+            actual: format!("ShobjDescription({} args)", values.len()),
+        })),
+    }
+}
+
 fn eval_obj_description_for_classoid(
     objoid: u32,
     classoid: u32,
@@ -3239,6 +3284,13 @@ fn eval_pg_get_expr_text(
         }
     }
     let catalog = executor_catalog(ctx)?;
+    if catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| row.contype == CONSTRAINT_CHECK && row.conbin.as_deref() == Some(text))
+    {
+        return Ok(Value::Text(normalize_check_expr_sql(text).into()));
+    }
     Ok(Value::Text(
         canonicalize_catalog_expr_sql(text, relation_oid, catalog)
             .unwrap_or_else(|| text.to_string())
@@ -3978,9 +4030,11 @@ fn format_constraintdef_for_catalog(
     match row.contype {
         CONSTRAINT_NOTNULL => Some("NOT NULL".into()),
         CONSTRAINT_CHECK => row.conbin.as_deref().map(|expr_sql| {
-            let expr_sql = canonicalize_catalog_expr_sql(expr_sql, row.conrelid, catalog)
-                .unwrap_or_else(|| expr_sql.to_string());
-            format!("CHECK ({expr_sql})")
+            let mut def = format!("CHECK {}", normalize_check_expr_sql(expr_sql));
+            if row.connoinherit {
+                def.push_str(" NO INHERIT");
+            }
+            def
         }),
         CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
             format_index_backed_constraintdef_for_catalog(catalog, row)
@@ -4000,7 +4054,7 @@ fn format_index_backed_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let all_columns = index_display_names_for_heap(&relation.desc, &index.index_meta)?;
     let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
     let mut columns = all_columns
         .iter()
@@ -4041,7 +4095,7 @@ fn format_exclusion_constraintdef_for_catalog(
         .index_relations_for_heap(row.conrelid)
         .into_iter()
         .find(|index| index.relation_oid == row.conindid)?;
-    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    let all_columns = index_display_names_for_heap(&relation.desc, &index.index_meta)?;
     let operators = row
         .conexclop
         .as_ref()?
@@ -4525,6 +4579,36 @@ fn index_column_names_for_heap(desc: &RelationDesc, attnums: &[i16]) -> Option<V
                 .then(|| desc.columns.get((*attnum as usize).saturating_sub(1)))
                 .flatten()
                 .map(|column| column.name.clone())
+        })
+        .collect()
+}
+
+fn index_display_names_for_heap(
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+) -> Option<Vec<String>> {
+    let expression_sqls = index_meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    index_meta
+        .indkey
+        .iter()
+        .map(|attnum| {
+            if *attnum > 0 {
+                return desc
+                    .columns
+                    .get((*attnum as usize).saturating_sub(1))
+                    .map(|column| column.name.clone());
+            }
+            let rendered = expression_sqls
+                .get(expression_index)
+                .map(|expr| parenthesized_index_expression(&normalize_index_expression_sql(expr)))
+                .unwrap_or_else(|| format!("expr{}", expression_index + 1));
+            expression_index += 1;
+            Some(rendered)
         })
         .collect()
 }
@@ -7016,6 +7100,14 @@ fn eval_func_expr(
 }
 
 fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
+    if let Some(db) = ctx.database.as_ref()
+        && db.has_active_temp_namespace(ctx.client_id)
+    {
+        let temp_backend_id = db.temp_backend_id(ctx.client_id);
+        return Some(
+            crate::pgrust::database::Database::temp_namespace_name(temp_backend_id).into(),
+        );
+    }
     // :HACK: `pg_my_temp_schema()` needs session temp namespace identity, but
     // executor contexts do not thread that through directly yet. Derive the
     // visible temp schema name from the qualified temp relcache entries until
@@ -7076,6 +7168,81 @@ fn current_schema_value(ctx: &ExecutorContext) -> Value {
         })
         .map(|schema| Value::Text(schema.into()))
         .unwrap_or(Value::Null)
+}
+
+fn current_schemas_value(include_implicit: bool, ctx: &ExecutorContext) -> Value {
+    let mut schemas = Vec::<String>::new();
+    let mut push_schema = |schema: String| {
+        if !schemas
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&schema))
+        {
+            schemas.push(schema);
+        }
+    };
+
+    if include_implicit {
+        if let Some(temp_schema) = current_temp_namespace_name(ctx) {
+            push_schema(temp_schema.to_string());
+        }
+        push_schema("pg_catalog".into());
+    }
+
+    let configured_path = ctx
+        .catalog
+        .as_deref()
+        .map(|catalog| catalog.search_path())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| configured_current_schema_search_path(ctx));
+    for schema in configured_path {
+        if schema == "$user" {
+            continue;
+        }
+        if schema.eq_ignore_ascii_case("pg_temp") {
+            if include_implicit {
+                if let Some(temp_schema) = current_temp_namespace_name(ctx) {
+                    push_schema(temp_schema.to_string());
+                }
+            }
+            continue;
+        }
+        if schema.eq_ignore_ascii_case("pg_catalog") && include_implicit {
+            continue;
+        }
+        push_schema(schema);
+    }
+
+    Value::PgArray(
+        ArrayValue::from_1d(
+            schemas
+                .into_iter()
+                .map(|schema| Value::Text(schema.into()))
+                .collect(),
+        )
+        .with_element_type_oid(NAME_TYPE_OID),
+    )
+}
+
+fn pg_stat_get_backend_wal_value(values: &[Value], ctx: &ExecutorContext) -> Value {
+    let pid = values.first().and_then(|value| match value {
+        Value::Int32(value) => Some(*value),
+        Value::Int64(value) => i32::try_from(*value).ok(),
+        _ => None,
+    });
+    if pid != Some(ctx.client_id as i32) {
+        return Value::Null;
+    }
+    let wal_bytes = ctx.session_stats.read().backend_wal_write_bytes();
+    Value::Record(crate::include::nodes::datum::RecordValue::anonymous(vec![
+        ("wal_records".into(), Value::Int64(0)),
+        ("wal_fpi".into(), Value::Int64(0)),
+        ("wal_bytes".into(), Value::Int64(wal_bytes)),
+        ("wal_buffers_full".into(), Value::Int64(0)),
+        (
+            "stats_reset".into(),
+            Value::TimestampTz(crate::backend::utils::activity::now_timestamptz()),
+        ),
+    ]))
 }
 
 fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
@@ -7150,6 +7317,17 @@ fn eval_bound_tuple_var(
             hint: None,
             sqlstate: "XX000",
         })
+}
+
+fn eval_bound_system_var(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    var: &crate::include::nodes::primnodes::Var,
+) -> Option<Value> {
+    match var.varattno {
+        TABLE_OID_ATTR_NO => lookup_system_binding(bindings, var.varno),
+        SELF_ITEM_POINTER_ATTR_NO => lookup_ctid_binding(bindings, var.varno),
+        _ => None,
+    }
 }
 
 fn expr_requires_stack_check(expr: &Expr) -> bool {
@@ -7240,16 +7418,41 @@ pub fn eval_expr(
             }),
         Expr::Var(var) => {
             if var.varno == OUTER_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.outer_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var)
+                }
             } else if var.varno == INNER_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.inner_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
+                }
             } else if var.varno == INDEX_VAR {
-                eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
+                if is_system_attr(var.varattno) {
+                    Ok(eval_bound_system_var(&ctx.expr_bindings.index_system_bindings, var)
+                        .unwrap_or(Value::Null))
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
+                }
             } else if var.varlevelsup == 1 {
                 let mut outer_var = var.clone();
                 outer_var.varno = OUTER_VAR;
                 outer_var.varlevelsup = 0;
-                eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var)
+                if is_system_attr(outer_var.varattno) {
+                    Ok(
+                        eval_bound_system_var(
+                            &ctx.expr_bindings.outer_system_bindings,
+                            &outer_var,
+                        )
+                        .unwrap_or(Value::Null),
+                    )
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var)
+                }
             } else if var.varlevelsup > 0 {
                 Err(ExecError::DetailedError {
                     message: "unlowered outer Var reached executor".into(),
@@ -7932,7 +8135,49 @@ fn cast_record_value_for_target(
         _ => return Ok(Value::Record(record)),
     };
 
-    if descriptor.fields.len() != record.fields.len() {
+    let source_fields = if descriptor.fields.len() == record.fields.len() {
+        record
+            .fields
+            .into_iter()
+            .map(|value| (value, None))
+            .collect::<Vec<_>>()
+    } else if descriptor.typrelid != 0 {
+        let mut projected = Vec::with_capacity(descriptor.fields.len());
+        for target_field in &descriptor.fields {
+            let Some((source_index, source_field)) = record
+                .descriptor
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, source_field)| {
+                    source_field.name.eq_ignore_ascii_case(&target_field.name)
+                })
+            else {
+                return Err(ExecError::DetailedError {
+                    message: "cannot cast record to target composite type".into(),
+                    detail: Some(format!(
+                        "target expects field \"{}\" but source record does not provide it",
+                        target_field.name
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            };
+            let value = record.fields.get(source_index).cloned().ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: "cannot cast record to target composite type".into(),
+                    detail: Some(format!(
+                        "source record is missing value for field \"{}\"",
+                        source_field.name
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                }
+            })?;
+            projected.push((value, Some(source_field.sql_type)));
+        }
+        projected
+    } else {
         return Err(ExecError::DetailedError {
             message: "cannot cast record to target composite type".into(),
             detail: Some(format!(
@@ -7943,16 +8188,15 @@ fn cast_record_value_for_target(
             hint: None,
             sqlstate: "42804",
         });
-    }
+    };
 
-    let fields = record
-        .fields
+    let fields = source_fields
         .into_iter()
         .zip(descriptor.fields.iter())
-        .map(|(value, field)| {
+        .map(|((value, source_type), field)| {
             cast_value_with_source_type_catalog_and_config(
                 value,
-                None,
+                source_type,
                 field.sql_type,
                 ctx.catalog.as_deref(),
                 &ctx.datetime_config,
@@ -8236,6 +8480,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
+        },
+        BuiltinScalarFunction::BitLength => match values.first() {
+            Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
+            _ => eval_bit_length_function(&values),
         },
         BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
         BuiltinScalarFunction::PgSleep => eval_pg_sleep_function(&values),
@@ -8770,6 +9018,11 @@ fn eval_pg_sleep_function(values: &[Value]) -> Result<Value, ExecError> {
         [Value::Float64(value)] => *value,
         [Value::Int32(value)] => *value as f64,
         [Value::Int64(value)] => *value as f64,
+        [Value::Interval(value)] if value.is_finite() => value.cmp_key() as f64 / 1_000_000.0,
+        [value] if value.as_text().is_some() => {
+            let interval = parse_interval_text_value(value.as_text().unwrap())?;
+            interval.cmp_key() as f64 / 1_000_000.0
+        }
         [other] => {
             return Err(ExecError::TypeMismatch {
                 op: "pg_sleep",
@@ -9861,6 +10114,9 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
             eval_pg_identify_object_as_address(values, ctx)
         }
         BuiltinScalarFunction::PgGetObjectAddress => eval_pg_get_object_address(values, ctx),
+        BuiltinScalarFunction::PgStatGetBackendWal => {
+            Ok(pg_stat_get_backend_wal_value(values, ctx))
+        }
         BuiltinScalarFunction::GistTranslateCmpTypeCommon => {
             eval_gist_translate_cmptype_common(values)
         }
@@ -10333,6 +10589,7 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgStatForceNextFlush => {
             ctx.session_stats.write().flush_pending(&ctx.stats);
+            ctx.stats.write().record_database_session_start();
             Ok(Value::Null)
         }
         BuiltinScalarFunction::PgStatGetSnapshotTimestamp => Ok(ctx
@@ -10342,9 +10599,106 @@ pub(crate) fn eval_builtin_function(
             .map(Value::TimestampTz)
             .unwrap_or(Value::Null)),
         BuiltinScalarFunction::PgStatClearSnapshot => {
-            ctx.session_stats.write().clear_snapshot();
+            ctx.session_stats.write().force_clear_snapshot();
             Ok(Value::Null)
         }
+        BuiltinScalarFunction::PgStatGetBackendPid => {
+            let beid = values.first().and_then(|value| match value {
+                Value::Int32(value) => Some(*value),
+                Value::Int64(value) => i32::try_from(*value).ok(),
+                _ => None,
+            });
+            let current_beid = ctx
+                .database
+                .as_ref()
+                .map(|db| db.temp_backend_id(ctx.client_id) as i32)
+                .unwrap_or(ctx.client_id as i32);
+            Ok(Value::Int32(
+                (beid == Some(current_beid))
+                    .then_some(ctx.client_id as i32)
+                    .unwrap_or(0),
+            ))
+        }
+        BuiltinScalarFunction::PgStatGetBackendWal => {
+            Ok(pg_stat_get_backend_wal_value(&values, ctx))
+        }
+        BuiltinScalarFunction::PgStatReset => {
+            ctx.stats.write().reset_database();
+            ctx.session_stats.write().pending_flush.clear();
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetShared => {
+            let target =
+                values
+                    .first()
+                    .and_then(Value::as_text)
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op: "pg_stat_reset_shared",
+                        left: values.first().cloned().unwrap_or(Value::Null),
+                        right: Value::Text("".into()),
+                    })?;
+            if let Err(target) = ctx.stats.write().reset_shared(target) {
+                return Err(ExecError::DetailedError {
+                    message: format!("unrecognized reset target: \"{target}\""),
+                    detail: None,
+                    hint: Some(
+                        "Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"recovery_prefetch\", \"slru\", or \"wal\"."
+                            .into(),
+                    ),
+                    sqlstate: "22023",
+                });
+            }
+            ctx.session_stats.write().force_clear_snapshot();
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetSingleTableCounters => {
+            let oid = stats_oid_arg(&values, "pg_stat_reset_single_table_counters")?;
+            {
+                let mut session = ctx.session_stats.write();
+                session.pending_flush.relations.remove(&oid);
+                session.force_clear_snapshot();
+            }
+            ctx.stats.write().reset_relation(oid);
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetSingleFunctionCounters => {
+            let oid = stats_oid_arg(&values, "pg_stat_reset_single_function_counters")?;
+            {
+                let mut session = ctx.session_stats.write();
+                session.pending_flush.functions.remove(&oid);
+                session.force_clear_snapshot();
+            }
+            ctx.stats.write().reset_function(oid);
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetBackendStats => {
+            let pid = values.first().and_then(|value| match value {
+                Value::Int32(value) => Some(*value),
+                Value::Int64(value) => i32::try_from(*value).ok(),
+                _ => None,
+            });
+            if pid == Some(ctx.client_id as i32) {
+                ctx.session_stats.write().reset_backend_stats();
+            }
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetSlru => {
+            let target = match values.as_slice() {
+                [] | [Value::Null] => None,
+                [value] => Some(value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                    op: "pg_stat_reset_slru",
+                    left: value.clone(),
+                    right: Value::Text("".into()),
+                })?),
+                _ => None,
+            };
+            ctx.stats.write().reset_slru(target);
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetReplicationSlot
+        | BuiltinScalarFunction::PgStatResetSubscriptionStats => Ok(Value::Null),
+        BuiltinScalarFunction::PgStatGetReplicationSlot
+        | BuiltinScalarFunction::PgStatGetSubscriptionStats => Ok(Value::Null),
         BuiltinScalarFunction::PgStatHaveStats => {
             let kind =
                 values
@@ -10370,19 +10724,29 @@ pub(crate) fn eval_builtin_function(
                 .transpose()?
                 .unwrap_or_default();
             let has_stats = match kind.to_ascii_lowercase().as_str() {
-                "bgwriter" | "checkpointer" | "wal" => objid == 0 && objsubid == 0,
-                "database" => objid != 0 && (objsubid == 0 || objsubid == 1),
-                "relation" => ctx
-                    .session_stats
-                    .write()
-                    .has_visible_relation_stats(&ctx.stats, objid),
+                "bgwriter" | "checkpointer" | "io" | "wal" => objid == 0 && objsubid == 0,
+                "database" => objid != 0 && objsubid == 0,
+                "relation" => {
+                    let relation_oid = u32::try_from(objsubid).unwrap_or_default();
+                    if ctx
+                        .session_stats
+                        .write()
+                        .take_relation_have_stats_false_once(relation_oid)
+                    {
+                        false
+                    } else {
+                        executor_catalog(ctx)?
+                            .class_row_by_oid(relation_oid)
+                            .is_some()
+                    }
+                }
                 "function" => ctx
                     .session_stats
                     .write()
                     .has_visible_function_stats(&ctx.stats, objid),
                 other => {
                     return Err(ExecError::DetailedError {
-                        message: format!("unrecognized statistics kind \"{other}\""),
+                        message: format!("invalid statistics kind: \"{other}\""),
                         detail: None,
                         hint: None,
                         sqlstate: "22023",
@@ -10397,6 +10761,7 @@ pub(crate) fn eval_builtin_function(
         | BuiltinScalarFunction::PgStatGetTuplesFetched
         | BuiltinScalarFunction::PgStatGetTuplesInserted
         | BuiltinScalarFunction::PgStatGetTuplesUpdated
+        | BuiltinScalarFunction::PgStatGetTuplesHotUpdated
         | BuiltinScalarFunction::PgStatGetTuplesDeleted
         | BuiltinScalarFunction::PgStatGetLiveTuples
         | BuiltinScalarFunction::PgStatGetDeadTuples
@@ -10521,6 +10886,10 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
         }
+        BuiltinScalarFunction::CurrentSchemas => {
+            let include_implicit = matches!(values.first(), Some(Value::Bool(true)));
+            Ok(current_schemas_value(include_implicit, ctx))
+        }
         BuiltinScalarFunction::Version => Ok(Value::Text(pg_version_text().into())),
         BuiltinScalarFunction::PgBackendPid => Ok(Value::Int32(ctx.client_id as i32)),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
@@ -10574,6 +10943,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgTableIsVisible => eval_pg_table_is_visible(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
+        BuiltinScalarFunction::ShobjDescription => eval_shobj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgIdentifyObject => eval_pg_identify_object(&values, ctx),
         BuiltinScalarFunction::PgIdentifyObjectAsAddress => {
@@ -10766,6 +11136,10 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
+        },
+        BuiltinScalarFunction::BitLength => match values.first() {
+            Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
+            _ => eval_bit_length_function(&values),
         },
         BuiltinScalarFunction::Concat => {
             eval_concat_function(&values, func_variadic, &ctx.datetime_config)

@@ -723,7 +723,7 @@ fn bound_may_contain_non_null(
                     .iter()
                     .any(|value| !matches!(value, SerializedPartitionValue::Null))
         }
-        (PartitionStrategy::Range, PartitionBoundSpec::Range { is_default, .. }) => *is_default,
+        (PartitionStrategy::Range, PartitionBoundSpec::Range { .. }) => true,
         _ => true,
     }
 }

@@ -475,6 +475,19 @@ fn note_filtered_row(stats: &mut NodeExecStats) {
     stats.rows_removed_by_filter += 1;
 }
 
+fn relation_io_object(ctx: &ExecutorContext, relation_oid: u32) -> &'static str {
+    if ctx
+        .catalog
+        .as_deref()
+        .and_then(|catalog| catalog.relation_by_oid(relation_oid))
+        .is_some_and(|relation| relation.relpersistence == 't')
+    {
+        "temp relation"
+    } else {
+        "relation"
+    }
+}
+
 fn render_order_by_key(item: &OrderByEntry, column_names: &[String]) -> String {
     let mut rendered = render_explain_expr_inner(&item.expr, column_names);
     if item.descending {
@@ -1590,7 +1603,9 @@ impl PlanNode for SeqScanState {
             } else {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_block_fetched(self.relation_oid);
-                session_stats.note_io_read("client backend", "relation", "bulkread", 8192);
+                let object = relation_io_object(ctx, self.relation_oid);
+                session_stats.note_io_read("client backend", object, "normal", 8192);
+                session_stats.note_io_hit("client backend", object, "normal");
             }
         }
     }
@@ -1739,6 +1754,7 @@ impl PlanNode for IndexOnlyScanState {
             let mut session_stats = ctx.session_stats.write();
             session_stats.note_relation_scan(self.index_meta.indexrelid);
             session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            session_stats.note_io_hit("client backend", "relation", "normal");
         }
 
         loop {
@@ -1844,6 +1860,7 @@ impl PlanNode for IndexOnlyScanState {
                 session_stats.note_relation_tuple_fetched(self.relation_oid);
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
             self.slot.kind = SlotKind::HeapTuple {
                 desc: self.desc.clone(),
@@ -2014,6 +2031,7 @@ impl PlanNode for IndexScanState {
             let mut session_stats = ctx.session_stats.write();
             session_stats.note_relation_scan(self.index_meta.indexrelid);
             session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            session_stats.note_io_hit("client backend", "relation", "normal");
         }
 
         loop {
@@ -2143,6 +2161,7 @@ impl PlanNode for IndexScanState {
                 session_stats.note_relation_tuple_fetched(self.relation_oid);
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
             self.slot.kind = SlotKind::HeapTuple {
                 desc: self.desc.clone(),
@@ -2641,6 +2660,7 @@ impl BitmapIndexScanState {
             let mut session_stats = ctx.session_stats.write();
             session_stats.note_relation_scan(self.index_meta.indexrelid);
             session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            session_stats.note_io_hit("client backend", "relation", "normal");
         }
         let tuples = indexam::index_getbitmap(&mut scan, self.am_oid, &mut self.bitmap)
             .map_err(|err| bitmap_am_error("index access method bitmap scan", err))?;
@@ -2906,6 +2926,7 @@ impl BitmapHeapScanState {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
 
             self.current_page_pin = Some(pin_rc);
@@ -3707,6 +3728,28 @@ fn render_explain_scalar_array_op(
     } else {
         None
     };
+    if saop.use_or
+        && matches!(saop.op, SubqueryComparisonOp::Eq)
+        && let Some(element) = scalar_array_singleton_element(&saop.right)
+    {
+        return format!(
+            "{} {op} {}",
+            render_explain_infix_operand_with_display_type(
+                &saop.left,
+                display_type.map(|ty| ty.element_type()),
+                None,
+                qualifier,
+                column_names
+            ),
+            render_explain_infix_operand_with_display_type(
+                element,
+                display_type.map(|ty| ty.element_type()),
+                saop.collation_oid,
+                qualifier,
+                column_names
+            )
+        );
+    }
     format!(
         "{} {op} {quantifier} ({})",
         render_explain_infix_operand_with_display_type(
@@ -3724,6 +3767,14 @@ fn render_explain_scalar_array_op(
             column_names
         )
     )
+}
+
+fn scalar_array_singleton_element(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::ArrayLiteral { elements, .. } if elements.len() == 1 => elements.first(),
+        Expr::Cast(inner, _) => scalar_array_singleton_element(inner),
+        _ => None,
+    }
 }
 
 pub(crate) fn render_verbose_range_support_expr(
@@ -4272,6 +4323,8 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::TextStartsWith => "starts_with".into(),
         BuiltinScalarFunction::Abs => "abs".into(),
         BuiltinScalarFunction::Substring => "substr".into(),
+        BuiltinScalarFunction::Left => "\"left\"".into(),
+        BuiltinScalarFunction::Right => "\"right\"".into(),
         other => format!("{other:?}"),
     }
 }
@@ -4774,7 +4827,60 @@ pub(crate) fn render_explain_join_expr_inner(
         } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
             render_explain_join_expr_inner(expr, outer_names, inner_names)
         }),
+        Expr::Func(func) => render_explain_join_func_expr(func, outer_names, inner_names),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_join_func_expr(
+    func: &FuncExpr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+    ) && func.args.len() == 1
+    {
+        return render_explain_join_expr_inner(&func.args[0], outer_names, inner_names);
+    }
+    if render_explain_func_expr_is_infix(func)
+        && let Some(operator) = builtin_scalar_function_infix_operator(func.implementation)
+        && let [left, right] = func.args.as_slice()
+    {
+        return format!(
+            "{} {} {}",
+            render_explain_join_infix_operand(left, outer_names, inner_names),
+            operator,
+            render_explain_join_infix_operand(right, outer_names, inner_names)
+        );
+    }
+    let name = match func.implementation {
+        ScalarFunctionImpl::Builtin(builtin) => builtin_scalar_function_name(builtin),
+        ScalarFunctionImpl::UserDefined { proc_oid } => func
+            .funcname
+            .clone()
+            .unwrap_or_else(|| format!("proc_{proc_oid}")),
+    };
+    let args = func
+        .args
+        .iter()
+        .map(|arg| render_explain_join_expr_inner(arg, outer_names, inner_names))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
+}
+
+fn render_explain_join_infix_operand(
+    expr: &Expr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    let rendered = render_explain_join_expr_inner(expr, outer_names, inner_names);
+    if explain_expr_needs_infix_operand_parens(expr) {
+        format!("({rendered})")
+    } else {
+        rendered
     }
 }
 
@@ -5554,6 +5660,10 @@ fn exec_lateral_join<'a>(
                     set_outer_expr_bindings(
                         ctx,
                         values,
+                        &state.current_left.as_ref().unwrap().system_bindings,
+                    );
+                    set_active_system_bindings(
+                        ctx,
                         &state.current_left.as_ref().unwrap().system_bindings,
                     );
                     let saved_params = bind_exec_params(
