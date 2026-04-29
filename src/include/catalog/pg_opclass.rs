@@ -116,6 +116,7 @@ pub const ENUM_HASH_OPCLASS_OID: u32 = 76220;
 pub const MULTIRANGE_HASH_OPCLASS_OID: u32 = 76221;
 pub const RANGE_HASH_OPCLASS_OID: u32 = 76222;
 pub const JSONB_HASH_OPCLASS_OID: u32 = 76223;
+pub const RECORD_HASH_OPCLASS_OID: u32 = 76225;
 pub const MACADDR_HASH_OPCLASS_OID: u32 = 76232;
 pub const MACADDR8_HASH_OPCLASS_OID: u32 = 76233;
 pub const INTERVAL_HASH_OPCLASS_OID: u32 = 76234;
@@ -401,6 +402,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             RECORD_BTREE_OPCLASS_OID,
             "record_ops",
             BTREE_RECORD_FAMILY_OID,
+            RECORD_TYPE_OID,
+        ),
+        hash_row(
+            RECORD_HASH_OPCLASS_OID,
+            "record_ops",
+            HASH_RECORD_FAMILY_OID,
             RECORD_TYPE_OID,
         ),
         PgOpclassRow {
@@ -1042,6 +1049,16 @@ pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType)
             _ => None,
         };
     }
+    if matches!(
+        sql_type.element_type().kind,
+        SqlTypeKind::Record | SqlTypeKind::Composite
+    ) {
+        return match am_oid {
+            BTREE_AM_OID => Some(RECORD_BTREE_OPCLASS_OID),
+            HASH_AM_OID => Some(RECORD_HASH_OPCLASS_OID),
+            _ => None,
+        };
+    }
     let is_range = sql_type.is_range()
         || builtin_range_rows()
             .iter()
@@ -1149,6 +1166,7 @@ pub fn default_hash_opclass_oid(type_oid: u32) -> Option<u32> {
         TIMETZ_TYPE_OID => TIMETZ_HASH_OPCLASS_OID,
         BYTEA_TYPE_OID => BYTEA_HASH_OPCLASS_OID,
         UUID_TYPE_OID => UUID_HASH_OPCLASS_OID,
+        RECORD_TYPE_OID => RECORD_HASH_OPCLASS_OID,
         INT4RANGE_TYPE_OID | INT8RANGE_TYPE_OID | NUMRANGE_TYPE_OID | DATERANGE_TYPE_OID
         | TSRANGE_TYPE_OID | TSTZRANGE_TYPE_OID => RANGE_HASH_OPCLASS_OID,
         INT4MULTIRANGE_TYPE_OID

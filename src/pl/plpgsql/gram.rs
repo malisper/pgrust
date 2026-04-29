@@ -2270,6 +2270,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_continue_stmt() {
+        let block = parse_block(
+            "
+            begin
+                for item in values (1), (2) loop
+                    continue;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::ForQuery { body, .. } = unline(&block.statements[0]) else {
+            panic!("expected query FOR loop");
+        };
+        assert!(matches!(unline(&body[0]), Stmt::Continue));
+    }
+
+    #[test]
     fn parse_if_stmt_preserves_elsif_branches() {
         let block = parse_block(
             "

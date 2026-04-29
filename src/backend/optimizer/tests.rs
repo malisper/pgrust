@@ -50,6 +50,10 @@ fn bool_ty() -> SqlType {
     SqlType::new(SqlTypeKind::Bool)
 }
 
+fn varchar() -> SqlType {
+    SqlType::new(SqlTypeKind::Varchar)
+}
+
 fn var(varno: usize, attno: usize) -> crate::include::nodes::primnodes::Expr {
     crate::include::nodes::primnodes::Expr::Var(Var {
         varno,
@@ -1591,6 +1595,82 @@ fn catalog_with_interleaved_list_partitions() -> Catalog {
         add_ready_k_index(&mut catalog, child);
     }
     catalog
+}
+
+fn catalog_with_varchar_list_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    let desc = RelationDesc {
+        columns: vec![column_desc("a", varchar(), false)],
+    };
+    let entry = catalog
+        .create_table_with_relkind(
+            "coercepart",
+            desc.clone(),
+            PUBLIC_NAMESPACE_OID,
+            CURRENT_DATABASE_OID,
+            'p',
+            'p',
+            BOOTSTRAP_SUPERUSER_OID,
+        )
+        .expect("create coercepart");
+    let parent_oid = entry.relation_oid;
+    let spec = LoweredPartitionSpec {
+        strategy: PartitionStrategy::List,
+        key_columns: vec!["a".into()],
+        key_exprs: vec![typed_var(1, 1, varchar())],
+        key_types: vec![varchar()],
+        key_sqls: vec!["a".into()],
+        partattrs: vec![1],
+        partclass: vec![0],
+        partcollation: vec![0],
+    };
+    let table = catalog
+        .tables
+        .get_mut("coercepart")
+        .expect("coercepart table");
+    table.relhassubclass = true;
+    table.partitioned_table = Some(pg_partitioned_table_row(parent_oid, &spec, 0));
+    for (inhseqno, (name, value)) in [
+        ("coercepart_ab", "ab"),
+        ("coercepart_bc", "bc"),
+        ("coercepart_cd", "cd"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let entry = catalog
+            .create_table(name, desc.clone())
+            .expect("create child");
+        let child_oid = entry.relation_oid;
+        let child = catalog.tables.get_mut(name).expect("child table");
+        child.relispartition = true;
+        child.relpartbound = Some(
+            serialize_partition_bound(&PartitionBoundSpec::List {
+                values: vec![SerializedPartitionValue::Text(value.into())],
+                is_default: false,
+            })
+            .expect("serialize list bound"),
+        );
+        catalog.inherits.push(PgInheritsRow {
+            inhrelid: child_oid,
+            inhparent: parent_oid,
+            inhseqno: (inhseqno + 1) as i32,
+            inhdetachpending: false,
+        });
+    }
+    catalog
+}
+
+#[test]
+fn partitioned_scalar_array_null_qual_renders_result_false() {
+    let catalog = catalog_with_varchar_list_partitions();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from coercepart where a = any(null::text[])",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert_eq!(lines, ["Result", "  One-Time Filter: false"]);
 }
 
 fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {

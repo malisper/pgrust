@@ -4850,6 +4850,55 @@ fn explain_join_expr_renders_function_args_with_join_vars() {
 }
 
 #[test]
+fn explain_expr_renders_varchar_scalar_array_with_nonconst_element() {
+    use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+    use crate::include::nodes::primnodes::{
+        BuiltinScalarFunction, ScalarArrayOpExpr, ScalarFunctionImpl, Var,
+    };
+
+    let text = SqlType::new(SqlTypeKind::Text);
+    let varchar = SqlType::new(SqlTypeKind::Varchar);
+    let expr = Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+        op: SubqueryComparisonOp::Eq,
+        use_or: true,
+        left: Box::new(Expr::Cast(
+            Box::new(Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(0),
+                varlevelsup: 0,
+                vartype: varchar,
+            })),
+            text,
+        )),
+        right: Box::new(Expr::Cast(
+            Box::new(Expr::ArrayLiteral {
+                elements: vec![
+                    Expr::Const(Value::Text("ab".into())),
+                    Expr::func_with_impl(
+                        0,
+                        Some(text),
+                        false,
+                        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ToChar),
+                        vec![
+                            Expr::Const(Value::Int32(125)),
+                            Expr::Const(Value::Text("999".into())),
+                        ],
+                    ),
+                ],
+                array_type: SqlType::array_of(text),
+            }),
+            SqlType::array_of(text),
+        )),
+        collation_oid: None,
+    }));
+
+    assert_eq!(
+        render_explain_expr(&expr, &["a".into()]),
+        "((a)::text = ANY ((ARRAY['ab'::character varying, (to_char(125, '999'::text))::character varying])::text[]))"
+    );
+}
+
+#[test]
 fn explain_expr_renders_geometry_consts_as_sql_literals() {
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::include::nodes::datum::{GeoBox, GeoCircle, GeoPoint, GeoPolygon};
@@ -22604,7 +22653,7 @@ fn concat_rejects_non_text_nonarray_non_jsonb_operands() {
     let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 3 || 4.0").unwrap_err();
     assert!(matches!(
         err,
-        ExecError::Parse(ParseError::UndefinedOperator { op: "||", .. })
+        ExecError::Parse(ParseError::UndefinedOperator { op, .. }) if op == "||"
     ));
 }
 

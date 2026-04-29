@@ -4247,13 +4247,27 @@ fn render_explain_scalar_array_op(
     let quantifier = if saop.use_or { "ANY" } else { "ALL" };
     let display_type = if expr_has_bpchar_display_type(&saop.left) {
         Some(SqlType::array_of(SqlType::new(SqlTypeKind::Char)))
-    } else if expr_sql_type_hint_is(&saop.left, SqlTypeKind::Varchar) {
+    } else if expr_has_varchar_display_type(&saop.left) {
         Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)))
     } else if matches!(saop.right.as_ref(), Expr::Const(Value::Null)) {
         crate::include::nodes::primnodes::expr_sql_type_hint(&saop.left).map(SqlType::array_of)
     } else {
         None
     };
+    let right_sql = if expr_has_varchar_display_type(&saop.left) {
+        render_explain_varchar_array_as_text_array(&saop.right, qualifier, column_names)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| {
+        render_explain_infix_operand_with_display_type(
+            &saop.right,
+            display_type,
+            saop.collation_oid,
+            qualifier,
+            column_names,
+        )
+    });
     if saop.use_or
         && matches!(saop.op, SubqueryComparisonOp::Eq)
         && let Some(element) = scalar_array_singleton_element(&saop.right)
@@ -4262,7 +4276,11 @@ fn render_explain_scalar_array_op(
             "{} {op} {}",
             render_explain_infix_operand_with_display_type(
                 &saop.left,
-                display_type.map(|ty| ty.element_type()),
+                if expr_is_text_cast_from_varchar(&saop.left) {
+                    None
+                } else {
+                    display_type.map(|ty| ty.element_type())
+                },
                 None,
                 qualifier,
                 column_names
@@ -4280,18 +4298,16 @@ fn render_explain_scalar_array_op(
         "{} {op} {quantifier} ({})",
         render_explain_infix_operand_with_display_type(
             &saop.left,
-            display_type.map(|ty| ty.element_type()),
+            if expr_is_text_cast_from_varchar(&saop.left) {
+                None
+            } else {
+                display_type.map(|ty| ty.element_type())
+            },
             None,
             qualifier,
             column_names
         ),
-        render_explain_infix_operand_with_display_type(
-            &saop.right,
-            display_type,
-            saop.collation_oid,
-            qualifier,
-            column_names
-        )
+        right_sql
     )
 }
 
@@ -4301,6 +4317,43 @@ fn scalar_array_singleton_element(expr: &Expr) -> Option<&Expr> {
         Expr::Cast(inner, _) => scalar_array_singleton_element(inner),
         _ => None,
     }
+}
+
+fn render_explain_varchar_array_as_text_array(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    let array_expr = match expr {
+        Expr::ArrayLiteral { .. } => expr,
+        Expr::Cast(inner, ty) if ty.is_array => inner.as_ref(),
+        _ => return None,
+    };
+    let Expr::ArrayLiteral { elements, .. } = array_expr else {
+        return None;
+    };
+    if elements.iter().all(|expr| {
+        render_explain_array_literal_const(expr, SqlType::new(SqlTypeKind::Varchar)).is_some()
+    }) {
+        return None;
+    }
+    let varchar_type = SqlType::new(SqlTypeKind::Varchar);
+    let varchar_type_name = render_explain_sql_type_name(varchar_type);
+    let elements = elements
+        .iter()
+        .map(|expr| match expr {
+            Expr::Const(value) => format!(
+                "{}::{varchar_type_name}",
+                render_explain_typed_literal(value, varchar_type)
+            ),
+            _ => format!(
+                "({})::{varchar_type_name}",
+                render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("(ARRAY[{elements}])::text[]"))
 }
 
 pub(crate) fn render_verbose_range_support_expr(
@@ -4849,6 +4902,7 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::Extract => "extract".into(),
         BuiltinScalarFunction::TextStartsWith => "starts_with".into(),
         BuiltinScalarFunction::Abs => "abs".into(),
+        BuiltinScalarFunction::ToChar => "to_char".into(),
         BuiltinScalarFunction::Substring => "substr".into(),
         BuiltinScalarFunction::ToChar => "to_char".into(),
         BuiltinScalarFunction::Left => "\"left\"".into(),
@@ -5163,6 +5217,19 @@ fn expr_has_bpchar_display_type(expr: &Expr) -> bool {
                 func.implementation,
                 ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
             )
+    )
+}
+
+fn expr_has_varchar_display_type(expr: &Expr) -> bool {
+    expr_sql_type_hint_is(expr, SqlTypeKind::Varchar) || expr_is_text_cast_from_varchar(expr)
+}
+
+fn expr_is_text_cast_from_varchar(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Cast(inner, ty)
+            if matches!(ty.kind, SqlTypeKind::Text)
+                && expr_sql_type_hint_is(inner, SqlTypeKind::Varchar)
     )
 }
 

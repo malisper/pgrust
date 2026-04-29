@@ -3237,6 +3237,66 @@ fn cast_text_to_composite(
     Ok(RecordValue::from_descriptor(descriptor, values))
 }
 
+fn cast_text_to_composite_value(
+    text: &str,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let Some(catalog) = catalog else {
+        return Err(unsupported_record_input());
+    };
+    let relation = catalog
+        .relation_by_oid(ty.typrelid)
+        .or_else(|| catalog.lookup_relation_by_oid(ty.typrelid))
+        .ok_or_else(unsupported_record_input)?;
+    let raw_fields = parse_composite_literal_fields(text)?;
+    let columns = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .collect::<Vec<_>>();
+    if raw_fields.len() != columns.len() {
+        return Err(ExecError::DetailedError {
+            message: "malformed record literal".into(),
+            detail: Some(format!(
+                "record literal has {} fields but type expects {}",
+                raw_fields.len(),
+                columns.len()
+            )),
+            hint: None,
+            sqlstate: "22P02",
+        });
+    }
+    let descriptor = RecordDescriptor::named(
+        ty.type_oid,
+        ty.typrelid,
+        ty.typmod,
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    );
+    let fields = columns
+        .iter()
+        .zip(raw_fields)
+        .map(|(column, raw)| match raw {
+            Some(raw) => cast_value_with_source_type_catalog_and_config(
+                Value::Text(raw.into()),
+                Some(SqlType::new(SqlTypeKind::Text)),
+                column.sql_type,
+                Some(catalog),
+                config,
+            ),
+            None => Ok(Value::Null),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Record(RecordValue::from_descriptor(
+        descriptor, fields,
+    )))
+}
+
 fn parse_composite_literal_fields(text: &str) -> Result<Vec<Option<String>>, ExecError> {
     let body = text
         .strip_prefix('(')
@@ -4383,6 +4443,11 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
     {
         if let Some(text) = regclass_text_input(&value, source_type) {
             return expr_reg::cast_text_to_reg_object(text, ty.kind, catalog);
+        }
+    }
+    if matches!(ty.kind, SqlTypeKind::Composite) && ty.typrelid != 0 && !ty.is_array {
+        if let Some(text) = value.as_text() {
+            return cast_text_to_composite_value(text, ty, catalog, config);
         }
     }
     if matches!(ty.kind, SqlTypeKind::Enum) && !ty.is_array {

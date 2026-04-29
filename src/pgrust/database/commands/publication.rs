@@ -1530,6 +1530,7 @@ fn validate_publication_filter_types(
                 ));
             }
         }
+        Parameter(_) => {}
         Cast(inner, ty) => {
             validate_publication_filter_types(inner, relation, catalog)?;
             let sql_type = resolve_raw_type_name(ty, catalog).map_err(ExecError::Parse)?;
@@ -1695,7 +1696,6 @@ fn validate_publication_filter_types(
         ScalarSubquery(_)
         | ArraySubquery(_)
         | Exists(_)
-        | Parameter(_)
         | ParamRef(_)
         | Default
         | Const(_)
@@ -1823,6 +1823,7 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
                 "System columns are not allowed.",
             ));
         }
+        Parameter(_) => {}
         Add(left, right)
         | Sub(left, right)
         | BitAnd(left, right)
@@ -1954,7 +1955,6 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
             }
         }
         Column(_)
-        | Parameter(_)
         | ParamRef(_)
         | Default
         | Const(_)
