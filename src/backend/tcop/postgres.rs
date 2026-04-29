@@ -5958,7 +5958,8 @@ fn execute_psql_describe_query(
     {
         return Some(pg_policy_polqual_inputcollid_query(db, session, sql));
     }
-    if lower.contains("from pg_catalog.pg_class c")
+    if lower.starts_with("select c.oid")
+        && lower.contains("from pg_catalog.pg_class c")
         && lower.contains("left join pg_catalog.pg_namespace n on n.oid = c.relnamespace")
         && lower.contains("operator(pg_catalog.~)")
         && lower.contains("pg_catalog.pg_table_is_visible(c.oid)")
@@ -6035,7 +6036,10 @@ fn execute_psql_describe_query(
         return psql_relation_obj_description_query(db, session, sql);
     }
     if is_psql_permissions_query(&lower) {
-        return Some(psql_describe_permissions_query(db, session, &lower));
+        return Some(psql_describe_permissions_query(db, session, sql, &lower));
+    }
+    if is_psql_list_tables_query(&lower) {
+        return Some(psql_list_tables_query(db, session, sql, &lower));
     }
     if lower.contains("from pg_catalog.pg_policy pol")
         && (lower.contains("pol.polroles") || lower.contains("polroles"))
@@ -6118,6 +6122,7 @@ fn is_psql_permissions_query(lower: &str) -> bool {
 fn psql_describe_permissions_query(
     db: &Database,
     session: &Session,
+    sql: &str,
     lower_sql: &str,
 ) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
     let columns = vec![
@@ -6148,6 +6153,10 @@ fn psql_describe_permissions_query(
         || lower_sql.contains("n.nspname <> 'information_schema'");
     let require_table_visible = lower_sql.contains("pg_catalog.pg_table_is_visible(c.oid)")
         || lower_sql.contains("pg_table_is_visible(c.oid)");
+    let pattern = extract_psql_pattern_name(sql);
+    let pattern_regex = pattern
+        .filter(|pattern| !psql_describe_pattern_is_plain(pattern))
+        .and_then(|pattern| regex::Regex::new(&format!("^(?:{pattern})$")).ok());
     let txn_ctx = session.catalog_txn_ctx();
     let search_path = session.configured_search_path();
 
@@ -6161,6 +6170,18 @@ fn psql_describe_permissions_query(
                 && matches!(schema_name.as_str(), "pg_catalog" | "information_schema")
             {
                 return None;
+            }
+            if let Some(pattern) = pattern {
+                if psql_describe_pattern_is_plain(pattern) {
+                    if !class.relname.eq_ignore_ascii_case(pattern) {
+                        return None;
+                    }
+                } else if !pattern_regex
+                    .as_ref()
+                    .is_some_and(|regex| regex.is_match(&class.relname))
+                {
+                    return None;
+                }
             }
             if require_table_visible
                 && db
@@ -6286,6 +6307,138 @@ fn psql_permissions_relkind_name(relkind: char) -> &'static str {
         'S' => "sequence",
         'f' => "foreign table",
         'p' => "partitioned table",
+        _ => "",
+    }
+}
+
+fn is_psql_list_tables_query(lower: &str) -> bool {
+    lower.starts_with("select n.nspname")
+        && lower.contains("c.relname")
+        && lower.contains("case c.relkind")
+        && lower.contains("pg_catalog.pg_get_userbyid(c.relowner)")
+        && lower.contains("from pg_catalog.pg_class c")
+        && lower.contains("where c.relkind in")
+}
+
+fn psql_list_tables_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+    lower_sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let columns = vec![
+        QueryColumn::text("Schema"),
+        QueryColumn::text("Name"),
+        QueryColumn::text("Type"),
+        QueryColumn::text("Owner"),
+    ];
+    let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
+        return (columns, Vec::new());
+    };
+    let namespace_names = catcache
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<HashMap<_, _>>();
+    let role_names = catcache
+        .authid_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<HashMap<_, _>>();
+    let pattern = extract_psql_pattern_name(sql);
+    let pattern_regex = pattern
+        .filter(|pattern| !psql_describe_pattern_is_plain(pattern))
+        .and_then(|pattern| regex::Regex::new(&format!("^(?:{pattern})$")).ok());
+    let hide_system_schemas = lower_sql.contains("n.nspname <> 'pg_catalog'")
+        || lower_sql.contains("n.nspname <> 'information_schema'");
+    let require_table_visible = lower_sql.contains("pg_catalog.pg_table_is_visible(c.oid)")
+        || lower_sql.contains("pg_table_is_visible(c.oid)");
+    let txn_ctx = session.catalog_txn_ctx();
+    let search_path = session.configured_search_path();
+
+    let mut rows = catcache
+        .class_rows()
+        .into_iter()
+        .filter(|class| psql_list_tables_query_includes_relkind(lower_sql, class.relkind))
+        .filter_map(|class| {
+            let schema_name = namespace_names.get(&class.relnamespace)?.clone();
+            if hide_system_schemas
+                && (matches!(schema_name.as_str(), "pg_catalog" | "information_schema")
+                    || schema_name.starts_with("pg_toast"))
+            {
+                return None;
+            }
+            if let Some(pattern) = pattern {
+                if psql_describe_pattern_is_plain(pattern) {
+                    if !class.relname.eq_ignore_ascii_case(pattern) {
+                        return None;
+                    }
+                } else if !pattern_regex
+                    .as_ref()
+                    .is_some_and(|regex| regex.is_match(&class.relname))
+                {
+                    return None;
+                }
+            }
+            if require_table_visible
+                && db
+                    .relation_display_name(
+                        session.client_id,
+                        txn_ctx,
+                        search_path.as_deref(),
+                        class.oid,
+                    )
+                    .as_deref()
+                    != Some(class.relname.as_str())
+            {
+                return None;
+            }
+            let owner = role_names
+                .get(&class.relowner)
+                .cloned()
+                .unwrap_or_else(|| class.relowner.to_string());
+            Some((
+                schema_name.clone(),
+                class.relname.clone(),
+                vec![
+                    Value::Text(schema_name.into()),
+                    Value::Text(class.relname.into()),
+                    Value::Text(psql_list_tables_relkind_name(class.relkind).into()),
+                    Value::Text(owner.into()),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    (columns, rows.into_iter().map(|(_, _, row)| row).collect())
+}
+
+fn psql_list_tables_query_includes_relkind(lower_sql: &str, relkind: char) -> bool {
+    match relkind {
+        'r' => lower_sql.contains("'r'"),
+        'p' => lower_sql.contains("'p'"),
+        'v' => lower_sql.contains("'v'"),
+        'm' => lower_sql.contains("'m'"),
+        'i' => lower_sql.contains("'i'"),
+        'I' => lower_sql.contains("'i'"),
+        'S' => lower_sql.contains("'s'"),
+        't' => lower_sql.contains("'t'"),
+        'f' => lower_sql.contains("'f'"),
+        _ => false,
+    }
+}
+
+fn psql_list_tables_relkind_name(relkind: char) -> &'static str {
+    match relkind {
+        'r' => "table",
+        'v' => "view",
+        'm' => "materialized view",
+        'i' => "index",
+        'S' => "sequence",
+        't' => "TOAST table",
+        'f' => "foreign table",
+        'p' => "partitioned table",
+        'I' => "partitioned index",
         _ => "",
     }
 }
@@ -13133,6 +13286,97 @@ mod tests {
                 Value::Bool(true),
                 Value::Bool(false),
                 Value::Bool(true),
+            ]]
+        );
+    }
+
+    #[test]
+    fn psql_permissions_query_honors_name_pattern() {
+        let db = Database::open(temp_dir("describe_permissions_pattern"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create role acl_grantee").unwrap();
+        db.execute(1, "create table deptest1 (id int4)").unwrap();
+        db.execute(1, "create table deptest2 (id int4)").unwrap();
+        db.execute(1, "grant all on deptest1 to acl_grantee with grant option")
+            .unwrap();
+
+        let sql = "SELECT n.nspname as \"Schema\",
+  c.relname as \"Name\",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' END as \"Type\",
+  CASE WHEN pg_catalog.array_length(c.relacl, 1) = 0 THEN '(none)' ELSE pg_catalog.array_to_string(c.relacl, E'\\n') END AS \"Access privileges\",
+  pg_catalog.array_to_string(ARRAY(
+    SELECT attname || E':\\n  ' || pg_catalog.array_to_string(attacl, E'\\n  ')
+    FROM pg_catalog.pg_attribute a
+    WHERE attrelid = c.oid AND NOT attisdropped AND attacl IS NOT NULL
+  ), E'\\n') AS \"Column privileges\",
+  pg_catalog.array_to_string(ARRAY(
+    SELECT polname
+    FROM pg_catalog.pg_policy pol
+    WHERE polrelid = c.oid), E'\\n')
+    AS \"Policies\"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','v','m','S','f','p')
+  AND c.relname OPERATOR(pg_catalog.~) '^(deptest1)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1, 2";
+        let (columns, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Schema",
+                "Name",
+                "Type",
+                "Access privileges",
+                "Column privileges",
+                "Policies"
+            ]
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], Value::Text("deptest1".into()));
+        assert!(
+            matches!(&rows[0][3], Value::Text(text) if text.contains("acl_grantee=a*r*w*d*D*x*t*m*/postgres"))
+        );
+    }
+
+    #[test]
+    fn psql_list_tables_query_honors_name_pattern() {
+        let db = Database::open(temp_dir("list_tables_pattern"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create role list_owner").unwrap();
+        db.execute(1, "create table deptest (id int4)").unwrap();
+        db.execute(1, "create table other_table (id int4)").unwrap();
+        db.execute(1, "alter table deptest owner to list_owner")
+            .unwrap();
+
+        let sql = "SELECT n.nspname as \"Schema\",
+  c.relname as \"Name\",
+  CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as \"Type\",
+  pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p','t','s','')
+  AND c.relname OPERATOR(pg_catalog.~) '^(deptest)$' COLLATE pg_catalog.default
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY 1,2";
+        let (columns, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Schema", "Name", "Type", "Owner"]
+        );
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("public".into()),
+                Value::Text("deptest".into()),
+                Value::Text("table".into()),
+                Value::Text("list_owner".into()),
             ]]
         );
     }

@@ -2260,21 +2260,25 @@ impl CatalogLookup for Catalog {
         self.entries().find_map(|(name, entry)| {
             let relname = name.rsplit('.').next().unwrap_or(name);
             if entry.row_type_oid == oid {
-                Some(crate::include::catalog::composite_type_row(
+                Some(crate::include::catalog::composite_type_row_with_owner(
                     relname,
                     entry.row_type_oid,
                     entry.namespace_oid,
+                    entry.owner_oid,
                     entry.relation_oid,
                     entry.array_type_oid,
                 ))
             } else if entry.array_type_oid == oid {
-                Some(crate::include::catalog::composite_array_type_row(
-                    relname,
-                    entry.array_type_oid,
-                    entry.namespace_oid,
-                    entry.row_type_oid,
-                    entry.relation_oid,
-                ))
+                Some(
+                    crate::include::catalog::composite_array_type_row_with_owner(
+                        relname,
+                        entry.array_type_oid,
+                        entry.namespace_oid,
+                        entry.owner_oid,
+                        entry.row_type_oid,
+                        entry.relation_oid,
+                    ),
+                )
             } else {
                 None
             }
@@ -2295,23 +2299,27 @@ impl CatalogLookup for Catalog {
         self.entries().find_map(|(entry_name, entry)| {
             let relname = entry_name.rsplit('.').next().unwrap_or(entry_name);
             if entry.row_type_oid != 0 && relname.eq_ignore_ascii_case(normalized) {
-                return Some(crate::include::catalog::composite_type_row(
+                return Some(crate::include::catalog::composite_type_row_with_owner(
                     relname,
                     entry.row_type_oid,
                     entry.namespace_oid,
+                    entry.owner_oid,
                     entry.relation_oid,
                     entry.array_type_oid,
                 ));
             }
             let array_typname = format!("_{relname}");
             if entry.array_type_oid != 0 && array_typname.eq_ignore_ascii_case(normalized) {
-                return Some(crate::include::catalog::composite_array_type_row(
-                    relname,
-                    entry.array_type_oid,
-                    entry.namespace_oid,
-                    entry.row_type_oid,
-                    entry.relation_oid,
-                ));
+                return Some(
+                    crate::include::catalog::composite_array_type_row_with_owner(
+                        relname,
+                        entry.array_type_oid,
+                        entry.namespace_oid,
+                        entry.owner_oid,
+                        entry.row_type_oid,
+                        entry.relation_oid,
+                    ),
+                );
             }
             None
         })
@@ -2361,19 +2369,21 @@ impl CatalogLookup for Catalog {
             let relname = name.rsplit('.').next().unwrap_or(name);
             let rows = [
                 (entry.row_type_oid != 0).then(|| {
-                    crate::include::catalog::composite_type_row(
+                    crate::include::catalog::composite_type_row_with_owner(
                         relname,
                         entry.row_type_oid,
                         entry.namespace_oid,
+                        entry.owner_oid,
                         entry.relation_oid,
                         entry.array_type_oid,
                     )
                 }),
                 (entry.array_type_oid != 0).then(|| {
-                    crate::include::catalog::composite_array_type_row(
+                    crate::include::catalog::composite_array_type_row_with_owner(
                         relname,
                         entry.array_type_oid,
                         entry.namespace_oid,
+                        entry.owner_oid,
                         entry.row_type_oid,
                         entry.relation_oid,
                     )
@@ -2830,22 +2840,26 @@ fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
             let relname = name.rsplit('.').next().unwrap_or(name);
             let mut rows = Vec::new();
             if entry.row_type_oid != 0 {
-                rows.push(crate::include::catalog::composite_type_row(
+                rows.push(crate::include::catalog::composite_type_row_with_owner(
                     relname,
                     entry.row_type_oid,
                     entry.namespace_oid,
+                    entry.owner_oid,
                     entry.relation_oid,
                     entry.array_type_oid,
                 ));
             }
             if entry.array_type_oid != 0 {
-                rows.push(crate::include::catalog::composite_array_type_row(
-                    relname,
-                    entry.array_type_oid,
-                    entry.namespace_oid,
-                    entry.row_type_oid,
-                    entry.relation_oid,
-                ));
+                rows.push(
+                    crate::include::catalog::composite_array_type_row_with_owner(
+                        relname,
+                        entry.array_type_oid,
+                        entry.namespace_oid,
+                        entry.owner_oid,
+                        entry.row_type_oid,
+                        entry.relation_oid,
+                    ),
+                );
             }
             rows
         })

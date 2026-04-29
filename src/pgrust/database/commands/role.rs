@@ -614,6 +614,16 @@ impl Database {
                 interrupts: interrupts.clone(),
             };
             let effect = match object.kind {
+                OwnedObjectKind::CompositeType => self
+                    .catalog
+                    .write()
+                    .drop_composite_type_by_oid_mvcc(object.oid, &ctx)
+                    .map(|(_, effect)| effect),
+                OwnedObjectKind::Function => self
+                    .catalog
+                    .write()
+                    .drop_proc_by_oid_mvcc(object.oid, &ctx)
+                    .map(|(_, effect)| effect),
                 OwnedObjectKind::View => self
                     .catalog
                     .write()
@@ -647,6 +657,10 @@ impl Database {
                         &ctx,
                     )
                 }
+                OwnedObjectKind::Type => {
+                    self.drop_owned_dynamic_type_by_oid(client_id, object.oid)?;
+                    Ok(CatalogMutationEffect::default())
+                }
                 _ => self
                     .catalog
                     .write()
@@ -661,6 +675,11 @@ impl Database {
                 self.session_stats_state(client_id)
                     .write()
                     .note_relation_drop(object.oid, &self.stats);
+            }
+            if matches!(object.kind, OwnedObjectKind::Function) {
+                self.session_stats_state(client_id)
+                    .write()
+                    .note_function_drop(object.oid, &self.stats);
             }
             catalog_effects.push(effect);
             current_cid = current_cid.saturating_add(1);
@@ -785,6 +804,8 @@ impl Database {
             current_cid = current_cid.saturating_add(1);
         }
 
+        self.drop_owned_acl_entries(client_id, xid, current_cid, &role_oids, catalog_effects)?;
+
         // :HACK: DROP OWNED currently covers pgrust's tracked shared-role dependencies
         // (relation ownership, pg_auth_members rows, and database CREATE grants). Full
         // PostgreSQL-style shared dependency traversal should replace this with a single
@@ -793,8 +814,148 @@ impl Database {
         self.database_create_grants.write().retain(|grant| {
             !role_oids.contains(&grant.grantee_oid) && !role_oids.contains(&grant.grantor_oid)
         });
+        self.object_addresses
+            .write()
+            .default_acls
+            .retain(|row| !role_oids.contains(&row.role_oid));
 
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn drop_owned_acl_entries(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        role_oids: &BTreeSet<u32>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let mut current_cid = cid;
+        let catcache = self
+            .txn_backend_catcache(client_id, xid, current_cid)
+            .map_err(map_role_catalog_error)?;
+        let role_names = catcache
+            .authid_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.oid))
+            .map(|row| row.rolname)
+            .collect::<BTreeSet<_>>();
+        if role_names.is_empty() {
+            return Ok(current_cid);
+        }
+
+        let owner_names = catcache
+            .authid_rows()
+            .into_iter()
+            .map(|row| (row.oid, row.rolname))
+            .collect::<BTreeMap<_, _>>();
+        let interrupts = self.interrupt_state(client_id);
+        for class in catcache.class_rows() {
+            let Some(relacl) = class.relacl.clone() else {
+                continue;
+            };
+            let cleaned = remove_acl_role_mentions(relacl, &role_names);
+            if cleaned == class.relacl {
+                continue;
+            }
+            let owner_name = owner_names
+                .get(&class.relowner)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let collapsed =
+                collapse_relation_acl_after_role_drop(cleaned, owner_name, class.relkind);
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_relation_acl_mvcc(class.oid, collapsed, &ctx)
+                .map_err(map_role_catalog_error)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
+        }
+
+        let catcache = self
+            .txn_backend_catcache(client_id, xid, current_cid)
+            .map_err(map_role_catalog_error)?;
+        let mut attribute_acls = BTreeMap::<u32, BTreeMap<i16, Option<Vec<String>>>>::new();
+        for attribute in catcache.attribute_rows() {
+            let Some(attacl) = attribute.attacl.clone() else {
+                continue;
+            };
+            let cleaned = remove_acl_role_mentions(attacl, &role_names);
+            if cleaned == attribute.attacl {
+                continue;
+            }
+            attribute_acls
+                .entry(attribute.attrelid)
+                .or_default()
+                .insert(attribute.attnum, cleaned.filter(|acl| !acl.is_empty()));
+        }
+        for (relation_oid, acl_by_attnum) in attribute_acls {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_attribute_acls_mvcc(relation_oid, acl_by_attnum.into_iter().collect(), &ctx)
+                .map_err(map_role_catalog_error)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
+        }
+
+        Ok(current_cid)
+    }
+
+    fn drop_owned_dynamic_type_by_oid(
+        &self,
+        client_id: ClientId,
+        type_oid: u32,
+    ) -> Result<bool, ExecError> {
+        {
+            let mut enum_types = self.enum_types.write();
+            if let Some(key) = enum_types
+                .iter()
+                .find_map(|(key, entry)| (entry.oid == type_oid).then_some(key.clone()))
+            {
+                enum_types.remove(&key);
+                drop(enum_types);
+                self.refresh_catalog_store_dynamic_type_rows(client_id, None);
+                self.invalidate_backend_cache_state(client_id);
+                self.plan_cache.invalidate_all();
+                return Ok(true);
+            }
+        }
+
+        let mut range_types = self.range_types.write();
+        if let Some(key) = range_types
+            .iter()
+            .find_map(|(key, entry)| (entry.oid == type_oid).then_some(key.clone()))
+        {
+            range_types.remove(&key);
+            save_range_type_entries(&self.cluster.base_dir, self.database_oid, &range_types)?;
+            drop(range_types);
+            self.refresh_catalog_store_dynamic_type_rows(client_id, None);
+            self.invalidate_backend_cache_state(client_id);
+            self.plan_cache.invalidate_all();
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     pub(crate) fn execute_reassign_owned_stmt_in_transaction(
@@ -828,7 +989,17 @@ impl Database {
             }
         }
         let new_role = lookup_role(&auth_catalog, &stmt.new_role)?;
-        ensure_can_set_role(self, client_id, new_role.oid, &new_role.rolname)?;
+        if !auth.can_set_role(new_role.oid, &auth_catalog) {
+            return Err(ExecError::DetailedError {
+                message: "permission denied to reassign objects".into(),
+                detail: Some(format!(
+                    "Only roles with privileges of role \"{}\" may reassign objects to it.",
+                    new_role.rolname
+                )),
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
 
         let old_role_oids = old_roles
             .iter()
@@ -917,9 +1088,42 @@ impl Database {
                     .write()
                     .alter_namespace_owner_mvcc(object.oid, new_role.oid, &ctx)
                     .map_err(map_role_catalog_error)?,
+                OwnedObjectKind::Function => {
+                    let catcache = self
+                        .txn_backend_catcache(client_id, xid, cid.saturating_add(offset as u32))
+                        .map_err(map_role_catalog_error)?;
+                    let proc_row = catcache
+                        .proc_rows()
+                        .into_iter()
+                        .find(|row| row.oid == object.oid)
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "function \"{}\" does not exist",
+                                object.name
+                            )))
+                        })?;
+                    let (_, effect) = self
+                        .catalog
+                        .write()
+                        .replace_proc_mvcc(
+                            &proc_row,
+                            crate::include::catalog::PgProcRow {
+                                proowner: new_role.oid,
+                                ..proc_row.clone()
+                            },
+                            &ctx,
+                        )
+                        .map_err(map_role_catalog_error)?;
+                    effect
+                }
+                OwnedObjectKind::Type => {
+                    self.reassign_owned_dynamic_type_by_oid(client_id, object.oid, new_role.oid)?;
+                    CatalogMutationEffect::default()
+                }
                 OwnedObjectKind::Index
                 | OwnedObjectKind::Sequence
                 | OwnedObjectKind::Table
+                | OwnedObjectKind::CompositeType
                 | OwnedObjectKind::View => self
                     .catalog
                     .write()
@@ -953,6 +1157,39 @@ impl Database {
         }
 
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn reassign_owned_dynamic_type_by_oid(
+        &self,
+        client_id: ClientId,
+        type_oid: u32,
+        new_owner_oid: u32,
+    ) -> Result<bool, ExecError> {
+        {
+            let mut enum_types = self.enum_types.write();
+            if let Some(entry) = enum_types.values_mut().find(|entry| entry.oid == type_oid) {
+                entry.owner_oid = new_owner_oid;
+                drop(enum_types);
+                self.refresh_catalog_store_dynamic_type_rows(client_id, None);
+                self.invalidate_backend_cache_state(client_id);
+                self.plan_cache.invalidate_all();
+                return Ok(true);
+            }
+        }
+
+        let mut range_types = self.range_types.write();
+        if let Some(entry) = range_types.values_mut().find(|entry| entry.oid == type_oid) {
+            entry.owner_oid = new_owner_oid;
+            entry.owner_usage = true;
+            save_range_type_entries(&self.cluster.base_dir, self.database_oid, &range_types)?;
+            drop(range_types);
+            self.refresh_catalog_store_dynamic_type_rows(client_id, None);
+            self.invalidate_backend_cache_state(client_id);
+            self.plan_cache.invalidate_all();
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }
 
@@ -1126,19 +1363,24 @@ struct OwnedObject {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum OwnedObjectKind {
+    CompositeType,
     EventTrigger,
+    Function,
     Index,
     Publication,
     Schema,
     Sequence,
     Table,
+    Type,
     View,
 }
 
 impl OwnedObject {
     fn kind_name(&self) -> &'static str {
         match self.kind {
+            OwnedObjectKind::CompositeType | OwnedObjectKind::Type => "type",
             OwnedObjectKind::EventTrigger => "event trigger",
+            OwnedObjectKind::Function => "function",
             OwnedObjectKind::Index => "index",
             OwnedObjectKind::Publication => "publication",
             OwnedObjectKind::Schema => "schema",
@@ -1175,10 +1417,11 @@ fn owned_objects_for_roles(
         .into_iter()
         .filter(|row| role_oids.contains(&row.relowner))
         .filter(|row| row.relpersistence != 't')
-        .filter(|row| matches!(row.relkind, 'r' | 'v' | 'i' | 'S'))
+        .filter(|row| matches!(row.relkind, 'r' | 'v' | 'i' | 'S' | 'c'))
         .map(|row| OwnedObject {
             oid: row.oid,
             kind: match row.relkind {
+                'c' => OwnedObjectKind::CompositeType,
                 'i' => OwnedObjectKind::Index,
                 'S' => OwnedObjectKind::Sequence,
                 'v' => OwnedObjectKind::View,
@@ -1190,6 +1433,29 @@ fn owned_objects_for_roles(
             },
         })
         .collect::<Vec<_>>();
+    objects.extend(
+        catcache
+            .proc_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.proowner))
+            .map(|row| OwnedObject {
+                oid: row.oid,
+                kind: OwnedObjectKind::Function,
+                name: function_owned_object_name(&catcache, &row),
+            }),
+    );
+    objects.extend(
+        catcache
+            .type_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.typowner))
+            .filter(|row| matches!(row.typtype, 'e' | 'r'))
+            .map(|row| OwnedObject {
+                oid: row.oid,
+                kind: OwnedObjectKind::Type,
+                name: type_owned_object_name(&catcache, &row),
+            }),
+    );
     objects.extend(
         catcache
             .namespace_rows()
@@ -1224,19 +1490,64 @@ fn owned_objects_for_roles(
                 name: row.pubname,
             }),
     );
-    objects.sort_by(|left, right| left.name.cmp(&right.name).then(left.kind.cmp(&right.kind)));
+    objects.sort_by(|left, right| left.oid.cmp(&right.oid).then(left.kind.cmp(&right.kind)));
     Ok(objects)
+}
+
+fn function_owned_object_name(
+    catcache: &crate::backend::utils::cache::catcache::CatCache,
+    row: &crate::include::catalog::PgProcRow,
+) -> String {
+    let args = row
+        .proargtypes
+        .split_whitespace()
+        .filter_map(|oid| oid.parse::<u32>().ok())
+        .map(|oid| {
+            catcache
+                .type_by_oid(oid)
+                .map(|row| row.typname.clone())
+                .unwrap_or_else(|| oid.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{}({args})",
+        schema_qualified_name_for_role_deps(catcache, row.pronamespace, &row.proname)
+    )
+}
+
+fn type_owned_object_name(
+    catcache: &crate::backend::utils::cache::catcache::CatCache,
+    row: &crate::include::catalog::PgTypeRow,
+) -> String {
+    schema_qualified_name_for_role_deps(catcache, row.typnamespace, &row.typname)
+}
+
+fn schema_qualified_name_for_role_deps(
+    catcache: &crate::backend::utils::cache::catcache::CatCache,
+    namespace_oid: u32,
+    object_name: &str,
+) -> String {
+    match catcache
+        .namespace_by_oid(namespace_oid)
+        .map(|row| row.nspname.as_str())
+    {
+        Some("public") | Some("pg_catalog") | None => object_name.to_string(),
+        Some(schema_name) => format!("{schema_name}.{object_name}"),
+    }
 }
 
 fn owned_object_drop_priority(kind: OwnedObjectKind) -> u8 {
     match kind {
         OwnedObjectKind::EventTrigger => 0,
         OwnedObjectKind::View => 0,
-        OwnedObjectKind::Index => 1,
-        OwnedObjectKind::Publication => 2,
-        OwnedObjectKind::Sequence => 3,
-        OwnedObjectKind::Table => 4,
-        OwnedObjectKind::Schema => 5,
+        OwnedObjectKind::Function => 1,
+        OwnedObjectKind::Index => 2,
+        OwnedObjectKind::Publication => 3,
+        OwnedObjectKind::CompositeType | OwnedObjectKind::Type => 4,
+        OwnedObjectKind::Sequence => 5,
+        OwnedObjectKind::Table => 6,
+        OwnedObjectKind::Schema => 7,
     }
 }
 
@@ -1254,6 +1565,39 @@ fn acl_depends_on_role(acl: Option<&[String]>, role_names: &BTreeSet<&str>) -> b
     acl.unwrap_or_default()
         .iter()
         .any(|item| acl_item_depends_on_role(item, role_names))
+}
+
+fn acl_item_mentions_role_name(item: &str, role_names: &BTreeSet<String>) -> bool {
+    let Some((grantee, rest)) = item.split_once('=') else {
+        return false;
+    };
+    let Some((_, grantor)) = rest.split_once('/') else {
+        return false;
+    };
+    (!grantee.is_empty() && role_names.contains(grantee)) || role_names.contains(grantor)
+}
+
+fn remove_acl_role_mentions(
+    acl: Vec<String>,
+    role_names: &BTreeSet<String>,
+) -> Option<Vec<String>> {
+    let retained = acl
+        .into_iter()
+        .filter(|item| !acl_item_mentions_role_name(item, role_names))
+        .collect::<Vec<_>>();
+    (!retained.is_empty()).then_some(retained)
+}
+
+fn collapse_relation_acl_after_role_drop(
+    acl: Option<Vec<String>>,
+    _owner_name: &str,
+    _relkind: char,
+) -> Option<Vec<String>> {
+    let acl = acl?;
+    match acl.as_slice() {
+        [] => None,
+        _ => Some(acl),
+    }
 }
 
 fn shared_role_dependency_details_for_roles(
@@ -1348,9 +1692,6 @@ fn shared_role_dependency_details_for_roles(
         .map(|row| (row.oid, row.srvname))
         .collect::<BTreeMap<_, _>>();
     let user_mapping_rows = catcache.user_mapping_rows();
-    let has_target_user_mapping = user_mapping_rows
-        .iter()
-        .any(|mapping| role_oids.contains(&mapping.umuser));
     for mapping in user_mapping_rows {
         if role_oids.contains(&mapping.umuser)
             && let (Some(role_name), Some(server_name)) = (
@@ -1363,19 +1704,31 @@ fn shared_role_dependency_details_for_roles(
             ));
         }
     }
+    if db.database_create_grants.read().iter().any(|grant| {
+        role_oids.contains(&grant.grantee_oid) || role_oids.contains(&grant.grantor_oid)
+    }) {
+        details.push("privileges for database regression".into());
+    }
 
-    // :HACK: ALTER DEFAULT PRIVILEGES is currently accepted without pg_default_acl
-    // storage. Keep the event_trigger regression's DROP ROLE detail visible until
-    // default ACL rows are represented in the shared catalog.
     let mut default_privilege_details = Vec::new();
-    for role_name in &target_role_names {
-        if *role_name == "regress_evt_user" {
-            if has_target_user_mapping {
-                default_privilege_details.push(format!(
-                    "owner of default privileges on new relations belonging to role {role_name}"
-                ));
-            }
+    for row in db.object_addresses.read().default_acls.iter() {
+        if !role_oids.contains(&row.role_oid) {
+            continue;
         }
+        let object_kind = default_acl_object_kind_for_role_deps(row.objtype);
+        let role_name = role_names
+            .get(&row.role_oid)
+            .copied()
+            .unwrap_or(row.role_name.as_str());
+        let detail = match &row.namespace_name {
+            Some(namespace_name) => format!(
+                "owner of default privileges on new {object_kind} belonging to role {role_name} in schema {namespace_name}"
+            ),
+            None => format!(
+                "owner of default privileges on new {object_kind} belonging to role {role_name}"
+            ),
+        };
+        default_privilege_details.push(detail);
     }
 
     details.sort();
@@ -1384,6 +1737,17 @@ fn shared_role_dependency_details_for_roles(
     default_privilege_details.dedup();
     details.extend(default_privilege_details);
     Ok(details)
+}
+
+fn default_acl_object_kind_for_role_deps(objtype: char) -> &'static str {
+    match objtype {
+        'r' => "relations",
+        'S' => "sequences",
+        'f' => "functions",
+        'T' => "types",
+        'n' => "schemas",
+        _ => "objects",
+    }
 }
 
 fn policy_normal_relation_dependencies(
@@ -1518,6 +1882,32 @@ mod tests {
             .class_rows()
             .into_iter()
             .any(|row| row.relname == relname)
+    }
+
+    fn relation_acl(db: &Database, relname: &str) -> Option<Vec<String>> {
+        db.backend_catcache(1, None)
+            .unwrap()
+            .class_rows()
+            .into_iter()
+            .find(|row| row.relname == relname)
+            .unwrap()
+            .relacl
+    }
+
+    fn type_owner_name(db: &Database, typname: &str) -> String {
+        let catcache = db.backend_catcache(1, None).unwrap();
+        let owner_oid = catcache
+            .type_rows()
+            .into_iter()
+            .find(|row| row.typname == typname)
+            .map(|row| row.typowner)
+            .unwrap();
+        catcache
+            .authid_rows()
+            .into_iter()
+            .find(|row| row.oid == owner_oid)
+            .map(|row| row.rolname)
+            .unwrap()
     }
 
     fn set_relation_owner(db: &Database, relation_name: &str, owner_role: &str) {
@@ -2134,6 +2524,72 @@ mod tests {
     }
 
     #[test]
+    fn reassign_owned_target_permission_uses_postgres_detail() {
+        let base = temp_dir("reassign_owned_target_permission");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role owner_role").unwrap();
+        superuser.execute(&db, "create role target_role").unwrap();
+
+        let mut owner = Session::new(2);
+        owner.set_session_authorization_oid(role_oid(&db, "owner_role"));
+        let err = owner
+            .execute(&db, "reassign owned by owner_role to target_role")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(message, "permission denied to reassign objects");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "Only roles with privileges of role \"target_role\" may reassign objects to it."
+                    )
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_grant_option_allows_non_owner_regrant() {
+        let base = temp_dir("table_grant_option_regrant");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role owner_role").unwrap();
+        superuser.execute(&db, "create role grantor_role").unwrap();
+        superuser.execute(&db, "create role grantee_role").unwrap();
+
+        let mut owner = Session::new(2);
+        owner.set_session_authorization_oid(role_oid(&db, "owner_role"));
+        owner
+            .execute(&db, "create table grant_tbl (id int4)")
+            .unwrap();
+        owner
+            .execute(
+                &db,
+                "grant all on grant_tbl to grantor_role with grant option",
+            )
+            .unwrap();
+
+        let mut grantor = Session::new(3);
+        grantor.set_session_authorization_oid(role_oid(&db, "grantor_role"));
+        grantor
+            .execute(&db, "grant all on grant_tbl to grantee_role")
+            .unwrap();
+
+        assert_eq!(
+            relation_acl(&db, "grant_tbl").unwrap(),
+            vec![
+                "owner_role=arwdDxtm/owner_role".to_string(),
+                "grantor_role=a*r*w*d*D*x*t*m*/owner_role".to_string(),
+                "grantee_role=arwdDxtm/grantor_role".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn drop_owned_requires_privileges_of_target_role() {
         let base = temp_dir("drop_owned_permissions");
         let db = Database::open(&base, 16).unwrap();
@@ -2252,6 +2708,46 @@ mod tests {
 
         assert_eq!(
             superuser.execute(&db, "drop role tenant").unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+    }
+
+    #[test]
+    fn drop_owned_removes_relation_acl_grantee_and_grantor_entries() {
+        let base = temp_dir("drop_owned_acl_entries");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role owner_role").unwrap();
+        superuser.execute(&db, "create role grantor_role").unwrap();
+        superuser.execute(&db, "create role grantee_role").unwrap();
+
+        let mut owner = Session::new(2);
+        owner.set_session_authorization_oid(role_oid(&db, "owner_role"));
+        owner
+            .execute(&db, "create table grant_tbl (id int4)")
+            .unwrap();
+        owner
+            .execute(
+                &db,
+                "grant all on grant_tbl to grantor_role with grant option",
+            )
+            .unwrap();
+
+        let mut grantor = Session::new(3);
+        grantor.set_session_authorization_oid(role_oid(&db, "grantor_role"));
+        grantor
+            .execute(&db, "grant all on grant_tbl to grantee_role")
+            .unwrap();
+
+        superuser
+            .execute(&db, "drop owned by grantor_role")
+            .unwrap();
+        assert_eq!(
+            relation_acl(&db, "grant_tbl").unwrap(),
+            vec!["owner_role=arwdDxtm/owner_role".to_string()]
+        );
+        assert_eq!(
+            superuser.execute(&db, "drop role grantor_role").unwrap(),
             StatementResult::AffectedRows(0)
         );
     }
@@ -2484,5 +2980,89 @@ mod tests {
             superuser.execute(&db, "drop role policy_user2").unwrap(),
             StatementResult::AffectedRows(0)
         );
+    }
+
+    #[test]
+    fn reassign_owned_updates_composite_enum_and_range_type_owners() {
+        let base = temp_dir("reassign_owned_types");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role type_owner").unwrap();
+        superuser.execute(&db, "create role type_target").unwrap();
+
+        let mut owner = Session::new(2);
+        owner.set_session_authorization_oid(role_oid(&db, "type_owner"));
+        owner
+            .execute(&db, "create type owned_composite as (a int4)")
+            .unwrap();
+        owner
+            .execute(&db, "create type owned_enum as enum ('red')")
+            .unwrap();
+        owner
+            .execute(&db, "create type owned_range as range (subtype = int4)")
+            .unwrap();
+
+        assert_eq!(type_owner_name(&db, "owned_composite"), "type_owner");
+        assert_eq!(type_owner_name(&db, "owned_enum"), "type_owner");
+        assert_eq!(type_owner_name(&db, "owned_range"), "type_owner");
+
+        superuser
+            .execute(&db, "reassign owned by type_owner to type_target")
+            .unwrap();
+
+        assert_eq!(type_owner_name(&db, "owned_composite"), "type_target");
+        assert_eq!(type_owner_name(&db, "owned_enum"), "type_target");
+        assert_eq!(type_owner_name(&db, "owned_range"), "type_target");
+    }
+
+    #[test]
+    fn drop_role_reports_function_type_database_and_default_acl_dependencies() {
+        let base = temp_dir("drop_role_extended_dependencies");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role dep_owner").unwrap();
+        superuser.execute(&db, "create role dep_grantee").unwrap();
+        superuser
+            .execute(&db, "grant create on database regression to dep_owner")
+            .unwrap();
+
+        let mut owner = Session::new(2);
+        owner.set_session_authorization_oid(role_oid(&db, "dep_owner"));
+        owner.execute(&db, "create schema dep_schema").unwrap();
+        owner
+            .execute(
+                &db,
+                "alter default privileges for role dep_owner in schema dep_schema grant all on tables to dep_grantee",
+            )
+            .unwrap();
+        owner
+            .execute(
+                &db,
+                "create function dep_func() returns void language plpgsql as $$ begin end; $$",
+            )
+            .unwrap();
+        owner
+            .execute(&db, "create type dep_enum as enum ('red')")
+            .unwrap();
+        owner
+            .execute(&db, "create type dep_range as range (subtype = int4)")
+            .unwrap();
+        owner
+            .execute(&db, "create type dep_composite as (a int4)")
+            .unwrap();
+
+        let err = superuser.execute(&db, "drop role dep_owner").unwrap_err();
+        match err {
+            ExecError::DetailedError { detail, .. } => {
+                let detail = detail.unwrap();
+                assert!(detail.contains("privileges for database regression"));
+                assert!(detail.contains("owner of default privileges on new relations belonging to role dep_owner in schema dep_schema"));
+                assert!(detail.contains("owner of function dep_func()"));
+                assert!(detail.contains("owner of type dep_enum"));
+                assert!(detail.contains("owner of type dep_range"));
+                assert!(detail.contains("owner of type dep_composite"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

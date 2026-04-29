@@ -79,9 +79,9 @@ use crate::include::catalog::{
     bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
     bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
     bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
-    bootstrap_pg_user_mapping_rows, builtin_type_rows, composite_array_type_row,
-    composite_type_row, range_type_ref_for_sql_type, sort_pg_conversion_rows, sort_pg_rewrite_rows,
-    sort_pg_sequence_rows,
+    bootstrap_pg_user_mapping_rows, builtin_type_rows, composite_array_type_row_with_owner,
+    composite_type_row_with_owner, range_type_ref_for_sql_type, sort_pg_conversion_rows,
+    sort_pg_rewrite_rows, sort_pg_sequence_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -342,10 +342,11 @@ impl CatCache {
             cache.classes_by_oid.insert(class_row.oid, class_row);
 
             if entry.row_type_oid != 0 {
-                let composite_type = composite_type_row(
+                let composite_type = composite_type_row_with_owner(
                     relname,
                     entry.row_type_oid,
                     entry.namespace_oid,
+                    entry.owner_oid,
                     entry.relation_oid,
                     entry.array_type_oid,
                 );
@@ -356,10 +357,11 @@ impl CatCache {
                     .types_by_oid
                     .insert(composite_type.oid, composite_type);
                 if entry.array_type_oid != 0 {
-                    let array_type = composite_array_type_row(
+                    let array_type = composite_array_type_row_with_owner(
                         relname,
                         entry.array_type_oid,
                         entry.namespace_oid,
+                        entry.owner_oid,
                         entry.row_type_oid,
                         entry.relation_oid,
                     );

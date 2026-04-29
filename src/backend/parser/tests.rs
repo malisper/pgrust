@@ -4970,6 +4970,36 @@ fn parse_drop_role_statement() {
 }
 
 #[test]
+fn parse_drop_group_statement() {
+    let stmt = parse_statement("drop group regress_dep_group").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropRole(DropRoleStatement {
+            if_exists: false,
+            role_names: vec!["regress_dep_group".into()],
+        })
+    );
+
+    let stmt = parse_statement("DROP GROUP regress_dep_group").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropRole(DropRoleStatement {
+            if_exists: false,
+            role_names: vec!["regress_dep_group".into()],
+        })
+    );
+
+    let stmt = parse_statement("drop group if exists regress_dep_group").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropRole(DropRoleStatement {
+            if_exists: true,
+            role_names: vec!["regress_dep_group".into()],
+        })
+    );
+}
+
+#[test]
 fn parse_create_database_statement() {
     let stmt = parse_statement("create database analytics").unwrap();
     assert_eq!(
