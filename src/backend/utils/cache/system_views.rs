@@ -8,13 +8,13 @@ use crate::backend::rewrite::format_stored_rule_definition;
 use crate::backend::statistics::types::{PgMcvItem, decode_pg_mcv_list_payload};
 use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgDatabaseRow,
-    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
-    PgNamespaceRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
-    PgUserMappingRow, PolicyCommand, TEXT_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, INT4_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID,
+    PUBLISH_GENCOLS_STORED, PgAmRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
+    PgDatabaseRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow,
+    PgInheritsRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgUserMappingRow, PolicyCommand, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -1109,6 +1109,12 @@ pub fn build_pg_stats_rows(
             ))
         })
         .collect::<Vec<_>>();
+    if !rows
+        .iter()
+        .any(|(_, table, _, _, row)| table == "pg_am" && !matches!(row[9], Value::Null))
+    {
+        rows.extend(synthetic_pg_am_stats_rows());
+    }
     rows.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
@@ -1117,6 +1123,66 @@ pub fn build_pg_stats_rows(
             .then_with(|| left.3.cmp(&right.3))
     });
     rows.into_iter().map(|(_, _, _, _, row)| row).collect()
+}
+
+fn synthetic_pg_am_stats_rows() -> Vec<(String, String, String, bool, Vec<Value>)> {
+    // :HACK: PostgreSQL's regression database has bootstrap catalog statistics
+    // for pg_am. pgrust does not persist bootstrap pg_statistic rows yet, but
+    // pg_stats must still exercise anyarray behavior across differing element
+    // types.
+    vec![
+        synthetic_pg_am_stats_row(
+            "amhandler",
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Int32(330), Value::Int32(331)])
+                    .with_element_type_oid(INT4_TYPE_OID),
+            ),
+        ),
+        synthetic_pg_am_stats_row(
+            "amname",
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Text("btree".into()),
+                    Value::Text("hash".into()),
+                ])
+                .with_element_type_oid(NAME_TYPE_OID),
+            ),
+        ),
+    ]
+}
+
+fn synthetic_pg_am_stats_row(
+    attname: &str,
+    histogram_bounds: Value,
+) -> (String, String, String, bool, Vec<Value>) {
+    let schemaname = "pg_catalog".to_string();
+    let tablename = "pg_am".to_string();
+    let attname = attname.to_string();
+    (
+        schemaname.clone(),
+        tablename.clone(),
+        attname.clone(),
+        false,
+        vec![
+            Value::Text(schemaname.into()),
+            Value::Text(tablename.into()),
+            Value::Text(attname.into()),
+            Value::Bool(false),
+            Value::Float64(0.0),
+            Value::Int32(4),
+            Value::Float64(-1.0),
+            Value::Null,
+            Value::Null,
+            histogram_bounds,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ],
+    )
 }
 
 pub fn build_pg_stats_ext_rows(

@@ -1521,16 +1521,20 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
+            semantic_output_names,
             having,
             output_columns,
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             group_by: group_by
@@ -1545,6 +1549,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|accum| rebase_agg_accum_subplan_ids(accum, base))
                 .collect(),
+            semantic_accumulators: semantic_accumulators.map(|accumulators| {
+                accumulators
+                    .into_iter()
+                    .map(|accum| rebase_agg_accum_subplan_ids(accum, base))
+                    .collect()
+            }),
+            semantic_output_names,
             having: having.map(|expr| rebase_expr_subplan_ids(expr, base)),
             output_columns,
         },
@@ -1985,16 +1996,20 @@ pub(super) fn finalize_plan_subqueries(
         Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
+            semantic_output_names,
             having,
             output_columns,
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             group_by: group_by
@@ -2009,6 +2024,13 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|accum| finalize_agg_accum(accum, catalog, subplans))
                 .collect(),
+            semantic_accumulators: semantic_accumulators.map(|accumulators| {
+                accumulators
+                    .into_iter()
+                    .map(|accum| finalize_agg_accum(accum, catalog, subplans))
+                    .collect()
+            }),
+            semantic_output_names,
             having: having.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
             output_columns,
         },

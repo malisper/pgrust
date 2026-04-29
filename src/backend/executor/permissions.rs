@@ -4,12 +4,15 @@ use super::ExecutorContext;
 use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::catalog::roles::has_bypassrls_privilege;
 use crate::backend::parser::CatalogLookup;
-use crate::include::catalog::{PgAuthIdRow, PgAuthMembersRow, PgClassRow};
+use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PgAuthIdRow, PgAuthMembersRow, PgClassRow};
 
 pub(crate) fn relation_values_visible_for_error_detail(
     relation_oid: u32,
     ctx: &ExecutorContext,
 ) -> bool {
+    if ctx.current_user_oid == BOOTSTRAP_SUPERUSER_OID {
+        return true;
+    }
     let Some(catalog) = ctx.catalog.as_deref() else {
         return true;
     };

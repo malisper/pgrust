@@ -402,6 +402,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,

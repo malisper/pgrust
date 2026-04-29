@@ -13,8 +13,8 @@ use crate::include::catalog::{
     default_btree_opclass_oid,
 };
 use crate::pgrust::database::ddl::{
-    lookup_heap_relation_for_alter_table, reject_column_type_change_with_rule_dependencies,
-    validate_alter_table_alter_column_type,
+    lookup_table_or_partitioned_table_for_alter_table,
+    reject_column_type_change_with_rule_dependencies, validate_alter_table_alter_column_type,
 };
 use std::collections::BTreeSet;
 
@@ -48,8 +48,9 @@ fn reject_unsupported_alter_column_type_indexes(
         false
     });
     if has_unsupported_dependency {
-        // :HACK: Plain indexes are rebuilt below, but expression and partial
-        // indexes still need metadata expression rewrites.
+        // :HACK: Plain column indexes can be rebuilt from rewritten heap rows,
+        // but expression and partial indexes still need proper expression
+        // rebinding against the replacement column type.
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "ALTER TABLE ALTER COLUMN TYPE with dependent indexes".into(),
         )));
@@ -379,7 +380,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -424,7 +425,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -516,7 +517,7 @@ impl Database {
             trigger_depth: 0,
         };
         for target in &targets {
-            if target.relation.relkind == 'f' {
+            if matches!(target.relation.relkind, 'f' | 'p') {
                 continue;
             }
             if target.fires_table_rewrite {
@@ -598,16 +599,19 @@ impl Database {
                 )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
-            for index in &target.indexes {
+            for index in target.indexes {
                 let effect = store
-                    .alter_index_for_column_type_mvcc(
+                    .alter_index_relation_for_column_type_mvcc(
                         index.relation_oid,
                         index.desc.clone(),
-                        index.index_meta.indclass.clone(),
+                        index.index_meta.clone(),
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
+                if target.relation.relpersistence == 't' {
+                    temp_replacements.push((index.relation_oid, index.desc));
+                }
             }
             for statistics_oid in statistics_oids {
                 let effect = store
