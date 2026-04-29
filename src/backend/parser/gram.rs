@@ -4474,7 +4474,14 @@ pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
 
 pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
     let sql = strip_sql_comments_preserving_layout(sql);
-    let lowered = sql.trim().to_ascii_lowercase();
+    let trimmed = sql.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.ends_with("%type") || lowered.ends_with("%rowtype") {
+        return Ok(RawTypeName::Named {
+            name: trimmed.to_string(),
+            array_bounds: 0,
+        });
+    }
     match lowered.as_str() {
         "int2vector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int2Vector))),
         "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),
@@ -14558,13 +14565,18 @@ fn consume_keywords<'a>(input: &'a str, keywords: &[&str]) -> Option<&'a str> {
 
 fn keyword_at_boundary(input: &str, start: usize, keyword: &str) -> bool {
     let end = start.saturating_add(keyword.len());
+    let ident_char = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
     input
-        .get(start..end)
-        .is_some_and(|slice| slice.eq_ignore_ascii_case(keyword))
+        .get(..start)
+        .and_then(|slice| slice.chars().next_back())
+        .is_none_or(|ch| !ident_char(ch))
+        && input
+            .get(start..end)
+            .is_some_and(|slice| slice.eq_ignore_ascii_case(keyword))
         && input
             .get(end..)
             .and_then(|slice| slice.chars().next())
-            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .is_none_or(|ch| !ident_char(ch))
 }
 
 fn consume_keyword<'a>(input: &'a str, keyword: &str) -> &'a str {
@@ -16029,6 +16041,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
         Rule::drop_owned_stmt => Ok(Statement::DropOwned(build_drop_owned(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
+        Rule::lock_table_stmt => Ok(Statement::LockTable(build_lock_table(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
         Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
@@ -21776,6 +21789,78 @@ fn build_drop_owned(pair: Pair<'_, Rule>) -> Result<DropOwnedStatement, ParseErr
     })
 }
 
+fn build_qualified_identifier_string(pair: Pair<'_, Rule>) -> String {
+    let (schema, name) = build_relation_name(pair);
+    schema
+        .map(|schema| format!("{schema}.{name}"))
+        .unwrap_or(name)
+}
+
+fn build_qualified_identifier_list(pair: Pair<'_, Rule>) -> Vec<String> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::qualified_identifier)
+        .map(build_qualified_identifier_string)
+        .collect()
+}
+
+fn build_lock_table(pair: Pair<'_, Rule>) -> Result<LockTableStatement, ParseError> {
+    let mut table_names = Vec::new();
+    let mut mode = LockTableMode::AccessExclusive;
+    let mut nowait = false;
+
+    // :HACK: PostgreSQL's LockStmt carries RangeVar details for ONLY,
+    // inheritance recursion, trailing '*', and view recursion. This raw node
+    // keeps just direct relation names until those semantics are modeled.
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::qualified_ident_list => {
+                table_names.extend(build_qualified_identifier_list(part));
+            }
+            Rule::lock_table_mode_clause => mode = build_lock_table_mode_clause(part)?,
+            Rule::lock_nowait_clause => nowait = true,
+            _ => {}
+        }
+    }
+    if table_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(LockTableStatement {
+        table_names,
+        mode,
+        nowait,
+    })
+}
+
+fn build_lock_table_mode_clause(pair: Pair<'_, Rule>) -> Result<LockTableMode, ParseError> {
+    let mode = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::lock_table_mode)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_lock_table_mode(mode.as_str())
+}
+
+fn build_lock_table_mode(mode_sql: &str) -> Result<LockTableMode, ParseError> {
+    let normalized = mode_sql
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "access share" => Ok(LockTableMode::AccessShare),
+        "row share" => Ok(LockTableMode::RowShare),
+        "row exclusive" => Ok(LockTableMode::RowExclusive),
+        "share update exclusive" => Ok(LockTableMode::ShareUpdateExclusive),
+        "share" => Ok(LockTableMode::Share),
+        "share row exclusive" => Ok(LockTableMode::ShareRowExclusive),
+        "exclusive" => Ok(LockTableMode::Exclusive),
+        "access exclusive" => Ok(LockTableMode::AccessExclusive),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "LOCK TABLE mode",
+            actual: mode_sql.into(),
+        }),
+    }
+}
+
 fn build_truncate_table(pair: Pair<'_, Rule>) -> Result<TruncateTableStatement, ParseError> {
     let table_names = pair
         .into_inner()
@@ -21971,6 +22056,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut assignments = Vec::new();
     let mut from = None;
     let mut where_clause = None;
+    let mut current_of = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -21987,7 +22073,10 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
             }
             Rule::from_item => from = Some(build_from_item(part)?),
             Rule::assignment_item => assignments.extend(build_assignment_item(part)?),
-            Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::update_where_clause => match build_update_where_clause(part)? {
+                UpdateWhereClause::Expr(expr) => where_clause = Some(expr),
+                UpdateWhereClause::CurrentOf(cursor_name) => current_of = Some(cursor_name),
+            },
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
@@ -22001,6 +22090,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         assignments,
         from,
         where_clause,
+        current_of,
         returning,
     })
 }
@@ -22037,6 +22127,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut only = false;
     let mut using = None;
     let mut where_clause = None;
+    let mut current_of = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -22048,7 +22139,10 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::from_item => using = Some(build_from_item(part)?),
-            Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::update_where_clause => match build_update_where_clause(part)? {
+                UpdateWhereClause::Expr(expr) => where_clause = Some(expr),
+                UpdateWhereClause::CurrentOf(cursor_name) => current_of = Some(cursor_name),
+            },
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
@@ -22060,8 +22154,32 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         only,
         using,
         where_clause,
+        current_of,
         returning,
     })
+}
+
+enum UpdateWhereClause {
+    Expr(SqlExpr),
+    CurrentOf(String),
+}
+
+fn build_update_where_clause(pair: Pair<'_, Rule>) -> Result<UpdateWhereClause, ParseError> {
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => return build_expr(part).map(UpdateWhereClause::Expr),
+            Rule::current_of_clause => {
+                let cursor_name = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .map(build_identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                return Ok(UpdateWhereClause::CurrentOf(cursor_name));
+            }
+            _ => {}
+        }
+    }
+    Err(ParseError::UnexpectedEof)
 }
 
 fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
@@ -22210,7 +22328,8 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             SqlExpr::ArraySubscript { .. }
             | SqlExpr::Column(_)
             | SqlExpr::FieldSelect { .. }
-            | SqlExpr::FuncCall { .. } => select_item_name(inner, index),
+            | SqlExpr::FuncCall { .. }
+            | SqlExpr::Row(_) => select_item_name(inner, index),
             SqlExpr::Cast(grand_inner, _) if matches!(grand_inner.as_ref(), SqlExpr::Column(_)) => {
                 select_item_name(inner, index)
             }

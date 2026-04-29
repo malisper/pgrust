@@ -495,7 +495,7 @@ fn cast_text_to_regclass(
     let relation_oid = catalog
         .lookup_any_relation(text)
         .map(|entry| entry.relation_oid)
-        .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(text.into())))?;
+        .ok_or_else(|| expr_reg::regclass_lookup_error(text, Some(catalog)))?;
     Ok(Value::Int64(relation_oid as i64))
 }
 
@@ -3581,7 +3581,9 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         } => "22003",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::InvalidFloatInput { .. } => "22P02",
-        ExecError::DetailedError { sqlstate, .. } => sqlstate,
+        ExecError::DetailedError { sqlstate, .. } | ExecError::DiagnosticError { sqlstate, .. } => {
+            sqlstate
+        }
         _ => "XX000",
     }
 }
@@ -3888,7 +3890,10 @@ fn enforce_domain_check(
     let Some(catalog) = catalog else {
         return Ok(value);
     };
-    let Some(domain) = catalog.domain_by_type_oid(ty.type_oid) else {
+    let Some(domain) = catalog
+        .domain_by_type_oid(ty.type_oid)
+        .or_else(|| domain_from_array_element_type(&value, catalog))
+    else {
         return Ok(value);
     };
     if ty.is_array && !domain.sql_type.is_array {
@@ -3944,31 +3949,55 @@ fn enforce_domain_check(
             if domain_upper_less_than_limit(&value, limit) {
                 continue;
             }
-            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
+            return Err(domain_check_violation_for_name(
+                &domain.name,
+                &constraint_name,
+            ));
         }
         if let Some(disallowed) = parse_not_equal_domain_check(check) {
             if !domain_value_equals(&value, &disallowed) {
                 continue;
             }
-            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
+            return Err(domain_check_violation_for_name(
+                &domain.name,
+                &constraint_name,
+            ));
         }
         if let Some(limit) = parse_greater_than_domain_check(check) {
             if domain_greater_than_limit(&value, limit) {
                 continue;
             }
-            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
+            return Err(domain_check_violation_for_name(
+                &domain.name,
+                &constraint_name,
+            ));
         }
         if let Some((dim, expected)) = parse_array_length_equal_domain_check(check) {
             if domain_array_length_equals(&value, dim, expected) {
                 continue;
             }
-            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
+            return Err(domain_check_violation_for_name(
+                &domain.name,
+                &constraint_name,
+            ));
+        }
+        if let Some((left, right)) = parse_array_element_lt_domain_check(check) {
+            if domain_array_element_lt(&value, left, right) {
+                continue;
+            }
+            return Err(domain_check_violation_for_name(
+                &domain.name,
+                &constraint_name,
+            ));
         }
         if let Some((left, right)) = parse_composite_field_lte_domain_check(check) {
             if domain_composite_field_lte(&value, &left, &right) {
                 continue;
             }
-            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
+            return Err(domain_check_violation_for_name(
+                &domain.name,
+                &constraint_name,
+            ));
         }
     }
     Ok(value)
@@ -3980,6 +4009,17 @@ pub(crate) fn enforce_domain_constraints_for_value(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
     enforce_domain_check(value, ty, catalog)
+}
+
+fn domain_from_array_element_type(
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+) -> Option<crate::backend::parser::DomainLookup> {
+    let element_type_oid = match value {
+        Value::PgArray(array) => array.element_type_oid?,
+        _ => return None,
+    };
+    catalog.domain_by_type_oid(element_type_oid)
 }
 
 fn domain_not_null_violation(domain_name: &str) -> ExecError {
@@ -4150,6 +4190,74 @@ fn domain_array_length_equals(value: &Value, dim: usize, expected: usize) -> boo
         Value::Array(items) if dim == 1 => items.len() == expected,
         Value::Array(_) => true,
         _ => true,
+    }
+}
+
+fn parse_array_element_lt_domain_check(check: &str) -> Option<(i32, i32)> {
+    let normalized = check
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let mut body = normalized
+        .strip_prefix("check(")
+        .and_then(|body| body.strip_suffix(')'))
+        .unwrap_or(normalized.as_str());
+    while body.starts_with('(') && body.ends_with(')') {
+        body = &body[1..body.len().saturating_sub(1)];
+    }
+    if body.contains("<=") || body.contains("<>") {
+        return None;
+    }
+    let (left, right) = body.split_once('<')?;
+    Some((
+        parse_array_domain_subscript(left)?,
+        parse_array_domain_subscript(right)?,
+    ))
+}
+
+fn parse_array_domain_subscript(input: &str) -> Option<i32> {
+    input
+        .strip_prefix("value[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
+fn domain_array_element_lt(value: &Value, left_index: i32, right_index: i32) -> bool {
+    let Some(left) = domain_array_element(value, left_index) else {
+        return true;
+    };
+    let Some(right) = domain_array_element(value, right_index) else {
+        return true;
+    };
+    match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => true,
+        (Value::Int16(left), Value::Int16(right)) => left < right,
+        (Value::Int16(left), Value::Int32(right)) => i32::from(*left) < *right,
+        (Value::Int16(left), Value::Int64(right)) => i64::from(*left) < *right,
+        (Value::Int32(left), Value::Int16(right)) => *left < i32::from(*right),
+        (Value::Int32(left), Value::Int32(right)) => left < right,
+        (Value::Int32(left), Value::Int64(right)) => i64::from(*left) < *right,
+        (Value::Int64(left), Value::Int16(right)) => *left < i64::from(*right),
+        (Value::Int64(left), Value::Int32(right)) => *left < i64::from(*right),
+        (Value::Int64(left), Value::Int64(right)) => left < right,
+        _ => true,
+    }
+}
+
+fn domain_array_element(value: &Value, index: i32) -> Option<&Value> {
+    match value {
+        Value::PgArray(array) if array.dimensions.len() <= 1 => {
+            let lower_bound = array.lower_bound(0).unwrap_or(1);
+            let offset = usize::try_from(i64::from(index) - i64::from(lower_bound)).ok()?;
+            array.elements.get(offset)
+        }
+        Value::Array(items) => {
+            let offset = usize::try_from(i64::from(index) - 1).ok()?;
+            items.get(offset)
+        }
+        _ => None,
     }
 }
 

@@ -103,6 +103,7 @@ pub struct BoundUpdateStatement {
     pub target_tableoid_index: usize,
     pub required_privileges: Vec<RelationPrivilegeRequirement>,
     pub subplans: Vec<Plan>,
+    pub current_of: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +131,7 @@ pub struct BoundDeleteStatement {
     pub target_tableoid_index: usize,
     pub required_privileges: Vec<RelationPrivilegeRequirement>,
     pub subplans: Vec<Plan>,
+    pub current_of: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3322,6 +3324,7 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         target_tableoid_index: stmt.target_tableoid_index,
         required_privileges,
         subplans: stmt.subplans,
+        current_of: stmt.current_of,
     })
 }
 
@@ -4305,6 +4308,7 @@ fn bind_simple_update(
         target_tableoid_index: entry.desc.columns.len() + 1,
         required_privileges,
         subplans: Vec::new(),
+        current_of: stmt.current_of.clone(),
     })
 }
 
@@ -4503,6 +4507,7 @@ fn bind_update_from(
         target_tableoid_index: visible_column_count + 1,
         required_privileges,
         subplans: Vec::new(),
+        current_of: stmt.current_of.clone(),
     })
 }
 
@@ -4695,6 +4700,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         target_tableoid_index: entry.desc.columns.len() + 1,
         required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
         subplans: Vec::new(),
+        current_of: stmt.current_of.clone(),
     })
 }
 
@@ -4821,5 +4827,6 @@ fn bind_delete_using(
         target_tableoid_index: visible_column_count + 1,
         required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
         subplans: Vec::new(),
+        current_of: stmt.current_of.clone(),
     })
 }

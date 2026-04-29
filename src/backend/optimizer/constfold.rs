@@ -7,8 +7,8 @@ use crate::backend::executor::expr_ops::{
 };
 use crate::backend::executor::{ExecError, Value, cast_value};
 use crate::backend::parser::{ParseError, is_binary_coercible_type};
-use crate::include::catalog::builtin_range_spec_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
+use crate::include::catalog::{builtin_range_spec_by_oid, builtin_type_name_for_oid};
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RecursiveUnionQuery, SetOperationQuery,
     SqlType, SqlTypeKind,
@@ -1092,6 +1092,9 @@ fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
     if matches!(value, Value::Null)
         && matches!(target.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
     {
+        return false;
+    }
+    if target.type_oid != 0 && builtin_type_name_for_oid(target.type_oid).is_none() {
         return false;
     }
     // :HACK: Dynamic range OIDs include domains-over-range. Domain CHECK

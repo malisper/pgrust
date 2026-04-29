@@ -51,6 +51,7 @@ pub struct PlannerConfig {
     pub enable_sort: bool,
     pub force_parallel_gather: bool,
     pub max_parallel_workers_per_gather: usize,
+    pub fold_constants: bool,
 }
 
 impl Default for PlannerConfig {
@@ -72,6 +73,7 @@ impl Default for PlannerConfig {
             enable_sort: true,
             force_parallel_gather: false,
             max_parallel_workers_per_gather: 2,
+            fold_constants: true,
         }
     }
 }

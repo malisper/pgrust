@@ -5652,10 +5652,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         }
                         return Err(err);
                     }
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "supported builtin function",
-                        actual: name.clone(),
-                    });
+                    return Err(proc_resolution_error.unwrap_or_else(|| {
+                        function_does_not_exist_error(name, &actual_types, catalog)
+                    }));
                 }
             };
             let lowered_args = lower_named_scalar_function_args(legacy_func, args_list)?;
@@ -6502,11 +6501,30 @@ fn bind_regclass_literal_cast(
                 .lookup_any_relation(relation_name)
                 .map(|entry| entry.relation_oid)
         })
-        .ok_or_else(|| ParseError::UnknownTable(relation_name.to_string()))?;
+        .ok_or_else(|| missing_regclass_literal_error(relation_name, catalog))?;
     Ok(Some(Expr::Cast(
         Box::new(Expr::Const(Value::Int64(relation_oid as i64))),
         target_type,
     )))
+}
+
+fn missing_regclass_literal_error(name: &str, catalog: &dyn CatalogLookup) -> ParseError {
+    if let Some((schema, _relation)) = name.rsplit_once('.') {
+        let schema = schema.trim_matches('"').to_ascii_lowercase();
+        if !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname == schema)
+        {
+            return ParseError::DetailedError {
+                message: format!("schema \"{schema}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "3F000",
+            };
+        }
+    }
+    ParseError::UnknownTable(name.to_string())
 }
 
 fn bind_regtype_literal_cast(
@@ -7072,7 +7090,16 @@ fn bind_domain_constraint_expr(
     let Some(domain) = domain else {
         return expr;
     };
-    let check = domain
+    let has_enforced_constraint = domain.not_null
+        || domain.check.is_some()
+        || domain
+            .constraints
+            .iter()
+            .any(|constraint| constraint.enforced);
+    if !has_enforced_constraint {
+        return expr;
+    }
+    let upper_less_than_check = domain
         .constraints
         .iter()
         .filter(|constraint| {
@@ -7080,24 +7107,26 @@ fn bind_domain_constraint_expr(
         })
         .filter_map(|constraint| constraint.expr.as_deref())
         .find(|check| parse_domain_upper_less_than_check(check).is_some())
-        .or(domain.check.as_deref());
-    let Some(check) = check else {
-        return expr;
-    };
-    let Some(limit) = parse_domain_upper_less_than_check(check) else {
-        return expr;
-    };
-    Expr::func_with_impl(
-        0,
-        Some(target_type),
-        false,
-        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::PgRustDomainCheckUpperLessThan),
-        vec![
-            expr,
-            Expr::Const(Value::Text(domain.name.clone().into())),
-            Expr::Const(Value::Int32(limit)),
-        ],
-    )
+        .or_else(|| {
+            domain
+                .check
+                .as_deref()
+                .filter(|check| parse_domain_upper_less_than_check(check).is_some())
+        });
+    if let Some(limit) = upper_less_than_check.and_then(parse_domain_upper_less_than_check) {
+        return Expr::func_with_impl(
+            0,
+            Some(target_type),
+            false,
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::PgRustDomainCheckUpperLessThan),
+            vec![
+                expr,
+                Expr::Const(Value::Text(domain.name.clone().into())),
+                Expr::Const(Value::Int32(limit)),
+            ],
+        );
+    }
+    Expr::Cast(Box::new(expr), target_type)
 }
 
 fn parse_domain_upper_less_than_check(check: &str) -> Option<i32> {

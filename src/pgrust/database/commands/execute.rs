@@ -115,6 +115,7 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
             "max_parallel_workers_per_gather",
             2,
         ),
+        fold_constants: true,
     }
 }
 
@@ -1108,6 +1109,12 @@ impl Database {
                 )?;
                 Ok(StatementResult::AffectedRows(0))
             }
+            Statement::LockTable(_) => Err(ExecError::DetailedError {
+                message: "LOCK TABLE can only be used in transaction blocks".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25P01",
+            }),
             Statement::Notify(ref notify_stmt) => self.execute_notify_stmt(client_id, notify_stmt),
             Statement::Listen(ref listen_stmt) => {
                 Ok(self.execute_listen_stmt(client_id, listen_stmt))
@@ -1594,10 +1601,11 @@ impl Database {
                 }))
             }
             Statement::CreateFunction(ref create_stmt) => self
-                .execute_create_function_stmt_with_search_path(
+                .execute_create_function_stmt_with_search_path_and_gucs(
                     client_id,
                     create_stmt,
                     configured_search_path,
+                    Some(gucs),
                 ),
             Statement::CreateProcedure(ref create_stmt) => self
                 .execute_create_procedure_stmt_with_search_path(
@@ -1783,6 +1791,7 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
+                    pending_portals: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
@@ -2113,6 +2122,7 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
+                    pending_portals: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(
                         visible_catalog.clone(),
                     )),
@@ -2245,6 +2255,7 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
+                    pending_portals: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
@@ -2486,6 +2497,7 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
+                    pending_portals: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
@@ -2604,6 +2616,7 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
+                    pending_portals: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
@@ -3099,6 +3112,7 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
+                    pending_portals: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
                     srf_rows_cache: std::collections::HashMap::new(),
@@ -3334,6 +3348,7 @@ impl Database {
             database: Some(self.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
+            pending_portals: Vec::new(),
             catalog: visible_catalog_snapshot,
             scalar_function_cache: std::collections::HashMap::new(),
             srf_rows_cache: std::collections::HashMap::new(),

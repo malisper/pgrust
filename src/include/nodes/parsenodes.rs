@@ -529,6 +529,7 @@ pub enum Statement {
     ResetSessionAuthorization(ResetSessionAuthorizationStatement),
     DropOwned(DropOwnedStatement),
     ReassignOwned(ReassignOwnedStatement),
+    LockTable(LockTableStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
     Notify(NotifyStatement),
@@ -3958,6 +3959,25 @@ pub struct AlterUserMappingStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockTableStatement {
+    pub table_names: Vec<String>,
+    pub mode: LockTableMode,
+    pub nowait: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockTableMode {
+    AccessShare,
+    RowShare,
+    RowExclusive,
+    ShareUpdateExclusive,
+    Share,
+    ShareRowExclusive,
+    Exclusive,
+    AccessExclusive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TruncateTableStatement {
     pub table_names: Vec<String>,
 }
@@ -4847,6 +4867,7 @@ pub struct UpdateStatement {
     pub assignments: Vec<Assignment>,
     pub from: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
+    pub current_of: Option<String>,
     pub returning: Vec<SelectItem>,
 }
 
@@ -4858,6 +4879,7 @@ pub struct DeleteStatement {
     pub only: bool,
     pub using: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
+    pub current_of: Option<String>,
     pub returning: Vec<SelectItem>,
 }
 

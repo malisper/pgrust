@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::Expr;
@@ -8,25 +8,30 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
-    ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection, BoundCte,
-    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
-    CreateTableAsStatement, CreateTableStatement, CteBody, DeleteStatement, FromItem, InsertSource,
-    InsertStatement, OnConflictClause, OnConflictTarget, OrderByItem, ParseError, RawWindowFrame,
-    RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn,
-    SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement, UpdateStatement,
-    ValuesStatement, XmlTableColumn, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    AliasColumnSpec, ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection,
+    BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
+    CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement, CteBody,
+    DeleteStatement, FromItem, InsertSource, InsertStatement, OnConflictAction, OnConflictClause,
+    OnConflictTarget, OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
+    RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr,
+    SqlType, SqlTypeKind, Statement, UpdateStatement, ValuesStatement, XmlTableColumn,
+    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
-    pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
+    pg_plan_query_with_outer_scopes_and_ctes_config,
+    pg_plan_values_query_with_outer_scopes_and_ctes,
+    pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PgProcRow, RECORD_TYPE_OID};
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
 use super::ast::{
-    AliasTarget, AssignTarget, Block, CursorDecl, Decl, ExceptionCondition, ForQuerySource,
-    ForTarget, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
+    AliasTarget, AssignIndirection, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection,
+    Decl, ExceptionCondition, ForQuerySource, ForTarget, OpenCursorSource, RaiseCondition,
+    RaiseLevel, RaiseUsingOption, Stmt, VarDecl,
 };
 use super::gram::parse_block;
 
@@ -35,19 +40,24 @@ pub(crate) struct CompiledBlock {
     pub(crate) local_slots: Vec<CompiledVar>,
     pub(crate) statements: Vec<CompiledStmt>,
     pub(crate) exception_handlers: Vec<CompiledExceptionHandler>,
+    pub(crate) exception_sqlstate_slot: Option<usize>,
+    pub(crate) exception_sqlerrm_slot: Option<usize>,
     pub(crate) total_slots: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct CompiledFunction {
     pub(crate) name: String,
+    pub(crate) proc_oid: u32,
     pub(crate) proconfig: Option<Vec<String>>,
+    pub(crate) print_strict_params: Option<bool>,
     pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
     pub(crate) context_arg_type_names: Vec<String>,
     pub(crate) output_slots: Vec<CompiledOutputSlot>,
     pub(crate) body: CompiledBlock,
     pub(crate) return_contract: FunctionReturnContract,
     pub(crate) found_slot: usize,
+    pub(crate) sqlstate_slot: usize,
     pub(crate) sqlerrm_slot: usize,
     pub(crate) local_ctes: Vec<BoundCte>,
     pub(crate) trigger_transition_ctes: Vec<CompiledTriggerTransitionCte>,
@@ -82,9 +92,19 @@ pub(crate) struct CompiledOutputSlot {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledVar {
+    pub(crate) name: String,
     pub(crate) slot: usize,
     pub(crate) ty: SqlType,
     pub(crate) default_expr: Option<CompiledExpr>,
+    pub(crate) not_null: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PlpgsqlVariableConflict {
+    #[default]
+    Error,
+    UseVariable,
+    UseColumn,
 }
 
 #[derive(Debug, Clone)]
@@ -92,11 +112,13 @@ pub(crate) enum CompiledExpr {
     Scalar {
         expr: Expr,
         subplans: Vec<Plan>,
+        source: String,
     },
     QueryCompare {
         plan: PlannedStmt,
         op: QueryCompareOp,
         rhs: Expr,
+        source: String,
     },
 }
 
@@ -112,9 +134,44 @@ pub(crate) enum QueryCompareOp {
     IsNotDistinctFrom,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompiledSelectIntoTarget {
     pub(crate) slot: usize,
+    pub(crate) ty: SqlType,
+    pub(crate) name: Option<String>,
+    pub(crate) not_null: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledIndirectAssignTarget {
+    pub(crate) slot: usize,
+    pub(crate) ty: SqlType,
+    pub(crate) indirection: Vec<CompiledAssignIndirection>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CompiledAssignIndirection {
+    Field(String),
+    Subscript(CompiledExpr),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledStrictParam {
+    pub(crate) name: String,
+    pub(crate) slot: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DeclaredCursor {
+    query: String,
+    scrollable: bool,
+    params: Vec<DeclaredCursorParam>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeclaredCursorParam {
+    pub(crate) name: String,
+    pub(crate) type_name: String,
     pub(crate) ty: SqlType,
 }
 
@@ -128,9 +185,35 @@ pub(crate) enum CompiledForQuerySource {
     Static {
         plan: PlannedStmt,
     },
+    NoTuples {
+        sql: String,
+    },
     Dynamic {
         sql_expr: CompiledExpr,
         using_exprs: Vec<CompiledExpr>,
+    },
+    Cursor {
+        slot: usize,
+        name: String,
+        source: CompiledCursorOpenSource,
+        scrollable: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CompiledCursorOpenSource {
+    Static {
+        plan: PlannedStmt,
+    },
+    Dynamic {
+        sql_expr: CompiledExpr,
+        using_exprs: Vec<CompiledExpr>,
+    },
+    Declared {
+        query: String,
+        params: Vec<DeclaredCursorParam>,
+        args: Vec<CompiledExpr>,
+        arg_context: Option<String>,
     },
 }
 
@@ -198,10 +281,20 @@ pub(crate) enum TriggerReturnedRow {
 
 #[derive(Debug, Clone)]
 pub(crate) enum CompiledStmt {
+    WithLine {
+        line: usize,
+        stmt: Box<CompiledStmt>,
+    },
     Block(CompiledBlock),
     Assign {
         slot: usize,
         ty: SqlType,
+        name: Option<String>,
+        not_null: bool,
+        expr: CompiledExpr,
+    },
+    AssignIndirect {
+        target: CompiledIndirectAssignTarget,
         expr: CompiledExpr,
     },
     Null,
@@ -212,6 +305,12 @@ pub(crate) enum CompiledStmt {
     While {
         condition: CompiledExpr,
         body: Vec<CompiledStmt>,
+    },
+    Loop {
+        body: Vec<CompiledStmt>,
+    },
+    Exit {
+        condition: Option<CompiledExpr>,
     },
     ForInt {
         slot: usize,
@@ -224,16 +323,29 @@ pub(crate) enum CompiledStmt {
         source: CompiledForQuerySource,
         body: Vec<CompiledStmt>,
     },
-    ExitWhen {
-        condition: Option<CompiledExpr>,
+    ForEach {
+        target: CompiledForQueryTarget,
+        slice: usize,
+        array_expr: CompiledExpr,
+        body: Vec<CompiledStmt>,
     },
     Raise {
         level: RaiseLevel,
         sqlstate: Option<String>,
-        message: String,
+        message: Option<String>,
+        message_expr: Option<CompiledExpr>,
+        detail_expr: Option<CompiledExpr>,
+        hint_expr: Option<CompiledExpr>,
+        errcode_expr: Option<CompiledExpr>,
+        column_expr: Option<CompiledExpr>,
+        constraint_expr: Option<CompiledExpr>,
+        datatype_expr: Option<CompiledExpr>,
+        table_expr: Option<CompiledExpr>,
+        schema_expr: Option<CompiledExpr>,
         params: Vec<CompiledExpr>,
         line: usize,
     },
+    Reraise,
     Assert {
         condition: CompiledExpr,
         message: Option<CompiledExpr>,
@@ -251,15 +363,16 @@ pub(crate) enum CompiledStmt {
     ReturnTriggerNull,
     ReturnTriggerNoValue,
     ReturnQuery {
-        plan: PlannedStmt,
-        kind: ReturnQueryKind,
+        source: CompiledForQuerySource,
     },
     Perform {
         plan: PlannedStmt,
         line: usize,
+        sql: Option<String>,
     },
     DynamicExecute {
         sql_expr: CompiledExpr,
+        strict: bool,
         into_targets: Vec<CompiledSelectIntoTarget>,
         using_exprs: Vec<CompiledExpr>,
         line: usize,
@@ -269,6 +382,9 @@ pub(crate) enum CompiledStmt {
         value: Option<String>,
         is_local: bool,
     },
+    CommentOnFunction {
+        stmt: CommentOnFunctionStatement,
+    },
     GetDiagnostics {
         stacked: bool,
         items: Vec<(CompiledSelectIntoTarget, String)>,
@@ -276,11 +392,18 @@ pub(crate) enum CompiledStmt {
     OpenCursor {
         slot: usize,
         name: String,
-        plan: PlannedStmt,
+        source: CompiledCursorOpenSource,
+        scrollable: bool,
+        constant: bool,
     },
     FetchCursor {
         slot: usize,
+        direction: CursorDirection,
         targets: Vec<CompiledSelectIntoTarget>,
+    },
+    MoveCursor {
+        slot: usize,
+        direction: CursorDirection,
     },
     CloseCursor {
         slot: usize,
@@ -292,6 +415,7 @@ pub(crate) enum CompiledStmt {
         plan: PlannedStmt,
         targets: Vec<CompiledSelectIntoTarget>,
         strict: bool,
+        strict_params: Vec<CompiledStrictParam>,
     },
     ExecInsertInto {
         stmt: BoundInsertStatement,
@@ -326,6 +450,8 @@ pub(crate) enum CompiledStmt {
 struct ScopeVar {
     slot: usize,
     ty: SqlType,
+    constant: bool,
+    not_null: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -354,9 +480,14 @@ struct CompileEnv {
     relation_scopes: Vec<RelationScopeVar>,
     labeled_scopes: Vec<LabeledScope>,
     local_ctes: Vec<BoundCte>,
-    declared_cursors: HashMap<String, String>,
+    declared_cursors: HashMap<String, DeclaredCursor>,
+    open_cursor_shapes: HashMap<usize, Vec<QueryColumn>>,
     parameter_slots: Vec<ScopeVar>,
     positional_parameter_names: Vec<String>,
+    exception_sqlstate: Option<ScopeVar>,
+    exception_sqlerrm: Option<ScopeVar>,
+    variable_conflict: PlpgsqlVariableConflict,
+    nonstandard_string_literals: bool,
     next_slot: usize,
 }
 
@@ -366,26 +497,108 @@ impl CompileEnv {
     }
 
     fn define_var(&mut self, name: &str, ty: SqlType) -> usize {
+        self.define_var_with_options(name, ty, false, false)
+    }
+
+    fn define_var_with_options(
+        &mut self,
+        name: &str,
+        ty: SqlType,
+        constant: bool,
+        not_null: bool,
+    ) -> usize {
+        let slot = self.allocate_slot();
+        self.vars.insert(
+            name.to_ascii_lowercase(),
+            ScopeVar {
+                slot,
+                ty,
+                constant,
+                not_null,
+            },
+        );
+        slot
+    }
+
+    fn allocate_slot(&mut self) -> usize {
         let slot = self.next_slot;
         self.next_slot += 1;
-        self.vars
-            .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty });
         slot
+    }
+
+    fn define_exception_slots(&mut self) -> (usize, usize) {
+        let text_ty = SqlType::new(SqlTypeKind::Text);
+        let sqlstate_slot = self.allocate_slot();
+        let sqlerrm_slot = self.allocate_slot();
+        self.exception_sqlstate = Some(ScopeVar {
+            slot: sqlstate_slot,
+            ty: text_ty,
+            constant: false,
+            not_null: false,
+        });
+        self.exception_sqlerrm = Some(ScopeVar {
+            slot: sqlerrm_slot,
+            ty: text_ty,
+            constant: false,
+            not_null: false,
+        });
+        (sqlstate_slot, sqlerrm_slot)
+    }
+
+    fn with_exception_vars<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        let saved_sqlstate = self.vars.insert(
+            "sqlstate".into(),
+            self.exception_sqlstate
+                .clone()
+                .ok_or(ParseError::UnexpectedEof)?,
+        );
+        let saved_sqlerrm = self.vars.insert(
+            "sqlerrm".into(),
+            self.exception_sqlerrm
+                .clone()
+                .ok_or(ParseError::UnexpectedEof)?,
+        );
+        let result = f(self);
+        restore_optional_var(&mut self.vars, "sqlstate", saved_sqlstate);
+        restore_optional_var(&mut self.vars, "sqlerrm", saved_sqlerrm);
+        result
     }
 
     fn define_parameter_var(&mut self, name: &str, ty: SqlType) -> usize {
         let slot = self.define_var(name, ty);
-        self.parameter_slots.push(ScopeVar { slot, ty });
+        self.parameter_slots.push(ScopeVar {
+            slot,
+            ty,
+            constant: false,
+            not_null: false,
+        });
         let positional_name = positional_parameter_var_name(self.parameter_slots.len());
-        self.vars
-            .insert(positional_name.clone(), ScopeVar { slot, ty });
+        self.vars.insert(
+            positional_name.clone(),
+            ScopeVar {
+                slot,
+                ty,
+                constant: false,
+                not_null: false,
+            },
+        );
         self.positional_parameter_names.push(positional_name);
         slot
     }
 
     fn define_alias(&mut self, name: &str, slot: usize, ty: SqlType) {
-        self.vars
-            .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty });
+        self.vars.insert(
+            name.to_ascii_lowercase(),
+            ScopeVar {
+                slot,
+                ty,
+                constant: false,
+                not_null: false,
+            },
+        );
     }
 
     fn update_slot_type(&mut self, slot: usize, ty: SqlType) {
@@ -579,15 +792,25 @@ impl CompileEnv {
             .collect()
     }
 
-    fn define_cursor(&mut self, name: &str, query: &str) {
-        self.declared_cursors
-            .insert(name.to_ascii_lowercase(), query.to_string());
+    fn define_cursor(
+        &mut self,
+        name: &str,
+        query: &str,
+        scrollable: bool,
+        params: Vec<DeclaredCursorParam>,
+    ) {
+        self.declared_cursors.insert(
+            name.to_ascii_lowercase(),
+            DeclaredCursor {
+                query: query.to_string(),
+                scrollable,
+                params,
+            },
+        );
     }
 
-    fn declared_cursor_query(&self, name: &str) -> Option<&str> {
-        self.declared_cursors
-            .get(&name.to_ascii_lowercase())
-            .map(String::as_str)
+    fn declared_cursor(&self, name: &str) -> Option<&DeclaredCursor> {
+        self.declared_cursors.get(&name.to_ascii_lowercase())
     }
 
     fn visible_sql_columns(&self) -> Vec<(String, SqlType)> {
@@ -611,7 +834,23 @@ impl CompileEnv {
                 hidden: false,
             })
             .collect::<Vec<_>>();
-        ordered.sort_by_key(|column| column.slot);
+        for (name, var) in &self.vars {
+            if is_internal_plpgsql_name(name) {
+                continue;
+            }
+            ordered.push(SlotScopeColumn {
+                slot: var.slot,
+                name: plpgsql_var_alias(var.slot),
+                sql_type: var.ty,
+                hidden: false,
+            });
+        }
+        ordered.sort_by(|left, right| {
+            left.slot
+                .cmp(&right.slot)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        ordered.dedup_by(|left, right| left.name == right.name);
         ordered
     }
 
@@ -623,22 +862,47 @@ impl CompileEnv {
     }
 }
 
+fn restore_optional_var(vars: &mut HashMap<String, ScopeVar>, name: &str, saved: Option<ScopeVar>) {
+    match saved {
+        Some(var) => {
+            vars.insert(name.into(), var);
+        }
+        None => {
+            vars.remove(name);
+        }
+    }
+}
+
 pub(crate) fn compile_do_block(
     block: &Block,
     catalog: &dyn CatalogLookup,
 ) -> Result<CompiledBlock, ParseError> {
+    compile_do_block_with_gucs(block, catalog, None)
+}
+
+pub(crate) fn compile_do_block_with_gucs(
+    block: &Block,
+    catalog: &dyn CatalogLookup,
+    gucs: Option<&HashMap<String, String>>,
+) -> Result<CompiledBlock, ParseError> {
     let mut env = CompileEnv::default();
+    env.variable_conflict = variable_conflict_from_gucs(gucs);
+    env.nonstandard_string_literals = nonstandard_string_literals_from_gucs(gucs);
     let _ = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let _ = env.define_exception_slots();
     compile_block(block, catalog, &mut env, None)
 }
 
 pub(crate) fn compile_do_function(
     block: &Block,
     catalog: &dyn CatalogLookup,
+    gucs: Option<&HashMap<String, String>>,
 ) -> Result<CompiledFunction, ParseError> {
     let mut env = CompileEnv::default();
+    env.variable_conflict = variable_conflict_from_gucs(gucs);
+    env.nonstandard_string_literals = nonstandard_string_literals_from_gucs(gucs);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
     let return_contract = FunctionReturnContract::Scalar {
         ty: SqlType::new(SqlTypeKind::Void),
         setof: false,
@@ -647,13 +911,16 @@ pub(crate) fn compile_do_function(
     let body = compile_block(block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: "inline_code_block".into(),
+        proc_oid: 0,
         proconfig: None,
+        print_strict_params: None,
         parameter_slots: Vec::new(),
         context_arg_type_names: Vec::new(),
         output_slots: Vec::new(),
         body,
         return_contract,
         found_slot,
+        sqlstate_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
@@ -663,6 +930,7 @@ pub(crate) fn compile_do_function(
 pub(crate) fn compile_function_from_proc(
     row: &PgProcRow,
     catalog: &dyn CatalogLookup,
+    gucs: Option<&HashMap<String, String>>,
 ) -> Result<CompiledFunction, ParseError> {
     if row.prorettype == EVENT_TRIGGER_TYPE_OID {
         return Err(ParseError::DetailedError {
@@ -673,7 +941,10 @@ pub(crate) fn compile_function_from_proc(
         });
     }
     let block = parse_block(&row.prosrc)?;
+    let print_strict_params = print_strict_params_directive(&row.prosrc);
     let mut env = CompileEnv::default();
+    env.variable_conflict = variable_conflict_mode(&row.prosrc, gucs);
+    env.nonstandard_string_literals = nonstandard_string_literals_from_gucs(gucs);
     let mut parameter_slots = Vec::new();
     let mut output_slots = Vec::new();
 
@@ -705,7 +976,7 @@ pub(crate) fn compile_function_from_proc(
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| format!("column{}", index + 1));
             match *mode {
-                b'i' => {
+                b'i' | b'v' => {
                     let slot = env.define_parameter_var(&name, sql_type);
                     parameter_slots.push(CompiledFunctionSlot {
                         name,
@@ -763,7 +1034,8 @@ pub(crate) fn compile_function_from_proc(
     }
 
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
+    env.push_label_scope(&row.proname);
 
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
@@ -773,17 +1045,71 @@ pub(crate) fn compile_function_from_proc(
         .collect();
     Ok(CompiledFunction {
         name: row.proname.clone(),
+        proc_oid: row.oid,
         proconfig: row.proconfig.clone(),
+        print_strict_params,
         parameter_slots,
         context_arg_type_names,
         output_slots,
         body,
         return_contract,
         found_slot,
+        sqlstate_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
     })
+}
+
+fn print_strict_params_directive(source: &str) -> Option<bool> {
+    source.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("#print_strict_params")?.trim();
+        if rest.eq_ignore_ascii_case("on") {
+            Some(true)
+        } else if rest.eq_ignore_ascii_case("off") {
+            Some(false)
+        } else {
+            None
+        }
+    })
+}
+
+fn variable_conflict_mode(
+    source: &str,
+    gucs: Option<&HashMap<String, String>>,
+) -> PlpgsqlVariableConflict {
+    variable_conflict_directive(source).unwrap_or_else(|| variable_conflict_from_gucs(gucs))
+}
+
+fn variable_conflict_from_gucs(gucs: Option<&HashMap<String, String>>) -> PlpgsqlVariableConflict {
+    gucs.and_then(|gucs| gucs.get("plpgsql.variable_conflict"))
+        .and_then(|value| parse_variable_conflict_mode(value))
+        .unwrap_or_default()
+}
+
+fn nonstandard_string_literals_from_gucs(gucs: Option<&HashMap<String, String>>) -> bool {
+    gucs.and_then(|gucs| gucs.get("standard_conforming_strings"))
+        .is_some_and(|value| value.eq_ignore_ascii_case("off"))
+}
+
+fn variable_conflict_directive(source: &str) -> Option<PlpgsqlVariableConflict> {
+    source.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("#variable_conflict")?.trim();
+        rest.split_whitespace()
+            .next()
+            .and_then(parse_variable_conflict_mode)
+    })
+}
+
+fn parse_variable_conflict_mode(value: &str) -> Option<PlpgsqlVariableConflict> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "error" => Some(PlpgsqlVariableConflict::Error),
+        "use_variable" => Some(PlpgsqlVariableConflict::UseVariable),
+        "use_column" => Some(PlpgsqlVariableConflict::UseColumn),
+        _ => None,
+    }
 }
 
 pub(crate) fn compile_trigger_function_from_proc(
@@ -791,9 +1117,13 @@ pub(crate) fn compile_trigger_function_from_proc(
     relation_desc: &RelationDesc,
     transition_tables: &[TriggerTransitionTable],
     catalog: &dyn CatalogLookup,
+    gucs: Option<&HashMap<String, String>>,
 ) -> Result<CompiledFunction, ParseError> {
     let block = parse_block(&row.prosrc)?;
+    let print_strict_params = print_strict_params_directive(&row.prosrc);
     let mut env = CompileEnv::default();
+    env.variable_conflict = variable_conflict_mode(&row.prosrc, gucs);
+    env.nonstandard_string_literals = nonstandard_string_literals_from_gucs(gucs);
     let mut trigger_transition_ctes = Vec::new();
     env.local_ctes = transition_tables
         .iter()
@@ -812,18 +1142,22 @@ pub(crate) fn compile_trigger_function_from_proc(
         .collect();
     let bindings = seed_trigger_env(&mut env, relation_desc);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
+    env.push_label_scope(&row.proname);
     let return_contract = FunctionReturnContract::Trigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: row.proname.clone(),
+        proc_oid: row.oid,
         proconfig: row.proconfig.clone(),
+        print_strict_params,
         parameter_slots: Vec::new(),
         context_arg_type_names: Vec::new(),
         output_slots: Vec::new(),
         body,
         return_contract,
         found_slot,
+        sqlstate_slot,
         sqlerrm_slot,
         local_ctes: env.local_ctes.clone(),
         trigger_transition_ctes,
@@ -838,18 +1172,21 @@ pub(crate) fn compile_event_trigger_function_from_proc(
     let mut env = CompileEnv::default();
     let bindings = seed_event_trigger_env(&mut env);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
     let return_contract = FunctionReturnContract::EventTrigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: row.proname.clone(),
+        proc_oid: row.oid,
         proconfig: row.proconfig.clone(),
+        print_strict_params: None,
         parameter_slots: Vec::new(),
         context_arg_type_names: Vec::new(),
         output_slots: Vec::new(),
         body,
         return_contract,
         found_slot,
+        sqlstate_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
@@ -996,14 +1333,12 @@ fn compile_block(
         .exception_handlers
         .iter()
         .map(|handler| {
+            let statements = env.with_exception_vars(|handler_env| {
+                compile_stmt_list(&handler.statements, catalog, handler_env, return_contract)
+            })?;
             Ok(CompiledExceptionHandler {
                 conditions: handler.conditions.clone(),
-                statements: compile_stmt_list(
-                    &handler.statements,
-                    catalog,
-                    &mut env,
-                    return_contract,
-                )?,
+                statements,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -1012,6 +1347,8 @@ fn compile_block(
         local_slots,
         statements,
         exception_handlers,
+        exception_sqlstate_slot: env.exception_sqlstate.as_ref().map(|var| var.slot),
+        exception_sqlerrm_slot: env.exception_sqlerrm.as_ref().map(|var| var.slot),
         total_slots: outer.next_slot,
     })
 }
@@ -1022,16 +1359,18 @@ fn compile_var_decl(
     env: &mut CompileEnv,
 ) -> Result<CompiledVar, ParseError> {
     let ty = resolve_decl_type(&decl.type_name, catalog)?;
-    let slot = env.define_var(&decl.name, ty);
     let default_expr = decl
         .default_expr
         .as_deref()
         .map(|expr| compile_assignment_expr_text(expr, catalog, env))
         .transpose()?;
+    let slot = env.define_var_with_options(&decl.name, ty, decl.constant, decl.strict);
     Ok(CompiledVar {
+        name: decl.name.clone(),
         slot,
         ty,
         default_expr,
+        not_null: decl.strict,
     })
 }
 
@@ -1043,8 +1382,21 @@ fn compile_cursor_decl(
     let ty = SqlType::new(SqlTypeKind::Text)
         .with_identity(crate::include::catalog::REFCURSOR_TYPE_OID, 0);
     let slot = env.define_var(&decl.name, ty);
-    env.define_cursor(&decl.name, &decl.query);
+    env.define_cursor(
+        &decl.name,
+        &decl.query,
+        decl.scrollable,
+        decl.params
+            .iter()
+            .map(|param| DeclaredCursorParam {
+                name: param.name.clone(),
+                type_name: param.type_name.clone(),
+                ty: param.ty,
+            })
+            .collect(),
+    );
     Ok(CompiledVar {
+        name: decl.name.clone(),
         slot,
         ty,
         default_expr: Some(compile_expr_text(
@@ -1052,6 +1404,7 @@ fn compile_cursor_decl(
             catalog,
             env,
         )?),
+        not_null: false,
     })
 }
 
@@ -1141,15 +1494,29 @@ fn compile_stmt(
     return_contract: Option<&FunctionReturnContract>,
 ) -> Result<CompiledStmt, ParseError> {
     Ok(match stmt {
+        Stmt::WithLine { line, stmt } => CompiledStmt::WithLine {
+            line: *line,
+            stmt: Box::new(compile_stmt(stmt, catalog, env, return_contract)?),
+        },
         Stmt::Block(block) => {
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }
         Stmt::Assign { target, expr } => {
-            let (slot, ty) = resolve_assign_target(target, env)?;
-            CompiledStmt::Assign {
-                slot,
-                ty,
-                expr: compile_assignment_expr_text(expr, catalog, env)?,
+            match compile_indirect_assign_target(target, catalog, env)? {
+                Some(target) => CompiledStmt::AssignIndirect {
+                    target,
+                    expr: compile_assignment_expr_text(expr, catalog, env)?,
+                },
+                None => {
+                    let (slot, ty, name, not_null) = resolve_assign_target(target, env)?;
+                    CompiledStmt::Assign {
+                        slot,
+                        ty,
+                        name,
+                        not_null,
+                        expr: compile_assignment_expr_text(expr, catalog, env)?,
+                    }
+                }
             }
         }
         Stmt::Null => CompiledStmt::Null,
@@ -1171,6 +1538,15 @@ fn compile_stmt(
         Stmt::While { condition, body } => CompiledStmt::While {
             condition: compile_condition_text(condition, catalog, env)?,
             body: compile_stmt_list(body, catalog, env, return_contract)?,
+        },
+        Stmt::Loop { body } => CompiledStmt::Loop {
+            body: compile_stmt_list(body, catalog, env, return_contract)?,
+        },
+        Stmt::Exit { condition } => CompiledStmt::Exit {
+            condition: condition
+                .as_deref()
+                .map(|condition| compile_condition_text(condition, catalog, env))
+                .transpose()?,
         },
         Stmt::ForInt {
             var_name,
@@ -1194,40 +1570,35 @@ fn compile_stmt(
             source,
             body,
         } => compile_for_query_stmt(target, source, body, catalog, env, return_contract)?,
-        Stmt::ExitWhen { condition } => CompiledStmt::ExitWhen {
-            condition: condition
-                .as_deref()
-                .map(|condition| compile_condition_text(condition, catalog, env))
-                .transpose()?,
-        },
+        Stmt::ForEach {
+            target,
+            slice,
+            array_expr,
+            body,
+        } => compile_foreach_stmt(
+            target,
+            *slice,
+            array_expr,
+            body,
+            catalog,
+            env,
+            return_contract,
+        )?,
         Stmt::Raise {
             level,
-            sqlstate,
+            condition,
             message,
             params,
-            line,
-        } => {
-            let placeholder_count = message.matches('%').count();
-            if placeholder_count != params.len() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "RAISE placeholder count matching argument count",
-                    actual: format!(
-                        "message has {placeholder_count} placeholders but {} arguments were provided",
-                        params.len()
-                    ),
-                });
-            }
-            CompiledStmt::Raise {
-                level: level.clone(),
-                sqlstate: sqlstate.clone(),
-                message: message.clone(),
-                params: params
-                    .iter()
-                    .map(|expr| compile_expr_text(expr, catalog, env))
-                    .collect::<Result<_, _>>()?,
-                line: *line,
-            }
-        }
+            using_options,
+        } => compile_raise_stmt(
+            level,
+            condition,
+            message,
+            params,
+            using_options,
+            catalog,
+            env,
+        )?,
         Stmt::Assert { condition, message } => CompiledStmt::Assert {
             condition: compile_condition_text(condition, catalog, env)?,
             message: message
@@ -1242,51 +1613,295 @@ fn compile_stmt(
         Stmt::ReturnNext { expr } => {
             compile_return_next_stmt(expr.as_deref(), catalog, env, return_contract)?
         }
-        Stmt::ReturnQuery { sql, kind } => {
-            compile_return_query_stmt(sql, *kind, catalog, env, return_contract)?
+        Stmt::ReturnQuery { source } => {
+            compile_return_query_stmt(source, catalog, env, return_contract)?
         }
         Stmt::Perform { sql, line } => compile_perform_stmt(sql, *line, catalog, env)?,
         Stmt::DynamicExecute {
             sql_expr,
+            strict,
             into_targets,
             using_exprs,
             line,
-        } => {
-            compile_dynamic_execute_stmt(sql_expr, into_targets, using_exprs, *line, catalog, env)?
-        }
+        } => compile_dynamic_execute_stmt(
+            sql_expr,
+            *strict,
+            into_targets,
+            using_exprs,
+            *line,
+            catalog,
+            env,
+        )?,
         Stmt::GetDiagnostics { stacked, items } => {
             let items = items
                 .iter()
-                .map(|(target, item)| {
-                    let (slot, ty) = resolve_assign_target(target, env)?;
-                    Ok((CompiledSelectIntoTarget { slot, ty }, item.clone()))
-                })
+                .map(|(target, item)| Ok((compile_select_into_target(target, env)?, item.clone())))
                 .collect::<Result<Vec<_>, ParseError>>()?;
             CompiledStmt::GetDiagnostics {
                 stacked: *stacked,
                 items,
             }
         }
-        Stmt::OpenCursor { name, sql } => {
-            compile_open_cursor_stmt(name, sql.as_deref(), catalog, env)?
-        }
-        Stmt::FetchCursor { name, targets } => {
-            let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
-            let targets = targets
+        Stmt::OpenCursor { name, source } => compile_open_cursor_stmt(name, source, catalog, env)?,
+        Stmt::FetchCursor {
+            name,
+            direction,
+            targets,
+        } => {
+            let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            let cursor_shape = env.open_cursor_shapes.get(&slot).cloned();
+            let mut targets = targets
                 .iter()
-                .map(|target| {
-                    resolve_assign_target(target, env)
-                        .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-                })
+                .map(|target| compile_select_into_target(target, env))
                 .collect::<Result<Vec<_>, _>>()?;
-            CompiledStmt::FetchCursor { slot, targets }
+            apply_cursor_shape_to_fetch_targets(&mut targets, cursor_shape.as_deref(), env);
+            CompiledStmt::FetchCursor {
+                slot,
+                direction: *direction,
+                targets,
+            }
+        }
+        Stmt::MoveCursor { name, direction } => {
+            let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            CompiledStmt::MoveCursor {
+                slot,
+                direction: *direction,
+            }
         }
         Stmt::CloseCursor { name } => {
-            let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
             CompiledStmt::CloseCursor { slot }
         }
         Stmt::ExecSql { sql } => compile_exec_sql_stmt(sql, catalog, env)?,
     })
+}
+
+fn compile_raise_stmt(
+    level: &RaiseLevel,
+    condition: &Option<RaiseCondition>,
+    message: &Option<String>,
+    params: &[String],
+    using_options: &[RaiseUsingOption],
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    if condition.is_none() && message.is_none() && params.is_empty() && using_options.is_empty() {
+        return Ok(CompiledStmt::Reraise);
+    }
+
+    let mut sqlstate = None::<String>;
+    let mut default_message = None::<String>;
+    let condition_sets_errcode = condition.is_some();
+    match condition {
+        Some(RaiseCondition::SqlState(value)) => {
+            sqlstate = Some(value.clone());
+            default_message = Some(value.clone());
+        }
+        Some(RaiseCondition::ConditionName(name)) => {
+            sqlstate = Some(
+                exception_condition_name_sqlstate(name)
+                    .unwrap_or("P0001")
+                    .to_string(),
+            );
+            default_message = Some(name.clone());
+        }
+        None => {}
+    }
+
+    let mut message_expr = None::<String>;
+    let mut detail_expr = None::<String>;
+    let mut hint_expr = None::<String>;
+    let mut errcode_expr = None::<String>;
+    let mut column_expr = None::<String>;
+    let mut constraint_expr = None::<String>;
+    let mut datatype_expr = None::<String>;
+    let mut table_expr = None::<String>;
+    let mut schema_expr = None::<String>;
+    for option in using_options {
+        match option.name.to_ascii_lowercase().as_str() {
+            "message" => {
+                if message.is_some() || message_expr.is_some() {
+                    return duplicate_raise_option("MESSAGE");
+                }
+                message_expr = Some(option.expr.clone());
+            }
+            "detail" => {
+                if detail_expr.is_some() {
+                    return duplicate_raise_option("DETAIL");
+                }
+                detail_expr = Some(option.expr.clone());
+            }
+            "hint" => {
+                if hint_expr.is_some() {
+                    return duplicate_raise_option("HINT");
+                }
+                hint_expr = Some(option.expr.clone());
+            }
+            "errcode" => {
+                if condition_sets_errcode || errcode_expr.is_some() {
+                    return duplicate_raise_option("ERRCODE");
+                }
+                errcode_expr = Some(option.expr.clone());
+            }
+            "column" | "column_name" => {
+                if column_expr.is_some() {
+                    return duplicate_raise_option("COLUMN");
+                }
+                column_expr = Some(option.expr.clone());
+            }
+            "constraint" | "constraint_name" => {
+                if constraint_expr.is_some() {
+                    return duplicate_raise_option("CONSTRAINT");
+                }
+                constraint_expr = Some(option.expr.clone());
+            }
+            "datatype" | "datatype_name" => {
+                if datatype_expr.is_some() {
+                    return duplicate_raise_option("DATATYPE");
+                }
+                datatype_expr = Some(option.expr.clone());
+            }
+            "table" | "table_name" => {
+                if table_expr.is_some() {
+                    return duplicate_raise_option("TABLE");
+                }
+                table_expr = Some(option.expr.clone());
+            }
+            "schema" | "schema_name" => {
+                if schema_expr.is_some() {
+                    return duplicate_raise_option("SCHEMA");
+                }
+                schema_expr = Some(option.expr.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let message = message
+        .as_ref()
+        .map(|message| {
+            if env.nonstandard_string_literals {
+                decode_nonstandard_backslash_escapes(message)
+            } else {
+                message.clone()
+            }
+        })
+        .or(default_message)
+        .or_else(|| {
+            if message_expr.is_none() {
+                Some(sqlstate.clone().unwrap_or_else(|| "P0001".into()))
+            } else {
+                None
+            }
+        });
+
+    if let Some(message) = &message {
+        let placeholder_count = count_raise_placeholders(message);
+        if placeholder_count != params.len() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RAISE placeholder count matching argument count",
+                actual: format!(
+                    "message has {placeholder_count} placeholders but {} arguments were provided",
+                    params.len()
+                ),
+            });
+        }
+    } else if !params.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RAISE format string before parameter list",
+            actual: format!("{params:?}"),
+        });
+    }
+
+    Ok(CompiledStmt::Raise {
+        line: 1,
+        level: level.clone(),
+        sqlstate,
+        message,
+        message_expr: message_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        detail_expr: detail_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        hint_expr: hint_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        errcode_expr: errcode_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        column_expr: column_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        constraint_expr: constraint_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        datatype_expr: datatype_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        table_expr: table_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        schema_expr: schema_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        params: params
+            .iter()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+fn duplicate_raise_option<T>(name: &str) -> Result<T, ParseError> {
+    Err(ParseError::UnexpectedToken {
+        expected: "RAISE option specified once",
+        actual: format!("RAISE option already specified: {name}"),
+    })
+}
+
+fn count_raise_placeholders(message: &str) -> usize {
+    let mut count = 0usize;
+    let mut chars = message.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            if chars.peek() == Some(&'%') {
+                chars.next();
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "assert_failure" => Some("P0004"),
+        "data_corrupted" => Some("XX001"),
+        "division_by_zero" => Some("22012"),
+        "feature_not_supported" => Some("0A000"),
+        "raise_exception" => Some("P0001"),
+        "reading_sql_data_not_permitted" => Some("2F003"),
+        "syntax_error" => Some("42601"),
+        "no_data_found" => Some("P0002"),
+        "too_many_rows" => Some("P0003"),
+        "unique_violation" => Some("23505"),
+        "not_null_violation" => Some("23502"),
+        "check_violation" => Some("23514"),
+        "foreign_key_violation" => Some("23503"),
+        "invalid_parameter_value" => Some("22023"),
+        "null_value_not_allowed" => Some("22004"),
+        _ => None,
+    }
 }
 
 fn compile_return_stmt(
@@ -1340,6 +1955,19 @@ fn compile_return_stmt(
             Some(_),
         ) => Err(ParseError::DetailedError {
             message: "RETURN cannot have a parameter in function with OUT parameters".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        }),
+        (
+            FunctionReturnContract::Scalar {
+                ty,
+                output_slot: None,
+                setof: false,
+            },
+            Some(_),
+        ) if ty.kind == SqlTypeKind::Void => Err(ParseError::DetailedError {
+            message: "RETURN cannot have a parameter in function returning void".into(),
             detail: None,
             hint: None,
             sqlstate: "42804",
@@ -1431,12 +2059,14 @@ fn plan_select_for_env(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<PlannedStmt, ParseError> {
+    validate_select_variable_conflicts(stmt, catalog, env)?;
     let stmt = normalize_plpgsql_select(stmt.clone(), env);
-    pg_plan_query_with_outer_scopes_and_ctes(
+    pg_plan_query_with_outer_scopes_and_ctes_config(
         &stmt,
         catalog,
         &[outer_scope_for_sql(env)],
         &env.local_ctes,
+        plpgsql_planner_config(),
     )
 }
 
@@ -1446,17 +2076,336 @@ fn plan_values_for_env(
     env: &CompileEnv,
 ) -> Result<PlannedStmt, ParseError> {
     let stmt = normalize_plpgsql_values(stmt.clone(), env);
-    pg_plan_values_query_with_outer_scopes_and_ctes(
+    pg_plan_values_query_with_outer_scopes_and_ctes_config(
         &stmt,
         catalog,
         &[outer_scope_for_sql(env)],
         &env.local_ctes,
+        plpgsql_planner_config(),
     )
 }
 
-fn compile_return_query_stmt(
+fn plpgsql_planner_config() -> PlannerConfig {
+    PlannerConfig {
+        fold_constants: false,
+        ..PlannerConfig::default()
+    }
+}
+
+fn validate_select_variable_conflicts(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<(), ParseError> {
+    if env.variable_conflict != PlpgsqlVariableConflict::Error {
+        return Ok(());
+    }
+    let Some(from) = stmt.from.as_ref() else {
+        return Ok(());
+    };
+    let mut from_columns = HashSet::new();
+    collect_from_item_column_names(from, catalog, env, &mut from_columns);
+    if from_columns.is_empty() {
+        return Ok(());
+    }
+    let mut refs = Vec::new();
+    collect_select_column_refs(stmt, &mut refs);
+    for name in refs {
+        if from_columns.contains(&name.to_ascii_lowercase()) && env.get_var(&name).is_some() {
+            return Err(ambiguous_plpgsql_column_error(&name));
+        }
+    }
+    Ok(())
+}
+
+fn ambiguous_plpgsql_column_error(name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("column reference \"{name}\" is ambiguous"),
+        detail: Some("It could refer to either a PL/pgSQL variable or a table column.".into()),
+        hint: None,
+        sqlstate: "42702",
+    }
+}
+
+fn collect_from_item_column_names(
+    item: &FromItem,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+    names: &mut HashSet<String>,
+) {
+    match item {
+        FromItem::Table { name, .. } => {
+            if let Some(cte) = env
+                .local_ctes
+                .iter()
+                .find(|cte| cte.name.eq_ignore_ascii_case(name))
+            {
+                names.extend(
+                    cte.desc
+                        .columns
+                        .iter()
+                        .filter(|column| !column.dropped)
+                        .map(|column| column.name.to_ascii_lowercase()),
+                );
+                return;
+            }
+            if let Some(relation) = catalog.lookup_any_relation(name) {
+                names.extend(
+                    relation
+                        .desc
+                        .columns
+                        .iter()
+                        .filter(|column| !column.dropped)
+                        .map(|column| column.name.to_ascii_lowercase()),
+                );
+            }
+        }
+        FromItem::Alias {
+            source,
+            column_aliases,
+            ..
+        } => match column_aliases {
+            AliasColumnSpec::Names(alias_names) if !alias_names.is_empty() => {
+                names.extend(alias_names.iter().map(|name| name.to_ascii_lowercase()));
+            }
+            AliasColumnSpec::Definitions(defs) if !defs.is_empty() => {
+                names.extend(defs.iter().map(|def| def.name.to_ascii_lowercase()));
+            }
+            _ => collect_from_item_column_names(source, catalog, env, names),
+        },
+        FromItem::Join { left, right, .. } => {
+            collect_from_item_column_names(left, catalog, env, names);
+            collect_from_item_column_names(right, catalog, env, names);
+        }
+        FromItem::Lateral(source) => collect_from_item_column_names(source, catalog, env, names),
+        _ => {}
+    }
+}
+
+fn collect_select_column_refs(stmt: &SelectStatement, refs: &mut Vec<String>) {
+    for target in &stmt.targets {
+        collect_expr_column_refs(&target.expr, refs);
+    }
+    if let Some(expr) = &stmt.where_clause {
+        collect_expr_column_refs(expr, refs);
+    }
+    for expr in &stmt.group_by {
+        collect_expr_column_refs(expr, refs);
+    }
+    if let Some(expr) = &stmt.having {
+        collect_expr_column_refs(expr, refs);
+    }
+    for item in &stmt.order_by {
+        collect_expr_column_refs(&item.expr, refs);
+    }
+}
+
+fn collect_expr_column_refs(expr: &SqlExpr, refs: &mut Vec<String>) {
+    match expr {
+        SqlExpr::Column(name) if !name.contains('.') && !is_internal_plpgsql_name(name) => {
+            refs.push(name.clone());
+        }
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right) => {
+            collect_expr_column_refs(left, refs);
+            collect_expr_column_refs(right, refs);
+        }
+        SqlExpr::BinaryOperator { left, right, .. } => {
+            collect_expr_column_refs(left, refs);
+            collect_expr_column_refs(right, refs);
+        }
+        SqlExpr::UnaryPlus(expr)
+        | SqlExpr::Negate(expr)
+        | SqlExpr::BitNot(expr)
+        | SqlExpr::PrefixOperator { expr, .. }
+        | SqlExpr::Cast(expr, _)
+        | SqlExpr::Not(expr)
+        | SqlExpr::IsNull(expr)
+        | SqlExpr::IsNotNull(expr)
+        | SqlExpr::FieldSelect { expr, .. } => collect_expr_column_refs(expr, refs),
+        SqlExpr::Subscript { expr, .. } => collect_expr_column_refs(expr, refs),
+        SqlExpr::GeometryUnaryOp { expr, .. } => collect_expr_column_refs(expr, refs),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            collect_expr_column_refs(left, refs);
+            collect_expr_column_refs(right, refs);
+        }
+        SqlExpr::Collate { expr, .. } => collect_expr_column_refs(expr, refs),
+        SqlExpr::AtTimeZone { expr, zone } => {
+            collect_expr_column_refs(expr, refs);
+            collect_expr_column_refs(zone, refs);
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_expr_column_refs(expr, refs);
+            collect_expr_column_refs(pattern, refs);
+            if let Some(escape) = escape {
+                collect_expr_column_refs(escape, refs);
+            }
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                collect_expr_column_refs(arg, refs);
+            }
+            for arm in args {
+                collect_expr_column_refs(&arm.expr, refs);
+                collect_expr_column_refs(&arm.result, refs);
+            }
+            if let Some(defresult) = defresult {
+                collect_expr_column_refs(defresult, refs);
+            }
+        }
+        SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => {
+            for item in items {
+                collect_expr_column_refs(item, refs);
+            }
+        }
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            collect_expr_column_refs(left, refs);
+            collect_expr_column_refs(array, refs);
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            collect_expr_column_refs(array, refs);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_expr_column_refs(lower, refs);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_expr_column_refs(upper, refs);
+                }
+            }
+        }
+        SqlExpr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_expr_column_refs(child, refs);
+            }
+        }
+        SqlExpr::JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_expr_column_refs(child, refs);
+            }
+        }
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
+            for arg in args.args() {
+                collect_expr_column_refs(&arg.value, refs);
+            }
+            for item in order_by {
+                collect_expr_column_refs(&item.expr, refs);
+            }
+            if let Some(within_group) = within_group {
+                for item in within_group {
+                    collect_expr_column_refs(&item.expr, refs);
+                }
+            }
+            if let Some(filter) = filter {
+                collect_expr_column_refs(filter, refs);
+            }
+            if let Some(over) = over {
+                collect_window_column_refs(over, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_window_column_refs(spec: &RawWindowSpec, refs: &mut Vec<String>) {
+    for expr in &spec.partition_by {
+        collect_expr_column_refs(expr, refs);
+    }
+    for item in &spec.order_by {
+        collect_expr_column_refs(&item.expr, refs);
+    }
+    if let Some(frame) = &spec.frame {
+        collect_window_frame_bound_refs(&frame.start_bound, refs);
+        collect_window_frame_bound_refs(&frame.end_bound, refs);
+    }
+}
+
+fn collect_window_frame_bound_refs(bound: &RawWindowFrameBound, refs: &mut Vec<String>) {
+    match bound {
+        RawWindowFrameBound::OffsetPreceding(expr) | RawWindowFrameBound::OffsetFollowing(expr) => {
+            collect_expr_column_refs(expr, refs)
+        }
+        RawWindowFrameBound::UnboundedPreceding
+        | RawWindowFrameBound::CurrentRow
+        | RawWindowFrameBound::UnboundedFollowing => {}
+    }
+}
+
+fn compile_static_query_source(
     sql: &str,
-    kind: ReturnQueryKind,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+    expected: &'static str,
+) -> Result<PlannedStmt, ParseError> {
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    match parse_statement(&rewritten_sql)? {
+        Statement::Select(stmt) => plan_select_for_env(&stmt, catalog, env),
+        Statement::Values(stmt) => plan_values_for_env(&stmt, catalog, env),
+        other => Err(ParseError::UnexpectedToken {
+            expected,
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn compile_return_query_stmt(
+    source: &ForQuerySource,
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
     return_contract: Option<&FunctionReturnContract>,
@@ -1480,21 +2429,140 @@ fn compile_return_query_stmt(
         ));
     }
 
-    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
-    let planned = match parse_statement(&rewritten_sql)? {
-        Statement::Select(stmt) => plan_select_for_env(&stmt, catalog, env)?,
-        Statement::Values(stmt) => plan_values_for_env(&stmt, catalog, env)?,
-        other => {
+    let source = match source {
+        ForQuerySource::Static(sql) => compile_return_query_static_source(sql, catalog, env)?,
+        ForQuerySource::Execute {
+            sql_expr,
+            using_exprs,
+        } => CompiledForQuerySource::Dynamic {
+            sql_expr: compile_expr_text(sql_expr, catalog, env)?,
+            using_exprs: using_exprs
+                .iter()
+                .map(|expr| compile_expr_text(expr, catalog, env))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        ForQuerySource::Cursor { .. } => {
             return Err(ParseError::UnexpectedToken {
-                expected: "RETURN QUERY SELECT ... or RETURN QUERY VALUES (...)",
-                actual: format!("{other:?}"),
+                expected: "RETURN QUERY SELECT ..., VALUES (...), or EXECUTE ...",
+                actual: "cursor query source".into(),
             });
         }
     };
-    Ok(CompiledStmt::ReturnQuery {
-        plan: planned,
-        kind,
-    })
+    Ok(CompiledStmt::ReturnQuery { source })
+}
+
+fn compile_return_query_static_source(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledForQuerySource, ParseError> {
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    match parse_statement(&rewritten_sql)? {
+        Statement::Select(stmt) => Ok(CompiledForQuerySource::Static {
+            plan: plan_select_for_env(&stmt, catalog, env)?,
+        }),
+        Statement::Values(stmt) => Ok(CompiledForQuerySource::Static {
+            plan: plan_values_for_env(&stmt, catalog, env)?,
+        }),
+        Statement::CreateTableAs(_) => Ok(CompiledForQuerySource::NoTuples {
+            sql: normalize_sql_context_text(&rewritten_sql),
+        }),
+        Statement::Unsupported(unsupported)
+            if unsupported.feature == "SELECT form"
+                && find_next_top_level_keyword(&unsupported.sql, &["into"]).is_some() =>
+        {
+            Ok(CompiledForQuerySource::NoTuples {
+                sql: normalize_sql_context_text(&unsupported.sql),
+            })
+        }
+        other => Err(ParseError::UnexpectedToken {
+            expected: "RETURN QUERY SELECT ... or RETURN QUERY VALUES (...)",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn normalize_sql_context_text(sql: &str) -> String {
+    sql.trim().trim_end_matches(';').trim_end().to_string()
+}
+
+fn normalize_nonstandard_string_literals(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            let previous = sql[..i].chars().rev().find(|ch| !ch.is_ascii_whitespace());
+            if !matches!(previous, Some('E' | 'e' | '&')) {
+                out.push('E');
+            }
+            out.push('\'');
+            i += 1;
+            while i < bytes.len() {
+                out.push(bytes[i] as char);
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                    out.push(bytes[i] as char);
+                } else if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        i += 1;
+                        out.push('\'');
+                    } else {
+                        i += 1;
+                        break;
+                    }
+                }
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    out
+}
+
+fn decode_nonstandard_backslash_escapes(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        let Some(escaped) = chars.next() else {
+            out.push('\\');
+            break;
+        };
+        match escaped {
+            '\\' => out.push('\\'),
+            '\'' => out.push('\''),
+            '0'..='7' => {
+                let mut digits = String::from(escaped);
+                while digits.len() < 3 {
+                    match chars.peek().copied() {
+                        Some(next @ '0'..='7') => {
+                            digits.push(next);
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                if let Ok(code) = u32::from_str_radix(&digits, 8)
+                    && let Some(decoded) = char::from_u32(code)
+                {
+                    out.push(decoded);
+                }
+            }
+            other => {
+                out.push('\\');
+                out.push(other);
+            }
+        }
+    }
+    out
 }
 
 fn compile_perform_stmt(
@@ -1512,26 +2580,41 @@ fn compile_perform_stmt(
     Ok(CompiledStmt::Perform {
         plan: planned,
         line,
+        sql: Some(format!("SELECT {}", sql.trim())),
     })
 }
 
 fn compile_dynamic_execute_stmt(
     sql_expr: &str,
+    strict: bool,
     into_targets: &[AssignTarget],
     using_exprs: &[String],
     line: usize,
     catalog: &dyn CatalogLookup,
-    env: &CompileEnv,
+    env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
-    let targets = into_targets
+    let mut targets = into_targets
         .iter()
-        .map(|target| {
-            resolve_assign_target(target, env)
-                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-        })
+        .map(|target| compile_select_into_target(target, env))
         .collect::<Result<Vec<_>, _>>()?;
+    if let [target] = targets.as_mut_slice()
+        && target.ty.kind == SqlTypeKind::Record
+        && let Some(result_columns) =
+            dynamic_sql_literal_result_columns(sql_expr, using_exprs, catalog, env)
+    {
+        let descriptor = assign_anonymous_record_descriptor(
+            result_columns
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        );
+        let ty = descriptor.sql_type();
+        env.update_slot_type(target.slot, ty);
+        target.ty = ty;
+    }
     Ok(CompiledStmt::DynamicExecute {
         sql_expr: compile_expr_text(sql_expr, catalog, env)?,
+        strict,
         into_targets: targets,
         using_exprs: using_exprs
             .iter()
@@ -1541,38 +2624,189 @@ fn compile_dynamic_execute_stmt(
     })
 }
 
+fn compile_cursor_open_source(
+    name: &str,
+    source: &OpenCursorSource,
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+) -> Result<(CompiledCursorOpenSource, bool, Option<PlannedStmt>), ParseError> {
+    match source {
+        OpenCursorSource::Static(sql) => {
+            let plan = compile_static_query_source(sql, catalog, env, "cursor query")?;
+            Ok((
+                CompiledCursorOpenSource::Static { plan: plan.clone() },
+                true,
+                Some(plan),
+            ))
+        }
+        OpenCursorSource::Dynamic {
+            sql_expr,
+            using_exprs,
+        } => Ok((
+            CompiledCursorOpenSource::Dynamic {
+                sql_expr: compile_expr_text(sql_expr, catalog, env)?,
+                using_exprs: using_exprs
+                    .iter()
+                    .map(|expr| compile_expr_text(expr, catalog, env))
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            true,
+            None,
+        )),
+        OpenCursorSource::Declared { args } => {
+            let cursor =
+                env.declared_cursor(name)
+                    .cloned()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "declared cursor query or OPEN cursor FOR query",
+                        actual: name.to_string(),
+                    })?;
+            let (args, arg_context) =
+                compile_declared_cursor_args(name, args, &cursor.params, catalog, env)?;
+            let shape_plan = plan_declared_cursor_query_for_shape(&cursor, catalog, env).ok();
+            Ok((
+                CompiledCursorOpenSource::Declared {
+                    query: cursor.query,
+                    params: cursor.params,
+                    args,
+                    arg_context,
+                },
+                cursor.scrollable,
+                shape_plan,
+            ))
+        }
+    }
+}
+
+fn compile_declared_cursor_args(
+    cursor_name: &str,
+    args: &[CursorArg],
+    params: &[DeclaredCursorParam],
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+) -> Result<(Vec<CompiledExpr>, Option<String>), ParseError> {
+    let mut assigned = vec![None::<String>; params.len()];
+    for (arg_index, arg) in args.iter().enumerate() {
+        match arg {
+            CursorArg::Positional(expr) => {
+                let Some(param) = params.get(arg_index) else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "cursor argument",
+                        actual: format!("too many arguments for cursor \"{cursor_name}\""),
+                    });
+                };
+                if assigned[arg_index].is_some() {
+                    return Err(duplicate_cursor_param_error(cursor_name, &param.name));
+                }
+                assigned[arg_index] = Some(expr.clone());
+            }
+            CursorArg::Named { name, expr } => {
+                let Some(index) = params
+                    .iter()
+                    .position(|param| param.name.eq_ignore_ascii_case(name))
+                else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "cursor argument name",
+                        actual: format!(
+                            "cursor \"{cursor_name}\" has no argument named \"{name}\""
+                        ),
+                    });
+                };
+                if assigned[index].is_some() {
+                    return Err(duplicate_cursor_param_error(
+                        cursor_name,
+                        &params[index].name,
+                    ));
+                }
+                assigned[index] = Some(expr.clone());
+            }
+        }
+    }
+    if let Some(param) = params
+        .iter()
+        .zip(&assigned)
+        .find_map(|(param, expr)| expr.is_none().then_some(param))
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "cursor argument",
+            actual: format!(
+                "not enough arguments for cursor \"{cursor_name}\"; missing \"{}\"",
+                param.name
+            ),
+        });
+    }
+    let arg_context = declared_cursor_args_context(&assigned, params);
+    let args = assigned
+        .into_iter()
+        .map(|expr| compile_expr_text(&expr.expect("checked above"), catalog, env))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((args, arg_context))
+}
+
+fn declared_cursor_args_context(
+    assigned: &[Option<String>],
+    params: &[DeclaredCursorParam],
+) -> Option<String> {
+    if assigned.is_empty() {
+        return None;
+    }
+    Some(
+        assigned
+            .iter()
+            .zip(params)
+            .map(|(expr, param)| {
+                format!(
+                    "{} AS {}",
+                    expr.as_deref().expect("cursor args checked").trim(),
+                    param.name
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+fn duplicate_cursor_param_error(cursor_name: &str, param_name: &str) -> ParseError {
+    ParseError::UnexpectedToken {
+        expected: "cursor argument",
+        actual: format!(
+            "value for parameter \"{param_name}\" of cursor \"{cursor_name}\" specified more than once"
+        ),
+    }
+}
+
+fn plan_declared_cursor_query_for_shape(
+    cursor: &DeclaredCursor,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<PlannedStmt, ParseError> {
+    let sql = rewrite_declared_cursor_params_for_plan(&cursor.query, &cursor.params)?;
+    compile_static_query_source(&sql, catalog, env, "cursor query")
+}
+
 fn compile_open_cursor_stmt(
     name: &str,
-    sql: Option<&str>,
+    source: &OpenCursorSource,
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
-    let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.to_string()), env)?;
-    let query_sql = match sql {
-        Some(sql) => sql,
-        None => env
-            .declared_cursor_query(name)
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "declared cursor query or OPEN cursor FOR query",
-                actual: name.to_string(),
-            })?,
-    };
-    let rewritten_sql = rewrite_plpgsql_sql_text(query_sql, env)?;
-    let stmt = parse_statement(&rewritten_sql)?;
-    let plan = match stmt {
-        Statement::Select(stmt) => plan_select_for_env(&stmt, catalog, env)?,
-        Statement::Values(stmt) => plan_values_for_env(&stmt, catalog, env)?,
-        other => {
-            return Err(ParseError::UnexpectedToken {
-                expected: "cursor query",
-                actual: format!("{other:?}"),
-            });
-        }
-    };
+    let var = env
+        .get_var(name)
+        .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
+    let slot = var.slot;
+    let constant = var.constant;
+    let (source, scrollable, shape_plan) = compile_cursor_open_source(name, source, catalog, env)?;
+    if let Some(plan) = shape_plan {
+        env.open_cursor_shapes.insert(slot, plan.columns());
+    } else {
+        env.open_cursor_shapes.remove(&slot);
+    }
     Ok(CompiledStmt::OpenCursor {
         slot,
         name: name.to_string(),
-        plan,
+        source,
+        scrollable,
+        constant,
     })
 }
 
@@ -1595,13 +2829,8 @@ fn compile_exec_sql_stmt(
     if let Some((target_name, select_sql)) =
         split_cte_prefixed_select_into_target(sql).or_else(|| split_select_into_target(sql))
     {
-        return compile_select_into_stmt(
-            &select_sql,
-            &[AssignTarget::Name(target_name)],
-            false,
-            catalog,
-            env,
-        );
+        let targets = parse_select_into_assign_targets(&target_name)?;
+        return compile_select_into_stmt(&select_sql, &targets, false, catalog, env);
     }
 
     if let Some((target_names, select_sql, strict)) = split_select_with_into_targets(sql) {
@@ -1626,21 +2855,18 @@ fn compile_exec_sql_stmt(
     }
 
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
-    let stmt = parse_statement(&rewritten_sql)?;
+    let stmt = normalize_plpgsql_sql_statement(parse_statement(&rewritten_sql)?, env);
     let outer_scope = outer_scope_for_sql(env);
     match stmt {
         Statement::Select(stmt) => Ok(CompiledStmt::Perform {
-            plan: pg_plan_query_with_outer_scopes_and_ctes(
-                &stmt,
-                catalog,
-                &[outer_scope],
-                &env.local_ctes,
-            )?,
+            plan: plan_select_for_env(&stmt, catalog, env)?,
             line: 1,
+            sql: Some(rewritten_sql.clone()),
         }),
         Statement::Values(stmt) => Ok(CompiledStmt::Perform {
             plan: plan_values_for_env(&stmt, catalog, env)?,
             line: 1,
+            sql: Some(rewritten_sql.clone()),
         }),
         Statement::Insert(stmt) => Ok(CompiledStmt::ExecInsert {
             stmt: bind_insert_with_outer_scopes(
@@ -1675,6 +2901,7 @@ fn compile_exec_sql_stmt(
             value: stmt.value,
             is_local: stmt.is_local,
         }),
+        Statement::CommentOnFunction(stmt) => Ok(CompiledStmt::CommentOnFunction { stmt }),
         other => Err(ParseError::UnexpectedToken {
             expected: "PL/pgSQL SQL statement",
             actual: format!("{other:?}"),
@@ -1965,6 +3192,14 @@ fn is_plpgsql_label_alias(name: &str) -> bool {
     name.starts_with("__pgrust_plpgsql_label_")
 }
 
+fn plpgsql_var_alias(slot: usize) -> String {
+    format!("__pgrust_plpgsql_var_{slot}")
+}
+
+fn is_internal_plpgsql_name(name: &str) -> bool {
+    name.starts_with("__pgrust_plpgsql_")
+}
+
 fn rewrite_plpgsql_sql_text(sql: &str, env: &CompileEnv) -> Result<String, ParseError> {
     let bytes = sql.as_bytes();
     let mut out = String::with_capacity(sql.len());
@@ -2050,6 +3285,106 @@ fn rewrite_plpgsql_sql_text(sql: &str, env: &CompileEnv) -> Result<String, Parse
                     idx = end;
                     continue;
                 }
+            }
+            _ => {}
+        }
+
+        out.push(ch);
+        idx += 1;
+    }
+    Ok(out)
+}
+
+fn rewrite_declared_cursor_params_for_plan(
+    sql: &str,
+    params: &[DeclaredCursorParam],
+) -> Result<String, ParseError> {
+    if params.is_empty() {
+        return Ok(sql.to_string());
+    }
+    rewrite_identifier_refs(sql, |ident| {
+        params
+            .iter()
+            .find(|param| param.name.eq_ignore_ascii_case(ident))
+            .map(|param| format!("(null::{})", param.type_name))
+    })
+}
+
+fn rewrite_identifier_refs<F>(sql: &str, mut replacement: F) -> Result<String, ParseError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut idx = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            out.push(ch);
+            idx += 1;
+            if ch == '\'' {
+                if bytes.get(idx) == Some(&b'\'') {
+                    out.push('\'');
+                    idx += 1;
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            out.push(ch);
+            idx += 1;
+            if ch == '"' {
+                if bytes.get(idx) == Some(&b'"') {
+                    out.push('"');
+                    idx += 1;
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+            if let Some(close) = sql[idx + tag.len()..].find(tag) {
+                let end = idx + tag.len() + close + tag.len();
+                out.push_str(&sql[idx..end]);
+                idx = end;
+            } else {
+                out.push_str(&sql[idx..]);
+                break;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                out.push(ch);
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                out.push(ch);
+                idx += 1;
+                continue;
+            }
+            _ if is_identifier_start(ch) => {
+                let start = idx;
+                idx += 1;
+                while idx < bytes.len() && is_identifier_char(bytes[idx] as char) {
+                    idx += 1;
+                }
+                let ident = &sql[start..idx];
+                if let Some(value) = replacement(ident) {
+                    out.push_str(&value);
+                } else {
+                    out.push_str(ident);
+                }
+                continue;
             }
             _ => {}
         }
@@ -2158,6 +3493,10 @@ fn keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
 
 fn is_identifier_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn is_identifier_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
 }
 
 fn split_top_level_csv(input: &str) -> Option<Vec<String>> {
@@ -2276,6 +3615,17 @@ fn parse_select_into_assign_target(target: &str) -> Result<AssignTarget, ParseEr
     }
 }
 
+fn parse_select_into_assign_targets(targets_sql: &str) -> Result<Vec<AssignTarget>, ParseError> {
+    split_top_level_csv(targets_sql)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "PL/pgSQL SELECT INTO target [, ...]",
+            actual: targets_sql.into(),
+        })?
+        .iter()
+        .map(|target| parse_select_into_assign_target(target))
+        .collect()
+}
+
 fn compile_select_into_stmt(
     select_sql: &str,
     target_refs: &[AssignTarget],
@@ -2291,10 +3641,7 @@ fn compile_select_into_stmt(
     )?;
     let mut targets = target_refs
         .iter()
-        .map(|target| {
-            resolve_assign_target(target, env)
-                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-        })
+        .map(|target| compile_select_into_target(target, env))
         .collect::<Result<Vec<_>, _>>()?;
     if let [target] = targets.as_mut_slice()
         && target.ty.kind == SqlTypeKind::Record
@@ -2314,7 +3661,57 @@ fn compile_select_into_stmt(
         plan: planned,
         targets,
         strict,
+        strict_params: strict_params_for_sql(select_sql, env),
     })
+}
+
+fn strict_params_for_sql(sql: &str, env: &CompileEnv) -> Vec<CompiledStrictParam> {
+    let mut params = env
+        .vars
+        .iter()
+        .filter(|(name, _)| {
+            !name.starts_with('$')
+                && !is_plpgsql_label_alias(name)
+                && identifier_position(sql, name).is_some()
+        })
+        .map(|(name, var)| {
+            (
+                identifier_position(sql, name).unwrap_or(usize::MAX),
+                CompiledStrictParam {
+                    name: name.clone(),
+                    slot: var.slot,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    params.sort_by_key(|(position, _)| *position);
+    params.into_iter().map(|(_, param)| param).collect()
+}
+
+fn identifier_position(sql: &str, ident: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let ident_len = ident.len();
+    let mut offset = 0usize;
+    while offset + ident_len <= bytes.len() {
+        let rest = &sql[offset..];
+        let Some(found) = rest.to_ascii_lowercase().find(&ident.to_ascii_lowercase()) else {
+            break;
+        };
+        let start = offset + found;
+        let end = start + ident_len;
+        let before_ok =
+            start == 0 || !is_sql_ident_char(sql.as_bytes()[start.saturating_sub(1)] as char);
+        let after_ok = end == sql.len() || !is_sql_ident_char(sql.as_bytes()[end] as char);
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        offset = end;
+    }
+    None
+}
+
+fn is_sql_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn compile_for_query_stmt(
@@ -2325,28 +3722,29 @@ fn compile_for_query_stmt(
     env: &mut CompileEnv,
     return_contract: Option<&FunctionReturnContract>,
 ) -> Result<CompiledStmt, ParseError> {
-    let (target, source) = match source {
+    let mut implicit_env = implicit_query_loop_record_name(target, env).map(|name| {
+        let mut loop_env = env.child();
+        loop_env.define_var(name, SqlType::record(RECORD_TYPE_OID));
+        loop_env
+    });
+
+    let (source, static_plan) = match source {
         ForQuerySource::Static(sql) => {
-            let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
-            let stmt = parse_statement(&rewritten_sql)?;
-            let plan = match stmt {
-                Statement::Select(stmt) => plan_select_for_env(&stmt, catalog, env)?,
-                Statement::Values(stmt) => plan_values_for_env(&stmt, catalog, env)?,
-                other => {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "FOR ... IN query LOOP supports SELECT or VALUES; use EXECUTE for dynamic SQL",
-                        actual: format!("{other:?}"),
-                    });
-                }
-            };
-            let target = compile_for_query_target(target, env, Some(&plan))?;
-            (target, CompiledForQuerySource::Static { plan })
+            let plan = compile_static_query_source(
+                sql,
+                catalog,
+                env,
+                "FOR ... IN query LOOP supports SELECT or VALUES; use EXECUTE for dynamic SQL",
+            )?;
+            (
+                CompiledForQuerySource::Static { plan: plan.clone() },
+                Some(plan),
+            )
         }
         ForQuerySource::Execute {
             sql_expr,
             using_exprs,
         } => (
-            compile_for_query_target(target, env, None)?,
             CompiledForQuerySource::Dynamic {
                 sql_expr: compile_expr_text(sql_expr, catalog, env)?,
                 using_exprs: using_exprs
@@ -2354,13 +3752,60 @@ fn compile_for_query_stmt(
                     .map(|expr| compile_expr_text(expr, catalog, env))
                     .collect::<Result<Vec<_>, _>>()?,
             },
+            None,
         ),
+        ForQuerySource::Cursor { name, args } => {
+            let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            let source = OpenCursorSource::Declared { args: args.clone() };
+            let (source, scrollable, shape_plan) =
+                compile_cursor_open_source(name, &source, catalog, env)?;
+            (
+                CompiledForQuerySource::Cursor {
+                    slot,
+                    name: name.clone(),
+                    source,
+                    scrollable,
+                },
+                shape_plan,
+            )
+        }
     };
-    let body = compile_stmt_list(body, catalog, env, return_contract)?;
+    let target_env = implicit_env.as_mut().unwrap_or(env);
+    let target = compile_for_query_target(target, target_env, static_plan.as_ref())?;
+    let body = compile_stmt_list(body, catalog, target_env, return_contract)?;
+    if let Some(loop_env) = implicit_env {
+        env.next_slot = env.next_slot.max(loop_env.next_slot);
+    }
     Ok(CompiledStmt::ForQuery {
         target,
         source,
         body,
+    })
+}
+
+fn implicit_query_loop_record_name<'a>(target: &'a ForTarget, env: &CompileEnv) -> Option<&'a str> {
+    match target {
+        ForTarget::Single(AssignTarget::Name(name)) if env.get_var(name).is_none() => {
+            Some(name.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn compile_foreach_stmt(
+    target: &ForTarget,
+    slice: usize,
+    array_expr: &str,
+    body: &[Stmt],
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
+) -> Result<CompiledStmt, ParseError> {
+    Ok(CompiledStmt::ForEach {
+        target: compile_for_query_target(target, env, None)?,
+        slice,
+        array_expr: compile_expr_text(array_expr, catalog, env)?,
+        body: compile_stmt_list(body, catalog, env, return_contract)?,
     })
 }
 
@@ -2376,10 +3821,7 @@ fn compile_for_query_target(
 
     let mut targets = target_refs
         .iter()
-        .map(|target| {
-            resolve_assign_target(target, env)
-                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-        })
+        .map(|target| compile_select_into_target(target, env))
         .collect::<Result<Vec<_>, _>>()?;
 
     if targets.len() > 1
@@ -2408,6 +3850,28 @@ fn compile_for_query_target(
     }
 
     Ok(CompiledForQueryTarget { targets })
+}
+
+fn apply_cursor_shape_to_fetch_targets(
+    targets: &mut [CompiledSelectIntoTarget],
+    columns: Option<&[QueryColumn]>,
+    env: &mut CompileEnv,
+) {
+    let ([target], Some(columns)) = (targets, columns) else {
+        return;
+    };
+    if target.ty.kind != SqlTypeKind::Record {
+        return;
+    }
+    let descriptor = assign_anonymous_record_descriptor(
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    );
+    let ty = descriptor.sql_type();
+    env.update_slot_type(target.slot, ty);
+    target.ty = ty;
 }
 
 fn compile_exec_returning_into_stmt(
@@ -2484,10 +3948,7 @@ fn compile_dml_into_targets(
 ) -> Result<Vec<CompiledSelectIntoTarget>, ParseError> {
     let mut targets = target_refs
         .iter()
-        .map(|target| {
-            resolve_assign_target(target, env)
-                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-        })
+        .map(|target| compile_select_into_target(target, env))
         .collect::<Result<Vec<_>, _>>()?;
     if let [target] = targets.as_mut_slice()
         && target.ty.kind == SqlTypeKind::Record
@@ -2503,6 +3964,150 @@ fn compile_dml_into_targets(
         target.ty = ty;
     }
     Ok(targets)
+}
+
+fn dynamic_sql_literal_result_columns(
+    sql_expr: &str,
+    using_exprs: &[String],
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Option<Vec<QueryColumn>> {
+    let sql = dynamic_sql_literal(sql_expr)?;
+    let sql = dynamic_shape_sql(&sql, using_exprs);
+    let outer_scope = outer_scope_for_sql(env);
+    let stmt = parse_statement(&sql).ok()?;
+    match stmt {
+        Statement::Select(stmt) => pg_plan_query_with_outer_scopes_and_ctes(
+            &stmt,
+            catalog,
+            std::slice::from_ref(&outer_scope),
+            &env.local_ctes,
+        )
+        .ok()
+        .map(|plan| plan.columns()),
+        Statement::Values(stmt) => pg_plan_values_query_with_outer_scopes_and_ctes(
+            &stmt,
+            catalog,
+            std::slice::from_ref(&outer_scope),
+            &env.local_ctes,
+        )
+        .ok()
+        .map(|plan| plan.columns()),
+        Statement::Insert(stmt) => {
+            bind_insert_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
+                .ok()
+                .map(|bound| {
+                    bound
+                        .returning
+                        .iter()
+                        .map(target_entry_query_column)
+                        .collect()
+                })
+        }
+        Statement::Update(stmt) => {
+            bind_update_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
+                .ok()
+                .map(|bound| {
+                    bound
+                        .returning
+                        .iter()
+                        .map(target_entry_query_column)
+                        .collect()
+                })
+        }
+        Statement::Delete(stmt) => {
+            bind_delete_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
+                .ok()
+                .map(|bound| {
+                    bound
+                        .returning
+                        .iter()
+                        .map(target_entry_query_column)
+                        .collect()
+                })
+        }
+        _ => None,
+    }
+}
+
+fn dynamic_sql_literal(sql_expr: &str) -> Option<String> {
+    let expr = parse_expr(sql_expr).ok()?;
+    match expr {
+        SqlExpr::Const(value) => value.as_text().map(str::to_string),
+        _ => None,
+    }
+}
+
+fn dynamic_shape_sql(sql: &str, using_exprs: &[String]) -> String {
+    if using_exprs.is_empty() {
+        return sql.trim().trim_end_matches(';').trim_end().to_string();
+    }
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut idx = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            out.push(ch);
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    out.push('\'');
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            out.push(ch);
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    out.push('"');
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if ch == '\'' {
+            in_single = true;
+            out.push(ch);
+            idx += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_double = true;
+            out.push(ch);
+            idx += 1;
+            continue;
+        }
+        if ch == '$' {
+            let start = idx + 1;
+            let mut end = start;
+            while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+                end += 1;
+            }
+            if end > start
+                && let Ok(param_index) = sql[start..end].parse::<usize>()
+                && let Some(expr) = using_exprs.get(param_index - 1)
+            {
+                out.push('(');
+                out.push_str(expr);
+                out.push(')');
+                idx = end;
+                continue;
+            }
+        }
+        out.push(ch);
+        idx += 1;
+    }
+    out.trim().trim_end_matches(';').trim_end().to_string()
 }
 
 fn target_entry_query_column(target: &TargetEntry) -> QueryColumn {
@@ -2531,7 +4136,7 @@ fn compile_expr_text(
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
-    compile_expr_sql(&rewritten_sql, catalog, env)
+    compile_expr_sql(&rewritten_sql, sql.trim(), catalog, env)
 }
 
 fn compile_assignment_expr_text(
@@ -2542,26 +4147,70 @@ fn compile_assignment_expr_text(
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
     let rewritten_sql =
         rewrite_plpgsql_assignment_query_expr(&rewritten_sql).unwrap_or(rewritten_sql);
-    compile_expr_sql(&rewritten_sql, catalog, env)
+    compile_expr_sql(&rewritten_sql, sql.trim(), catalog, env)
 }
 
 fn compile_expr_sql(
     sql: &str,
+    source: &str,
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
+    let normalized_sql;
+    let sql = if env.nonstandard_string_literals {
+        normalized_sql = normalize_nonstandard_string_literals(sql);
+        normalized_sql.as_str()
+    } else {
+        sql
+    };
     let parsed = normalize_plpgsql_expr(parse_expr(sql)?, env);
-    let (expr, sql_type) = bind_scalar_expr_in_named_slot_scope(
+    let (expr, sql_type) = match bind_scalar_expr_in_named_slot_scope(
         &parsed,
         &env.relation_slot_scopes(),
         &env.slot_columns(),
         catalog,
         &env.local_ctes,
-    )?;
+    ) {
+        Ok(bound) => bound,
+        Err(err) => {
+            if let Some(expr) = bind_dynamic_record_field_expr(&parsed, env) {
+                (expr, SqlType::new(SqlTypeKind::Text))
+            } else {
+                return Err(err);
+            }
+        }
+    };
     let _ = sql_type;
     let mut subplans = Vec::new();
     let expr = finalize_expr_subqueries(expr, catalog, &mut subplans);
-    Ok(CompiledExpr::Scalar { expr, subplans })
+    Ok(CompiledExpr::Scalar {
+        expr,
+        subplans,
+        source: source.trim().to_string(),
+    })
+}
+
+fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Expr> {
+    let SqlExpr::FieldSelect { expr, field } = expr else {
+        return None;
+    };
+    let SqlExpr::Column(name) = expr.as_ref() else {
+        return None;
+    };
+    let var = env.get_var(name)?;
+    if !matches!(var.ty.kind, SqlTypeKind::Record) || var.ty.typmod > 0 {
+        return None;
+    }
+    Some(Expr::FieldSelect {
+        expr: Box::new(Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(var.slot),
+            varlevelsup: 0,
+            vartype: var.ty,
+        })),
+        field: field.clone(),
+        field_type: SqlType::new(SqlTypeKind::Text),
+    })
 }
 
 fn compile_condition_text(
@@ -2583,7 +4232,7 @@ fn compile_condition_text(
                 );
                 let plan = plan_select_for_env(&select, catalog, env)?;
                 let rhs = match compile_expr_text(condition.right_expr, catalog, env)? {
-                    CompiledExpr::Scalar { expr, subplans } if subplans.is_empty() => expr,
+                    CompiledExpr::Scalar { expr, subplans, .. } if subplans.is_empty() => expr,
                     CompiledExpr::Scalar { .. } => {
                         return Err(ParseError::FeatureNotSupported(
                             "query-style PL/pgSQL conditions do not support subqueries on the comparison value".into(),
@@ -2599,6 +4248,7 @@ fn compile_condition_text(
                     plan,
                     op: condition.op,
                     rhs,
+                    source: sql.trim().to_string(),
                 });
             }
             Err(ParseError::UnexpectedToken {
@@ -2834,11 +4484,101 @@ fn find_top_level_token(input: &str, token: &str) -> Option<usize> {
     None
 }
 
+fn normalize_plpgsql_sql_statement(stmt: Statement, env: &CompileEnv) -> Statement {
+    match stmt {
+        Statement::Update(mut stmt) => {
+            for assignment in &mut stmt.assignments {
+                assignment.expr = normalize_plpgsql_expr(assignment.expr.clone(), env);
+                normalize_assignment_target_subscripts(&mut assignment.target, env);
+            }
+            if let Some(where_clause) = stmt.where_clause.take() {
+                stmt.where_clause = Some(normalize_plpgsql_expr(where_clause, env));
+            }
+            for item in &mut stmt.returning {
+                item.expr = normalize_plpgsql_expr(item.expr.clone(), env);
+            }
+            Statement::Update(stmt)
+        }
+        Statement::Delete(mut stmt) => {
+            if let Some(where_clause) = stmt.where_clause.take() {
+                stmt.where_clause = Some(normalize_plpgsql_expr(where_clause, env));
+            }
+            for item in &mut stmt.returning {
+                item.expr = normalize_plpgsql_expr(item.expr.clone(), env);
+            }
+            Statement::Delete(stmt)
+        }
+        Statement::Insert(mut stmt) => {
+            normalize_insert_source(&mut stmt.source, env);
+            if let Some(clause) = &mut stmt.on_conflict
+                && matches!(clause.action, OnConflictAction::Update)
+            {
+                for assignment in &mut clause.assignments {
+                    assignment.expr = normalize_plpgsql_expr(assignment.expr.clone(), env);
+                    normalize_assignment_target_subscripts(&mut assignment.target, env);
+                }
+                if let Some(predicate) = clause.where_clause.take() {
+                    clause.where_clause = Some(normalize_plpgsql_expr(predicate, env));
+                }
+            }
+            for item in &mut stmt.returning {
+                item.expr = normalize_plpgsql_expr(item.expr.clone(), env);
+            }
+            Statement::Insert(stmt)
+        }
+        other => other,
+    }
+}
+
+fn normalize_assignment_target_subscripts(target: &mut AssignmentTarget, env: &CompileEnv) {
+    for subscript in &mut target.subscripts {
+        if let Some(lower) = subscript.lower.take() {
+            subscript.lower = Some(Box::new(normalize_plpgsql_expr(*lower, env)));
+        }
+        if let Some(upper) = subscript.upper.take() {
+            subscript.upper = Some(Box::new(normalize_plpgsql_expr(*upper, env)));
+        }
+    }
+    for indirection in &mut target.indirection {
+        if let AssignmentTargetIndirection::Subscript(subscript) = indirection {
+            if let Some(lower) = subscript.lower.take() {
+                subscript.lower = Some(Box::new(normalize_plpgsql_expr(*lower, env)));
+            }
+            if let Some(upper) = subscript.upper.take() {
+                subscript.upper = Some(Box::new(normalize_plpgsql_expr(*upper, env)));
+            }
+        }
+    }
+}
+
+fn normalize_insert_source(source: &mut InsertSource, env: &CompileEnv) {
+    match source {
+        InsertSource::Values(rows) => {
+            for row in rows {
+                for expr in row {
+                    *expr = normalize_plpgsql_expr(expr.clone(), env);
+                }
+            }
+        }
+        InsertSource::Select(select) => {
+            *select = Box::new(normalize_plpgsql_select((**select).clone(), env));
+        }
+        InsertSource::DefaultValues => {}
+    }
+}
+
 fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
     match expr {
         SqlExpr::Column(name) => {
             if let Some(expr) = normalize_labeled_column_name(&name, env) {
                 return expr;
+            }
+            if env.variable_conflict == PlpgsqlVariableConflict::UseVariable
+                && !name.contains('.')
+                && !is_internal_plpgsql_name(&name)
+                && let Some(var) = env.get_var(&name)
+            {
+                return SqlExpr::Column(plpgsql_var_alias(var.slot));
             }
             if let Some((base, field)) = name.rsplit_once('.')
                 && let Some(var) = env.get_var(base)
@@ -3268,7 +5008,11 @@ fn normalize_plpgsql_window_frame_bound(
 
 fn normalize_labeled_column_name(name: &str, env: &CompileEnv) -> Option<SqlExpr> {
     let (label_and_var, field) = name.rsplit_once('.')?;
-    let (label, qualifier) = label_and_var.rsplit_once('.')?;
+    let Some((label, qualifier)) = label_and_var.rsplit_once('.') else {
+        return env
+            .get_labeled_var(label_and_var, field)
+            .map(|scope_var| SqlExpr::Column(scope_var.alias.clone()));
+    };
     if let Some(scope_var) = env.get_labeled_var(label, qualifier)
         && matches!(
             scope_var.var.ty.kind,
@@ -3297,6 +5041,12 @@ fn normalize_labeled_field_select(
     field: &str,
     env: &CompileEnv,
 ) -> Option<SqlExpr> {
+    if let SqlExpr::Column(label) = expr
+        && let Some(scope_var) = env.get_labeled_var(label, field)
+    {
+        return Some(SqlExpr::Column(scope_var.alias.clone()));
+    }
+
     if let SqlExpr::Column(label) = expr
         && let Some((qualifier, nested_field)) = field.rsplit_once('.')
     {
@@ -3779,17 +5529,77 @@ fn seed_event_trigger_env(env: &mut CompileEnv) -> CompiledEventTriggerBindings 
 fn resolve_assign_target(
     target: &AssignTarget,
     env: &CompileEnv,
-) -> Result<(usize, SqlType), ParseError> {
+) -> Result<(usize, SqlType, Option<String>, bool), ParseError> {
     match target {
+        AssignTarget::Parameter(index) => env
+            .get_parameter(*index)
+            .map(|var| (var.slot, var.ty, None, var.not_null))
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "existing positional parameter assignment target",
+                actual: format!("${index}"),
+            }),
         AssignTarget::Name(name) => env
             .get_var(name)
-            .map(|var| (var.slot, var.ty))
+            .map(|var| {
+                if var.constant {
+                    Err(ParseError::DetailedError {
+                        message: format!("variable \"{name}\" is declared CONSTANT"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22005",
+                    })
+                } else {
+                    Ok((var.slot, var.ty, Some(name.clone()), var.not_null))
+                }
+            })
+            .transpose()?
             .ok_or_else(|| ParseError::UnknownColumn(name.clone())),
         AssignTarget::Field { relation, field } => env
             .get_relation_field(relation, field)
-            .map(|column| (column.slot, column.sql_type))
+            .map(|column| (column.slot, column.sql_type, None, false))
             .ok_or_else(|| ParseError::UnknownColumn(format!("{relation}.{field}"))),
+        AssignTarget::Indirect { .. } => Err(ParseError::FeatureNotSupported(
+            "indirect assignment target is only supported for assignment statements".into(),
+        )),
     }
+}
+
+fn compile_select_into_target(
+    target: &AssignTarget,
+    env: &CompileEnv,
+) -> Result<CompiledSelectIntoTarget, ParseError> {
+    let (slot, ty, name, not_null) = resolve_assign_target(target, env)?;
+    Ok(CompiledSelectIntoTarget {
+        slot,
+        ty,
+        name,
+        not_null,
+    })
+}
+
+fn compile_indirect_assign_target(
+    target: &AssignTarget,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<Option<CompiledIndirectAssignTarget>, ParseError> {
+    let AssignTarget::Indirect { base, indirection } = target else {
+        return Ok(None);
+    };
+    let (slot, ty, _, _) = resolve_assign_target(base, env)?;
+    let indirection = indirection
+        .iter()
+        .map(|step| match step {
+            AssignIndirection::Field(field) => Ok(CompiledAssignIndirection::Field(field.clone())),
+            AssignIndirection::Subscript(expr) => Ok(CompiledAssignIndirection::Subscript(
+                compile_expr_text(expr, catalog, env)?,
+            )),
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    Ok(Some(CompiledIndirectAssignTarget {
+        slot,
+        ty,
+        indirection,
+    }))
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
@@ -3859,6 +5669,20 @@ mod tests {
                 expr: Box::new(SqlExpr::Column(plpgsql_label_alias(0, slot, "item"))),
                 field: "note".into(),
             }
+        );
+    }
+
+    #[test]
+    fn normalizes_labeled_scalar_variable_reference() {
+        let mut env = CompileEnv::default();
+        let slot = env.define_var("param1", SqlType::new(SqlTypeKind::Int4));
+        env.push_label_scope("pl_qual_names");
+        env.define_var("param1", SqlType::new(SqlTypeKind::Int4));
+
+        let parsed = parse_expr("pl_qual_names.param1").unwrap();
+        assert_eq!(
+            normalize_plpgsql_expr(parsed, &env),
+            SqlExpr::Column(plpgsql_label_alias(0, slot, "param1")),
         );
     }
 

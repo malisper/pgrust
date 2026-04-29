@@ -229,6 +229,7 @@ fn analyze_executor_context(
         database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
+        pending_portals: Vec::new(),
         catalog: visible_catalog.map(crate::backend::executor::executor_catalog),
         scalar_function_cache: std::collections::HashMap::new(),
         srf_rows_cache: std::collections::HashMap::new(),
@@ -2838,6 +2839,9 @@ fn query_text_column(session: &mut Session, db: &Database, sql: &str) -> Vec<Str
 
 fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
     match err {
+        ExecError::WithContext { source, .. } => {
+            assert_sqlstate(*source, expected_sqlstate, expected_message_part)
+        }
         ExecError::DetailedError {
             message, sqlstate, ..
         }
@@ -2851,6 +2855,36 @@ fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_par
             );
         }
         other => panic!("expected SQLSTATE {expected_sqlstate}, got {other:?}"),
+    }
+}
+
+fn exec_error_context_contains(err: &ExecError, needle: &str) -> bool {
+    match err {
+        ExecError::WithContext { source, context } => {
+            context.contains(needle) || exec_error_context_contains(source, needle)
+        }
+        _ => false,
+    }
+}
+
+fn exec_error_is_or_wraps_division_by_zero(err: &ExecError) -> bool {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_is_or_wraps_division_by_zero(source),
+        ExecError::DivisionByZero(_) => true,
+        _ => false,
+    }
+}
+
+fn exec_error_detailed_message_sqlstate(err: &ExecError) -> Option<(&str, &'static str)> {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_detailed_message_sqlstate(source),
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => Some((message.as_str(), *sqlstate)),
+        ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        }) => Some((message.as_str(), *sqlstate)),
+        _ => None,
     }
 }
 
@@ -7752,7 +7786,7 @@ fn autovacuum_once_skips_locked_table_without_blocking() {
     let rel = relation_locator_for(&db, 1, "av_locked_items");
     db.table_locks.lock_table(
         rel,
-        crate::backend::storage::lmgr::TableLockMode::RowExclusive,
+        crate::backend::storage::lmgr::TableLockMode::ShareUpdateExclusive,
         99,
     );
     let result = db.run_autovacuum_once();
@@ -12831,6 +12865,272 @@ fn relation_privileges_gate_select_dml_copy_and_locking() {
 }
 
 #[test]
+fn lock_table_requires_transaction_block() {
+    let dir = temp_dir("lock_table_requires_transaction");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table lock_outside_txn(id int4)")
+        .unwrap();
+    match session.execute(&db, "lock table lock_outside_txn") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "LOCK TABLE can only be used in transaction blocks");
+            assert_eq!(sqlstate, "25P01");
+        }
+        other => panic!("expected transaction block error, got {other:?}"),
+    }
+}
+
+#[test]
+fn lock_table_permissions_follow_postgres() {
+    fn lock_allowed(session: &mut Session, db: &Database, sql: &str) {
+        session.execute(db, "begin").unwrap();
+        session.execute(db, sql).unwrap();
+        session.execute(db, "rollback").unwrap();
+    }
+
+    fn assert_lock_permission_denied(session: &mut Session, db: &Database, sql: &str, table: &str) {
+        session.execute(db, "begin").unwrap();
+        match session.execute(db, sql) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+        session.execute(db, "rollback").unwrap();
+    }
+
+    let dir = temp_dir("lock_table_permissions");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role lock_owner login")
+        .unwrap();
+    for role in [
+        "lock_reader",
+        "lock_inserter",
+        "lock_updater",
+        "lock_deleter",
+        "lock_truncater",
+        "lock_maintainer",
+        "lock_pg_maintainer",
+    ] {
+        session
+            .execute(&db, &format!("create role {role} login"))
+            .unwrap();
+    }
+    for table in [
+        "lock_select_acl",
+        "lock_insert_acl",
+        "lock_update_acl",
+        "lock_delete_acl",
+        "lock_truncate_acl",
+        "lock_maintain_acl",
+        "lock_pg_maintain_acl",
+    ] {
+        session
+            .execute(&db, &format!("create table {table}(id int4)"))
+            .unwrap();
+        session
+            .execute(&db, &format!("alter table {table} owner to lock_owner"))
+            .unwrap();
+    }
+    session
+        .execute(&db, "grant select on lock_select_acl to lock_reader")
+        .unwrap();
+    session
+        .execute(&db, "grant insert on lock_insert_acl to lock_inserter")
+        .unwrap();
+    session
+        .execute(&db, "grant update on lock_update_acl to lock_updater")
+        .unwrap();
+    session
+        .execute(&db, "grant delete on lock_delete_acl to lock_deleter")
+        .unwrap();
+    session
+        .execute(&db, "grant truncate on lock_truncate_acl to lock_truncater")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant maintain on lock_maintain_acl to lock_maintainer",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant pg_maintain to lock_pg_maintainer")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization lock_reader")
+        .unwrap();
+    lock_allowed(
+        &mut session,
+        &db,
+        "lock table lock_select_acl in access share mode",
+    );
+    assert_lock_permission_denied(
+        &mut session,
+        &db,
+        "lock table lock_select_acl in row share mode",
+        "lock_select_acl",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization lock_inserter")
+        .unwrap();
+    lock_allowed(
+        &mut session,
+        &db,
+        "lock table lock_insert_acl in access share mode",
+    );
+    lock_allowed(
+        &mut session,
+        &db,
+        "lock table lock_insert_acl in row share mode",
+    );
+    lock_allowed(
+        &mut session,
+        &db,
+        "lock table lock_insert_acl in row exclusive mode",
+    );
+    assert_lock_permission_denied(
+        &mut session,
+        &db,
+        "lock table lock_insert_acl in share update exclusive mode",
+        "lock_insert_acl",
+    );
+
+    for (role, table) in [
+        ("lock_updater", "lock_update_acl"),
+        ("lock_deleter", "lock_delete_acl"),
+        ("lock_truncater", "lock_truncate_acl"),
+        ("lock_maintainer", "lock_maintain_acl"),
+        ("lock_pg_maintainer", "lock_pg_maintain_acl"),
+    ] {
+        session.execute(&db, "reset session authorization").unwrap();
+        session
+            .execute(&db, &format!("set session authorization {role}"))
+            .unwrap();
+        lock_allowed(
+            &mut session,
+            &db,
+            &format!("lock table {table} in access exclusive mode"),
+        );
+    }
+}
+
+#[test]
+fn lock_table_nowait_reports_lock_not_available() {
+    let dir = temp_dir("lock_table_nowait");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder
+        .execute(&db, "create table lock_nowait_items(id int4)")
+        .unwrap();
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "lock table lock_nowait_items in access exclusive mode")
+        .unwrap();
+
+    waiter.execute(&db, "begin").unwrap();
+    match waiter.execute(
+        &db,
+        "lock table lock_nowait_items in access share mode nowait",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "could not obtain lock on relation \"lock_nowait_items\""
+            );
+            assert_eq!(sqlstate, "55P03");
+        }
+        other => panic!("expected lock-not-available error, got {other:?}"),
+    }
+    waiter.execute(&db, "rollback").unwrap();
+    holder.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn lock_table_locks_persist_until_transaction_end() {
+    let dir = temp_dir("lock_table_pg_locks_lifetime");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut holder = Session::new(1);
+
+    holder
+        .execute(&db, "create table lock_lifetime_items(id int4)")
+        .unwrap();
+    let relation_oid = relation_oid_for(&db, 1, "lock_lifetime_items");
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "lock table lock_lifetime_items in share mode")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            2,
+            &format!(
+                "select mode, granted from pg_locks \
+                 where locktype = 'relation' and relation = {relation_oid} and pid = 1"
+            ),
+        ),
+        vec![vec![Value::Text("ShareLock".into()), Value::Bool(true)]]
+    );
+
+    holder.execute(&db, "commit").unwrap();
+    assert!(
+        query_rows(
+            &db,
+            2,
+            &format!(
+                "select mode from pg_locks \
+                 where locktype = 'relation' and relation = {relation_oid} and pid = 1"
+            ),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn pg_write_all_data_does_not_allow_system_catalog_writes() {
+    let dir = temp_dir("pg_write_all_data_system_catalog_writes");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role catalog_writer login")
+        .unwrap();
+    session
+        .execute(&db, "grant pg_write_all_data to catalog_writer")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization catalog_writer")
+        .unwrap();
+
+    match session.execute(&db, "update pg_catalog.pg_class set relname = 'blocked'") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table pg_class");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected system catalog write permission error, got {other:?}"),
+    }
+}
+
+#[test]
 fn normal_view_select_uses_view_owner_for_base_privileges() {
     fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
         match result {
@@ -17706,6 +18006,534 @@ fn comment_on_function_uses_pg_proc_description_rows() {
 }
 
 #[test]
+fn plpgsql_keyword_vars_and_comment_on_function_body() {
+    let base = temp_dir("plpgsql_keyword_vars_comment");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_return_var_test() returns int4 language plpgsql as $$
+         declare
+           return int4 := 42;
+         begin
+           return := return + 1;
+           return return;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_return_var_test()"),
+        vec![vec![Value::Int32(43)]]
+    );
+
+    db.execute(
+        1,
+        "create function plpgsql_comment_body_test() returns int4 language plpgsql as $$
+         declare
+           comment int4 := 21;
+         begin
+           comment := comment * 2;
+           comment on function plpgsql_comment_body_test() is 'body comment';
+           return comment;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_comment_body_test()"),
+        vec![vec![Value::Int32(42)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select obj_description('plpgsql_comment_body_test()'::regprocedure, 'pg_proc')"
+        ),
+        vec![vec![Value::Text("body comment".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_get_stacked_diagnostics_reports_exception_fields() {
+    let base = temp_dir("plpgsql_stacked_diagnostics");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_zero_divide_diag() returns int4 language plpgsql as $$
+         declare v int4 := 0;
+         begin
+           return 10 / v;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_stacked_context_diag() returns void language plpgsql as $$
+         declare
+           _sqlstate text;
+           _message text;
+           _context text;
+         begin
+           perform plpgsql_zero_divide_diag();
+         exception when others then
+           get stacked diagnostics
+             _sqlstate = returned_sqlstate,
+             _message = message_text,
+             _context = pg_exception_context;
+           raise notice 'sqlstate: %, message: %, context: [%]',
+             _sqlstate, _message, replace(_context, E'\\n', ' <- ');
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "select plpgsql_stacked_context_diag()")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from(
+            "sqlstate: 22012, message: division by zero, context: [PL/pgSQL function plpgsql_zero_divide_diag() line 4 at RETURN <- SQL statement \"SELECT plpgsql_zero_divide_diag()\" <- PL/pgSQL function plpgsql_stacked_context_diag() line 7 at PERFORM]"
+        )]
+    );
+
+    db.execute(
+        1,
+        "create or replace function plpgsql_raise_diag() returns void language plpgsql as $$
+         begin
+           raise exception 'custom exception'
+             using detail = 'some detail',
+                   hint = 'some hint',
+                   column = 'some column',
+                   constraint = 'some constraint',
+                   datatype = 'some datatype',
+                   table = 'some table',
+                   schema = 'some schema';
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_stacked_fields_diag() returns void language plpgsql as $$
+         declare
+           _message text;
+           _detail text;
+           _hint text;
+           _column text;
+           _constraint text;
+           _datatype text;
+           _table text;
+           _schema text;
+         begin
+           perform plpgsql_raise_diag();
+         exception when others then
+           get stacked diagnostics
+             _message = message_text,
+             _detail = pg_exception_detail,
+             _hint = pg_exception_hint,
+             _column = column_name,
+             _constraint = constraint_name,
+             _datatype = pg_datatype_name,
+             _table = table_name,
+             _schema = schema_name;
+           raise notice '%|%|%|%|%|%|%|%',
+             _message, _detail, _hint, _column, _constraint, _datatype, _table, _schema;
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "select plpgsql_stacked_fields_diag()")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from(
+            "custom exception|some detail|some hint|some column|some constraint|some datatype|some table|some schema"
+        )]
+    );
+}
+
+#[test]
+fn plpgsql_get_stacked_diagnostics_requires_exception_handler() {
+    let base = temp_dir("plpgsql_stacked_diagnostics_outside");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_stacked_diag_outside() returns void language plpgsql as $$
+         declare _message text;
+         begin
+           get stacked diagnostics _message = message_text;
+         end
+         $$",
+    )
+    .unwrap();
+
+    match db.execute(1, "select plpgsql_stacked_diag_outside()") {
+        Err(err) => {
+            assert!(exec_error_context_contains(&err, "GET STACKED DIAGNOSTICS"));
+            let Some((message, sqlstate)) = exec_error_detailed_message_sqlstate(&err) else {
+                panic!("expected detailed error, got {err:?}");
+            };
+            assert_eq!(
+                message,
+                "GET STACKED DIAGNOSTICS cannot be used outside an exception handler"
+            );
+            assert_eq!(sqlstate, "0Z002");
+        }
+        other => panic!("expected stacked diagnostics error, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_exception_sqlstate_condition_matches_error_code() {
+    let base = temp_dir("plpgsql_exception_sqlstate_condition");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_sqlstate_condition_test() returns void language plpgsql as $$
+         begin
+           perform 1/0;
+         exception
+           when sqlstate '22012' then
+             raise notice using message = sqlstate;
+             raise sqlstate '22012' using message = 'substitute message';
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    match db.execute(1, "select plpgsql_sqlstate_condition_test()") {
+        Err(err) => {
+            assert_eq!(take_notice_messages(), vec![String::from("22012")]);
+            let Some((message, sqlstate)) = exec_error_detailed_message_sqlstate(&err) else {
+                panic!("expected detailed error, got {err:?}");
+            };
+            assert_eq!(message, "substitute message");
+            assert_eq!(sqlstate, "22012");
+        }
+        other => panic!("expected substitute error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create function plpgsql_sqlstate_restore_test() returns void language plpgsql as $$
+         begin
+           begin
+             raise exception 'user exception';
+           exception when others then
+             raise notice 'caught exception % %', sqlstate, sqlerrm;
+             begin
+               raise notice '% %', sqlstate, sqlerrm;
+               perform 10/0;
+             exception
+               when division_by_zero then
+                 raise notice 'caught exception % %', sqlstate, sqlerrm;
+             end;
+             raise notice '% %', sqlstate, sqlerrm;
+           end;
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "select plpgsql_sqlstate_restore_test()")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            String::from("caught exception P0001 user exception"),
+            String::from("P0001 user exception"),
+            String::from("caught exception 22012 division by zero"),
+            String::from("P0001 user exception"),
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_variadic_parameter_is_visible_as_positional_array() {
+    let base = temp_dir("plpgsql_variadic_positional");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_variadic_notice(variadic int4[]) returns void language plpgsql as $$
+         begin
+           for i in array_lower($1, 1)..array_upper($1, 1) loop
+             raise notice '%', $1[i];
+           end loop;
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "select plpgsql_variadic_notice(1,2,3)")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("1"), String::from("2"), String::from("3")]
+    );
+}
+
+#[test]
+fn plpgsql_get_diagnostics_pg_context_reports_live_stack() {
+    let base = temp_dir("plpgsql_pg_context");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_context_inner() returns text language plpgsql as $$
+         declare
+           _context text;
+         begin
+           get diagnostics _context = pg_context;
+           return _context;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_context_outer() returns text language plpgsql as $$
+         declare
+           _context text;
+         begin
+           _context := plpgsql_context_inner();
+           return _context;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let rows = query_rows(&db, 1, "select plpgsql_context_outer()");
+    let Value::Text(context) = &rows[0][0] else {
+        panic!("expected context text, got {rows:?}");
+    };
+    assert!(context.contains("PL/pgSQL function plpgsql_context_inner()"));
+    assert!(context.contains("at GET DIAGNOSTICS"));
+    assert!(context.contains("PL/pgSQL function plpgsql_context_outer()"));
+    assert!(context.contains("at assignment"));
+}
+
+#[test]
+fn plpgsql_get_diagnostics_rejects_composite_target() {
+    let base = temp_dir("plpgsql_get_diagnostics_composite_target");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table plpgsql_diag_row(a int4)")
+        .unwrap();
+    let err = db
+        .execute(
+            1,
+            "create function plpgsql_diag_bad(x plpgsql_diag_row) returns void language plpgsql as $$
+             begin
+               get diagnostics x = row_count;
+               return;
+             end
+             $$",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42804", "\"x\" is not a scalar variable");
+}
+
+#[test]
+fn plpgsql_declare_default_scope_matches_declaration_order() {
+    let base = temp_dir("plpgsql_declare_default_scope");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_declare_default_scope() returns text language plpgsql as $$
+         declare
+           x int := 42;
+         begin
+           declare
+             y int := x + 1;
+             x int := x + 2;
+             z int := x * 10;
+           begin
+             return x::text || ',' || y::text || ',' || z::text;
+           end;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_declare_default_scope()"),
+        vec![vec![Value::Text("44,43,440".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
+    let base = temp_dir("plpgsql_variable_conflict_modes");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table plpgsql_conflict_src(q1 int, q2 int)")
+        .unwrap();
+    session
+        .execute(&db, "insert into plpgsql_conflict_src values (10, 20)")
+        .unwrap();
+    session
+        .execute(&db, "set plpgsql.variable_conflict = error")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function plpgsql_conflict_test() returns text language plpgsql as $$
+             declare
+               a int;
+               b int;
+               q1 int := 42;
+             begin
+               for a, b in select q1, q2 from plpgsql_conflict_src loop
+                 return a::text || ',' || b::text;
+               end loop;
+               return null;
+             end
+             $$",
+        )
+        .unwrap();
+
+    assert_sqlstate(
+        session
+            .execute(&db, "select plpgsql_conflict_test()")
+            .unwrap_err(),
+        "42702",
+        "column reference \"q1\" is ambiguous",
+    );
+
+    session
+        .execute(
+            &db,
+            "create or replace function plpgsql_conflict_test() returns text language plpgsql as $$
+             #variable_conflict use_variable
+             declare
+               a int;
+               b int;
+               q1 int := 42;
+             begin
+               for a, b in select q1, q2 from plpgsql_conflict_src loop
+                 return a::text || ',' || b::text;
+               end loop;
+               return null;
+             end
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select plpgsql_conflict_test()"),
+        vec![vec![Value::Text("42,20".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create or replace function plpgsql_conflict_test() returns text language plpgsql as $$
+             #variable_conflict use_column
+             declare
+               a int;
+               b int;
+               q1 int := 42;
+             begin
+               for a, b in select q1, q2 from plpgsql_conflict_src loop
+                 return a::text || ',' || b::text;
+               end loop;
+               return null;
+             end
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select plpgsql_conflict_test()"),
+        vec![vec![Value::Text("10,20".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_missing_return_reports_function_context() {
+    let base = temp_dir("plpgsql_missing_return_context");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_missing_return_context() returns int language plpgsql as $$
+         begin
+           null;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db
+        .execute(1, "select plpgsql_missing_return_context()")
+        .unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function plpgsql_missing_return_context()"
+    ));
+    assert_sqlstate(
+        err,
+        "2F005",
+        "control reached end of function without RETURN",
+    );
+}
+
+#[test]
+fn plpgsql_get_diagnostics_pg_routine_oid_reports_current_function() {
+    let base = temp_dir("plpgsql_pg_routine_oid");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_current_routine_oid(arg text) returns regprocedure language plpgsql as $$
+         declare fn_oid regprocedure;
+         begin
+           get diagnostics fn_oid = pg_routine_oid;
+           return fn_oid;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_current_routine_oid('x')::text"),
+        vec![vec![Value::Text(
+            "plpgsql_current_routine_oid(text)".into()
+        )]]
+    );
+
+    clear_notices();
+    db.execute(
+        1,
+        "do $$
+         declare fn_oid oid;
+         begin
+           get diagnostics fn_oid = pg_routine_oid;
+           raise notice 'pg_routine_oid = %', fn_oid;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("pg_routine_oid = 0")]
+    );
+}
+
+#[test]
 fn comment_on_function_missing_signature_uses_canonical_type_names() {
     let base = temp_dir("comment_on_function_missing_sig");
     let db = Database::open(&base, 16).unwrap();
@@ -17725,6 +18553,19 @@ fn comment_on_function_missing_signature_uses_canonical_type_names() {
         }
         other => panic!("expected missing function error, got {other:?}"),
     }
+}
+
+#[test]
+fn missing_scalar_function_call_reports_signature() {
+    let base = temp_dir("missing_scalar_function_call");
+    let db = Database::open(&base, 16).unwrap();
+
+    let err = db.execute(1, "select missing_scalar_func(1)").unwrap_err();
+    assert_sqlstate(
+        err,
+        "42883",
+        "function missing_scalar_func(integer) does not exist",
+    );
 }
 
 #[test]
@@ -20146,6 +20987,20 @@ fn regclass_cast_resolves_text_expression() {
             crate::include::catalog::PG_OPERATOR_RELATION_OID as i64
         )]]
     );
+}
+
+#[test]
+fn regclass_cast_reports_missing_schema_for_qualified_name() {
+    let base = temp_dir("regclass_missing_schema");
+    let db = Database::open(&base, 16).unwrap();
+
+    let err = db
+        .execute(1, "select 'nonexistent.stuffs'::regclass")
+        .unwrap_err();
+    let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+        .unwrap_or_else(|| panic!("expected detailed regclass lookup error, got {err:?}"));
+    assert_eq!(message, "schema \"nonexistent\" does not exist");
+    assert_eq!(sqlstate, "3F000");
 }
 
 #[test]
@@ -36158,6 +37013,121 @@ fn plpgsql_labeled_record_reference_uses_outer_slot_when_shadowed() {
 }
 
 #[test]
+fn plpgsql_labeled_scalar_references_include_function_parameters() {
+    let base = temp_dir("plpgsql_labeled_scalar_refs");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_labeled_scalar_lookup(param1 int) returns text language plpgsql as $$
+         <<outerblock>>
+         declare
+           param1 int := 1;
+         begin
+           <<innerblock>>
+           declare
+             param1 int := 2;
+           begin
+             return param1::text
+                    || ',' || plpgsql_labeled_scalar_lookup.param1::text
+                    || ',' || outerblock.param1::text
+                    || ',' || innerblock.param1::text;
+           end;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_labeled_scalar_lookup(42)"),
+        vec![vec![Value::Text("2,42,1,2".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_select_into_leading_form_splits_tight_targets() {
+    let base = temp_dir("plpgsql_select_into_tight_targets");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_select_into_tight_targets(p1 int) returns bool language plpgsql as $$
+         declare
+           x int;
+           y int;
+         begin
+           select into x,y p1, $1;
+           return x = y;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_select_into_tight_targets(42)"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_multidimensional_array_element_assignment_preserves_shape() {
+    let base = temp_dir("plpgsql_multidim_array_assignment");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_multidim_array_assignment() returns text[] language plpgsql as $$
+         declare
+           arr text[];
+           lr text;
+           i int;
+         begin
+           arr := array[array['foo','bar'], array['baz','quux']];
+           lr := 'fool';
+           i := 1;
+           arr[(select i)][(select i + 1)] := (select lr);
+           return arr;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_multidim_array_assignment()::text"),
+        vec![vec![Value::Text("{{foo,fool},{baz,quux}}".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_not_null_variable_assignment_raises_and_can_be_caught() {
+    let base = temp_dir("plpgsql_not_null_var_assignment");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_not_null_var_assignment() returns int language plpgsql as $$
+         declare
+           i integer not null := 0;
+         begin
+           begin
+             i := (select null::integer);
+           exception
+             when others then
+               i := (select 1::integer);
+           end;
+           return i;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_not_null_var_assignment()"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn plpgsql_assignment_query_expr_from_clause_uses_sql_scope() {
     let base = temp_dir("plpgsql_assignment_query_expr_from");
     let db = Database::open(&base, 16).unwrap();
@@ -48964,6 +49934,157 @@ fn create_function_setof_scalar_works_in_from_and_project_set() {
 }
 
 #[test]
+fn create_plpgsql_function_assigns_composite_array_field_subscript() {
+    let dir = temp_dir("create_plpgsql_function_array_field_subscript");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type plpgsql_array_row as (id int4, ar text[])")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_arrayassign1() returns text[] language plpgsql as $$
+         declare r plpgsql_array_row;
+         begin
+           r := row(1, array['foo','bar','baz']);
+           r.ar[2] := 'replace';
+           return r.ar;
+         end$$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_arrayassign1()"),
+        vec![vec![Value::PgArray(ArrayValue::from_1d(vec![
+            Value::Text("foo".into()),
+            Value::Text("replace".into()),
+            Value::Text("baz".into()),
+        ]))]]
+    );
+}
+
+#[test]
+fn plpgsql_orderedarray_domain_cast_enforces_array_subscript_check() {
+    fn assert_orderedarray_violation(err: ExecError) {
+        let err = match err {
+            ExecError::WithContext { source, .. } => *source,
+            other => other,
+        };
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                sqlstate: "23514",
+                ..
+            } if message == "value for domain orderedarray violates check constraint \"sorted\""
+        ));
+    }
+
+    let dir = temp_dir("plpgsql_orderedarray_domain_cast");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create domain orderedarray as int[2] constraint sorted check (value[1] < value[2])",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ('{1,2}'::orderedarray)[1], ('{1,2}'::orderedarray)[2]"
+        ),
+        vec![vec![Value::Int32(1), Value::Int32(2)]]
+    );
+    assert_orderedarray_violation(db.execute(1, "select '{2,1}'::orderedarray").unwrap_err());
+
+    db.execute(
+        1,
+        "create function testoa(x1 int, x2 int, x3 int) returns orderedarray
+         language plpgsql as $$
+         declare res orderedarray;
+         begin
+           res := array[x1, x2];
+           res[2] := x3;
+           return res;
+         end$$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select (testoa(1,2,3))[1], (testoa(1,2,3))[2]"),
+        vec![vec![Value::Int32(1), Value::Int32(3)]]
+    );
+    assert_orderedarray_violation(db.execute(1, "select testoa(2,1,3)").unwrap_err());
+    assert_orderedarray_violation(db.execute(1, "select testoa(1,2,1)").unwrap_err());
+}
+
+#[test]
+fn plpgsql_do_assignment_enforces_function_domain_checks() {
+    let dir = temp_dir("plpgsql_do_domain_checks");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+        "create function plpgsql_domain_check_test(val int4) returns boolean language plpgsql immutable as $$ begin return val > 0; end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create domain plpgsql_domain_test as int4 check(plpgsql_domain_check_test(value))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "do $$ declare v_test plpgsql_domain_test; begin v_test := 1; end $$",
+        )
+        .unwrap();
+
+    let err = session
+        .execute(
+            &db,
+            "do $$ declare v_test plpgsql_domain_test := 1; begin v_test := 0; end $$",
+        )
+        .unwrap_err();
+    let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+        .unwrap_or_else(|| panic!("expected scalar domain check failure, got {err:?}"));
+    assert_eq!(
+        message,
+        "value for domain plpgsql_domain_test violates check constraint \"plpgsql_domain_test_check\""
+    );
+    assert_eq!(sqlstate, "23514");
+
+    session
+        .execute(
+            &db,
+        "create function plpgsql_arr_domain_check_test(val int4[]) returns boolean language plpgsql immutable as $$ begin return val[1] > 0; end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+        "create domain plpgsql_arr_domain_test as int4[] check(plpgsql_arr_domain_check_test(value))",
+        )
+        .unwrap();
+    let err = session
+        .execute(
+            &db,
+            "do $$ declare v_test plpgsql_arr_domain_test := array[1]; begin v_test := array[0]; end $$",
+        )
+        .unwrap_err();
+    let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+        .unwrap_or_else(|| panic!("expected array domain check failure, got {err:?}"));
+    assert_eq!(
+        message,
+        "value for domain plpgsql_arr_domain_test violates check constraint \"plpgsql_arr_domain_test_check\""
+    );
+    assert_eq!(sqlstate, "23514");
+}
+
+#[test]
 fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
     let dir = temp_dir("create_function_void_regprocedure");
     let db = Database::open(&dir, 64).unwrap();
@@ -49098,10 +50219,7 @@ fn bootstrap_toast_relations_resolve_before_privilege_checks() {
         Err(ExecError::DetailedError {
             message, sqlstate, ..
         }) => {
-            assert_eq!(
-                message,
-                "permission denied for table pg_toast.pg_toast_1213"
-            );
+            assert_eq!(message, "permission denied for table pg_toast_1213");
             assert_eq!(sqlstate, "42501");
         }
         other => panic!("expected toast table permission error, got {other:?}"),
@@ -49840,6 +50958,557 @@ fn plpgsql_refcursor_open_fetch_close_work() {
 }
 
 #[test]
+fn plpgsql_constant_refcursor_requires_portal_name() {
+    let dir = temp_dir("plpgsql_constant_refcursor");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_constant_cursor_items (id int4)")
+        .unwrap();
+    db.execute(1, "insert into pl_constant_cursor_items values (1)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function constant_refcursor_without_name() returns refcursor language plpgsql as $$
+            declare
+                rc constant refcursor;
+            begin
+                open rc for select id from pl_constant_cursor_items;
+                return rc;
+            end
+        $$",
+    )
+    .unwrap();
+    let err = db
+        .execute(1, "select constant_refcursor_without_name()")
+        .expect_err("constant refcursor without name should fail");
+    let root = match &err {
+        ExecError::WithContext { source, .. } => source.as_ref(),
+        other => other,
+    };
+    match root {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(message, "variable \"rc\" is declared CONSTANT");
+            assert_eq!(*sqlstate, "22005");
+        }
+        other => panic!("expected constant refcursor error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create function constant_refcursor_with_name() returns refcursor language plpgsql as $$
+            declare
+                rc constant refcursor := 'my_cursor_name';
+            begin
+                open rc for select id from pl_constant_cursor_items;
+                return rc;
+            end
+        $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select constant_refcursor_with_name()"),
+        vec![vec![Value::Text("my_cursor_name".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_returned_refcursor_is_fetchable() {
+    let dir = temp_dir("plpgsql_returned_refcursor");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_returned_cursor_items (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into pl_returned_cursor_items values (5), (50), (500)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_return_unnamed_refcursor() returns refcursor language plpgsql as $$
+            declare
+                rc refcursor;
+            begin
+                open rc for select id from pl_returned_cursor_items order by id;
+                return rc;
+            end
+        $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_use_returned_refcursor() returns int4 language plpgsql as $$
+            declare
+                rc refcursor;
+                x record;
+            begin
+                rc := pl_return_unnamed_refcursor();
+                fetch next from rc into x;
+                return x.id;
+            end
+        $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select pl_use_returned_refcursor()"),
+        vec![vec![Value::Int32(5)]]
+    );
+
+    db.execute(
+        1,
+        "create function pl_return_named_refcursor(rc refcursor) returns refcursor language plpgsql as $$
+            begin
+                open rc for select id from pl_returned_cursor_items order by id;
+                return rc;
+            end
+        $$",
+    )
+    .unwrap();
+    let mut session = Session::new(1);
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pl_return_named_refcursor('test1')"
+        ),
+        vec![vec![Value::Text("test1".into())]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch next in test1"),
+        vec![vec![Value::Int32(5)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from test1"),
+        vec![vec![Value::Int32(50)], vec![Value::Int32(500)]]
+    );
+    session.execute(&db, "commit").unwrap();
+    assert_sqlstate(
+        session.execute(&db, "fetch next from test1").unwrap_err(),
+        "34000",
+        "cursor \"test1\" does not exist",
+    );
+}
+
+#[test]
+fn plpgsql_partitioned_table_percent_type_signatures() {
+    let dir = temp_dir("plpgsql_partitioned_percent_type");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table pl_percent_parted (a int4, b text) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pl_percent_parted_1 partition of pl_percent_parted for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pl_percent_parted_2 partition of pl_percent_parted for values in (2)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into pl_percent_parted values (1, 'Row 1'), (2, 'Row 2')",
+    )
+    .unwrap();
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create function pl_percent_get(pl_percent_parted.a%type)
+         returns pl_percent_parted language plpgsql as $$
+         declare
+           a_val pl_percent_parted.a%TYPE;
+           result pl_percent_parted%ROWTYPE;
+         begin
+           a_val := $1;
+           select * into result from pl_percent_parted where a = a_val;
+           return result;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "type reference pl_percent_parted.a%TYPE converted to integer"
+        )]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_percent_get(1) as t"),
+        vec![vec![Value::Int32(1), Value::Text("Row 1".into())]]
+    );
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create function pl_percent_list()
+         returns setof public.pl_percent_parted.a%TYPE language plpgsql as $$
+         declare
+           row public.pl_percent_parted%ROWTYPE;
+           a_val public.pl_percent_parted.a%TYPE;
+         begin
+           for row in select * from public.pl_percent_parted order by a loop
+             a_val := row.a;
+             return next a_val;
+           end loop;
+           return;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "type reference public.pl_percent_parted.a%TYPE converted to integer"
+        )]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_percent_list() as t"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn plpgsql_where_current_of_updates_cursor_row() {
+    let dir = temp_dir("plpgsql_where_current_of");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_current_items (i int4, j int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into pl_current_items values (1, 1), (2, 2), (3, 3)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_current_bound() returns void language plpgsql as $$
+         declare
+           c cursor for select * from pl_current_items order by i;
+         begin
+           for r in c loop
+             update pl_current_items set i = i * 10, j = r.j * 2 where current of c;
+           end loop;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(1, "select pl_current_bound()").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_current_items order by i"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(2)],
+            vec![Value::Int32(20), Value::Int32(4)],
+            vec![Value::Int32(30), Value::Int32(6)],
+        ]
+    );
+
+    db.execute(
+        1,
+        "create function pl_current_refcursor() returns void language plpgsql as $$
+         declare
+           c refcursor := 'renamed_current_cursor';
+           r record;
+         begin
+           open c for select * from pl_current_items order by i;
+           loop
+             fetch c into r;
+             exit when not found;
+             update pl_current_items set i = i * 10, j = r.j + 1 where current of c;
+           end loop;
+           close c;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(1, "select pl_current_refcursor()").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_current_items order by i"),
+        vec![
+            vec![Value::Int32(100), Value::Int32(3)],
+            vec![Value::Int32(200), Value::Int32(5)],
+            vec![Value::Int32(300), Value::Int32(7)],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_record_function_returns_scalar_record_value() {
+    let dir = temp_dir("plpgsql_record_scalar_return");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function pl_record_scalar() returns record language plpgsql as $$
+         begin
+           return (1, 'hello');
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select pl_record_scalar()"),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("f1".into(), Value::Int32(1)),
+            ("f2".into(), Value::Text("hello".into())),
+        ]))]]
+    );
+}
+
+#[test]
+fn casted_row_constructor_keeps_row_default_name_for_expansion() {
+    let dir = temp_dir("casted_row_default_name");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type casted_row_pair as (i int4, j int4)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select (row).* from (select row(10, 1)::casted_row_pair) s",
+        ),
+        vec![vec![Value::Int32(10), Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn plpgsql_composite_return_handles_null_and_scalar_mismatch() {
+    let dir = temp_dir("plpgsql_composite_return_values");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type pl_comp_return as (i int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function pl_comp_return_next() returns setof pl_comp_return language plpgsql as $$
+         begin
+           return next (1, 'one')::pl_comp_return;
+           return next null::pl_comp_return;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_comp_return_next()"),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Null, Value::Null],
+        ]
+    );
+
+    db.execute(
+        1,
+        "create function pl_comp_scalar_mismatch() returns int4 language plpgsql as $$
+         begin
+           return (1, 'hello')::pl_comp_return;
+         end
+         $$",
+    )
+    .unwrap();
+    let err = db
+        .execute(1, "select pl_comp_scalar_mismatch()")
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("InvalidIntegerInput"),
+        "expected invalid integer input, got {err:?}"
+    );
+
+    db.execute(
+        1,
+        "create function pl_comp_noncomposite() returns pl_comp_return language plpgsql as $$
+         begin
+           return 1 + 1;
+         end
+         $$",
+    )
+    .unwrap();
+    let err = db.execute(1, "select pl_comp_noncomposite()").unwrap_err();
+    assert!(
+        format!("{err:?}")
+            .contains("cannot return non-composite value from function returning composite type"),
+        "expected non-composite return error, got {err:?}"
+    );
+}
+
+#[test]
+fn plpgsql_return_query_uses_current_composite_shape() {
+    let dir = temp_dir("plpgsql_return_query_current_shape");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table pl_return_shape(a int4, b int4, c int4, d int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into pl_return_shape values (10, 20, 30, 40), (50, 60, 70, 80)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_return_shape_f() returns setof pl_return_shape language plpgsql as $$
+         begin
+           return query select * from pl_return_shape;
+           return query execute 'select * from pl_return_shape';
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_return_shape_f()"),
+        vec![
+            vec![
+                Value::Int32(10),
+                Value::Int32(20),
+                Value::Int32(30),
+                Value::Int32(40),
+            ],
+            vec![
+                Value::Int32(50),
+                Value::Int32(60),
+                Value::Int32(70),
+                Value::Int32(80),
+            ],
+            vec![
+                Value::Int32(10),
+                Value::Int32(20),
+                Value::Int32(30),
+                Value::Int32(40),
+            ],
+            vec![
+                Value::Int32(50),
+                Value::Int32(60),
+                Value::Int32(70),
+                Value::Int32(80),
+            ],
+        ]
+    );
+
+    db.execute(1, "alter table pl_return_shape drop column b")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_return_shape_f()"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(30), Value::Int32(40)],
+            vec![Value::Int32(50), Value::Int32(70), Value::Int32(80)],
+            vec![Value::Int32(10), Value::Int32(30), Value::Int32(40)],
+            vec![Value::Int32(50), Value::Int32(70), Value::Int32(80)],
+        ]
+    );
+
+    db.execute(1, "alter table pl_return_shape drop column d")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_return_shape_f()"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(30)],
+            vec![Value::Int32(50), Value::Int32(70)],
+            vec![Value::Int32(10), Value::Int32(30)],
+            vec![Value::Int32(50), Value::Int32(70)],
+        ]
+    );
+
+    db.execute(1, "alter table pl_return_shape add column d int4")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_return_shape_f()"),
+        vec![
+            vec![Value::Int32(10), Value::Int32(30), Value::Null],
+            vec![Value::Int32(50), Value::Int32(70), Value::Null],
+            vec![Value::Int32(10), Value::Int32(30), Value::Null],
+            vec![Value::Int32(50), Value::Int32(70), Value::Null],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_nested_dynamic_do_preserves_outer_notices() {
+    let dir = temp_dir("plpgsql_nested_dynamic_do_notices");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "do $outer$
+         begin
+           for i in 1..3 loop
+             begin
+               execute $inner$
+                 do $$
+                 declare x int = 0;
+                 begin
+                   x := 1 / x;
+                 end
+                 $$;
+               $inner$;
+             exception when division_by_zero then
+               raise notice 'caught division by zero';
+             end;
+           end loop;
+         end
+         $outer$",
+        )
+        .unwrap();
+
+    assert_eq!(
+        take_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec![
+            "caught division by zero",
+            "caught division by zero",
+            "caught division by zero",
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_nonstandard_string_literals_decode_backslashes() {
+    let dir = temp_dir("plpgsql_nonstandard_strings");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set standard_conforming_strings = off")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            r#"create function pl_nonstandard_string() returns text language plpgsql as $$
+             begin
+               raise notice 'foo\\bar\041baz';
+               return 'foo\\bar\041baz';
+             end
+             $$"#,
+        )
+        .unwrap();
+
+    clear_notices();
+    let result = session
+        .execute(&db, "select pl_nonstandard_string()")
+        .unwrap();
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows, vec![vec![Value::Text("foo\\bar!baz".into())]]);
+    assert_eq!(take_notice_messages(), vec!["foo\\bar!baz".to_string()]);
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();
@@ -49911,7 +51580,8 @@ fn plpgsql_runtime_errors_include_statement_context() {
         ExecError::WithContext { source, context } => {
             assert!(context.contains("PL/pgSQL function fail_context"));
             assert!(context.contains("at PERFORM"));
-            assert!(matches!(*source, ExecError::DivisionByZero(_)));
+            assert!(exec_error_context_contains(&source, "SQL statement"));
+            assert!(exec_error_is_or_wraps_division_by_zero(&source));
         }
         other => panic!("expected PL/pgSQL context, got {other:?}"),
     }
@@ -50010,6 +51680,112 @@ fn plpgsql_context_uses_declared_polymorphic_signature() {
         }
         other => panic!("expected PL/pgSQL context, got {other:?}"),
     }
+}
+
+#[test]
+fn plpgsql_return_expression_errors_include_expression_context() {
+    let dir = temp_dir("plpgsql_return_expr_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function return_expr_context() returns int4 language plpgsql as $$
+         begin
+           return 1/0;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select return_expr_context()").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL expression \"1/0\""
+    ));
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function return_expr_context() line 3 at RETURN"
+    ));
+}
+
+#[test]
+fn plpgsql_declared_cursor_arg_errors_include_argument_context() {
+    let dir = temp_dir("plpgsql_cursor_arg_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function cursor_arg_context() returns void language plpgsql as $$
+         declare
+           c1 cursor (p1 int4, p2 int4) for select p1;
+         begin
+           open c1 (p2 := 77, p1 := 42/0);
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select cursor_arg_context()").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL expression \"42/0 AS p1, 77 AS p2\""
+    ));
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function cursor_arg_context() line 5 at OPEN"
+    ));
+}
+
+#[test]
+fn plpgsql_return_cast_errors_include_cast_context() {
+    let dir = temp_dir("plpgsql_return_cast_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type return_cast_pair as (x int4, y text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function return_cast_context() returns int4 language plpgsql as $$
+         begin
+           return (1, 'hello')::return_cast_pair;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select return_cast_context()").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function return_cast_context() while casting return value to function's return type"
+    ));
+}
+
+#[test]
+fn plpgsql_reraise_preserves_original_error_context() {
+    let dir = temp_dir("plpgsql_reraise_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function reraise_context() returns void language plpgsql as $$
+         begin
+           raise exception 'check me' using detail = 'detail';
+         exception when others then
+           raise;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select reraise_context()").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function reraise_context() line 3 at RAISE"
+    ));
+    assert!(!exec_error_context_contains(
+        &err,
+        "PL/pgSQL function reraise_context() line 5 at RAISE"
+    ));
 }
 
 #[test]
@@ -50757,6 +52533,327 @@ fn plpgsql_dynamic_execute_statement_supports_into_and_using() {
 }
 
 #[test]
+fn plpgsql_out_parameter_assignment_supports_positional_target() {
+    let dir = temp_dir("plpgsql_out_param_assignment");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function out_param_rows(out int4, out int4) returns setof record language plpgsql as $$ begin $1 := -1; $2 := -2; return next; $1 := 10; $2 := 20; return next; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from out_param_rows()"),
+        vec![
+            vec![Value::Int32(-1), Value::Int32(-2)],
+            vec![Value::Int32(10), Value::Int32(20)],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_raise_placeholder_mismatch_fails_at_create_time() {
+    let dir = temp_dir("plpgsql_raise_placeholder_validation");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let too_many = db
+        .execute(
+            1,
+            "create function bad_raise_many(x int4) returns int4 language plpgsql as $$ begin raise notice 'missing placeholder', x; return x; end $$",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{too_many:?}").contains("too many parameters specified for RAISE"),
+        "{too_many:?}"
+    );
+
+    let too_few = db
+        .execute(
+            1,
+            "create function bad_raise_few(x int4) returns int4 language plpgsql as $$ begin raise notice '%, %', x; return x; end $$",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{too_few:?}").contains("too few parameters specified for RAISE"),
+        "{too_few:?}"
+    );
+}
+
+#[test]
+fn plpgsql_static_sql_syntax_is_validated_at_create_time() {
+    let dir = temp_dir("plpgsql_static_sql_validation");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let err = db
+        .execute(
+            1,
+            "create function bad_static_sql() returns int4 language plpgsql as $$ begin Johnny Yuma; return 1; end $$",
+        )
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("Johnny"), "{err:?}");
+
+    let err = db
+        .execute(
+            1,
+            "create function bad_static_loop_sql() returns int4 language plpgsql as $$ declare r record; begin for r in select I fought the law, the law won loop return 1; end loop; return 2; end $$",
+        )
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("the"), "{err:?}");
+}
+
+#[test]
+fn plpgsql_return_shape_is_validated_at_create_time() {
+    let dir = temp_dir("plpgsql_return_shape_validation");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let missing = db
+        .execute(
+            1,
+            "create function missing_return_expr() returns int4 language plpgsql as $$ begin return; end $$",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{missing:?}").contains("missing expression"),
+        "{missing:?}"
+    );
+
+    let void_expr = db
+        .execute(
+            1,
+            "create function void_return_expr() returns void language plpgsql as $$ begin return 5; end $$",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{void_expr:?}")
+            .contains("RETURN cannot have a parameter in function returning void"),
+        "{void_expr:?}"
+    );
+
+    db.execute(
+        1,
+        "create function void_return_ok() returns void language plpgsql as $$ begin perform 2 + 2; end $$",
+    )
+    .unwrap();
+}
+
+#[test]
+fn plpgsql_sqlstate_sqlerrm_are_visible_only_in_exception_handlers() {
+    let dir = temp_dir("plpgsql_exception_var_scope");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function sqlstate_outside_handler() returns void language plpgsql as $$ begin raise notice '%', sqlstate; end $$",
+    )
+    .unwrap();
+    let err = db
+        .execute(1, "select sqlstate_outside_handler()")
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("sqlstate"), "{err:?}");
+
+    db.execute(
+        1,
+        "create function sqlstate_inside_handler() returns text language plpgsql as $$ begin raise exception 'boom'; exception when others then return sqlstate || ':' || sqlerrm; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select sqlstate_inside_handler()"),
+        vec![vec![Value::Text("P0001:boom".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_return_query_execute_supports_using() {
+    let dir = temp_dir("plpgsql_return_query_execute_using");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dynamic_return_rows() returns setof int4 language plpgsql as $$ begin return query execute 'values (10), (20)'; return query execute 'values ($1), ($2)' using 40, 50; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from dynamic_return_rows()"),
+        vec![
+            vec![Value::Int32(10)],
+            vec![Value::Int32(20)],
+            vec![Value::Int32(40)],
+            vec![Value::Int32(50)],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_return_query_updates_found() {
+    let dir = temp_dir("plpgsql_return_query_found");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function return_query_found_flags() returns table(val int4, seen bool, rc int8) language plpgsql as $$
+         begin
+           return query values (10, false, -1);
+           get diagnostics rc = row_count;
+           val := 20;
+           seen := found;
+           return next;
+           return query select 30, false, -1 where 1 = 0;
+           get diagnostics rc = row_count;
+           val := 40;
+           seen := found;
+           return next;
+           return query execute 'values (50, false, -1)';
+           get diagnostics rc = row_count;
+           val := 60;
+           seen := found;
+           return next;
+           return query execute 'select 70, false, -1 where 1 = 0';
+           get diagnostics rc = row_count;
+           val := 80;
+           seen := found;
+           return next;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from return_query_found_flags()"),
+        vec![
+            vec![Value::Int32(10), Value::Bool(false), Value::Int64(-1)],
+            vec![Value::Int32(20), Value::Bool(true), Value::Int64(1)],
+            vec![Value::Int32(40), Value::Bool(false), Value::Int64(0)],
+            vec![Value::Int32(50), Value::Bool(false), Value::Int64(-1)],
+            vec![Value::Int32(60), Value::Bool(true), Value::Int64(1)],
+            vec![Value::Int32(80), Value::Bool(false), Value::Int64(0)],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_return_query_select_into_reports_no_tuples() {
+    let dir = temp_dir("plpgsql_return_query_select_into_no_tuples");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function static_return_query_select_into() returns setof int4 language plpgsql as $$
+         begin
+           return query select 10 into no_such_table;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function dynamic_return_query_select_into() returns setof int4 language plpgsql as $$
+         begin
+           return query execute 'select 10 into no_such_table';
+         end
+         $$",
+    )
+    .unwrap();
+
+    for function_name in [
+        "static_return_query_select_into",
+        "dynamic_return_query_select_into",
+    ] {
+        let err = db
+            .execute(1, &format!("select * from {function_name}()"))
+            .unwrap_err();
+        let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+            .unwrap_or_else(|| panic!("expected detailed no-tuples error, got {err:?}"));
+        assert_eq!(message, "SELECT INTO query does not return tuples");
+        assert_eq!(sqlstate, "42601");
+        assert!(exec_error_context_contains(
+            &err,
+            "SQL statement \"select 10 into no_such_table\""
+        ));
+        assert!(exec_error_context_contains(&err, "at RETURN QUERY"));
+    }
+}
+
+#[test]
+fn plpgsql_open_cursor_for_execute_supports_using() {
+    let dir = temp_dir("plpgsql_open_cursor_execute_using");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dynamic_cursor_sum(n int4) returns int4 language plpgsql as $$ declare c refcursor; i int4; total int4 := 0; begin open c for execute 'select * from generate_series(1,$1)' using n; loop fetch c into i; exit when not found; total := total + i; end loop; close c; return total; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select dynamic_cursor_sum(5)"),
+        vec![vec![Value::Int32(15)]]
+    );
+}
+
+#[test]
+fn plpgsql_declared_cursor_accepts_named_arguments() {
+    let dir = temp_dir("plpgsql_declared_cursor_named_args");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function cursor_named_arg_rows() returns setof int4 language plpgsql as $$ declare c cursor(r1 int4, r2 int4) for select * from generate_series(r1,r2) i; begin for r in c(r2 := 7, r1 => 5) loop return next r.i; end loop; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from cursor_named_arg_rows()"),
+        vec![
+            vec![Value::Int32(5)],
+            vec![Value::Int32(6)],
+            vec![Value::Int32(7)],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_declared_cursor_rejects_duplicate_named_arguments() {
+    let dir = temp_dir("plpgsql_declared_cursor_duplicate_args");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let err = db
+        .execute(
+            1,
+            "create function bad_cursor_args() returns void language plpgsql as $$ declare c cursor(p1 int4, p2 int4) for select p1, p2; begin open c(p2 := 77, p2 := 42); end $$",
+        )
+        .unwrap_err();
+    let err_text = format!("{err:?}");
+    assert!(
+        err_text.contains("value for parameter") && err_text.contains("p2"),
+        "{err_text}"
+    );
+}
+
+#[test]
+fn plpgsql_cursor_move_supports_relative_and_forward_all() {
+    let dir = temp_dir("plpgsql_cursor_move");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function cursor_move_rows() returns setof int4 language plpgsql as $$ declare c scroll cursor for select * from generate_series(1,10); i int4; begin open c; loop move relative 2 in c; fetch next from c into i; exit when not found; return next i; end loop; close c; open c; move forward all in c; fetch backward from c into i; if found then return next i; end if; close c; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from cursor_move_rows()"),
+        vec![
+            vec![Value::Int32(3)],
+            vec![Value::Int32(6)],
+            vec![Value::Int32(9)],
+            vec![Value::Int32(10)],
+        ]
+    );
+}
+
+#[test]
 fn plpgsql_exception_block_handles_named_condition() {
     let dir = temp_dir("plpgsql_exception_named_condition");
     let db = Database::open(&dir, 64).unwrap();
@@ -50771,6 +52868,30 @@ fn plpgsql_exception_block_handles_named_condition() {
         query_rows(&db, 1, "select catch_assert()"),
         vec![vec![Value::Text("handled".into())]]
     );
+}
+
+#[test]
+fn plpgsql_exception_others_does_not_catch_assert_failure() {
+    let dir = temp_dir("plpgsql_exception_others_assert_failure");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function uncaught_assert() returns void language plpgsql as $$
+         begin
+           assert false, 'uncaught assert';
+         exception when others then
+           return;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select uncaught_assert()").unwrap_err();
+    let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+        .unwrap_or_else(|| panic!("expected assertion failure, got {err:?}"));
+    assert_eq!(message, "uncaught assert");
+    assert_eq!(sqlstate, "P0004");
 }
 
 #[test]

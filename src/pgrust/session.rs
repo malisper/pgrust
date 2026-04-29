@@ -70,13 +70,15 @@ use crate::backend::utils::misc::stack_depth::{
 };
 use crate::include::catalog::{
     ANYARRAYOID, ANYELEMENTOID, ANYOID, CONSTRAINT_FOREIGN, INT4_TYPE_OID, NUMERIC_TYPE_OID,
-    PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
-    PG_WRITE_SERVER_FILES_OID, PgProcRow, TEXT_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID,
+    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID,
+    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, PG_WRITE_SERVER_FILES_OID, PgProcRow,
+    TEXT_TYPE_OID,
 };
 use crate::include::nodes::execnodes::ScalarType;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::QueryColumn;
-use crate::pgrust::auth::AuthState;
+use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::commands::privilege::{
     acl_grants_privilege, effective_acl_grantee_names, function_owner_default_acl,
@@ -2819,6 +2821,7 @@ impl Session {
                 .get("max_parallel_workers_per_gather")
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(2),
+            fold_constants: true,
         }
     }
 
@@ -3214,6 +3217,7 @@ impl Session {
             database: Some(db.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
+            pending_portals: Vec::new(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -3626,6 +3630,7 @@ impl Session {
                 | Statement::Notify(_)
                 | Statement::Listen(_)
                 | Statement::Unlisten(_)
+                | Statement::LockTable(_)
                 | Statement::Load(_)
                 | Statement::Discard(_)
                 | Statement::SetSessionAuthorization(_)
@@ -4436,6 +4441,7 @@ impl Session {
         let temp_effects = mem::take(&mut ctx.temp_effects);
         catalog_effects.extend(mem::take(&mut ctx.pending_catalog_effects));
         let pending_table_locks = mem::take(&mut ctx.pending_table_locks);
+        let pending_portals = mem::take(&mut ctx.pending_portals);
         if let Some(txn) = self.active_txn.as_mut() {
             txn.catalog_effects.extend(catalog_effects);
             txn.temp_effects.extend(temp_effects);
@@ -4456,6 +4462,11 @@ impl Session {
         if !succeeded {
             ctx.pending_async_notifications.clear();
             return;
+        }
+        if self.active_txn.is_some() {
+            for portal in pending_portals {
+                self.portals.put(portal);
+            }
         }
         let Some(txn) = self.active_txn.as_mut() else {
             ctx.pending_async_notifications.clear();
@@ -5011,6 +5022,7 @@ impl Session {
             Statement::SetTransaction(ref set_txn_stmt) => self.apply_set_transaction(set_txn_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
             Statement::Checkpoint(_) => self.apply_checkpoint(db),
+            Statement::LockTable(_) => Err(Self::lock_table_requires_transaction_error()),
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CopyTo(ref copy_stmt) => self
                 .execute_copy_to(db, copy_stmt, None)
@@ -5047,10 +5059,11 @@ impl Session {
                 } else {
                     self.validate_create_function_config(create_stmt)?;
                     let search_path = self.configured_search_path();
-                    db.execute_create_function_stmt_with_search_path(
+                    db.execute_create_function_stmt_with_search_path_and_gucs(
                         self.client_id,
                         create_stmt,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                     )
                 }
             }
@@ -8052,6 +8065,7 @@ impl Session {
                 .as_ref()
                 .map(|expr| Self::substitute_sql_expr(expr, subst))
                 .transpose()?,
+            current_of: update.current_of.clone(),
             returning: update
                 .returning
                 .iter()
@@ -8940,6 +8954,202 @@ impl Session {
         db.row_locks.unlock_all_session(self.client_id);
     }
 
+    fn lock_table_requires_transaction_error() -> ExecError {
+        ExecError::DetailedError {
+            message: "LOCK TABLE can only be used in transaction blocks".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "25P01",
+        }
+    }
+
+    fn table_lock_mode_from_statement(
+        mode: crate::backend::parser::LockTableMode,
+    ) -> TableLockMode {
+        match mode {
+            crate::backend::parser::LockTableMode::AccessShare => TableLockMode::AccessShare,
+            crate::backend::parser::LockTableMode::RowShare => TableLockMode::RowShare,
+            crate::backend::parser::LockTableMode::RowExclusive => TableLockMode::RowExclusive,
+            crate::backend::parser::LockTableMode::ShareUpdateExclusive => {
+                TableLockMode::ShareUpdateExclusive
+            }
+            crate::backend::parser::LockTableMode::Share => TableLockMode::Share,
+            crate::backend::parser::LockTableMode::ShareRowExclusive => {
+                TableLockMode::ShareRowExclusive
+            }
+            crate::backend::parser::LockTableMode::Exclusive => TableLockMode::Exclusive,
+            crate::backend::parser::LockTableMode::AccessExclusive => {
+                TableLockMode::AccessExclusive
+            }
+        }
+    }
+
+    fn lock_table_privileges_for_mode(mode: TableLockMode) -> &'static [char] {
+        match mode {
+            TableLockMode::AccessShare => &['m', 'w', 'd', 'D', 'a', 'r'],
+            TableLockMode::RowShare | TableLockMode::RowExclusive => &['m', 'w', 'd', 'D', 'a'],
+            TableLockMode::ShareUpdateExclusive
+            | TableLockMode::Share
+            | TableLockMode::ShareRowExclusive
+            | TableLockMode::Exclusive
+            | TableLockMode::AccessExclusive => &['m', 'w', 'd', 'D'],
+        }
+    }
+
+    fn predefined_role_grants_relation_privilege(
+        class_row: &crate::include::catalog::PgClassRow,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        privilege: char,
+    ) -> bool {
+        if matches!(privilege, 'a' | 'w' | 'd' | 'm')
+            && matches!(
+                class_row.relnamespace,
+                PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
+            )
+        {
+            return false;
+        }
+        let target_role = match privilege {
+            'r' => PG_READ_ALL_DATA_OID,
+            'a' | 'w' | 'd' => PG_WRITE_ALL_DATA_OID,
+            'm' => PG_MAINTAIN_OID,
+            _ => return false,
+        };
+        auth.has_effective_membership(target_role, auth_catalog)
+    }
+
+    fn lock_table_acl_allows(
+        class_row: &crate::include::catalog::PgClassRow,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+    ) -> bool {
+        if auth.has_effective_membership(class_row.relowner, auth_catalog) {
+            return true;
+        }
+        let effective_names = effective_acl_grantee_names(auth, auth_catalog);
+        Self::lock_table_privileges_for_mode(mode)
+            .iter()
+            .any(|privilege| {
+                Self::predefined_role_grants_relation_privilege(
+                    class_row,
+                    auth,
+                    auth_catalog,
+                    *privilege,
+                ) || class_row
+                    .relacl
+                    .as_deref()
+                    .is_some_and(|acl| acl_grants_privilege(acl, &effective_names, *privilege))
+            })
+    }
+
+    fn lock_table_permission_denied(relkind: char, relation_name: &str) -> ExecError {
+        let relation_kind = if relkind == 'v' { "view" } else { "table" };
+        ExecError::DetailedError {
+            message: format!("permission denied for {relation_kind} {relation_name}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42501",
+        }
+    }
+
+    fn lock_table_not_available(relation_name: &str) -> ExecError {
+        ExecError::DetailedError {
+            message: format!("could not obtain lock on relation \"{relation_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "55P03",
+        }
+    }
+
+    fn try_lock_table_if_needed(
+        &mut self,
+        db: &Database,
+        rel: RelFileLocator,
+        mode: TableLockMode,
+    ) -> bool {
+        let Some(txn) = self.active_txn.as_mut() else {
+            return db.table_locks.try_lock_table(rel, mode, self.client_id);
+        };
+        if txn
+            .held_table_locks
+            .get(&rel)
+            .is_some_and(|existing| existing.strongest(mode) == *existing)
+        {
+            return true;
+        }
+        if !db.table_locks.try_lock_table(rel, mode, self.client_id) {
+            return false;
+        }
+        txn.held_table_locks
+            .entry(rel)
+            .and_modify(|existing| *existing = existing.strongest(mode))
+            .or_insert(mode);
+        true
+    }
+
+    fn execute_lock_table_stmt(
+        &mut self,
+        db: &Database,
+        stmt: &crate::backend::parser::LockTableStatement,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<StatementResult, ExecError> {
+        let mode = Self::table_lock_mode_from_statement(stmt.mode);
+        let search_path = self.configured_search_path();
+        let catalog = if xid != INVALID_TRANSACTION_ID {
+            self.catalog_lookup_for_command(db, xid, cid)
+        } else {
+            db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref())
+        };
+        let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
+        let mut targets = Vec::new();
+
+        for table_name in &stmt.table_names {
+            let relation = catalog
+                .lookup_any_relation(table_name)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
+            let class_row = catalog
+                .class_row_by_oid(relation.relation_oid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("relation with OID {} does not exist", relation.relation_oid),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+
+            if !matches!(class_row.relkind, 'r' | 'p' | 'v') {
+                return Err(ExecError::DetailedError {
+                    message: format!("cannot lock relation \"{}\"", class_row.relname),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42809",
+                });
+            }
+            if !Self::lock_table_acl_allows(&class_row, self.auth_state(), &auth_catalog, mode) {
+                return Err(Self::lock_table_permission_denied(
+                    class_row.relkind,
+                    &class_row.relname,
+                ));
+            }
+
+            targets.push((relation.rel, class_row.relname.clone()));
+        }
+
+        for (rel, relation_name) in targets {
+            if stmt.nowait {
+                if !self.try_lock_table_if_needed(db, rel, mode) {
+                    return Err(Self::lock_table_not_available(&relation_name));
+                }
+            } else {
+                self.lock_table_if_needed(db, rel, mode)?;
+            }
+        }
+
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     fn lock_table_if_needed(
         &mut self,
         db: &Database,
@@ -9511,6 +9721,9 @@ impl Session {
                 }
                 Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
                 Statement::Checkpoint(_) => self.apply_checkpoint(db),
+                Statement::LockTable(ref lock_stmt) => {
+                    self.execute_lock_table_stmt(db, lock_stmt, xid, cid)
+                }
                 Statement::AlterTableCompound(ref compound_stmt) => {
                     validate_compound_alter_table_temporal_fk_actions(compound_stmt)?;
                     compound_stmt.actions.iter().try_for_each(|action| {
@@ -12341,6 +12554,7 @@ impl Session {
                         xid,
                         cid,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                     )
                 }

@@ -86,15 +86,15 @@ use crate::include::catalog::{
     PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
     PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
     PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID,
-    PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID,
+    PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_MAINTAIN_OID,
     PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow,
-    PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
+    PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PG_WRITE_ALL_DATA_OID,
+    PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow, PgPublicationRow,
+    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -3421,6 +3421,17 @@ pub(crate) fn collect_matching_rows_heap(
     predicate: Option<&Expr>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    collect_matching_rows_heap_with_table_oid(rel, desc, toast, None, predicate, ctx)
+}
+
+pub(crate) fn collect_matching_rows_heap_with_table_oid(
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    desc: &RelationDesc,
+    toast: Option<ToastRelationRef>,
+    table_oid: Option<u32>,
+    predicate: Option<&Expr>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
     // :HACK: DELETE still materializes candidate rows before deleting them.
     // Per-row timeout polling makes PostgreSQL's btree regression delete tests
     // time out in dev builds; restore finer-grained checks when DELETE can use
@@ -3471,7 +3482,8 @@ pub(crate) fn collect_matching_rows_heap(
         drop(pin);
 
         for (tid, values) in page_rows {
-            let mut slot = TupleSlot::virtual_row_with_metadata(values.clone(), Some(tid), None);
+            let mut slot =
+                TupleSlot::virtual_row_with_metadata(values.clone(), Some(tid), table_oid);
             if let Some(q) = &qual {
                 if !q(&mut slot, ctx)? {
                     continue;
@@ -4019,6 +4031,7 @@ pub(crate) fn collect_matching_rows_index(
     toast: Option<ToastRelationRef>,
     index: &BoundIndexRelation,
     keys: &[crate::include::access::scankey::ScanKeyData],
+    table_oid: Option<u32>,
     predicate: Option<&Expr>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
@@ -4077,6 +4090,7 @@ pub(crate) fn collect_matching_rows_index(
         };
         let mut slot =
             TupleSlot::from_heap_tuple(Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple);
+        slot.table_oid = table_oid;
         slot.toast = slot_toast_context(toast, ctx);
         if let Some(q) = &qual {
             if !q(&mut slot, ctx)? {
@@ -4227,6 +4241,7 @@ fn collect_referencing_rows(
             constraint.child_toast,
             index,
             &build_equality_scan_keys(key_values),
+            None,
             None,
             ctx,
         )
@@ -6908,6 +6923,29 @@ pub(crate) fn relation_acl_allows(
     relation_acl_allows_as(ctx, relation_oid, privilege, None)
 }
 
+fn predefined_role_grants_relation_privilege(
+    class_row: &crate::include::catalog::PgClassRow,
+    auth: &AuthState,
+    auth_catalog: &AuthCatalog,
+    privilege: char,
+) -> bool {
+    if matches!(privilege, 'a' | 'w' | 'd' | 'm')
+        && matches!(
+            class_row.relnamespace,
+            PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
+        )
+    {
+        return false;
+    }
+    let target_role = match privilege {
+        'r' => PG_READ_ALL_DATA_OID,
+        'a' | 'w' | 'd' => PG_WRITE_ALL_DATA_OID,
+        'm' => PG_MAINTAIN_OID,
+        _ => return false,
+    };
+    auth.has_effective_membership(target_role, auth_catalog)
+}
+
 fn relation_acl_allows_as(
     ctx: &ExecutorContext,
     relation_oid: u32,
@@ -6945,6 +6983,9 @@ fn relation_acl_allows_as(
         return Ok(true);
     }
     if catalog_relation_readable_by_public(relation_oid, privilege) {
+        return Ok(true);
+    }
+    if predefined_role_grants_relation_privilege(&class_row, &auth, &auth_catalog, privilege) {
         return Ok(true);
     }
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
@@ -7016,6 +7057,9 @@ fn relation_or_all_column_acls_allow_as(
         return Ok(true);
     }
     if catalog_relation_readable_by_public(relation_oid, privilege) {
+        return Ok(true);
+    }
+    if predefined_role_grants_relation_privilege(&class_row, &auth, &auth_catalog, privilege) {
         return Ok(true);
     }
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
@@ -7103,15 +7147,11 @@ fn relation_permission_denied_for_requirement(
     } else {
         "table"
     };
-    let relation_name = if requirement.relation_name.starts_with("pg_toast.") {
-        requirement.relation_name.as_str()
-    } else {
-        requirement
-            .relation_name
-            .rsplit_once('.')
-            .map(|(_, name)| name)
-            .unwrap_or(&requirement.relation_name)
-    };
+    let relation_name = requirement
+        .relation_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(&requirement.relation_name);
     ExecError::DetailedError {
         message: format!("permission denied for {relation_kind} {relation_name}"),
         detail: None,
@@ -8005,7 +8045,7 @@ fn domain_not_null_violation(domain_name: &str) -> ExecError {
     }
 }
 
-fn enforce_domain_constraint_for_value(
+pub(crate) fn enforce_domain_constraint_for_value(
     value: &Value,
     ty: SqlType,
     ctx: &mut ExecutorContext,
@@ -10147,10 +10187,11 @@ pub fn execute_update_with_waiter(
                 .as_ref()
                 .map(|p| compile_predicate_with_decoder(p, &decoder));
             let target_rows = match &target.row_source {
-                BoundModifyRowSource::Heap => collect_matching_rows_heap(
+                BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                     target.rel,
                     &target.desc,
                     target.toast,
+                    Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
                 )?,
@@ -10160,6 +10201,7 @@ pub fn execute_update_with_waiter(
                     target.toast,
                     index,
                     keys,
+                    Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
                 )?,
@@ -11238,10 +11280,11 @@ pub fn execute_delete_with_waiter(
                         )
                     })
                     .collect::<Vec<_>>(),
-                BoundModifyRowSource::Heap => collect_matching_rows_heap(
+                BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                     target.rel,
                     &target.desc,
                     target.toast,
+                    Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
                 )?
@@ -11254,6 +11297,7 @@ pub fn execute_delete_with_waiter(
                     target.toast,
                     index,
                     keys,
+                    Some(target.relation_oid),
                     target.predicate.as_ref(),
                     ctx,
                 )?
@@ -11473,10 +11517,11 @@ pub(crate) fn materialize_update_row_events(
     let mut events = Vec::new();
     for target in &stmt.targets {
         let target_rows = match &target.row_source {
-            BoundModifyRowSource::Heap => collect_matching_rows_heap(
+            BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                 target.rel,
                 &target.desc,
                 target.toast,
+                Some(target.relation_oid),
                 target.predicate.as_ref(),
                 ctx,
             )?,
@@ -11486,6 +11531,7 @@ pub(crate) fn materialize_update_row_events(
                 target.toast,
                 index,
                 keys,
+                Some(target.relation_oid),
                 target.predicate.as_ref(),
                 ctx,
             )?,
@@ -11815,10 +11861,11 @@ pub(crate) fn materialize_delete_row_events(
     let mut events = Vec::new();
     for target in &stmt.targets {
         let rows = match &target.row_source {
-            BoundModifyRowSource::Heap => collect_matching_rows_heap(
+            BoundModifyRowSource::Heap => collect_matching_rows_heap_with_table_oid(
                 target.rel,
                 &target.desc,
                 target.toast,
+                Some(target.relation_oid),
                 target.predicate.as_ref(),
                 ctx,
             )?,
@@ -11828,6 +11875,7 @@ pub(crate) fn materialize_delete_row_events(
                 target.toast,
                 index,
                 keys,
+                Some(target.relation_oid),
                 target.predicate.as_ref(),
                 ctx,
             )?,

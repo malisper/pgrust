@@ -162,14 +162,14 @@ use crate::include::catalog::{
     KD_POINT_SPGIST_OPCLASS_OID, NAME_TYPE_OID, OID_TYPE_OID, PG_AUTHID_RELATION_OID,
     PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
     PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
-    POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
-    PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
-    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
-    default_hash_opclass_oid,
+    PG_LARGEOBJECT_RELATION_OID, PG_MAINTAIN_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
+    PG_READ_ALL_DATA_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
+    PgClassRow, PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow,
+    PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID,
+    SPGIST_AM_OID, TEXT_ARRAY_TYPE_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
+    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    default_btree_opclass_oid, default_hash_opclass_oid,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, NumericValue, RecordDescriptor, RecordValue,
@@ -2677,7 +2677,7 @@ fn eval_text_to_regclass_function(
             })?;
     let relation = catalog
         .lookup_any_relation(text)
-        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(text.to_string())))?;
+        .ok_or_else(|| expr_reg::regclass_lookup_error(text, Some(catalog)))?;
     Ok(Value::Int64(i64::from(relation.relation_oid)))
 }
 
@@ -6261,7 +6261,7 @@ fn relation_acl_allows_role(
     let auth_members_rows = catalog.auth_members_rows();
     if !role_is_superuser(&authid_rows, role_oid)
         && is_protected_system_class(class_row)
-        && matches!(spec.acl_char, 'a' | 'w' | 'd' | 'D' | 'U')
+        && matches!(spec.acl_char, 'a' | 'w' | 'd' | 'D' | 'm' | 'U')
     {
         return false;
     }
@@ -6293,6 +6293,16 @@ fn relation_acl_allows_role(
         && role_has_effective_membership(
             role_oid,
             PG_WRITE_ALL_DATA_OID,
+            &authid_rows,
+            &auth_members_rows,
+        )
+    {
+        return true;
+    }
+    if spec.acl_char == 'm'
+        && role_has_effective_membership(
+            role_oid,
+            PG_MAINTAIN_OID,
             &authid_rows,
             &auth_members_rows,
         )
@@ -8167,12 +8177,16 @@ pub fn eval_expr(
                     sqlstate: "XX000",
                 })
             } else if var.varattno == TABLE_OID_ATTR_NO {
-                Ok(lookup_system_binding(&ctx.system_bindings, var.varno)
-                    .or_else(|| slot.table_oid.map(|table_oid| Value::Int64(i64::from(table_oid))))
+                Ok(slot
+                    .table_oid
+                    .map(|table_oid| Value::Int64(i64::from(table_oid)))
+                    .or_else(|| lookup_system_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
             } else if var.varattno == SELF_ITEM_POINTER_ATTR_NO {
-                Ok(lookup_ctid_binding(&ctx.system_bindings, var.varno)
-                    .or_else(|| slot.tid().map(ctid_value))
+                Ok(slot
+                    .tid()
+                    .map(ctid_value)
+                    .or_else(|| lookup_ctid_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
