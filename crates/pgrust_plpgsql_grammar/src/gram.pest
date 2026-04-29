@@ -23,6 +23,7 @@ sqlstate_condition = { kw_sqlstate ~ sql_string }
 stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | for_stmt | exit_stmt | raise_stmt | assert_stmt | continue_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | get_diagnostics_stmt | open_cursor_stmt | fetch_cursor_stmt | close_cursor_stmt | assign_stmt | exec_sql_stmt }
 nested_block_stmt = { block ~ semi }
 null_stmt = { kw_null ~ semi }
+continue_stmt = { kw_continue ~ semi }
 assign_stmt = { assign_target ~ assign_op ~ expr_until_semi ~ semi }
 assign_target = { ident ~ ("." ~ ident)? }
 if_stmt = { kw_if ~ expr_until_then ~ kw_then ~ stmt* ~ elsif_clause* ~ else_clause? ~ kw_end ~ kw_if ~ semi }
@@ -38,7 +39,6 @@ raise_condition_clause = { (sqlstate_condition | ident) ~ raise_using_clause? }
 raise_using_clause = { kw_using ~ raise_using_item ~ (comma ~ raise_using_item)* }
 raise_using_item = { ident ~ assign_op ~ expr_until_comma_or_semi }
 assert_stmt = { kw_assert ~ expr_until_comma_or_semi ~ (comma ~ expr_until_semi)? ~ semi }
-continue_stmt = { kw_continue ~ semi }
 return_stmt = { kw_return ~ expr_until_semi? ~ semi }
 return_next_stmt = { kw_return ~ kw_next ~ expr_until_semi? ~ semi }
 return_query_stmt = { kw_return ~ kw_query ~ return_query_sql ~ semi }
@@ -69,8 +69,8 @@ stmt_keyword_start = _{
     | kw_perform
     | kw_raise
     | kw_assert
-    | kw_continue
     | kw_return
+    | kw_continue
     | kw_execute
     | kw_get
     | kw_open

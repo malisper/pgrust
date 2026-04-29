@@ -3522,7 +3522,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 || !(0..=1).contains(index)
             {
                 return Err(ParseError::UndefinedOperator {
-                    op: "[]",
+                    op: "[]".into(),
                     left_type: sql_type_name(expr_type),
                     right_type: "integer".into(),
                 });

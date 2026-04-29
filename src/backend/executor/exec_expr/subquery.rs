@@ -859,6 +859,12 @@ pub(super) fn compare_subquery_values(
         SubqueryComparisonOp::NotILike => eval_like(&left, &right, None, collation_oid, true, true),
         SubqueryComparisonOp::Similar => eval_similar(&left, &right, None, collation_oid, false),
         SubqueryComparisonOp::NotSimilar => eval_similar(&left, &right, None, collation_oid, true),
+        SubqueryComparisonOp::RegexMatch => eval_regex_match_operator(&left, &right),
+        SubqueryComparisonOp::NotRegexMatch => match eval_regex_match_operator(&left, &right)? {
+            Value::Bool(result) => Ok(Value::Bool(!result)),
+            Value::Null => Ok(Value::Null),
+            other => Err(ExecError::NonBoolQual(other)),
+        },
     }
 }
 

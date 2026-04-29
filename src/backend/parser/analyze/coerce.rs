@@ -222,7 +222,7 @@ pub(super) fn resolve_numeric_binary_type(
     if op == "%" && (matches!(left.kind, Float4 | Float8) || matches!(right.kind, Float4 | Float8))
     {
         return Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left),
             right_type: sql_type_name(right),
         });
@@ -730,7 +730,7 @@ pub(super) fn resolve_array_concat_element_type(
     if left.is_array && right.is_array {
         return resolve_common_scalar_type(left_elem, right_elem).ok_or(
             ParseError::UndefinedOperator {
-                op: "||",
+                op: "||".into(),
                 left_type: sql_type_name(left),
                 right_type: sql_type_name(right),
             },
@@ -739,7 +739,7 @@ pub(super) fn resolve_array_concat_element_type(
     if left.is_array {
         return resolve_common_scalar_type(left_elem, right_elem).ok_or(
             ParseError::UndefinedOperator {
-                op: "||",
+                op: "||".into(),
                 left_type: sql_type_name(left),
                 right_type: sql_type_name(right),
             },
@@ -748,14 +748,14 @@ pub(super) fn resolve_array_concat_element_type(
     if right.is_array {
         return resolve_common_scalar_type(left_elem, right_elem).ok_or(
             ParseError::UndefinedOperator {
-                op: "||",
+                op: "||".into(),
                 left_type: sql_type_name(left),
                 right_type: sql_type_name(right),
             },
         );
     }
     Err(ParseError::UndefinedOperator {
-        op: "||",
+        op: "||".into(),
         left_type: sql_type_name(left),
         right_type: sql_type_name(right),
     })

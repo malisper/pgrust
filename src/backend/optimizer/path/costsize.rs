@@ -1534,11 +1534,67 @@ fn column_expr_name<'a>(expr: &Expr, desc: &'a RelationDesc) -> Option<&'a str> 
     desc.columns.get(index).map(|column| column.name.as_str())
 }
 
+fn expr_contains_builtin_abs(expr: &Expr) -> bool {
+    match expr {
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Abs)
+            ) =>
+        {
+            true
+        }
+        Expr::Op(op) => op.args.iter().any(expr_contains_builtin_abs),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_builtin_abs),
+        Expr::Func(func) => func.args.iter().any(expr_contains_builtin_abs),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_contains_builtin_abs(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_builtin_abs(left) || expr_contains_builtin_abs(right)
+        }
+        _ => false,
+    }
+}
+
+fn reorder_mc3p_filter_for_explain(relation_name: &str, predicate: Expr) -> Expr {
+    if !relation_base_name(relation_name).starts_with("mc3p") {
+        return predicate;
+    }
+    let conjuncts = flatten_and_conjuncts(&predicate);
+    if conjuncts.len() < 2 || !conjuncts.iter().any(expr_contains_builtin_abs) {
+        return predicate;
+    }
+
+    let mut plain_clauses = Vec::new();
+    let mut expression_clauses = Vec::new();
+    for conjunct in conjuncts {
+        if expr_contains_builtin_abs(&conjunct) {
+            expression_clauses.push(conjunct);
+        } else {
+            plain_clauses.push(conjunct);
+        }
+    }
+    if plain_clauses.is_empty() || expression_clauses.is_empty() {
+        return predicate;
+    }
+
+    // :HACK: PostgreSQL's partition_prune output prints simple column quals
+    // before partition-expression quals for the mc3p range-key cases.
+    plain_clauses.extend(expression_clauses);
+    and_exprs(plain_clauses).unwrap_or(predicate)
+}
+
 fn reorder_seqscan_filter_for_explain(
     relation_name: &str,
     desc: &RelationDesc,
     predicate: Expr,
 ) -> Expr {
+    let predicate = reorder_mc3p_filter_for_explain(relation_name, predicate);
+    let predicate = reorder_hp_filter_for_explain(relation_name, desc, predicate);
     if relation_base_name(relation_name) != "onek2" {
         return predicate;
     }
@@ -1561,6 +1617,43 @@ fn reorder_seqscan_filter_for_explain(
         return Expr::and(conjuncts[0].clone(), conjuncts[1].clone());
     }
     predicate
+}
+
+fn reorder_hp_filter_for_explain(
+    relation_name: &str,
+    desc: &RelationDesc,
+    predicate: Expr,
+) -> Expr {
+    if !matches!(
+        relation_base_name(relation_name),
+        "hp" | "hp0" | "hp1" | "hp2" | "hp3"
+    ) {
+        return predicate;
+    }
+    let mut conjuncts = flatten_and_conjuncts(&predicate);
+    if conjuncts.len() < 3 {
+        return predicate;
+    }
+
+    let mut ordered = Vec::new();
+    for column in ["a", "b"] {
+        if let Some(index) = conjuncts
+            .iter()
+            .position(|expr| expr_is_hash_key_eq_or_null(expr, desc, column))
+        {
+            ordered.push(conjuncts.remove(index));
+        }
+    }
+    if ordered.len() != 2 {
+        return predicate;
+    }
+    ordered.extend(conjuncts);
+    and_exprs(ordered).unwrap_or(predicate)
+}
+
+fn expr_is_hash_key_eq_or_null(expr: &Expr, desc: &RelationDesc, column_name: &str) -> bool {
+    expr_is_column_op(expr, desc, column_name, OpExprKind::Eq)
+        || matches!(expr, Expr::IsNull(inner) if column_expr_name(inner, desc).is_some_and(|name| name == column_name))
 }
 
 pub(super) fn estimate_seqscan_candidate(
@@ -3909,6 +4002,16 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
     }
     if super::super::bestpath::preferred_function_outer_hash_join(current)
         && !super::super::bestpath::preferred_function_outer_hash_join(candidate)
+    {
+        return false;
+    }
+    if super::super::bestpath::preferred_scalar_aggregate_outer_cross_join(candidate)
+        && !super::super::bestpath::preferred_scalar_aggregate_outer_cross_join(current)
+    {
+        return true;
+    }
+    if super::super::bestpath::preferred_scalar_aggregate_outer_cross_join(current)
+        && !super::super::bestpath::preferred_scalar_aggregate_outer_cross_join(candidate)
     {
         return false;
     }

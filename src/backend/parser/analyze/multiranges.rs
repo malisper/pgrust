@@ -146,7 +146,7 @@ fn bind_same_kind_multirange_binary(
         }
         _ => {
             return Err(ParseError::UndefinedOperator {
-                op,
+                op: op.into(),
                 left_type: sql_type_name(raw_left_type),
                 right_type: sql_type_name(raw_right_type),
             });
@@ -185,7 +185,7 @@ fn bind_multirange_relation_binary(
         let Some(right_target) = multirange_relation_target(right, raw_right_type, left_multirange)
         else {
             return Err(ParseError::UndefinedOperator {
-                op,
+                op: op.into(),
                 left_type: sql_type_name(raw_left_type),
                 right_type: sql_type_name(raw_right_type),
             });
@@ -195,7 +195,7 @@ fn bind_multirange_relation_binary(
         let Some(left_target) = multirange_relation_target(left, raw_left_type, right_multirange)
         else {
             return Err(ParseError::UndefinedOperator {
-                op,
+                op: op.into(),
                 left_type: sql_type_name(raw_left_type),
                 right_type: sql_type_name(raw_right_type),
             });
@@ -203,7 +203,7 @@ fn bind_multirange_relation_binary(
         (left_target, right_multirange.sql_type)
     } else {
         return Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(raw_left_type),
             right_type: sql_type_name(raw_right_type),
         });
@@ -453,7 +453,7 @@ pub(super) fn bind_maybe_multirange_contains(
                     multirange_binary_target(right, raw_right_type, left_multirange)
                 else {
                     return Some(Err(ParseError::UndefinedOperator {
-                        op,
+                        op: op.into(),
                         left_type: sql_type_name(raw_left_type),
                         right_type: sql_type_name(raw_right_type),
                     }));
@@ -465,7 +465,7 @@ pub(super) fn bind_maybe_multirange_contains(
                     multirange_binary_target(left, raw_left_type, right_multirange)
                 else {
                     return Some(Err(ParseError::UndefinedOperator {
-                        op,
+                        op: op.into(),
                         left_type: sql_type_name(raw_left_type),
                         right_type: sql_type_name(raw_right_type),
                     }));
@@ -473,7 +473,7 @@ pub(super) fn bind_maybe_multirange_contains(
                 vec![left_target, right_multirange.sql_type]
             } else {
                 return Some(Err(ParseError::UndefinedOperator {
-                    op,
+                    op: op.into(),
                     left_type: sql_type_name(raw_left_type),
                     right_type: sql_type_name(raw_right_type),
                 }));

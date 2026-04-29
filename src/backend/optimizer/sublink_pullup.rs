@@ -225,7 +225,9 @@ fn subquery_comparison_op_expr_kind(op: SubqueryComparisonOp) -> Option<OpExprKi
         | SubqueryComparisonOp::ILike
         | SubqueryComparisonOp::NotILike
         | SubqueryComparisonOp::Similar
-        | SubqueryComparisonOp::NotSimilar => return None,
+        | SubqueryComparisonOp::NotSimilar
+        | SubqueryComparisonOp::RegexMatch
+        | SubqueryComparisonOp::NotRegexMatch => return None,
     })
 }
 

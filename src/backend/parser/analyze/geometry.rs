@@ -213,7 +213,7 @@ pub(super) fn bind_maybe_geometry_arithmetic(
     };
     if op == "#" && geometry_intersection_result_type(left_type, right_type).is_none() {
         return Some(Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         }));
@@ -416,7 +416,7 @@ pub(super) fn bind_geometry_subscript(
     let ty = infer_arg_type(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
     if ty.is_array || !(0..=1).contains(&index) {
         return Err(ParseError::UndefinedOperator {
-            op: "[]",
+            op: "[]".into(),
             left_type: sql_type_name(ty),
             right_type: "integer".into(),
         });
@@ -428,7 +428,7 @@ pub(super) fn bind_geometry_subscript(
         SqlTypeKind::Point => BuiltinScalarFunction::GeoPointY,
         _ => {
             return Err(ParseError::UndefinedOperator {
-                op: "[]",
+                op: "[]".into(),
                 left_type: sql_type_name(ty),
                 right_type: "integer".into(),
             });

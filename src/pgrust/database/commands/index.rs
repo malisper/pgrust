@@ -1593,7 +1593,7 @@ impl Database {
                     .map(|row| row.oid)
                     .ok_or_else(|| {
                         ExecError::Parse(ParseError::UndefinedOperator {
-                            op: if op_name == "&&" { "&&" } else { "=" },
+                            op: (if op_name == "&&" { "&&" } else { "=" }).into(),
                             left_type: column.name.clone(),
                             right_type: column.name.clone(),
                         })
@@ -1684,7 +1684,7 @@ impl Database {
                             _ => "operator",
                         };
                         ExecError::Parse(ParseError::UndefinedOperator {
-                            op,
+                            op: op.into(),
                             left_type: display_name.clone(),
                             right_type: display_name,
                         })

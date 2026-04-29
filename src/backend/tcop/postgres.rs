@@ -466,7 +466,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 .map(|index| index + 1);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { op, .. }) => {
-            if let Some(index) = sql.find(op) {
+            if let Some(index) = sql.find(*op) {
                 return Some(index + 1);
             }
             if *op == "=" {
@@ -5918,6 +5918,9 @@ fn psql_partition_value_text(value: &SerializedPartitionValue) -> String {
         SerializedPartitionValue::Int64(value) => value.to_string(),
         SerializedPartitionValue::Money(value) => value.to_string(),
         SerializedPartitionValue::Bool(value) => value.to_string(),
+        SerializedPartitionValue::EnumOid(value) => {
+            quote_sql_literal_for_describe(&value.to_string())
+        }
         SerializedPartitionValue::Date(_)
         | SerializedPartitionValue::Time(_)
         | SerializedPartitionValue::TimeTz { .. }
@@ -14531,7 +14534,7 @@ ORDER BY 1, 2;";
     fn exec_error_position_points_at_in_for_scalar_array_operator_errors() {
         let sql = "select '(0,0)'::point in ('(0,0,0,0)'::box, point(0,0));";
         let err = ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator {
-            op: "=",
+            op: "=".into(),
             left_type: "point".into(),
             right_type: "box".into(),
         });
