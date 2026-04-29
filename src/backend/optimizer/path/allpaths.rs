@@ -10,7 +10,7 @@ use crate::backend::executor::compare_order_values;
 use crate::backend::parser::{
     BoundIndexRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp,
-    deserialize_partition_bound, partition_value_to_value,
+    deserialize_partition_bound, is_binary_coercible_type, partition_value_to_value,
 };
 use crate::include::catalog::BTREE_AM_OID;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
@@ -27,8 +27,9 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     BoolExprType, Expr, JoinType, OpExprKind, OrderByEntry, QueryColumn, RelationDesc,
-    SortGroupClause, ToastRelationRef, Var, attrno_index, expr_contains_set_returning,
-    is_system_attr, set_returning_call_exprs, user_attrno,
+    ScalarArrayOpExpr, SortGroupClause, ToastRelationRef, Var, attrno_index,
+    expr_contains_set_returning, expr_sql_type_hint, is_system_attr, set_returning_call_exprs,
+    user_attrno,
 };
 
 use super::super::bestpath;
@@ -381,11 +382,56 @@ fn scalar_array_null_filter(expr: &Expr) -> bool {
     }
 }
 
-fn expr_is_null_array(expr: &Expr) -> bool {
+fn partitioned_scalar_array_null_filter(expr: &Expr) -> bool {
     match expr {
-        Expr::Const(Value::Null) => true,
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_is_null_array(inner),
+        Expr::ScalarArrayOp(saop) => partitioned_scalar_array_null_op_is_foldable(saop),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
+            .args
+            .iter()
+            .any(partitioned_scalar_array_null_filter),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            partitioned_scalar_array_null_filter(inner)
+        }
         _ => false,
+    }
+}
+
+fn partitioned_scalar_array_null_op_is_foldable(saop: &ScalarArrayOpExpr) -> bool {
+    let Some(left_type) = transparent_scalar_array_left_type(&saop.left) else {
+        return false;
+    };
+    let Some(array_type) = null_array_type(&saop.right) else {
+        return matches!(*saop.right, Expr::Const(Value::Null));
+    };
+    if !array_type.is_array {
+        return false;
+    }
+    let element_type = array_type.element_type();
+    is_binary_coercible_type(left_type, element_type)
+        || is_binary_coercible_type(element_type, left_type)
+}
+
+fn transparent_scalar_array_left_type(expr: &Expr) -> Option<SqlType> {
+    match expr {
+        Expr::Cast(inner, target_type) => {
+            let source_type = transparent_scalar_array_left_type(inner)?;
+            is_binary_coercible_type(source_type, *target_type).then_some(*target_type)
+        }
+        Expr::Collate { expr: inner, .. } => transparent_scalar_array_left_type(inner),
+        Expr::Var(_) | Expr::Param(_) => expr_sql_type_hint(expr),
+        _ => None,
+    }
+}
+
+fn expr_is_null_array(expr: &Expr) -> bool {
+    null_array_type(expr).is_some() || matches!(expr, Expr::Const(Value::Null))
+}
+
+fn null_array_type(expr: &Expr) -> Option<SqlType> {
+    match expr {
+        Expr::Cast(inner, ty) if expr_is_null_array(inner) => Some(*ty),
+        Expr::Collate { expr: inner, .. } => null_array_type(inner),
+        _ => None,
     }
 }
 
@@ -3223,6 +3269,21 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
     } = rte.kind.clone()
         && (relkind == 'p' || !child_rtindexes.is_empty())
     {
+        if matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false)))) {
+            if let Some(rel) = root
+                .simple_rel_array
+                .get_mut(rtindex)
+                .and_then(Option::as_mut)
+            {
+                rel.add_path(optimize_path_with_config(
+                    const_false_relation_path(rtindex, &rte.desc),
+                    catalog,
+                    root.config,
+                ));
+                bestpath::set_cheapest(rel);
+            }
+            return;
+        }
         let query_order_items = query_order_items_for_base_rel(root, rtindex);
         let query_pathkeys = root.query_pathkeys.clone();
         let filter = root
@@ -3230,7 +3291,14 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             .get(rtindex)
             .and_then(Option::as_ref)
             .and_then(base_filter_expr);
-        if relkind != 'p' && filter.as_ref().is_some_and(scalar_array_null_filter) {
+        let has_null_scalar_array_filter = if relkind == 'p' {
+            filter
+                .as_ref()
+                .is_some_and(partitioned_scalar_array_null_filter)
+        } else {
+            filter.as_ref().is_some_and(scalar_array_null_filter)
+        };
+        if has_null_scalar_array_filter {
             if let Some(rel) = root
                 .simple_rel_array
                 .get_mut(rtindex)

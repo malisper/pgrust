@@ -95,7 +95,7 @@ fn infer_quantified_array_literal_type(
                 });
             if !compatible {
                 return Err(ParseError::UndefinedOperator {
-                    op: comparison_op,
+                    op: comparison_op.into(),
                     left_type: sql_type_name(left_element_type),
                     right_type: sql_type_name(element_type),
                 });
@@ -392,14 +392,14 @@ fn bind_row_valued_in_testexpr(
         let right_type = target.sql_type;
         let common = resolve_common_scalar_type(left_type, right_type).ok_or_else(|| {
             ParseError::UndefinedOperator {
-                op: "=",
+                op: "=".into(),
                 left_type: sql_type_name(left_type),
                 right_type: sql_type_name(right_type),
             }
         })?;
         if !supports_comparison_operator(catalog, "=", common, common) {
             return Err(ParseError::UndefinedOperator {
-                op: "=",
+                op: "=".into(),
                 left_type: sql_type_name(common),
                 right_type: sql_type_name(common),
             });
@@ -469,7 +469,7 @@ pub(super) fn bind_quantified_subquery_expr(
     {
         let left_type = expr_sql_type_hint(&left).unwrap_or(SqlType::new(SqlTypeKind::Text));
         return Err(ParseError::UndefinedOperator {
-            op: comparison_op,
+            op: comparison_op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         });
@@ -589,7 +589,7 @@ pub(super) fn bind_quantified_array_expr(
                 && let Some(comparison_op) = comparison_operator_for_quantified_array(op)
             {
                 return Err(ParseError::UndefinedOperator {
-                    op: comparison_op,
+                    op: comparison_op.into(),
                     left_type: sql_type_name(left_type),
                     right_type: sql_type_name(raw_array_type),
                 });

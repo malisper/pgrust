@@ -12,7 +12,9 @@ use crate::include::nodes::pathnodes::{
     AppendRelInfo, PartitionInfo, PartitionMember, PlannerInfo, PlannerPartitionChildBound,
     RelOptInfo, RelOptKind,
 };
-use crate::include::nodes::primnodes::{Expr, ExprArraySubscript, RelationDesc, Var, user_attrno};
+use crate::include::nodes::primnodes::{
+    ColumnDesc, Expr, ExprArraySubscript, RelationDesc, Var, user_attrno,
+};
 
 use super::joininfo;
 use super::partition_cache;
@@ -76,6 +78,9 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             })
             .unwrap_or_else(|| relation_oid.to_string());
         let mut child_alias_index = 1usize;
+        let parent_source_desc = catalog
+            .relation_by_oid(relation_oid)
+            .map(|relation| relation.desc);
 
         for child_row in child_rows {
             let child_oid = child_row.row.inhrelid;
@@ -86,8 +91,12 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                 continue;
             }
             let child_rtindex = root.parse.rtable.len() + 1;
-            let translated_vars =
-                translate_parent_vars_to_child(&parent_rte.desc, child_rtindex, &child.desc);
+            let translated_vars = translate_parent_vars_to_child(
+                &parent_rte.desc,
+                parent_source_desc.as_ref(),
+                child_rtindex,
+                &child.desc,
+            );
             let child_alias = if child_alias_index == 1 {
                 parent_alias.clone()
             } else {
@@ -537,31 +546,45 @@ pub(super) fn append_translation(
 
 fn translate_parent_vars_to_child(
     parent_desc: &RelationDesc,
+    parent_source_desc: Option<&RelationDesc>,
     child_rtindex: usize,
     child_desc: &RelationDesc,
 ) -> Vec<Expr> {
     parent_desc
         .columns
         .iter()
-        .map(|parent_column| {
-            child_desc
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, child_column)| {
-                    !child_column.dropped
-                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
-                        && child_column.sql_type == parent_column.sql_type
-                })
-                .map(|(index, child_column)| {
-                    Expr::Var(Var {
-                        varno: child_rtindex,
-                        varattno: user_attrno(index),
-                        varlevelsup: 0,
-                        vartype: child_column.sql_type,
-                    })
-                })
-                .unwrap_or(Expr::Const(Value::Null))
+        .enumerate()
+        .map(|(parent_index, parent_column)| {
+            let lookup_column = parent_source_desc
+                .and_then(|desc| desc.columns.get(parent_index))
+                .filter(|source_column| source_column.sql_type == parent_column.sql_type)
+                .unwrap_or(parent_column);
+            translate_parent_column_to_child(lookup_column, child_rtindex, child_desc)
         })
         .collect()
+}
+
+fn translate_parent_column_to_child(
+    parent_column: &ColumnDesc,
+    child_rtindex: usize,
+    child_desc: &RelationDesc,
+) -> Expr {
+    child_desc
+        .columns
+        .iter()
+        .enumerate()
+        .find(|(_, child_column)| {
+            !child_column.dropped
+                && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                && child_column.sql_type == parent_column.sql_type
+        })
+        .map(|(index, child_column)| {
+            Expr::Var(Var {
+                varno: child_rtindex,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: child_column.sql_type,
+            })
+        })
+        .unwrap_or(Expr::Const(Value::Null))
 }

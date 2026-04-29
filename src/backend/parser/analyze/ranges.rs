@@ -102,21 +102,21 @@ fn bind_same_kind_range_binary(
     let right_type = coerce_unknown_string_literal_type(right, raw_right_type, raw_left_type);
     let Some(left_range_type) = range_type_ref_for_sql_type(left_type) else {
         return Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         });
     };
     let Some(right_range_type) = range_type_ref_for_sql_type(right_type) else {
         return Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         });
     };
     if left_range_type.type_oid() != right_range_type.type_oid() {
         return Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         });
@@ -198,21 +198,21 @@ pub(super) fn bind_maybe_range_comparison(
     }
     let Some(left_range_type) = range_type_ref_for_sql_type(left_type) else {
         return Some(Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         }));
     };
     let Some(right_range_type) = range_type_ref_for_sql_type(right_type) else {
         return Some(Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         }));
     };
     if left_range_type.type_oid() != right_range_type.type_oid() {
         return Some(Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         }));
@@ -250,7 +250,7 @@ pub(super) fn bind_maybe_range_comparison(
             ">=" => crate::include::nodes::primnodes::OpExprKind::GtEq,
             _ => {
                 return Some(Err(ParseError::UndefinedOperator {
-                    op,
+                    op: op.into(),
                     left_type: sql_type_name(left_type),
                     right_type: sql_type_name(right_type),
                 }));
@@ -373,7 +373,7 @@ pub(super) fn bind_maybe_range_contains(
                 )
             } else {
                 Err(ParseError::UndefinedOperator {
-                    op,
+                    op: op.into(),
                     left_type: sql_type_name(left_type),
                     right_type: sql_type_name(right_type),
                 })
@@ -418,7 +418,7 @@ pub(super) fn bind_maybe_range_contains(
             ))
         }
         _ => Some(Err(ParseError::UndefinedOperator {
-            op,
+            op: op.into(),
             left_type: sql_type_name(left_type),
             right_type: sql_type_name(right_type),
         })),

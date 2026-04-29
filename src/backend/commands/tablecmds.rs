@@ -18,9 +18,7 @@ use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::value_io::format_failing_row_detail;
-use crate::backend::optimizer::{
-    finalize_expr_subqueries, planner, relation_may_satisfy_own_partition_bound,
-};
+use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundAssignmentTargetIndirection, BoundDeleteStatement, BoundDeleteTarget,
@@ -541,6 +539,7 @@ pub(crate) fn execute_explain(
         Statement::Select(select) => EitherExplainTarget::Select(select),
         Statement::DeclareCursor(declare) => EitherExplainTarget::Select(declare.query),
         Statement::Merge(merge) => EitherExplainTarget::Merge(merge),
+        Statement::Delete(_) => unreachable!("DELETE handled above"),
         Statement::CreateTableAs(create_table_as) => {
             if explain_create_table_as_relation_exists(&create_table_as, catalog)? {
                 return Ok(StatementResult::Query {
@@ -991,7 +990,7 @@ fn explain_delete_rule_lines(
 fn explain_delete_base_lines(
     stmt: &DeleteStatement,
     bound: &BoundDeleteStatement,
-    catalog: &dyn CatalogLookup,
+    _catalog: &dyn CatalogLookup,
     show_costs: bool,
     verbose: bool,
 ) -> Vec<String> {
@@ -1017,7 +1016,7 @@ fn explain_delete_base_lines(
     let live_targets = bound
         .targets
         .iter()
-        .filter(|target| delete_target_can_match(target, catalog))
+        .filter(|target| delete_target_is_live(target))
         .collect::<Vec<_>>();
     let labeled_targets = if live_targets.len() > 1 {
         live_targets.clone()
@@ -1340,15 +1339,8 @@ fn from_item_is_lateral_derived_table(item: &FromItem) -> bool {
     }
 }
 
-fn delete_target_can_match(target: &BoundDeleteTarget, catalog: &dyn CatalogLookup) -> bool {
-    if is_const_false(target.predicate.as_ref()) {
-        return false;
-    }
-    let filter = target
-        .predicate
-        .as_ref()
-        .and_then(delete_target_filter_expr);
-    relation_may_satisfy_own_partition_bound(catalog, target.relation_oid, filter.as_ref())
+fn delete_target_is_live(target: &BoundDeleteTarget) -> bool {
+    !is_const_false(target.predicate.as_ref())
 }
 
 fn push_delete_target_scan_lines(
