@@ -94,6 +94,8 @@ fn scalar_function_may_return_geometry(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::GeoSub
             | BuiltinScalarFunction::GeoMul
             | BuiltinScalarFunction::GeoDiv
+            | BuiltinScalarFunction::GeoBoxHigh
+            | BuiltinScalarFunction::GeoBoxLow
     )
 }
 
@@ -412,19 +414,28 @@ pub(super) fn bind_geometry_subscript(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     let ty = infer_arg_type(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
-    if ty.element_type().kind != SqlTypeKind::Point || ty.is_array || !(0..=1).contains(&index) {
+    if ty.is_array || !(0..=1).contains(&index) {
         return Err(ParseError::UndefinedOperator {
             op: "[]",
             left_type: sql_type_name(ty),
             right_type: "integer".into(),
         });
     }
+    let func = match ty.element_type().kind {
+        SqlTypeKind::Box if index == 0 => BuiltinScalarFunction::GeoBoxHigh,
+        SqlTypeKind::Box => BuiltinScalarFunction::GeoBoxLow,
+        SqlTypeKind::Point if index == 0 => BuiltinScalarFunction::GeoPointX,
+        SqlTypeKind::Point => BuiltinScalarFunction::GeoPointY,
+        _ => {
+            return Err(ParseError::UndefinedOperator {
+                op: "[]",
+                left_type: sql_type_name(ty),
+                right_type: "integer".into(),
+            });
+        }
+    };
     bind_geometry_call(
-        if index == 0 {
-            BuiltinScalarFunction::GeoPointX
-        } else {
-            BuiltinScalarFunction::GeoPointY
-        },
+        func,
         &[expr],
         scope,
         catalog,
@@ -443,7 +454,17 @@ pub(super) fn infer_geometry_special_expr_type_with_ctes(
     ctes: &[BoundCte],
 ) -> Option<SqlType> {
     match expr {
-        SqlExpr::Subscript { .. } => Some(SqlType::new(SqlTypeKind::Float8)),
+        SqlExpr::Subscript { expr, index } => {
+            let ty = infer_arg_type(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
+            if ty.is_array || !(0..=1).contains(index) {
+                return None;
+            }
+            match ty.element_type().kind {
+                SqlTypeKind::Box => Some(SqlType::new(SqlTypeKind::Point)),
+                SqlTypeKind::Point => Some(SqlType::new(SqlTypeKind::Float8)),
+                _ => None,
+            }
+        }
         SqlExpr::GeometryUnaryOp { op, .. } => Some(match op {
             GeometryUnaryOp::Center => SqlType::new(SqlTypeKind::Point),
             GeometryUnaryOp::Length => SqlType::new(SqlTypeKind::Float8),
@@ -596,7 +617,9 @@ pub(super) fn infer_geometry_function_return_type_with_ctes(
         | BuiltinScalarFunction::GeoPointY => SqlType::new(SqlTypeKind::Float8),
         BuiltinScalarFunction::GeoCenter
         | BuiltinScalarFunction::GeoPolyCenter
-        | BuiltinScalarFunction::GeoClosestPoint => SqlType::new(SqlTypeKind::Point),
+        | BuiltinScalarFunction::GeoClosestPoint
+        | BuiltinScalarFunction::GeoBoxHigh
+        | BuiltinScalarFunction::GeoBoxLow => SqlType::new(SqlTypeKind::Point),
         BuiltinScalarFunction::GeoBoundBox => SqlType::new(SqlTypeKind::Box),
         BuiltinScalarFunction::GeoDiagonal => SqlType::new(SqlTypeKind::Lseg),
         BuiltinScalarFunction::GeoNpoints => SqlType::new(SqlTypeKind::Int4),

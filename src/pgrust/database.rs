@@ -70,7 +70,7 @@ pub(crate) use crate::backend::utils::activity::{
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
-    CatalogInvalidation, accept_invalidation_messages, catalog_invalidation_from_effect,
+    AcceptInvalidationMessages, CatalogInvalidation, catalog_invalidation_from_effect,
     finalize_aborted_local_catalog_invalidations, finalize_command_end_local_catalog_invalidations,
     finalize_committed_catalog_effects,
 };
@@ -1864,7 +1864,7 @@ impl Database {
     }
 
     pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {
-        accept_invalidation_messages(self, client_id);
+        AcceptInvalidationMessages(self, client_id);
     }
 
     pub(crate) fn current_database_name(&self) -> String {

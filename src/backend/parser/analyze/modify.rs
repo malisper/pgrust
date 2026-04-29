@@ -2134,6 +2134,7 @@ fn rewrite_auto_view_scan_plan(
                 relkind: resolved.base_relation.relkind,
                 relispopulated: resolved.base_relation.relispopulated,
                 toast: resolved.base_relation.toast,
+                tablesample: None,
                 desc: resolved.base_relation.desc.clone(),
                 disabled,
             };

@@ -47,12 +47,13 @@ use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, T
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
+    BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState, GatherState,
     IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MaterializedRow, MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
-    PlanState, ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState,
-    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot,
-    UniqueState, ValuesState, WindowAggState, WorkTableScanState,
+    MaterializeState, MaterializedRow, MemoizeState, MergeAppendState, NestedLoopJoinState,
+    NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState, ProjectionState,
+    RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind, SubqueryScanState,
+    SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState, ValuesState, WindowAggState,
+    WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument,
@@ -3723,6 +3724,9 @@ fn render_explain_func_expr(
             );
         }
     }
+    if let Some(rendered) = render_explain_geometry_subscript_func(func, qualifier, column_names) {
+        return rendered;
+    }
     if matches!(
         func.implementation,
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Timezone)
@@ -3743,6 +3747,41 @@ fn render_explain_func_expr(
         .collect::<Vec<_>>()
         .join(", ");
     format!("{name}({args})")
+}
+
+fn render_explain_geometry_subscript_func(
+    func: &FuncExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    let index = match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX) => 0,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointY) => 1,
+        _ => return None,
+    };
+    let arg = func.args.first()?;
+    let rendered_arg = render_explain_expr_inner_with_qualifier(arg, qualifier, column_names);
+    Some(match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow) => {
+            format!("{rendered_arg}[{index}]")
+        }
+        _ if matches!(
+            arg,
+            Expr::Func(inner)
+                if matches!(
+                    inner.implementation,
+                    ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+                        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow)
+                )
+        ) =>
+        {
+            format!("(({rendered_arg})[{index}])")
+        }
+        _ => format!("{rendered_arg}[{index}]"),
+    })
 }
 
 fn render_explain_scalar_array_op(
@@ -5456,6 +5495,244 @@ impl PlanNode for FilterState {
         if matches!(self.predicate, Expr::Const(Value::Bool(false))) {
             return;
         }
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+    }
+}
+
+impl PlanNode for MaterializeState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+        if self.input.exec_proc_node(ctx)?.is_some() {
+            finish_row(&mut self.stats, start);
+            Ok(self.input.current_slot())
+        } else {
+            finish_eof(&mut self.stats, start, ctx);
+            Ok(None)
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.input.current_system_bindings()
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Materialize".into()
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+    }
+}
+
+impl PlanNode for MemoizeState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        // :HACK: This is a semantic pass-through for now. The planner needs a
+        // real Memoize node for PostgreSQL-compatible EXPLAIN output; caching
+        // can be added here when non-EXPLAIN workloads start depending on it.
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+        if self.input.exec_proc_node(ctx)?.is_some() {
+            finish_row(&mut self.stats, start);
+            Ok(self.input.current_slot())
+        } else {
+            finish_eof(&mut self.stats, start, ctx);
+            Ok(None)
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.input.current_system_bindings()
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Memoize".into()
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = explain_detail_prefix(indent);
+        if !self.cache_keys.is_empty() {
+            let keys = self
+                .cache_keys
+                .iter()
+                .map(|expr| render_explain_expr(expr, self.input.column_names()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("{prefix}Cache Key: {keys}"));
+        }
+        lines.push(format!("{prefix}Cache Mode: logical"));
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+    }
+}
+
+impl PlanNode for GatherState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+        if self.input.exec_proc_node(ctx)?.is_some() {
+            finish_row(&mut self.stats, start);
+            Ok(self.input.current_slot())
+        } else {
+            finish_eof(&mut self.stats, start, ctx);
+            Ok(None)
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.input.current_system_bindings()
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Gather".into()
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = explain_detail_prefix(indent);
+        lines.push(format!("{prefix}Workers Planned: {}", self.workers_planned));
+        if self.single_copy {
+            lines.push(format!("{prefix}Single Copy: true"));
+        }
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
         format_explain_lines_with_costs(
             &*self.input,
             indent + 1,

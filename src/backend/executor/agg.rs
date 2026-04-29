@@ -5,7 +5,7 @@ use super::{
 };
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
-use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call;
+use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call_with_arg_types;
 use crate::backend::executor::expr_ops::{
     bitwise_and_values, bitwise_or_values, bitwise_xor_values, compare_order_by_keys,
     interval_div_float,
@@ -40,6 +40,8 @@ pub(crate) struct CustomAggregateRuntime {
     pub(crate) finalfn_oid: Option<u32>,
     pub(crate) finalfn_strict: bool,
     pub(crate) transtype: SqlType,
+    pub(crate) transfn_arg_types: Vec<SqlType>,
+    pub(crate) finalfn_arg_types: Vec<SqlType>,
     pub(crate) init_value: Option<Value>,
 }
 
@@ -1145,8 +1147,12 @@ impl AggregateRuntime {
                 {
                     return Ok(());
                 }
-                let value =
-                    execute_scalar_function_value_call(custom.transfn_oid, &call_args, ctx)?;
+                let value = execute_scalar_function_value_call_with_arg_types(
+                    custom.transfn_oid,
+                    &call_args,
+                    Some(&custom.transfn_arg_types),
+                    ctx,
+                )?;
                 *state = AccumState::custom(super::cast_value(value, custom.transtype)?);
                 Ok(())
             }
@@ -1338,7 +1344,12 @@ impl AggregateRuntime {
                     if custom.finalfn_strict && matches!(state_value, Value::Null) {
                         return Ok(Value::Null);
                     }
-                    execute_scalar_function_value_call(finalfn_oid, &[state_value], ctx)
+                    execute_scalar_function_value_call_with_arg_types(
+                        finalfn_oid,
+                        &[state_value],
+                        Some(&custom.finalfn_arg_types),
+                        ctx,
+                    )
                 } else {
                     Ok(state_value)
                 }

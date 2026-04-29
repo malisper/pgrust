@@ -7,8 +7,7 @@ use crate::backend::executor::expr_reg::{format_regprocedure_oid_optional, forma
 use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache_list2_db,
-    search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
@@ -450,11 +449,11 @@ fn drop_dependents_for_reference(
     txn_ctx: CatalogTxnContext,
     referenced: ObjectAddress,
 ) -> Vec<crate::include::catalog::PgDependRow> {
-    search_sys_cache_list2_db(
+    SearchSysCacheList2(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::DependReference,
+        SysCacheId::DEPENDREFERENCE,
         drop_oid_key(referenced.classid),
         drop_oid_key(referenced.objid),
     )
@@ -476,11 +475,11 @@ fn drop_inheritance_children(
     txn_ctx: CatalogTxnContext,
     parent_oid: u32,
 ) -> Vec<crate::include::catalog::PgInheritsRow> {
-    search_sys_cache_list1_db(
+    SearchSysCacheList1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::InheritsParent,
+        SysCacheId::INHPARENT,
         drop_oid_key(parent_oid),
     )
     .map(|tuples| {
@@ -501,11 +500,11 @@ fn drop_constraint_row_by_oid(
     txn_ctx: CatalogTxnContext,
     oid: u32,
 ) -> Option<PgConstraintRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::ConstraintOid,
+        SysCacheId::CONSTROID,
         drop_oid_key(oid),
     )
     .ok()?
@@ -522,11 +521,11 @@ fn drop_rewrite_row_by_oid(
     txn_ctx: CatalogTxnContext,
     oid: u32,
 ) -> Option<PgRewriteRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::RewriteOid,
+        SysCacheId::REWRITEOID,
         drop_oid_key(oid),
     )
     .ok()?
@@ -733,20 +732,11 @@ fn drop_function_arg_type_oid(
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> Result<Option<u32>, ParseError> {
     let mut text = arg.trim();
-    let lower = text.to_ascii_lowercase();
-    for (mode, callable) in [
-        ("inout", true),
-        ("variadic", true),
-        ("in", true),
-        ("out", false),
-    ] {
-        if lower == mode || lower.starts_with(&format!("{mode} ")) {
-            if !callable {
-                return Ok(None);
-            }
-            text = text[mode.len()..].trim_start();
-            break;
+    if let Some((rest, callable)) = strip_drop_function_arg_mode(text) {
+        if !callable {
+            return Ok(None);
         }
+        text = rest;
     }
 
     let raw_type = match parse_type_name(text).and_then(|raw_type| {
@@ -757,6 +747,9 @@ fn drop_function_arg_type_oid(
             let Some(rest) = strip_leading_sql_word(text) else {
                 return Err(first_err);
             };
+            let rest = strip_drop_function_arg_mode(rest)
+                .map(|(rest, _)| rest)
+                .unwrap_or(rest);
             parse_type_name(rest)?
         }
     };
@@ -769,6 +762,22 @@ fn drop_function_arg_type_oid(
         })
         .map(Some)
         .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
+}
+
+fn strip_drop_function_arg_mode(text: &str) -> Option<(&str, bool)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for (mode, callable) in [
+        ("inout", true),
+        ("variadic", true),
+        ("in", true),
+        ("out", false),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            return Some((trimmed[mode.len()..].trim_start(), callable));
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -795,19 +804,10 @@ fn drop_routine_arg_spec(
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> Result<DropRoutineArgSpec, ParseError> {
     let mut text = arg.trim();
-    let lower = text.to_ascii_lowercase();
     let mut parsed_mode = None;
-    for (mode, code) in [
-        ("inout", b'b'),
-        ("variadic", b'v'),
-        ("in", b'i'),
-        ("out", b'o'),
-    ] {
-        if lower == mode || lower.starts_with(&format!("{mode} ")) {
-            parsed_mode = Some(code);
-            text = text[mode.len()..].trim_start();
-            break;
-        }
+    if let Some((rest, mode)) = strip_drop_routine_arg_mode(text) {
+        parsed_mode = Some(mode);
+        text = rest;
     }
 
     let raw_type = match parse_type_name(text).and_then(|raw_type| {
@@ -817,6 +817,12 @@ fn drop_routine_arg_spec(
         Err(first_err) => {
             let Some(rest) = strip_leading_sql_word(text) else {
                 return Err(first_err);
+            };
+            let rest = if let Some((rest, mode)) = strip_drop_routine_arg_mode(rest) {
+                parsed_mode = Some(mode);
+                rest
+            } else {
+                rest
             };
             parse_type_name(rest)?
         }
@@ -833,6 +839,22 @@ fn drop_routine_arg_spec(
         mode: parsed_mode,
         type_oid,
     })
+}
+
+fn strip_drop_routine_arg_mode(text: &str) -> Option<(&str, u8)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for (mode, code) in [
+        ("inout", b'b'),
+        ("variadic", b'v'),
+        ("in", b'i'),
+        ("out", b'o'),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            return Some((trimmed[mode.len()..].trim_start(), code));
+        }
+    }
+    None
 }
 
 fn drop_table_direct_dependencies(

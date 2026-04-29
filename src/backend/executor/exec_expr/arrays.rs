@@ -676,7 +676,6 @@ pub(super) fn eval_cardinality_function(values: &[Value]) -> Result<Value, ExecE
 
 pub(super) fn eval_array_append_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
-        [Value::Null, _] => Ok(Value::Null),
         [array, element] => append_array_value(array, element, false),
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "array_append(array, element)",
@@ -687,7 +686,6 @@ pub(super) fn eval_array_append_function(values: &[Value]) -> Result<Value, Exec
 
 pub(super) fn eval_array_prepend_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
-        [_, Value::Null] => Ok(Value::Null),
         [element, array] => append_array_value(array, element, true),
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "array_prepend(element, array)",
@@ -808,7 +806,9 @@ pub(crate) fn append_array_value(
     prepend: bool,
 ) -> Result<Value, ExecError> {
     let Some(array) = normalize_array_value(array) else {
-        return Ok(Value::Null);
+        return Ok(Value::PgArray(ArrayValue::from_1d(vec![
+            element.to_owned_value(),
+        ])));
     };
     let element_type_oid = array.element_type_oid;
     if array.ndim() == 0 {

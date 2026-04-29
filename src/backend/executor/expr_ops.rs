@@ -161,10 +161,10 @@ pub(crate) fn compare_order_values(
         }
         (Value::Bool(a), Value::Bool(b)) => Ok(a.cmp(b)),
         (a, b) if normalize_array_value(a).is_some() && normalize_array_value(b).is_some() => {
-            Ok(compare_array_values(
+            compare_array_values(
                 &normalize_array_value(a).unwrap(),
                 &normalize_array_value(b).unwrap(),
-            ))
+            )
         }
         _ => Ok(Ordering::Equal),
     }
@@ -300,7 +300,7 @@ pub(crate) fn compare_values(
                 compare_array_values(
                     &normalize_array_value(l).unwrap(),
                     &normalize_array_value(r).unwrap(),
-                ) == Ordering::Equal,
+                )? == Ordering::Equal,
             ))
         }
         _ => Err(ExecError::TypeMismatch { op, left, right }),
@@ -440,7 +440,9 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
             compare_array_values(
                 &normalize_array_value(l).unwrap(),
                 &normalize_array_value(r).unwrap(),
-            ) != Ordering::Equal
+            )
+            .map(|ordering| ordering != Ordering::Equal)
+            .unwrap_or(true)
         }
         _ => true,
     }
@@ -1330,6 +1332,18 @@ pub(crate) fn concat_values_with_cast_context(
     catalog: Option<&dyn CatalogLookup>,
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null)
+        && !matches!(right, Value::Null)
+        && left_type.is_some_and(|ty| ty.is_array)
+    {
+        return append_array_value(&left, &right, false);
+    }
+    if matches!(right, Value::Null)
+        && !matches!(left, Value::Null)
+        && right_type.is_some_and(|ty| ty.is_array)
+    {
+        return append_array_value(&right, &left, true);
+    }
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
@@ -1644,7 +1658,7 @@ pub(crate) fn order_values(
                 compare_array_values(
                     &normalize_array_value(l).unwrap(),
                     &normalize_array_value(r).unwrap(),
-                ),
+                )?,
                 Ordering::Equal,
                 op,
             )))
@@ -1934,12 +1948,22 @@ fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
     }
 }
 
-fn compare_array_values(left: &ArrayValue, right: &ArrayValue) -> Ordering {
+fn compare_array_values(left: &ArrayValue, right: &ArrayValue) -> Result<Ordering, ExecError> {
+    if let (Some(left_oid), Some(right_oid)) = (left.element_type_oid, right.element_type_oid)
+        && left_oid != right_oid
+    {
+        return Err(ExecError::DetailedError {
+            message: "cannot compare arrays of different element types".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
     for (left_item, right_item) in left.elements.iter().zip(right.elements.iter()) {
         match (left_item, right_item) {
             (Value::Null, Value::Null) => {}
-            (Value::Null, _) => return Ordering::Greater,
-            (_, Value::Null) => return Ordering::Less,
+            (Value::Null, _) => return Ok(Ordering::Greater),
+            (_, Value::Null) => return Ok(Ordering::Less),
             _ => {
                 if matches!(
                     compare_values("=", left_item.clone(), right_item.clone(), None),
@@ -1951,13 +1975,14 @@ fn compare_array_values(left: &ArrayValue, right: &ArrayValue) -> Ordering {
                     order_values("<", left_item.clone(), right_item.clone(), None),
                     Ok(Value::Bool(true))
                 ) {
-                    return Ordering::Less;
+                    return Ok(Ordering::Less);
                 }
-                return Ordering::Greater;
+                return Ok(Ordering::Greater);
             }
         }
     }
-    left.elements
+    Ok(left
+        .elements
         .len()
         .cmp(&right.elements.len())
         .then_with(|| left.dimensions.len().cmp(&right.dimensions.len()))
@@ -1972,7 +1997,7 @@ fn compare_array_values(left: &ArrayValue, right: &ArrayValue) -> Ordering {
                 .iter()
                 .map(|dim| dim.lower_bound)
                 .cmp(right.dimensions.iter().map(|dim| dim.lower_bound))
-        })
+        }))
 }
 
 fn pg_float_eq(left: f64, right: f64) -> bool {

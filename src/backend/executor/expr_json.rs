@@ -3037,7 +3037,10 @@ fn eval_sql_json_value_expr(
 
 fn is_missing_jsonpath_variable_error(err: &ExecError) -> bool {
     match err {
-        ExecError::WithContext { source, .. } => is_missing_jsonpath_variable_error(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
+            is_missing_jsonpath_variable_error(source)
+        }
         ExecError::DetailedError { message, .. } => {
             message.starts_with("could not find jsonpath variable ")
         }
@@ -5354,7 +5357,10 @@ fn cast_sql_json_default_value(
 
 fn sql_json_default_error_is_direct(err: &ExecError) -> bool {
     match err {
-        ExecError::WithContext { source, .. } => sql_json_default_error_is_direct(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
+            sql_json_default_error_is_direct(source)
+        }
         ExecError::BitStringLengthMismatch { .. }
         | ExecError::BitStringTooLong { .. }
         | ExecError::StringDataRightTruncation { .. } => true,
@@ -5409,7 +5415,8 @@ fn sql_json_behavior_coercion_error(
 
 fn sql_json_error_message(err: &ExecError) -> String {
     match err {
-        ExecError::WithContext { source, .. } => sql_json_error_message(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => sql_json_error_message(source),
         ExecError::Parse(parse) => parse.to_string(),
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::JsonInput { message, .. } => message.clone(),

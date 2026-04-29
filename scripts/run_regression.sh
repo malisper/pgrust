@@ -642,6 +642,9 @@ direct_test_dependencies() {
         brin_bloom|brin_multi)
             echo "brin"
             ;;
+        brin)
+            echo "create_index"
+            ;;
         create_index_spgist|index_including|index_including_gist)
             echo "create_index"
             ;;
@@ -774,6 +777,8 @@ PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
 TIMEOUT=60
+TIMEOUT_PROVIDED=false
+LONG_REGRESSION_TIMEOUT="${PGRUST_REGRESS_LONG_TIMEOUT:-300}"
 JOBS=4
 STATEMENT_TIMEOUT="${PGRUST_STATEMENT_TIMEOUT:-5}"
 BASE_SETUP_TIMEOUT="${PGRUST_REGRESS_BASE_SETUP_TIMEOUT:-300}"
@@ -808,7 +813,7 @@ while [[ $# -gt 0 ]]; do
         --port) PORT="$2"; shift 2 ;;
         --skip-build) SKIP_BUILD=true; shift ;;
         --skip-server) SKIP_SERVER=true; shift ;;
-        --timeout) TIMEOUT="$2"; shift 2 ;;
+        --timeout) TIMEOUT="$2"; TIMEOUT_PROVIDED=true; shift 2 ;;
         --jobs|--max-connections) JOBS="$2"; shift 2 ;;
         --schedule) SCHEDULE_FILE="$2"; SCHEDULE_OVERRIDE=true; shift 2 ;;
         --test) SINGLE_TEST="$2"; shift 2 ;;
@@ -850,6 +855,29 @@ RUN_DEADLINE_EPOCH=0
 if [[ "$DEADLINE_SECS" -gt 0 ]]; then
     RUN_DEADLINE_EPOCH=$((RUN_START_EPOCH + DEADLINE_SECS))
 fi
+
+test_file_timeout() {
+    local test_name="$1"
+
+    if [[ "$TIMEOUT_PROVIDED" == true ]]; then
+        echo "$TIMEOUT"
+        return
+    fi
+
+    case "$test_name" in
+        create_index|indexing)
+            echo "$LONG_REGRESSION_TIMEOUT"
+            return
+            ;;
+    esac
+
+    if [[ "$NEEDS_CREATE_INDEX_BASE" == true ]] && test_uses_create_index_base "$test_name"; then
+        echo "$LONG_REGRESSION_TIMEOUT"
+        return
+    fi
+
+    echo "$TIMEOUT"
+}
 
 if [[ "$JOBS" -gt 1 && "$SKIP_SERVER" == false ]]; then
     ISOLATED_PARALLEL=true
@@ -1392,7 +1420,11 @@ build_isolated_regression_bases() {
 }
 
 echo "Per-query statement_timeout: ${STATEMENT_TIMEOUT}s"
-echo "Per-file timeout: ${TIMEOUT}s"
+if [[ "$TIMEOUT_PROVIDED" == true ]]; then
+    echo "Per-file timeout: ${TIMEOUT}s"
+else
+    echo "Per-file timeout: ${TIMEOUT}s (${LONG_REGRESSION_TIMEOUT}s for long regression files)"
+fi
 echo "Base setup timeout: ${BASE_SETUP_TIMEOUT}s"
 echo "Schedule shard: ${SHARD_INDEX}/${SHARD_TOTAL}"
 if [[ "$DEADLINE_SECS" -gt 0 ]]; then
@@ -1914,9 +1946,12 @@ run_one_regression_test() {
     sql_file="$PREPARED_SQL_FILE"
     expected_file="$PREPARED_EXPECTED_FILE"
 
+    local file_timeout
+    file_timeout="$(test_file_timeout "$test_name")"
+
     # Run the test with timeout (if available)
     # -a = echo all input, -q = quiet mode (matches PG regression test runner)
-    if run_psql_file "$TIMEOUT" "$sql_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+    if run_psql_file "$file_timeout" "$sql_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
         :
     else
         exit_code=$?
@@ -2002,7 +2037,7 @@ run_regression_dependency_setup() {
     prepare_test_fixture "$sql_file" "$expected_file" "$dependency_name"
     mkdir -p "$(dirname "$output_file")"
     echo "Running dependency setup for $dependent_name: $dependency_name"
-    if run_psql_file "$TIMEOUT" "$PREPARED_SQL_FILE" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+    if run_psql_file "$(test_file_timeout "$dependency_name")" "$PREPARED_SQL_FILE" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
         if ! reset_dependency_session_state "$output_file"; then
             echo "ERROR: failed to reset dependency session state for $dependent_name: $dependency_name" >&2
             echo "See: $output_file" >&2
@@ -2063,7 +2098,7 @@ run_select_distinct_index_setup() {
 CREATE INDEX IF NOT EXISTS tenk1_hundred ON tenk1 USING btree(hundred int4_ops);
 SQL
     echo "Dependency setup for select_distinct: tenk1_hundred"
-    if run_psql_file "$TIMEOUT" "$setup_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+    if run_psql_file "$(test_file_timeout select_distinct)" "$setup_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
         return 0
     fi
     echo "ERROR: select_distinct index dependency setup failed" >&2

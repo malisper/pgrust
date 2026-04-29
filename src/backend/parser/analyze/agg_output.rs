@@ -115,6 +115,24 @@ pub(super) fn grouped_infer_sql_expr_type(
     )
 }
 
+fn grouped_infer_sql_expr_function_arg_type(
+    expr: &SqlExpr,
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> SqlType {
+    let visible_ctes = current_grouped_agg_visible_ctes();
+    super::infer::infer_sql_expr_function_arg_type_with_ctes(
+        expr,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &visible_ctes,
+    )
+}
+
 pub(super) fn grouped_infer_common_scalar_expr_type(
     exprs: &[SqlExpr],
     input_scope: &BoundScope,
@@ -635,6 +653,117 @@ fn bind_grouped_window_agg_call(
     ))
 }
 
+fn bind_resolved_grouped_custom_window_agg_call(
+    name: &str,
+    resolved: &ResolvedFunctionCall,
+    args: &[SqlFunctionArg],
+    filter: Option<&SqlExpr>,
+    over: &RawWindowSpec,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[CollectedAggregate],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let state = current_window_state_or_error()?;
+    if aggregate_args_are_named(args) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "aggregate arguments without names",
+            actual: name.into(),
+        });
+    }
+
+    let arg_values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    let arg_types = arg_values
+        .iter()
+        .map(|expr| {
+            grouped_infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer)
+        })
+        .collect::<Vec<_>>();
+    let bound_args = arg_values
+        .iter()
+        .map(|expr| {
+            with_windows_disallowed(|| {
+                bind_agg_output_expr(
+                    expr,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for arg in &bound_args {
+        reject_nested_local_ctes_in_agg_expr(arg)?;
+    }
+    let coerced_args = bound_args
+        .into_iter()
+        .zip(arg_types.iter().copied())
+        .zip(resolved.declared_arg_types.iter().copied())
+        .map(|((arg, actual_type), declared_type)| {
+            coerce_bound_expr(arg, actual_type, declared_type)
+        })
+        .collect::<Vec<_>>();
+    let bound_filter = filter
+        .map(|expr| {
+            with_windows_disallowed(|| {
+                bind_agg_output_expr(
+                    expr,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            })
+        })
+        .transpose()?;
+    let spec = bind_window_spec(over, catalog, |expr| {
+        bind_agg_output_expr(
+            expr,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )
+    })?;
+    let kind = WindowFuncKind::Aggregate(crate::include::nodes::primnodes::Aggref {
+        aggfnoid: resolved.proc_oid,
+        aggtype: resolved.result_type,
+        aggvariadic: resolved.func_variadic,
+        aggdistinct: false,
+        direct_args: Vec::new(),
+        args: coerced_args.clone(),
+        aggorder: Vec::new(),
+        aggfilter: bound_filter,
+        agglevelsup: 0,
+        aggno: 0,
+    });
+    Ok(register_window_expr(
+        &state,
+        spec,
+        kind,
+        coerced_args,
+        resolved.result_type,
+        false,
+    ))
+}
+
 fn bind_grouped_visible_outer_aggregate_call(
     name: &str,
     direct_args: &[SqlFunctionArg],
@@ -949,7 +1078,7 @@ fn bind_grouped_window_func_call(
     let actual_types = args
         .iter()
         .map(|arg| {
-            grouped_infer_sql_expr_type(
+            grouped_infer_sql_expr_function_arg_type(
                 &arg.value,
                 input_scope,
                 catalog,
@@ -1057,9 +1186,21 @@ fn bind_grouped_window_func_call(
                 n_keys,
             );
         }
-        return Err(ParseError::FeatureNotSupported(format!(
-            "window execution for custom aggregate {name}"
-        )));
+        return bind_resolved_grouped_custom_window_agg_call(
+            name,
+            &resolved,
+            args,
+            None,
+            over,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        );
     }
     Err(ParseError::FeatureNotSupported(format!(
         "window function {name}"
@@ -3679,7 +3820,7 @@ fn bind_grouped_generate_series_srf(
     let actual_types = args
         .iter()
         .map(|arg| {
-            grouped_infer_sql_expr_type(
+            grouped_infer_sql_expr_function_arg_type(
                 &arg.value,
                 input_scope,
                 catalog,

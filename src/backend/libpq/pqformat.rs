@@ -45,7 +45,8 @@ impl Default for FloatFormatOptions {
 
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
-        ExecError::WithContext { source, .. } => format_exec_error(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => format_exec_error(source),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             format_exec_error(&ExecError::Parse((**source).clone()))
         }
@@ -169,7 +170,8 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
 
 pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
     match e {
-        ExecError::WithContext { source, .. } => format_exec_error_hint(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => format_exec_error_hint(source),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             format_exec_error_hint(&ExecError::Parse((**source).clone()))
         }
@@ -1828,6 +1830,22 @@ pub(crate) fn send_error_with_fields(
     context: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
+    send_error_with_internal_fields(
+        w, sqlstate, message, detail, hint, context, position, None, None,
+    )
+}
+
+pub(crate) fn send_error_with_internal_fields(
+    w: &mut impl Write,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    context: Option<&str>,
+    position: Option<usize>,
+    internal_query: Option<&str>,
+    internal_position: Option<usize>,
+) -> io::Result<()> {
     let mut body = Vec::new();
     body.push(b'S');
     body.extend_from_slice(b"ERROR\0");
@@ -1857,6 +1875,16 @@ pub(crate) fn send_error_with_fields(
     if let Some(position) = position {
         body.push(b'P');
         body.extend_from_slice(position.to_string().as_bytes());
+        body.push(0);
+    }
+    if let Some(internal_position) = internal_position {
+        body.push(b'p');
+        body.extend_from_slice(internal_position.to_string().as_bytes());
+        body.push(0);
+    }
+    if let Some(internal_query) = internal_query {
+        body.push(b'q');
+        body.extend_from_slice(internal_query.as_bytes());
         body.push(0);
     }
     body.push(0);

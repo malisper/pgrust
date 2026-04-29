@@ -275,6 +275,15 @@ pub(crate) fn relation_get_index_expressions(
     Ok(exprs)
 }
 
+#[allow(non_snake_case)]
+pub(crate) fn RelationGetIndexExpressions(
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<Expr>, ParseError> {
+    relation_get_index_expressions(index_meta, heap_desc, catalog)
+}
+
 fn bind_index_exprs_uncached(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     heap_desc: &RelationDesc,
@@ -317,6 +326,15 @@ pub(crate) fn relation_get_index_predicate(
     let predicate = bind_index_predicate_uncached(index_meta, heap_desc, catalog)?;
     index_meta.rd_indpred = Some(predicate.clone());
     Ok(predicate)
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn RelationGetIndexPredicate(
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    relation_get_index_predicate(index_meta, heap_desc, catalog)
 }
 
 fn bind_index_predicate_uncached(
@@ -1011,6 +1029,22 @@ pub trait CatalogLookup {
 
     fn depend_rows(&self) -> Vec<PgDependRow> {
         Vec::new()
+    }
+
+    fn depend_rows_referencing(
+        &self,
+        refclassid: u32,
+        refobjid: u32,
+        refobjsubid: Option<i32>,
+    ) -> Vec<PgDependRow> {
+        self.depend_rows()
+            .into_iter()
+            .filter(|row| {
+                row.refclassid == refclassid
+                    && row.refobjid == refobjid
+                    && refobjsubid.is_none_or(|objsubid| row.refobjsubid == objsubid)
+            })
+            .collect()
     }
 
     fn role_name_by_oid(&self, role_oid: u32) -> Option<String> {
@@ -1992,8 +2026,8 @@ fn planner_cached_index_expressions(
     }
 
     let index_exprs =
-        relation_get_index_expressions(index_meta, heap_desc, catalog).unwrap_or_default();
-    let index_predicate = relation_get_index_predicate(index_meta, heap_desc, catalog)
+        RelationGetIndexExpressions(index_meta, heap_desc, catalog).unwrap_or_default();
+    let index_predicate = RelationGetIndexPredicate(index_meta, heap_desc, catalog)
         .ok()
         .flatten();
     if let Some(cache) = index_expr_cache {
@@ -4132,9 +4166,9 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
-            FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
-                self.visit_from(source, context)
-            }
+            FromItem::Lateral(source)
+            | FromItem::Alias { source, .. }
+            | FromItem::TableSample { source, .. } => self.visit_from(source, context),
             FromItem::DerivedTable(select) => self.visit_select(select, context),
             FromItem::Join {
                 left,
@@ -4527,9 +4561,9 @@ fn insert_statement_references_table(stmt: &InsertStatement, table_name: &str) -
 fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
     match item {
         FromItem::Table { name, .. } => name.eq_ignore_ascii_case(table_name),
-        FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
-            from_item_references_table(source, table_name)
-        }
+        FromItem::Lateral(source)
+        | FromItem::Alias { source, .. }
+        | FromItem::TableSample { source, .. } => from_item_references_table(source, table_name),
         FromItem::DerivedTable(select) => select_statement_references_table(select, table_name),
         FromItem::Join { left, right, .. } => {
             from_item_references_table(left, table_name)
