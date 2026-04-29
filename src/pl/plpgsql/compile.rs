@@ -112,11 +112,13 @@ pub(crate) enum CompiledExpr {
     Scalar {
         expr: Expr,
         subplans: Vec<Plan>,
+        source: String,
     },
     QueryCompare {
         plan: PlannedStmt,
         op: QueryCompareOp,
         rhs: Expr,
+        source: String,
     },
 }
 
@@ -211,6 +213,7 @@ pub(crate) enum CompiledCursorOpenSource {
         query: String,
         params: Vec<DeclaredCursorParam>,
         args: Vec<CompiledExpr>,
+        arg_context: Option<String>,
     },
 }
 
@@ -2654,13 +2657,15 @@ fn compile_cursor_open_source(
                         expected: "declared cursor query or OPEN cursor FOR query",
                         actual: name.to_string(),
                     })?;
-            let args = compile_declared_cursor_args(name, args, &cursor.params, catalog, env)?;
+            let (args, arg_context) =
+                compile_declared_cursor_args(name, args, &cursor.params, catalog, env)?;
             let shape_plan = plan_declared_cursor_query_for_shape(&cursor, catalog, env).ok();
             Ok((
                 CompiledCursorOpenSource::Declared {
                     query: cursor.query,
                     params: cursor.params,
                     args,
+                    arg_context,
                 },
                 cursor.scrollable,
                 shape_plan,
@@ -2675,7 +2680,7 @@ fn compile_declared_cursor_args(
     params: &[DeclaredCursorParam],
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
-) -> Result<Vec<CompiledExpr>, ParseError> {
+) -> Result<(Vec<CompiledExpr>, Option<String>), ParseError> {
     let mut assigned = vec![None::<String>; params.len()];
     for (arg_index, arg) in args.iter().enumerate() {
         match arg {
@@ -2726,10 +2731,35 @@ fn compile_declared_cursor_args(
             ),
         });
     }
-    assigned
+    let arg_context = declared_cursor_args_context(&assigned, params);
+    let args = assigned
         .into_iter()
         .map(|expr| compile_expr_text(&expr.expect("checked above"), catalog, env))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((args, arg_context))
+}
+
+fn declared_cursor_args_context(
+    assigned: &[Option<String>],
+    params: &[DeclaredCursorParam],
+) -> Option<String> {
+    if assigned.is_empty() {
+        return None;
+    }
+    Some(
+        assigned
+            .iter()
+            .zip(params)
+            .map(|(expr, param)| {
+                format!(
+                    "{} AS {}",
+                    expr.as_deref().expect("cursor args checked").trim(),
+                    param.name
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn duplicate_cursor_param_error(cursor_name: &str, param_name: &str) -> ParseError {
@@ -4102,7 +4132,7 @@ fn compile_expr_text(
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
-    compile_expr_sql(&rewritten_sql, catalog, env)
+    compile_expr_sql(&rewritten_sql, sql.trim(), catalog, env)
 }
 
 fn compile_assignment_expr_text(
@@ -4113,11 +4143,12 @@ fn compile_assignment_expr_text(
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
     let rewritten_sql =
         rewrite_plpgsql_assignment_query_expr(&rewritten_sql).unwrap_or(rewritten_sql);
-    compile_expr_sql(&rewritten_sql, catalog, env)
+    compile_expr_sql(&rewritten_sql, sql.trim(), catalog, env)
 }
 
 fn compile_expr_sql(
     sql: &str,
+    source: &str,
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
@@ -4148,7 +4179,11 @@ fn compile_expr_sql(
     let _ = sql_type;
     let mut subplans = Vec::new();
     let expr = finalize_expr_subqueries(expr, catalog, &mut subplans);
-    Ok(CompiledExpr::Scalar { expr, subplans })
+    Ok(CompiledExpr::Scalar {
+        expr,
+        subplans,
+        source: source.trim().to_string(),
+    })
 }
 
 fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Expr> {
@@ -4193,7 +4228,7 @@ fn compile_condition_text(
                 );
                 let plan = plan_select_for_env(&select, catalog, env)?;
                 let rhs = match compile_expr_text(condition.right_expr, catalog, env)? {
-                    CompiledExpr::Scalar { expr, subplans } if subplans.is_empty() => expr,
+                    CompiledExpr::Scalar { expr, subplans, .. } if subplans.is_empty() => expr,
                     CompiledExpr::Scalar { .. } => {
                         return Err(ParseError::FeatureNotSupported(
                             "query-style PL/pgSQL conditions do not support subqueries on the comparison value".into(),
@@ -4209,6 +4244,7 @@ fn compile_condition_text(
                     plan,
                     op: condition.op,
                     rhs,
+                    source: sql.trim().to_string(),
                 });
             }
             Err(ParseError::UnexpectedToken {

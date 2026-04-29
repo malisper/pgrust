@@ -49473,6 +49473,60 @@ fn plpgsql_context_uses_declared_polymorphic_signature() {
 }
 
 #[test]
+fn plpgsql_return_expression_errors_include_expression_context() {
+    let dir = temp_dir("plpgsql_return_expr_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function return_expr_context() returns int4 language plpgsql as $$
+         begin
+           return 1/0;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select return_expr_context()").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL expression \"1/0\""
+    ));
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function return_expr_context() line 3 at RETURN"
+    ));
+}
+
+#[test]
+fn plpgsql_declared_cursor_arg_errors_include_argument_context() {
+    let dir = temp_dir("plpgsql_cursor_arg_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function cursor_arg_context() returns void language plpgsql as $$
+         declare
+           c1 cursor (p1 int4, p2 int4) for select p1;
+         begin
+           open c1 (p2 := 77, p1 := 42/0);
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select cursor_arg_context()").unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL expression \"42/0 AS p1, 77 AS p2\""
+    ));
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function cursor_arg_context() line 5 at OPEN"
+    ));
+}
+
+#[test]
 fn plpgsql_return_expr_with_out_parameter_is_compile_error() {
     let dir = temp_dir("plpgsql_return_expr_out_param");
     let db = Database::open(&dir, 64).unwrap();

@@ -4434,7 +4434,8 @@ fn execute_cursor_open_source(
             query,
             params,
             args,
-        } => execute_declared_cursor_query(query, params, args, compiled, state, ctx),
+            arg_context,
+        } => execute_declared_cursor_query(query, params, args, arg_context, compiled, state, ctx),
     }
 }
 
@@ -4442,14 +4443,19 @@ fn execute_declared_cursor_query(
     query: &str,
     params: &[DeclaredCursorParam],
     args: &[CompiledExpr],
+    arg_context: &Option<String>,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionQueryResult, ExecError> {
     let values = args
         .iter()
-        .map(|expr| eval_function_expr(expr, &state.values, ctx))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|expr| eval_function_expr_inner(expr, &state.values, ctx))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| match arg_context {
+            Some(source) => with_plpgsql_expression_context(err, source),
+            None => err,
+        })?;
     // :HACK: Declared cursor parameters are substituted as SQL literals until
     // pgrust has native PL/pgSQL cursor parameter binding in the SQL planner.
     let sql = substitute_declared_cursor_params(query, params, &values, ctx)?;
@@ -6164,7 +6170,7 @@ fn coerce_row_to_columns(row: Vec<Value>, columns: &[QueryColumn]) -> Result<Tup
 
 fn eval_do_expr(expr: &CompiledExpr, values: &[Value]) -> Result<Value, ExecError> {
     match expr {
-        CompiledExpr::Scalar { expr, subplans } if subplans.is_empty() => {
+        CompiledExpr::Scalar { expr, subplans, .. } if subplans.is_empty() => {
             let mut slot = TupleSlot::virtual_row(values.to_vec());
             eval_plpgsql_expr(expr, &mut slot)
         }
@@ -6184,8 +6190,18 @@ fn eval_function_expr(
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    let source = compiled_expr_source(expr);
+    eval_function_expr_inner(expr, values, ctx)
+        .map_err(|err| with_plpgsql_expression_context(err, source))
+}
+
+fn eval_function_expr_inner(
+    expr: &CompiledExpr,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     match expr {
-        CompiledExpr::Scalar { expr, subplans } => {
+        CompiledExpr::Scalar { expr, subplans, .. } => {
             let mut slot = TupleSlot::virtual_row(values.to_vec());
             if subplans.is_empty() {
                 return eval_expr(expr, &mut slot, ctx);
@@ -6197,7 +6213,7 @@ fn eval_function_expr(
             ctx.subplans = saved_subplans;
             result
         }
-        CompiledExpr::QueryCompare { plan, op, rhs } => {
+        CompiledExpr::QueryCompare { plan, op, rhs, .. } => {
             ctx.expr_bindings.outer_tuple = Some(values.to_vec());
             let result = execute_planned_stmt(plan.clone(), ctx);
             ctx.expr_bindings.outer_tuple = None;
@@ -6216,6 +6232,12 @@ fn eval_function_expr(
             let right = eval_expr(rhs, &mut slot, ctx)?;
             Ok(Value::Bool(eval_query_compare(*op, &left, &right)?))
         }
+    }
+}
+
+fn compiled_expr_source(expr: &CompiledExpr) -> &str {
+    match expr {
+        CompiledExpr::Scalar { source, .. } | CompiledExpr::QueryCompare { source, .. } => source,
     }
 }
 
@@ -6344,7 +6366,7 @@ fn exception_data_from_error(err: &ExecError) -> PlpgsqlExceptionData {
         detail: exec_error_detail_owned(err),
         hint: format_exec_error_hint(err),
         sqlstate: exec_error_sqlstate(err),
-        context: exec_error_context_owned(err),
+        context: exec_error_diagnostics_context_owned(err),
         column_name: exec_error_column_name_owned(err),
         constraint_name: exec_error_constraint_name_owned(err),
         datatype_name: exec_error_datatype_name_owned(err),
@@ -6376,6 +6398,26 @@ fn exec_error_context_owned(err: &ExecError) -> Option<String> {
             Some(inner) => Some(format!("{inner}\n{context}")),
             None => Some(context.clone()),
         },
+        ExecError::JsonInput { context, .. } | ExecError::XmlInput { context, .. } => {
+            context.clone()
+        }
+        ExecError::Regex(err) => err.context.clone(),
+        _ => None,
+    }
+}
+
+fn exec_error_diagnostics_context_owned(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::WithContext { source, context } => {
+            let inner = exec_error_diagnostics_context_owned(source);
+            if context.starts_with("PL/pgSQL expression \"") {
+                return inner;
+            }
+            match inner {
+                Some(inner) => Some(format!("{inner}\n{context}")),
+                None => Some(context.clone()),
+            }
+        }
         ExecError::JsonInput { context, .. } | ExecError::XmlInput { context, .. } => {
             context.clone()
         }
@@ -6816,6 +6858,20 @@ fn with_sql_statement_context(err: ExecError, sql: Option<&str>) -> ExecError {
     }
 }
 
+fn with_plpgsql_expression_context(err: ExecError, source: &str) -> ExecError {
+    let source = source.trim();
+    if source.is_empty()
+        || has_any_context(&err)
+        || has_plpgsql_expression_context_for(&err, source)
+    {
+        return err;
+    }
+    ExecError::WithContext {
+        source: Box::new(err),
+        context: format!("PL/pgSQL expression \"{source}\""),
+    }
+}
+
 fn with_plpgsql_context_if_missing(
     err: ExecError,
     compiled: &CompiledFunction,
@@ -6856,6 +6912,33 @@ fn has_plpgsql_context_for(err: &ExecError, function_name: &str) -> bool {
         ExecError::WithInternalQueryContext { source, .. } => {
             has_plpgsql_context_for(source, function_name)
         }
+        _ => false,
+    }
+}
+
+fn has_plpgsql_expression_context_for(err: &ExecError, source: &str) -> bool {
+    match err {
+        ExecError::WithContext {
+            source: inner,
+            context,
+        } => {
+            context == &format!("PL/pgSQL expression \"{source}\"")
+                || has_plpgsql_expression_context_for(inner, source)
+        }
+        _ => false,
+    }
+}
+
+fn has_any_context(err: &ExecError) -> bool {
+    match err {
+        ExecError::WithContext { .. }
+        | ExecError::JsonInput {
+            context: Some(_), ..
+        }
+        | ExecError::XmlInput {
+            context: Some(_), ..
+        } => true,
+        ExecError::Regex(err) => err.context.is_some(),
         _ => false,
     }
 }
