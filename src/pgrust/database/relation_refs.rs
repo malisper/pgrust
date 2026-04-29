@@ -326,6 +326,16 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(expr, rels);
             }
         }
+        Plan::Materialize { input, .. } => collect_rels_from_plan(input, rels),
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            collect_rels_from_plan(input, rels);
+            for expr in cache_keys {
+                collect_rels_from_expr(expr, rels);
+            }
+        }
+        Plan::Gather { input, .. } => collect_rels_from_plan(input, rels),
         Plan::NestedLoopJoin {
             left,
             right,
@@ -697,7 +707,7 @@ fn collect_direct_relation_oids_from_from_item(
         FromItem::XmlTable(table) => {
             collect_direct_relation_oids_from_xml_table(table, catalog, visible_ctes, rels);
         }
-        FromItem::Lateral(source) => {
+        FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
             collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
         }
         FromItem::DerivedTable(select) => {
