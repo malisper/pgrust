@@ -1337,6 +1337,33 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
         },
+        Plan::Materialize { plan_info, input } => Plan::Materialize {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+        },
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+        } => Plan::Memoize {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            cache_keys: cache_keys
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+        },
+        Plan::Gather {
+            plan_info,
+            input,
+            workers_planned,
+            single_copy,
+        } => Plan::Gather {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            workers_planned,
+            single_copy,
+        },
         Plan::NestedLoopJoin {
             plan_info,
             left,
@@ -1806,6 +1833,33 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
+        },
+        Plan::Materialize { plan_info, input } => Plan::Materialize {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+        },
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+        } => Plan::Memoize {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            cache_keys: cache_keys
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+        },
+        Plan::Gather {
+            plan_info,
+            input,
+            workers_planned,
+            single_copy,
+        } => Plan::Gather {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            workers_planned,
+            single_copy,
         },
         Plan::NestedLoopJoin {
             plan_info,
