@@ -370,6 +370,7 @@ pub enum Statement {
     AlterOperatorFamily(AlterOperatorFamilyStatement),
     AlterOperatorClass(AlterOperatorClassStatement),
     DropOperatorFamily(DropOperatorFamilyStatement),
+    DropOperatorClass(DropOperatorClassStatement),
     CreateTextSearch(CreateTextSearchStatement),
     AlterTextSearch(AlterTextSearchStatement),
     AlterSequence(AlterSequenceStatement),
@@ -2308,14 +2309,27 @@ pub enum TableAsObjectType {
 pub struct PrepareStatement {
     pub name: String,
     pub parameter_types: Vec<RawTypeName>,
-    pub query: SelectStatement,
+    pub query: PreparedStatementQuery,
     pub query_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedStatementQuery {
+    Select(SelectStatement),
+    Update(UpdateStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteStatement {
     pub name: String,
     pub args_sql: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedExternalParam {
+    pub paramid: usize,
+    pub arg: SqlExpr,
+    pub type_name: Option<RawTypeName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2545,6 +2559,14 @@ pub struct DropOperatorFamilyStatement {
     pub if_exists: bool,
     pub schema_name: Option<String>,
     pub family_name: String,
+    pub access_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropOperatorClassStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub opclass_name: String,
     pub access_method: String,
 }
 
@@ -4845,6 +4867,8 @@ pub enum SubqueryComparisonOp {
     Gt,
     GtEq,
     Match,
+    RegexMatch,
+    NotRegexMatch,
     Like,
     NotLike,
     ILike,

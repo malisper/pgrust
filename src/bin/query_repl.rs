@@ -1117,6 +1117,7 @@ fn run_statement(
         | Statement::AlterOperatorFamily(_)
         | Statement::AlterOperatorClass(_)
         | Statement::DropOperatorFamily(_)
+        | Statement::DropOperatorClass(_)
         | Statement::CreateRule(_)
         | Statement::CreateSchema(_)
         | Statement::CreateTablespace(_)

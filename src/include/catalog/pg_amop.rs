@@ -806,6 +806,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         oid = oid.saturating_add(1);
     }
     for (family, type_oid) in [
+        (HASH_ARRAY_FAMILY_OID, ANYARRAYOID),
         (HASH_BOOL_FAMILY_OID, BOOL_TYPE_OID),
         (HASH_INTEGER_FAMILY_OID, INT2_TYPE_OID),
         (HASH_INTEGER_FAMILY_OID, INT4_TYPE_OID),

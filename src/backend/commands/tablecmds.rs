@@ -48,10 +48,11 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    format_buffer_usage, format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
+    apply_runtime_pruning_for_explain_plan, format_buffer_usage,
+    format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
     format_explain_lines_with_options, format_explain_plan_with_subplans,
-    format_verbose_explain_plan_json_with_catalog, format_verbose_explain_plan_with_catalog,
-    push_explain_line,
+    format_explain_plan_with_subplans_and_catalog, format_verbose_explain_plan_json_with_catalog,
+    format_verbose_explain_plan_with_catalog, push_explain_line,
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
@@ -452,7 +453,7 @@ pub(crate) fn execute_explain(
     } = stmt;
     let statement = *statement;
     if let Statement::Update(update) = statement {
-        return execute_explain_update(update, analyze, costs, verbose, catalog);
+        return execute_explain_update(update, analyze, costs, verbose, catalog, ctx);
     }
     if let Statement::Delete(delete) = statement {
         return execute_explain_delete(delete, analyze, costs, verbose, catalog, planner_config);
@@ -601,7 +602,8 @@ pub(crate) fn execute_explain(
             lines.push(format!("Result Rows: {}", row_count));
         }
     } else {
-        let plan_tree = query_desc.planned_stmt.plan_tree;
+        let plan_tree =
+            apply_runtime_pruning_for_explain_plan(query_desc.planned_stmt.plan_tree, ctx);
         let subplans = query_desc.planned_stmt.subplans;
         if let Some(target_name) = merge_target_name {
             let state = executor_start(plan_tree);
@@ -624,7 +626,9 @@ pub(crate) fn execute_explain(
                     &plan_tree, &subplans, 0, costs, catalog, &mut lines,
                 );
             } else {
-                format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+                format_explain_plan_with_subplans_and_catalog(
+                    &plan_tree, &subplans, 0, costs, catalog, &mut lines,
+                );
             }
         }
     }
@@ -724,14 +728,14 @@ fn execute_explain_update(
     costs: bool,
     verbose: bool,
     catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    if analyze {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "EXPLAIN ANALYZE UPDATE".into(),
-        )));
-    }
-
     let bound = finalize_bound_update_stmt(bind_update(&stmt, catalog)?, catalog);
+    if analyze {
+        let xid = ctx.ensure_write_xid()?;
+        let cid = ctx.next_command_id;
+        execute_update(bound.clone(), catalog, ctx, xid, cid)?;
+    }
     let lines = explain_update_lines(&stmt, &bound, costs, verbose);
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
@@ -786,6 +790,12 @@ fn explain_delete_lines(
         show_costs,
         &mut lines,
     );
+    if verbose && !bound.returning.is_empty() {
+        lines.push(format!(
+            "  Output: {}",
+            render_update_returning_targets(&stmt.table_name, &bound.returning)
+        ));
+    }
     let child_targets = bound
         .targets
         .iter()
@@ -1038,7 +1048,11 @@ fn push_delete_target_scan_lines(
             push_delete_single_target_scan(target, alias.as_deref(), show_costs, indent + 6, lines);
         }
     } else {
-        push_delete_single_target_scan(targets[0], None, show_costs, indent, lines);
+        let alias = targets[0]
+            .relation_name
+            .ne(&stmt.table_name)
+            .then(|| format!("{}_1", stmt.table_name.trim_matches('"')));
+        push_delete_single_target_scan(targets[0], alias.as_deref(), show_costs, indent, lines);
     }
 }
 
@@ -1077,25 +1091,6 @@ fn push_delete_single_target_scan(
                     .collect::<Vec<_>>(),
             )
         ));
-    }
-}
-
-fn explain_delete_scan_label(target: &BoundDeleteTarget, alias: Option<&str>) -> String {
-    match &target.row_source {
-        BoundModifyRowSource::Heap => match alias {
-            Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),
-            None => format!("Seq Scan on {}", target.relation_name),
-        },
-        BoundModifyRowSource::Index { index, .. } => match alias {
-            Some(alias) => format!(
-                "Index Scan using {} on {} {alias}",
-                index.name, target.relation_name
-            ),
-            None => format!(
-                "Index Scan using {} on {}",
-                index.name, target.relation_name
-            ),
-        },
     }
 }
 
@@ -1177,13 +1172,13 @@ fn explain_update_lines(
         if let Some(alias) = &alias {
             lines.push(format!("  Update on {} {}", target.relation_name, alias));
         }
-        push_explain_line(
-            "  ->  Result",
-            crate::include::nodes::plannodes::PlanEstimate::default(),
-            show_costs,
-            &mut lines,
-        );
         if is_const_false(target.predicate.as_ref()) {
+            push_explain_line(
+                "  ->  Result",
+                crate::include::nodes::plannodes::PlanEstimate::default(),
+                show_costs,
+                &mut lines,
+            );
             if verbose {
                 lines.push(format!(
                     "        Output: {}",
@@ -1195,7 +1190,7 @@ fn explain_update_lines(
         }
         push_explain_line(
             &format!(
-                "        ->  {}",
+                "  ->  {}",
                 explain_update_scan_label(target, alias.as_deref())
             ),
             crate::include::nodes::plannodes::PlanEstimate::default(),
@@ -1203,10 +1198,10 @@ fn explain_update_lines(
             &mut lines,
         );
         if let Some(index_cond) = explain_update_index_cond(target) {
-            lines.push(format!("              Index Cond: {index_cond}"));
+            lines.push(format!("        Index Cond: {index_cond}"));
         } else if let Some(predicate) = &target.predicate {
             lines.push(format!(
-                "              Filter: {}",
+                "        Filter: {}",
                 crate::backend::executor::render_explain_expr(
                     predicate,
                     &target
@@ -1234,6 +1229,23 @@ fn explain_update_scan_target<'a>(
     base_name: &str,
     targets: &'a [BoundUpdateTarget],
 ) -> Option<&'a BoundUpdateTarget> {
+    targets
+        .iter()
+        .find(|target| {
+            target.relation_name != base_name && !is_const_false(target.predicate.as_ref())
+        })
+        .or_else(|| {
+            targets
+                .iter()
+                .find(|target| !is_const_false(target.predicate.as_ref()))
+        })
+        .or_else(|| targets.first())
+}
+
+fn explain_delete_scan_target<'a>(
+    base_name: &str,
+    targets: &'a [BoundDeleteTarget],
+) -> Option<&'a BoundDeleteTarget> {
     targets
         .iter()
         .find(|target| {
@@ -1287,6 +1299,25 @@ fn render_update_projection_output(target_name: &str, target: &BoundUpdateTarget
 }
 
 fn explain_update_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) -> String {
+    match &target.row_source {
+        BoundModifyRowSource::Heap => match alias {
+            Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),
+            None => format!("Seq Scan on {}", target.relation_name),
+        },
+        BoundModifyRowSource::Index { index, .. } => match alias {
+            Some(alias) => format!(
+                "Index Scan using {} on {} {alias}",
+                index.name, target.relation_name
+            ),
+            None => format!(
+                "Index Scan using {} on {}",
+                index.name, target.relation_name
+            ),
+        },
+    }
+}
+
+fn explain_delete_scan_label(target: &BoundDeleteTarget, alias: Option<&str>) -> String {
     match &target.row_source {
         BoundModifyRowSource::Heap => match alias {
             Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),
@@ -9625,7 +9656,7 @@ pub fn execute_update_with_waiter(
                         waiter,
                     ) {
                         Ok(WriteUpdatedRowResult::Updated(
-                            _new_tid,
+                            new_tid,
                             write_info,
                             no_action_checks,
                             outbound_checks,
@@ -9643,13 +9674,25 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if !stmt.returning.is_empty() {
+                                let visible_values = project_update_target_visible_values(
+                                    target,
+                                    &triggered_values,
+                                    new_tid,
+                                    ctx,
+                                )?;
+                                let old_visible_values = project_update_target_visible_values(
+                                    target,
+                                    &current_old_values,
+                                    current_tid,
+                                    ctx,
+                                )?;
                                 let row = project_returning_row_with_old_new(
                                     &stmt.returning,
-                                    &triggered_values,
-                                    None,
-                                    None,
-                                    Some(&current_old_values),
-                                    Some(&triggered_values),
+                                    &visible_values,
+                                    Some(new_tid),
+                                    Some(target.relation_oid),
+                                    Some(&old_visible_values),
+                                    Some(&visible_values),
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_returning_row(row.clone());

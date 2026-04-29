@@ -416,11 +416,19 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             source_id,
             desc,
+            partition_prune,
             children,
         } => Box::new(AppendState {
             source_id,
             children: children.into_iter().map(executor_start).collect(),
             current_child: 0,
+            active_children: None,
+            visible_children: None,
+            subplans_removed: partition_prune
+                .as_ref()
+                .map(|info| info.subplans_removed)
+                .unwrap_or_default(),
+            partition_prune,
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
             slot: TupleSlot::empty(desc.columns.len()),
             current_bindings: Vec::new(),
@@ -432,10 +440,18 @@ pub fn executor_start(plan: Plan) -> PlanState {
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         } => Box::new(MergeAppendState {
             source_id,
             children: children.into_iter().map(executor_start).collect(),
+            active_children: None,
+            visible_children: None,
+            subplans_removed: partition_prune
+                .as_ref()
+                .map(|info| info.subplans_removed)
+                .unwrap_or_default(),
+            partition_prune,
             items,
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
             rows: None,

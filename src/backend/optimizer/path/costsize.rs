@@ -123,6 +123,7 @@ pub(super) fn optimize_path_with_config(
                 source_id,
                 desc,
                 child_roots,
+                partition_prune,
                 children,
                 ..
             } => {
@@ -157,6 +158,7 @@ pub(super) fn optimize_path_with_config(
                     source_id,
                     desc,
                     child_roots,
+                    partition_prune,
                     children,
                 }
             }
@@ -165,6 +167,7 @@ pub(super) fn optimize_path_with_config(
                 source_id,
                 desc,
                 items,
+                partition_prune,
                 children,
                 ..
             } => {
@@ -197,6 +200,7 @@ pub(super) fn optimize_path_with_config(
                     source_id,
                     desc,
                     items,
+                    partition_prune,
                     children,
                 }
             }
@@ -2933,6 +2937,7 @@ fn parameterized_inner_index_path(
         source_id,
         desc,
         child_roots,
+        partition_prune,
         children,
     } = inner
     {
@@ -2974,6 +2979,7 @@ fn parameterized_inner_index_path(
                 source_id: *source_id,
                 desc: desc.clone(),
                 child_roots: child_roots.clone(),
+                partition_prune: partition_prune.clone(),
                 children: parameterized_children,
             },
             remaining.unwrap_or_default(),

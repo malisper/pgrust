@@ -2430,6 +2430,8 @@ fn render_subquery_op(op: SubqueryComparisonOp) -> &'static str {
         SubqueryComparisonOp::Gt => ">",
         SubqueryComparisonOp::GtEq => ">=",
         SubqueryComparisonOp::Match => "@@",
+        SubqueryComparisonOp::RegexMatch => "~",
+        SubqueryComparisonOp::NotRegexMatch => "!~",
         SubqueryComparisonOp::Like => "LIKE",
         SubqueryComparisonOp::NotLike => "NOT LIKE",
         SubqueryComparisonOp::ILike => "ILIKE",

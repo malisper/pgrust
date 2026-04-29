@@ -1,11 +1,13 @@
 use super::super::*;
 use crate::backend::executor::{
-    ExecutorTransactionState, SharedExecutorTransactionState, execute_planned_stmt,
-    execute_readonly_statement_with_config,
+    ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot, cast_value,
+    eval_expr, execute_planned_stmt, execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
     CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions,
-    SelectStatement, bind_insert_with_outer_scopes_and_ctes, bound_cte_from_query_rows,
+    PreparedExternalParam, SelectStatement, bind_insert_with_outer_scopes_and_ctes,
+    bind_scalar_expr_in_named_slot_scope, bound_cte_from_query_rows, resolve_raw_type_name,
+    with_external_param_types,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::push_warning_with_hint;
@@ -114,6 +116,60 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
             2,
         ),
     }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedExternalBinding {
+    paramid: usize,
+    expr: Expr,
+    ty: SqlType,
+}
+
+fn bind_prepared_external_params(
+    params: &[PreparedExternalParam],
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<PreparedExternalBinding>, ExecError> {
+    params
+        .iter()
+        .map(|param| {
+            let (expr, inferred) =
+                bind_scalar_expr_in_named_slot_scope(&param.arg, &[], &[], catalog, &[])
+                    .map_err(ExecError::Parse)?;
+            let ty = match &param.type_name {
+                Some(type_name) => {
+                    resolve_raw_type_name(type_name, catalog).map_err(ExecError::Parse)?
+                }
+                None => inferred,
+            };
+            Ok(PreparedExternalBinding {
+                paramid: param.paramid,
+                expr,
+                ty,
+            })
+        })
+        .collect()
+}
+
+fn prepared_external_types(bindings: &[PreparedExternalBinding]) -> Vec<(usize, SqlType)> {
+    bindings
+        .iter()
+        .map(|binding| (binding.paramid, binding.ty))
+        .collect()
+}
+
+fn install_prepared_external_params(
+    bindings: &[PreparedExternalBinding],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let mut slot = TupleSlot::empty(0);
+    for binding in bindings {
+        let value = eval_expr(&binding.expr, &mut slot, ctx)?;
+        let value = cast_value(value, binding.ty)?;
+        ctx.expr_bindings
+            .external_params
+            .insert(binding.paramid, value);
+    }
+    Ok(())
 }
 
 fn reject_restricted_view_access(name: &str, catalog: &dyn CatalogLookup) -> Result<(), ExecError> {
@@ -828,6 +884,44 @@ impl Database {
         )
     }
 
+    pub(crate) fn execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        external_params: &[PreparedExternalParam],
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
+        planner_config: PlannerConfig,
+    ) -> Result<StatementResult, ExecError> {
+        let datetime_config = autocommit_datetime_config(datetime_config);
+        let statement_lock_scope_id = Some(self.allocate_statement_lock_scope_id());
+        let stats_state = self.session_stats_state(client_id);
+        stats_state.write().begin_top_level_xact();
+        let advisory_locks = std::sync::Arc::clone(&self.advisory_locks);
+        let row_locks = std::sync::Arc::clone(&self.row_locks);
+        let result = self.execute_statement_with_search_path_inner(
+            client_id,
+            stmt,
+            statement_lock_scope_id,
+            configured_search_path,
+            &datetime_config,
+            gucs,
+            planner_config,
+            crate::backend::executor::PgPrngState::shared(),
+            external_params,
+        );
+        if let Some(scope_id) = statement_lock_scope_id {
+            advisory_locks.unlock_all_statement(client_id, scope_id);
+            row_locks.unlock_all_statement(client_id, scope_id);
+        }
+        match &result {
+            Ok(_) => stats_state.write().commit_top_level_xact(&self.stats),
+            Err(_) => stats_state.write().rollback_top_level_xact(),
+        }
+        result
+    }
+
     pub(crate) fn execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
         &self,
         client_id: ClientId,
@@ -853,6 +947,7 @@ impl Database {
             gucs,
             planner_config,
             random_state,
+            &[],
         );
         if let Some(scope_id) = statement_lock_scope_id {
             advisory_locks.unlock_all_statement(client_id, scope_id);
@@ -935,6 +1030,7 @@ impl Database {
         gucs: &std::collections::HashMap<String, String>,
         planner_config: PlannerConfig,
         random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
+        external_params: &[PreparedExternalParam],
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
@@ -957,6 +1053,7 @@ impl Database {
                         gucs,
                         planner_config,
                         std::sync::Arc::clone(&random_state),
+                        &[],
                     )?;
                 }
                 Ok(StatementResult::AffectedRows(0))
@@ -1170,6 +1267,7 @@ impl Database {
                         gucs,
                         planner_config,
                         std::sync::Arc::clone(&random_state),
+                        &[],
                     )?;
                 }
                 Ok(StatementResult::AffectedRows(0))
@@ -1545,6 +1643,12 @@ impl Database {
                     drop_stmt,
                     configured_search_path,
                 ),
+            Statement::DropOperatorClass(ref drop_stmt) => self
+                .execute_drop_operator_class_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateTextSearch(ref create_stmt) => self
                 .execute_create_text_search_stmt_with_search_path(
                     client_id,
@@ -1876,6 +1980,9 @@ impl Database {
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let external_bindings =
+                    bind_prepared_external_params(external_params, &visible_catalog)?;
+                let external_types = prepared_external_types(&external_bindings);
                 if restrict_nonsystem_view_enabled(gucs) {
                     match &stmt {
                         Statement::Select(select) => {
@@ -1889,24 +1996,13 @@ impl Database {
                         _ => {}
                     }
                 }
-                let (stmt, planned_select, planned_select_for_update, rels) = {
-                    let mut rels = std::collections::BTreeSet::new();
-                    let mut planned_select = None;
-                    let mut planned_select_for_update = false;
-                    match &stmt {
-                        Statement::Select(select) => {
-                            let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
-                                select,
-                                &visible_catalog,
-                                planner_config,
-                            )?;
-                            collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
-                            planned_select_for_update = select.locking_clause.is_some();
-                            planned_select = Some(planned_stmt);
-                        }
-                        Statement::Values(_) => {}
-                        Statement::Explain(explain) => {
-                            if let Statement::Select(select) = explain.statement.as_ref() {
+                let (stmt, planned_select, planned_select_for_update, rels) =
+                    with_external_param_types(&external_types, || {
+                        let mut rels = std::collections::BTreeSet::new();
+                        let mut planned_select = None;
+                        let mut planned_select_for_update = false;
+                        match &stmt {
+                            Statement::Select(select) => {
                                 let planned_stmt =
                                     crate::backend::parser::pg_plan_query_with_config(
                                         select,
@@ -1914,17 +2010,30 @@ impl Database {
                                         planner_config,
                                     )?;
                                 collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
+                                planned_select_for_update = select.locking_clause.is_some();
+                                planned_select = Some(planned_stmt);
                             }
+                            Statement::Values(_) => {}
+                            Statement::Explain(explain) => {
+                                if let Statement::Select(select) = explain.statement.as_ref() {
+                                    let planned_stmt =
+                                        crate::backend::parser::pg_plan_query_with_config(
+                                            select,
+                                            &visible_catalog,
+                                            planner_config,
+                                        )?;
+                                    collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
+                                }
+                            }
+                            _ => unreachable!(),
                         }
-                        _ => unreachable!(),
-                    }
-                    (
-                        stmt,
-                        planned_select,
-                        planned_select_for_update,
-                        rels.into_iter().collect::<Vec<_>>(),
-                    )
-                };
+                        Ok::<_, ExecError>((
+                            stmt,
+                            planned_select,
+                            planned_select_for_update,
+                            rels.into_iter().collect::<Vec<_>>(),
+                        ))
+                    })?;
 
                 lock_relations_interruptible(
                     &self.table_locks,
@@ -1999,7 +2108,8 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                     trigger_depth: 0,
                 };
-                let result = match planned_select {
+                install_prepared_external_params(&external_bindings, &mut ctx)?;
+                let result = with_external_param_types(&external_types, || match planned_select {
                     Some(planned_stmt) => {
                         if planned_select_for_update {
                             check_planned_stmt_select_for_update_privileges(&planned_stmt, &ctx)?;
@@ -2014,7 +2124,7 @@ impl Database {
                         &mut ctx,
                         planner_config,
                     ),
-                };
+                });
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 let mut catalog_effects = std::mem::take(&mut ctx.catalog_effects);
@@ -2288,7 +2398,11 @@ impl Database {
             }
             Statement::Update(ref update_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let bound = bind_update(update_stmt, &catalog)?;
+                let external_bindings = bind_prepared_external_params(external_params, &catalog)?;
+                let external_types = prepared_external_types(&external_bindings);
+                let bound = with_external_param_types(&external_types, || {
+                    bind_update(update_stmt, &catalog)
+                })?;
                 let prepared = super::rules::prepare_bound_update_for_execution(bound, &catalog)?;
                 let lock_requests = merge_table_lock_requests(
                     &update_foreign_key_lock_requests(&prepared.stmt),
@@ -2363,6 +2477,7 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                     trigger_depth: 0,
                 };
+                install_prepared_external_params(&external_bindings, &mut ctx)?;
                 let result = super::rules::execute_bound_update_with_rules(
                     prepared.stmt,
                     &catalog,

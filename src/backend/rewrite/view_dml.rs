@@ -177,7 +177,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
         )));
     };
 
-    if analyzed.base_relkind == 'r' {
+    if matches!(analyzed.base_relkind, 'r' | 'p') {
         let all_view_predicates = query
             .where_qual
             .clone()
