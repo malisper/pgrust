@@ -986,6 +986,7 @@ fn search_partition_child_alias_var<'a>(
                 && !is_executor_special_varno(candidate_var.varno)
                 && candidate_var.varattno == var.varattno
                 && candidate_var.vartype == var.vartype
+                && appendrel_child_matches(root, var.varno, candidate_var.varno)
                 && rte_alias_matches_partition_child(root, var.varno, candidate_var.varno)
         });
         if !entry_matches {
@@ -1030,6 +1031,7 @@ fn search_partition_child_shape_var<'a>(
                 && !is_executor_special_varno(candidate_var.varno)
                 && candidate_var.varattno == var.varattno
                 && candidate_var.vartype == var.vartype
+                && appendrel_child_matches(root, var.varno, candidate_var.varno)
                 && tlist_varno_matches_desc_shape(tlist, candidate_var.varno, &parent_types)
         });
         if !entry_matches {
@@ -1070,6 +1072,13 @@ fn tlist_varno_matches_desc_shape(
         .into_iter()
         .zip(parent_types.iter().copied())
         .all(|(candidate, parent)| candidate == Some(parent))
+}
+
+fn appendrel_child_matches(root: &PlannerInfo, parent_varno: usize, child_varno: usize) -> bool {
+    root.append_rel_infos
+        .iter()
+        .flatten()
+        .any(|info| info.parent_relid == parent_varno && info.child_relid == child_varno)
 }
 
 fn rte_alias_matches_partition_child(
