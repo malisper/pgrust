@@ -9813,8 +9813,18 @@ fn execute_merge_insert_action(
 ) -> Result<Option<Vec<Value>>, ExecError> {
     let mut row_values = vec![Value::Null; stmt.desc.columns.len()];
     let mut default_slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
+    let mut targeted = vec![false; stmt.desc.columns.len()];
+    for target in target_columns {
+        if let Some(mark) = targeted.get_mut(target.column_index) {
+            *mark = true;
+        }
+    }
     for (column_index, expr) in stmt.column_defaults.iter().enumerate() {
+        if targeted.get(column_index).copied().unwrap_or(false) {
+            continue;
+        }
         row_values[column_index] = eval_expr(expr, &mut default_slot, ctx)?;
+        default_slot.tts_values[column_index] = row_values[column_index].clone();
     }
     if let Some(values) = values {
         for (target, expr) in target_columns.iter().zip(values.iter()) {

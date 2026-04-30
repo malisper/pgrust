@@ -2,7 +2,8 @@ use super::super::*;
 use crate::backend::executor::expr_reg::format_regprocedure_oid_optional;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SequenceOwnedByClause};
 use crate::include::catalog::{
-    DEPENDENCY_NORMAL, INT8_TYPE_OID, PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID,
+    DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, INT8_TYPE_OID, PG_CLASS_RELATION_OID,
+    PG_PROC_RELATION_OID,
 };
 use crate::pgrust::database::ddl::{ensure_relation_owner, relation_kind_name};
 use crate::pgrust::database::sequences::{
@@ -188,6 +189,30 @@ fn find_sequence_function_dependents(catalog: &dyn CatalogLookup, sequence_oid: 
     oids
 }
 
+fn identity_sequence_owner_table_name(
+    catalog: &dyn CatalogLookup,
+    sequence_oid: u32,
+) -> Option<String> {
+    catalog
+        .depend_rows()
+        .into_iter()
+        .find(|row| {
+            row.classid == PG_CLASS_RELATION_OID
+                && row.objid == sequence_oid
+                && row.objsubid == 0
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjsubid > 0
+                && row.deptype == DEPENDENCY_INTERNAL
+        })
+        .and_then(|row| catalog.relation_by_oid(row.refobjid))
+        .map(|relation| {
+            catalog
+                .class_row_by_oid(relation.relation_oid)
+                .map(|class| class.relname)
+                .unwrap_or_else(|| relation.relation_oid.to_string())
+        })
+}
+
 impl Database {
     pub(crate) fn execute_create_sequence_stmt_with_search_path(
         &self,
@@ -315,6 +340,7 @@ impl Database {
                                 .set_sequence_owned_by_dependency_mvcc(
                                     entry.relation_oid,
                                     Some((owned_by.relation_oid, owned_by.attnum)),
+                                    DEPENDENCY_AUTO,
                                     &ctx,
                                 )
                                 .map_err(map_catalog_error)?;
@@ -360,6 +386,7 @@ impl Database {
                         .set_sequence_owned_by_dependency_mvcc(
                             created.entry.relation_oid,
                             Some((owned_by.relation_oid, owned_by.attnum)),
+                            DEPENDENCY_AUTO,
                             &ctx,
                         )
                         .map_err(map_catalog_error)?;
@@ -450,6 +477,22 @@ impl Database {
             Err(err) => return Err(err),
         };
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.sequence_name)?;
+        if matches!(
+            alter_stmt.options.owned_by,
+            Some(SequenceOwnedByClause::Column { .. }) | Some(SequenceOwnedByClause::None)
+        ) && let Some(table_name) =
+            identity_sequence_owner_table_name(&catalog, relation.relation_oid)
+        {
+            return Err(ExecError::DetailedError {
+                message: "cannot change ownership of identity sequence".into(),
+                detail: Some(format!(
+                    "Sequence \"{}\" is linked to table \"{}\".",
+                    alter_stmt.sequence_name, table_name
+                )),
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         let current = self
             .sequences
             .sequence_data(relation.relation_oid)
@@ -508,6 +551,7 @@ impl Database {
                         next.options
                             .owned_by
                             .map(|owned_by| (owned_by.relation_oid, owned_by.attnum)),
+                        DEPENDENCY_AUTO,
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;

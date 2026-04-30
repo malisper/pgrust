@@ -38,9 +38,9 @@ use crate::include::catalog::{
     PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
     PgEnumRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -1908,6 +1908,12 @@ impl CatalogLookup for LazyCatalogLookup {
     fn depend_rows(&self) -> Vec<PgDependRow> {
         backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.depend_rows())
+            .unwrap_or_default()
+    }
+
+    fn sequence_rows(&self) -> Vec<PgSequenceRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.sequence_rows())
             .unwrap_or_default()
     }
 

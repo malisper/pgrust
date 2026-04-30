@@ -792,6 +792,7 @@ pub enum BuiltinScalarFunction {
     PgSleep,
     Timezone,
     NextVal,
+    IdentityNextVal,
     CurrVal,
     LastVal,
     CurrTid2,

@@ -1,12 +1,12 @@
 use super::super::*;
 use crate::backend::parser::{
     AlterColumnIdentityAction, AlterTableAlterColumnIdentityStatement, BoundRelation,
-    CatalogLookup, ColumnIdentityKind, OwnedSequenceSpec, SequenceOptionsPatchSpec,
-    SequenceOptionsSpec, SerialKind, SqlType, SqlTypeKind,
+    CatalogLookup, ColumnIdentityKind, OwnedSequenceKind, OwnedSequenceSpec,
+    SequenceOptionsPatchSpec, SequenceOptionsSpec, SerialKind, SqlType, SqlTypeKind,
 };
-use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
+use crate::include::catalog::{DEPENDENCY_INTERNAL, PG_CATALOG_NAMESPACE_OID};
 use crate::pgrust::database::ddl::{
-    ensure_relation_owner, lookup_heap_relation_for_alter_table, map_catalog_error,
+    ensure_relation_owner, lookup_table_or_partitioned_table_for_alter_table, map_catalog_error,
 };
 use crate::pgrust::database::sequences::{apply_sequence_option_patch, pg_sequence_row};
 
@@ -22,14 +22,59 @@ fn identity_column_index(relation: &BoundRelation, column_name: &str) -> Result<
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.into())))
 }
 
+fn descendant_partition_oids(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<u32> {
+    let rows = catalog.inheritance_rows();
+    let mut out = Vec::new();
+    let mut pending = vec![root_oid];
+    while let Some(parent_oid) = pending.pop() {
+        let mut children = rows
+            .iter()
+            .filter(|row| row.inhparent == parent_oid && !row.inhdetachpending)
+            .map(|row| row.inhrelid)
+            .collect::<Vec<_>>();
+        children.sort_unstable();
+        children.dedup();
+        for child_oid in children {
+            if out.contains(&child_oid) {
+                continue;
+            }
+            out.push(child_oid);
+            pending.push(child_oid);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+fn partition_identity_error_message(action: &AlterColumnIdentityAction, only: bool) -> String {
+    let scope = if only {
+        "only the partitioned table"
+    } else {
+        "a partition"
+    };
+    match action {
+        AlterColumnIdentityAction::Add(_) => {
+            format!("cannot add identity to a column of {scope}")
+        }
+        AlterColumnIdentityAction::Drop { .. } => {
+            format!("cannot drop identity from a column of {scope}")
+        }
+        AlterColumnIdentityAction::Set { .. } => {
+            format!("cannot change identity column of {scope}")
+        }
+    }
+}
+
 fn serial_kind_for_identity_sql_type(sql_type: SqlType) -> Result<SerialKind, ParseError> {
     match sql_type.kind {
         SqlTypeKind::Int2 if !sql_type.is_array => Ok(SerialKind::Small),
         SqlTypeKind::Int4 if !sql_type.is_array => Ok(SerialKind::Regular),
         SqlTypeKind::Int8 if !sql_type.is_array => Ok(SerialKind::Big),
-        _ => Err(ParseError::UnexpectedToken {
-            expected: "smallint, integer, or bigint identity column",
-            actual: crate::pgrust::database::ddl::format_sql_type_name(sql_type),
+        _ => Err(ParseError::DetailedError {
+            message: "identity column type must be smallint, integer, or bigint".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
         }),
     }
 }
@@ -46,6 +91,19 @@ fn ensure_identity_add_allowed(
     column_index: usize,
 ) -> Result<SerialKind, ExecError> {
     let column = &relation.desc.columns[column_index];
+    let serial_kind =
+        serial_kind_for_identity_sql_type(column.sql_type).map_err(ExecError::Parse)?;
+    if relation.relispartition {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot alter identity column \"{}\" of relation \"{}\"",
+                column.name, relation_name
+            ),
+            detail: Some("Identity columns are inherited from the partitioned table.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
     if column.identity.is_some() {
         return Err(ExecError::DetailedError {
             message: format!(
@@ -98,7 +156,7 @@ fn ensure_identity_add_allowed(
             sqlstate: "55000",
         });
     }
-    serial_kind_for_identity_sql_type(column.sql_type).map_err(ExecError::Parse)
+    Ok(serial_kind)
 }
 
 impl Database {
@@ -110,7 +168,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -166,7 +224,7 @@ impl Database {
         sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -181,6 +239,22 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        if relation.relispartition {
+            return Err(ExecError::DetailedError {
+                message: partition_identity_error_message(&alter_stmt.action, false),
+                detail: None,
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
+        if relation.relkind == 'p' && alter_stmt.only {
+            return Err(ExecError::DetailedError {
+                message: partition_identity_error_message(&alter_stmt.action, true),
+                detail: None,
+                hint: Some("Do not specify the ONLY keyword.".into()),
+                sqlstate: "42809",
+            });
+        }
         let column_index = identity_column_index(&relation, &alter_stmt.column_name)?;
 
         match &alter_stmt.action {
@@ -248,6 +322,7 @@ impl Database {
         let column = &relation.desc.columns[column_index];
         let persistence = match relation.relpersistence {
             't' => TablePersistence::Temporary,
+            'u' => TablePersistence::Unlogged,
             _ => TablePersistence::Permanent,
         };
         let mut used_names = std::collections::BTreeSet::new();
@@ -259,6 +334,7 @@ impl Database {
             &OwnedSequenceSpec {
                 column_index,
                 column_name: column.name.clone(),
+                kind: OwnedSequenceKind::Identity,
                 serial_kind,
                 sql_type: column.sql_type,
                 options: options.clone(),
@@ -279,12 +355,50 @@ impl Database {
             relation,
             &column.name,
             Some(kind),
-            default_expr,
+            default_expr.clone(),
             Some(created.sequence_oid),
             xid,
             cid,
             catalog_effects,
-        )
+        )?;
+        let dependency_ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: cid.saturating_add(1),
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .set_sequence_owned_by_dependency_mvcc(
+                created.sequence_oid,
+                Some((
+                    relation.relation_oid,
+                    created.column_index.saturating_add(1) as i32,
+                )),
+                DEPENDENCY_INTERNAL,
+                &dependency_ctx,
+            )
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        if relation.relkind == 'p' {
+            self.propagate_identity_column_to_partitions(
+                client_id,
+                xid,
+                cid,
+                relation.relation_oid,
+                &column.name,
+                Some(kind),
+                default_expr,
+                Some(created.sequence_oid),
+                catalog_effects,
+            )?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -305,6 +419,10 @@ impl Database {
         let column = &relation.desc.columns[column_index];
         let Some(_identity) = column.identity else {
             if missing_ok {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    "column \"{}\" of relation \"{}\" is not an identity column, skipping",
+                    column.name, relation_name
+                ));
                 return Ok(());
             }
             return Err(ExecError::DetailedError {
@@ -331,6 +449,19 @@ impl Database {
             cid,
             catalog_effects,
         )?;
+        if relation.relkind == 'p' {
+            self.propagate_identity_column_to_partitions(
+                client_id,
+                xid,
+                cid,
+                relation.relation_oid,
+                &column.name,
+                None,
+                None,
+                None,
+                catalog_effects,
+            )?;
+        }
         if let Some(sequence_oid) = sequence_oid {
             if relation.relpersistence == 't' {
                 if let Some(sequence_name) = sequence_name {
@@ -442,6 +573,7 @@ impl Database {
             next,
             relation.relpersistence != 't',
         ));
+        let next_identity = generation.unwrap_or(current_identity);
         if let Some(generation) = generation
             && generation != current_identity
         {
@@ -454,6 +586,19 @@ impl Database {
                 column.default_sequence_oid,
                 xid,
                 cid,
+                catalog_effects,
+            )?;
+        }
+        if relation.relkind == 'p' {
+            self.propagate_identity_column_to_partitions(
+                client_id,
+                xid,
+                cid,
+                relation.relation_oid,
+                &column.name,
+                Some(next_identity),
+                column.default_expr.clone(),
+                column.default_sequence_oid,
                 catalog_effects,
             )?;
         }
@@ -513,5 +658,59 @@ impl Database {
         }
         catalog_effects.push(effect);
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_identity_column_to_partitions(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        mut cid: CommandId,
+        parent_relation_oid: u32,
+        column_name: &str,
+        identity: Option<ColumnIdentityKind>,
+        default_expr: Option<String>,
+        default_sequence_oid: Option<u32>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), None);
+        let descendants = descendant_partition_oids(&catalog, parent_relation_oid);
+        for child_oid in descendants {
+            let Some(child) = catalog.relation_by_oid(child_oid) else {
+                continue;
+            };
+            let Some(child_column) =
+                child.desc.columns.iter().find(|column| {
+                    !column.dropped && column.name.eq_ignore_ascii_case(column_name)
+                })
+            else {
+                continue;
+            };
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_set_column_identity_mvcc(
+                    child.relation_oid,
+                    &child_column.name,
+                    identity,
+                    default_expr.clone(),
+                    default_sequence_oid,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            cid = cid.saturating_add(1);
+        }
+        Ok(cid)
     }
 }

@@ -4178,6 +4178,7 @@ pub struct ColumnDef {
     pub ty: RawTypeName,
     pub collation: Option<String>,
     pub default_expr: Option<String>,
+    pub explicit_null: bool,
     pub generated: Option<ColumnGeneratedDef>,
     pub identity: Option<ColumnIdentityDef>,
     pub storage: Option<crate::include::access::htup::AttributeStorage>,

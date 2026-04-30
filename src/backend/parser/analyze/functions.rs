@@ -2508,7 +2508,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgControlInit
             | BuiltinScalarFunction::TestRelpath => args.is_empty(),
             BuiltinScalarFunction::LastVal => args.is_empty(),
-            BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
+            BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::IdentityNextVal
+            | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::CurrTid2 => args.len() == 2,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
@@ -5741,6 +5743,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgTsTemplateIsVisible
             | BuiltinScalarFunction::PgTsConfigIsVisible
             | BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::IdentityNextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::LastVal
             | BuiltinScalarFunction::CurrTid2

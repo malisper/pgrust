@@ -6,6 +6,7 @@ use crate::backend::commands::tablecmds::{
 };
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
+use crate::backend::parser::{RawTypeName, SequenceOptionsPatchSpec};
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
@@ -15,6 +16,9 @@ use crate::include::catalog::{
 use crate::pgrust::database::ddl::{
     lookup_table_or_partitioned_table_for_alter_table,
     reject_column_type_change_with_rule_dependencies, validate_alter_table_alter_column_type,
+};
+use crate::pgrust::database::sequences::{
+    apply_sequence_option_patch, pg_sequence_row, sequence_type_oid_for_sql_type,
 };
 use std::collections::BTreeSet;
 
@@ -500,6 +504,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut sequence_effects = Vec::new();
         let result = self
             .execute_alter_table_alter_column_type_stmt_in_transaction_with_search_path(
                 client_id,
@@ -509,8 +514,16 @@ impl Database {
                 configured_search_path,
                 datetime_config,
                 &mut catalog_effects,
+                &mut sequence_effects,
             );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &[],
+            &sequence_effects,
+        );
         guard.disarm();
         self.table_locks.unlock_table(
             crate::pgrust::database::relation_lock_tag(&relation),
@@ -528,6 +541,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -700,6 +714,38 @@ impl Database {
                 )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
+            if let Some(sequence_oid) =
+                target.new_desc.columns[target.column_index].default_sequence_oid
+                && target.new_desc.columns[target.column_index]
+                    .identity
+                    .is_some()
+            {
+                let current = self.sequences.sequence_data(sequence_oid).ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(sequence_oid.to_string()))
+                })?;
+                let target_type = target.new_desc.columns[target.column_index].sql_type;
+                let _ = sequence_type_oid_for_sql_type(target_type).map_err(ExecError::Parse)?;
+                let patch = SequenceOptionsPatchSpec {
+                    as_type: Some(RawTypeName::Builtin(target_type)),
+                    ..SequenceOptionsPatchSpec::default()
+                };
+                let (options, restart) = apply_sequence_option_patch(&current.options, &patch)
+                    .map_err(ExecError::Parse)?;
+                let mut next = current;
+                next.options = options;
+                if let Some(state) = restart {
+                    next.state = state;
+                }
+                let effect = store
+                    .upsert_sequence_row_mvcc(pg_sequence_row(sequence_oid, &next), &ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                sequence_effects.push(self.sequences.apply_upsert(
+                    sequence_oid,
+                    next,
+                    target.relation.relpersistence != 't',
+                ));
+            }
             let effect = store
                 .replace_relation_statistics_mvcc(
                     target.relation.relation_oid,

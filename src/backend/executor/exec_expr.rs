@@ -3616,6 +3616,7 @@ fn ensure_builtin_side_effects_allowed(
     if matches!(
         func,
         BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::IdentityNextVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::SetConfig
             | BuiltinScalarFunction::PgNotify
@@ -3642,7 +3643,9 @@ fn ensure_builtin_side_effects_allowed(
             message: format!(
                 "{} is not allowed in a read-only execution context",
                 match func {
-                    BuiltinScalarFunction::NextVal => "nextval",
+                    BuiltinScalarFunction::NextVal | BuiltinScalarFunction::IdentityNextVal => {
+                        "nextval"
+                    }
                     BuiltinScalarFunction::SetVal => "setval",
                     BuiltinScalarFunction::SetConfig => "set_config",
                     BuiltinScalarFunction::PgNotify => "pg_notify",
@@ -8661,10 +8664,12 @@ fn eval_sequence_builtin_function(
         (_, [Value::Null, ..]) | (_, [_, Value::Null, ..]) | (_, [_, _, Value::Null]) => {
             Ok(Value::Null)
         }
-        (BuiltinScalarFunction::NextVal, [target]) => {
+        (BuiltinScalarFunction::NextVal | BuiltinScalarFunction::IdentityNextVal, [target]) => {
             let catalog = sequence_catalog(ctx)?;
             let target = resolve_sequence_call_target(ctx, target)?;
-            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'w'])?;
+            if !matches!(func, BuiltinScalarFunction::IdentityNextVal) {
+                ensure_sequence_privilege(catalog, ctx, &target, &['U', 'w'])?;
+            }
             ensure_sequence_write_allowed(ctx, &target, "nextval")?;
             let value = sequence_runtime(ctx)
                 .and_then(|runtime| {
@@ -12715,6 +12720,7 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Bool(false)),
         BuiltinScalarFunction::NextVal
+        | BuiltinScalarFunction::IdentityNextVal
         | BuiltinScalarFunction::CurrVal
         | BuiltinScalarFunction::LastVal
         | BuiltinScalarFunction::CurrTid2
@@ -12930,6 +12936,7 @@ pub(crate) fn eval_builtin_function(
     if matches!(
         func,
         BuiltinScalarFunction::NextVal
+            | BuiltinScalarFunction::IdentityNextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::LastVal
             | BuiltinScalarFunction::CurrTid2
@@ -13144,6 +13151,7 @@ pub(crate) fn eval_builtin_function(
             ))
         }
         BuiltinScalarFunction::NextVal
+        | BuiltinScalarFunction::IdentityNextVal
         | BuiltinScalarFunction::CurrVal
         | BuiltinScalarFunction::LastVal
         | BuiltinScalarFunction::CurrTid2

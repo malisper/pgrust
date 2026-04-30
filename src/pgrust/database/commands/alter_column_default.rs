@@ -97,6 +97,7 @@ impl Database {
         let plan = validate_alter_table_alter_column_default(
             &catalog,
             &relation.desc,
+            &alter_stmt.table_name,
             &alter_stmt.column_name,
             alter_stmt.default_expr.as_ref(),
             alter_stmt.default_expr_sql.as_deref(),
