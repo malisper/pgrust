@@ -4233,7 +4233,7 @@ fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
 }
 use crate::ClientId;
 use crate::pgrust::cluster::Cluster;
-use crate::pgrust::database::Database;
+use crate::pgrust::database::{Database, SessionPreparedStatementViewRow};
 use crate::pgrust::portal::{CursorOptions, PortalFetchDirection, PortalFetchLimit};
 use crate::pgrust::session::{
     CopyCommand, CopyDirection, CopyEndpoint, CopyExecutionResult, Session, parse_copy_command,
@@ -4248,6 +4248,7 @@ static NEXT_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
 struct PreparedStatement {
     sql: String,
     param_type_oids: Vec<u32>,
+    prepare_time: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -4784,173 +4785,25 @@ fn fetch_limit_from_i64(count: Option<i64>) -> PortalFetchLimit {
     }
 }
 
-fn try_handle_pg_cursors_query(
-    stream: &mut impl Write,
-    state: &ConnectionState,
-    sql: &str,
-) -> io::Result<bool> {
-    let normalized = sql.to_ascii_lowercase();
-    if !normalized.contains("from pg_cursors") && !normalized.contains("from pg_catalog.pg_cursors")
-    {
-        return Ok(false);
-    }
-    let name_only = normalized.trim_start().starts_with("select name ");
-    let columns = if name_only {
-        vec![QueryColumn::text("name")]
-    } else {
-        vec![
-            QueryColumn::text("name"),
-            QueryColumn::text("statement"),
-            QueryColumn {
-                name: "is_holdable".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-            QueryColumn {
-                name: "is_binary".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-            QueryColumn {
-                name: "is_scrollable".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-        ]
-    };
-    let rows = state
-        .session
-        .cursor_view_rows()
-        .into_iter()
-        .map(|row| {
-            if name_only {
-                vec![Value::Text(row.name.into())]
-            } else {
-                vec![
-                    Value::Text(row.name.into()),
-                    Value::Text(row.statement.into()),
-                    Value::Bool(row.is_holdable),
-                    Value::Bool(row.is_binary),
-                    Value::Bool(row.is_scrollable),
-                ]
-            }
-        })
-        .collect::<Vec<_>>();
-    send_query_result(
-        stream,
-        &columns,
-        &rows,
-        &format!("SELECT {}", rows.len()),
-        FloatFormatOptions {
-            extra_float_digits: state.session.extra_float_digits(),
-            bytea_output: state.session.bytea_output(),
-            datetime_config: state.session.datetime_config().clone(),
-        },
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )?;
-    Ok(true)
-}
-
-// :HACK: This session-state view lives in the wire connection today. Long-term,
-// pg_prepared_statements should be modeled in normal catalog/executor paths.
-fn try_handle_pg_prepared_statements_query(
-    stream: &mut impl Write,
-    state: &ConnectionState,
-    sql: &str,
-) -> io::Result<bool> {
-    let normalized = sql.to_ascii_lowercase();
-    if !normalized.contains("from pg_prepared_statements")
-        && !normalized.contains("from pg_catalog.pg_prepared_statements")
-    {
-        return Ok(false);
-    }
-    let projection = pg_prepared_statements_projection(&normalized);
-    let columns = if projection == PreparedStatementsProjection::Name {
-        vec![QueryColumn::text("name")]
-    } else if projection == PreparedStatementsProjection::NameStatement {
-        vec![QueryColumn::text("name"), QueryColumn::text("statement")]
-    } else {
-        vec![
-            QueryColumn::text("name"),
-            QueryColumn::text("statement"),
-            QueryColumn {
-                name: "from_sql".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-        ]
-    };
-    let mut prepared_rows = state
+fn refresh_protocol_prepared_statement_view_rows(state: &mut ConnectionState) {
+    let mut rows = state
         .prepared
         .iter()
-        .map(|(name, prepared)| (name.clone(), prepared.sql.clone(), false))
-        .chain(
-            state
-                .session
-                .prepared_statement_rows()
-                .into_iter()
-                .map(|(name, sql)| (name, sql, true)),
-        )
-        .collect::<Vec<_>>();
-    prepared_rows.sort_by(|left, right| left.0.cmp(&right.0));
-    let rows = prepared_rows
-        .into_iter()
-        .map(|(name, statement, from_sql)| match projection {
-            PreparedStatementsProjection::Name => vec![Value::Text(name.into())],
-            PreparedStatementsProjection::NameStatement => {
-                vec![Value::Text(name.into()), Value::Text(statement.into())]
-            }
-            PreparedStatementsProjection::All => vec![
-                Value::Text(name.into()),
-                Value::Text(statement.into()),
-                Value::Bool(from_sql),
-            ],
+        .map(|(name, prepared)| SessionPreparedStatementViewRow {
+            name: name.clone(),
+            statement: prepared.sql.clone(),
+            prepare_time: prepared.prepare_time,
+            parameter_type_oids: prepared.param_type_oids.clone(),
+            result_type_oids: Vec::new(),
+            from_sql: false,
+            generic_plans: 0,
+            custom_plans: 0,
         })
         .collect::<Vec<_>>();
-    send_query_result(
-        stream,
-        &columns,
-        &rows,
-        &format!("SELECT {}", rows.len()),
-        FloatFormatOptions {
-            extra_float_digits: state.session.extra_float_digits(),
-            bytea_output: state.session.bytea_output(),
-            datetime_config: state.session.datetime_config().clone(),
-        },
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )?;
-    Ok(true)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PreparedStatementsProjection {
-    Name,
-    NameStatement,
-    All,
-}
-
-fn pg_prepared_statements_projection(normalized_sql: &str) -> PreparedStatementsProjection {
-    let Some(select_clause) = normalized_sql.split(" from ").next() else {
-        return PreparedStatementsProjection::All;
-    };
-    let Some(projection) = select_clause.trim_start().strip_prefix("select") else {
-        return PreparedStatementsProjection::All;
-    };
-    match projection.split_whitespace().collect::<String>().as_str() {
-        "name" => PreparedStatementsProjection::Name,
-        "name,statement" => PreparedStatementsProjection::NameStatement,
-        _ => PreparedStatementsProjection::All,
-    }
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    state
+        .session
+        .set_protocol_prepared_statement_view_rows(rows);
 }
 
 fn try_handle_pg_listening_channels_query(
@@ -5234,16 +5087,11 @@ fn execute_query_statement(
         )
         .map_err(|e| io::Error::other(format!("{e:?}")))
     };
+    refresh_protocol_prepared_statement_view_rows(state);
     if let Ok(stmt) = parsed.as_ref()
         && let Some(flow) = handle_portal_statement(stream, db, state, sql.as_ref(), stmt)?
     {
         return Ok(flow);
-    }
-    if try_handle_pg_cursors_query(stream, state, sql.as_ref())? {
-        return Ok(QueryStatementFlow::Continue);
-    }
-    if try_handle_pg_prepared_statements_query(stream, state, sql.as_ref())? {
-        return Ok(QueryStatementFlow::Continue);
     }
     if try_handle_pg_listening_channels_query(stream, db, state, sql.as_ref())? {
         return Ok(QueryStatementFlow::Continue);
@@ -10013,6 +9861,7 @@ fn handle_parse(
         PreparedStatement {
             sql,
             param_type_oids,
+            prepare_time: crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         },
     );
     send_parse_complete(stream)
@@ -13245,6 +13094,7 @@ mod tests {
             required_bind_param_count(&PreparedStatement {
                 sql: "select $2".into(),
                 param_type_oids: vec![],
+                prepare_time: 0,
             }),
             2
         );
@@ -13252,6 +13102,7 @@ mod tests {
             required_bind_param_count(&PreparedStatement {
                 sql: "select 1".into(),
                 param_type_oids: vec![23, 25],
+                prepare_time: 0,
             }),
             2
         );

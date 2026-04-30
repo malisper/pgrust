@@ -86,7 +86,8 @@ use crate::pgrust::database::commands::privilege::{
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::database::{
     AsyncListenAction, AsyncListenOp, Database, DynamicTypeSnapshot, PendingNotification,
-    SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
+    SequenceMutationEffect, SessionCursorViewRow, SessionPreparedStatementViewRow,
+    SessionStatsState, SessionViewState, StatsFetchConsistency, TempMutationEffect,
     TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
     alter_table_validate_constraint_lock_requests, default_sequence_name_base,
     delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,
@@ -1524,6 +1525,7 @@ struct PreparedSelectStatement {
     query: PreparedStatementQuery,
     query_sql: String,
     parameter_types: Vec<RawTypeName>,
+    prepare_time: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1681,6 +1683,7 @@ pub struct Session {
     portals: PortalManager,
     plpgsql_function_cache: Arc<RwLock<PlpgsqlFunctionCache>>,
     prepared_selects: HashMap<String, PreparedSelectStatement>,
+    protocol_prepared_statements: Vec<SessionPreparedStatementViewRow>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2504,6 +2507,7 @@ impl Session {
             portals: PortalManager::default(),
             plpgsql_function_cache: Arc::new(RwLock::new(PlpgsqlFunctionCache::default())),
             prepared_selects: HashMap::new(),
+            protocol_prepared_statements: Vec::new(),
         }
     }
 
@@ -4912,6 +4916,7 @@ impl Session {
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         db.install_plpgsql_function_cache(self.client_id, Arc::clone(&self.plpgsql_function_cache));
+        self.install_session_view_state(db);
         let _prepared_guard = self.push_prepared_statement_thread_context();
         let result = stacker::grow(32 * 1024 * 1024, || {
             StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb)
@@ -7604,6 +7609,7 @@ impl Session {
             query: prepare_stmt.query.clone(),
             query_sql: prepare_stmt.query_sql.clone(),
             parameter_types: prepare_stmt.parameter_types.clone(),
+            prepare_time: crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         };
         self.prepared_selects.insert(name.clone(), prepared.clone());
         SESSION_PREPARED_STATEMENTS.with(|cell| {
@@ -7633,11 +7639,62 @@ impl Session {
         Ok(StatementResult::AffectedRows(0))
     }
 
-    pub(crate) fn prepared_statement_rows(&self) -> Vec<(String, String)> {
-        self.prepared_selects
+    pub(crate) fn set_protocol_prepared_statement_view_rows(
+        &mut self,
+        rows: Vec<SessionPreparedStatementViewRow>,
+    ) {
+        self.protocol_prepared_statements = rows;
+    }
+
+    fn session_view_state(&self, catalog: &dyn CatalogLookup) -> SessionViewState {
+        let now = crate::backend::utils::time::datetime::current_postgres_timestamp_usecs();
+        let cursors = self
+            .portals
+            .cursor_view_rows()
+            .into_iter()
+            .map(|row| SessionCursorViewRow {
+                name: row.name,
+                statement: row.statement,
+                is_holdable: row.is_holdable,
+                is_binary: row.is_binary,
+                is_scrollable: row.is_scrollable,
+                creation_time: now,
+            })
+            .collect();
+        let mut prepared_statements = self
+            .prepared_selects
             .iter()
-            .map(|(name, prepared)| (name.clone(), prepared.query_sql.clone()))
-            .collect()
+            .map(|(name, prepared)| SessionPreparedStatementViewRow {
+                name: name.clone(),
+                statement: prepared.query_sql.clone(),
+                prepare_time: prepared.prepare_time,
+                parameter_type_oids: prepared
+                    .parameter_types
+                    .iter()
+                    .filter_map(|raw| raw.as_builtin())
+                    .filter_map(|ty| {
+                        catalog
+                            .type_oid_for_sql_type(ty)
+                            .or_else(|| (ty.type_oid != 0).then_some(ty.type_oid))
+                    })
+                    .collect(),
+                result_type_oids: Vec::new(),
+                from_sql: true,
+                generic_plans: 0,
+                custom_plans: 0,
+            })
+            .chain(self.protocol_prepared_statements.iter().cloned())
+            .collect::<Vec<_>>();
+        prepared_statements.sort_by(|left, right| left.name.cmp(&right.name));
+        SessionViewState {
+            cursors,
+            prepared_statements,
+        }
+    }
+
+    fn install_session_view_state(&self, db: &Database) {
+        let catalog = self.catalog_lookup(db);
+        db.install_session_view_state(self.client_id, self.session_view_state(&catalog));
     }
 
     fn resolve_prepared_statement(
@@ -9298,6 +9355,7 @@ impl Session {
         db.install_session_replication_role(self.client_id, self.session_replication_role());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_interrupt_state(self.client_id, self.interrupts());
+        self.install_session_view_state(db);
         if self.active_txn.is_none() {
             db.accept_invalidation_messages(self.client_id);
         }

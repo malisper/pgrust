@@ -211,6 +211,34 @@ impl DatabaseOpenOptions {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionViewState {
+    pub cursors: Vec<SessionCursorViewRow>,
+    pub prepared_statements: Vec<SessionPreparedStatementViewRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionCursorViewRow {
+    pub name: String,
+    pub statement: String,
+    pub is_holdable: bool,
+    pub is_binary: bool,
+    pub is_scrollable: bool,
+    pub creation_time: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionPreparedStatementViewRow {
+    pub name: String,
+    pub statement: String,
+    pub prepare_time: i64,
+    pub parameter_type_oids: Vec<u32>,
+    pub result_type_oids: Vec<u32>,
+    pub from_sql: bool,
+    pub generic_plans: i64,
+    pub custom_plans: i64,
+}
+
 #[derive(Clone)]
 pub struct Database {
     pub(crate) cluster: Arc<ClusterShared>,
@@ -239,6 +267,7 @@ pub struct Database {
         Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub(crate) session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
     pub(crate) session_guc_states: Arc<RwLock<HashMap<ClientId, HashMap<String, String>>>>,
+    pub(crate) session_view_states: Arc<RwLock<HashMap<ClientId, SessionViewState>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
@@ -739,6 +768,18 @@ impl Database {
             .insert(client_id, temp_backend_id);
     }
 
+    pub(crate) fn install_session_view_state(&self, client_id: ClientId, state: SessionViewState) {
+        self.session_view_states.write().insert(client_id, state);
+    }
+
+    pub(crate) fn session_view_state(&self, client_id: ClientId) -> SessionViewState {
+        self.session_view_states
+            .read()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub(crate) fn temp_backend_id(&self, client_id: ClientId) -> TempBackendId {
         self.session_temp_backend_ids
             .read()
@@ -812,6 +853,10 @@ impl Database {
 
     pub(crate) fn clear_temp_backend_id(&self, client_id: ClientId) {
         self.session_temp_backend_ids.write().remove(&client_id);
+    }
+
+    pub(crate) fn clear_session_view_state(&self, client_id: ClientId) {
+        self.session_view_states.write().remove(&client_id);
     }
 
     pub(crate) fn auth_catalog(
@@ -1654,6 +1699,7 @@ impl Database {
         self.clear_session_replication_role(client_id);
         self.clear_stats_state(client_id);
         self.clear_plpgsql_function_cache(client_id);
+        self.clear_session_view_state(client_id);
         self.sequences.clear_currvals_for_client(client_id);
     }
 
