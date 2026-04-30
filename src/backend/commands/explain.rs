@@ -61,6 +61,11 @@ pub(crate) fn format_explain_lines_with_options(
     format_explain_lines_with_options_inner(state, indent, analyze, show_costs, show_timing, lines);
 }
 
+pub(crate) fn format_explain_analyze_json(state: &dyn PlanNode) -> String {
+    let plan = state.explain_json(true, 4);
+    format!("[\n  {{\n    \"Plan\": {}\n  }}\n]", plan.trim_start())
+}
+
 fn format_explain_lines_with_options_inner(
     state: &dyn PlanNode,
     indent: usize,
@@ -974,6 +979,14 @@ fn push_verbose_json_plan_with_output(
             let (relation, alias) = explain_relation_and_alias(relation_name);
             let node_type = if matches!(plan, Plan::TidScan { .. }) {
                 "Tid Scan"
+            } else if matches!(
+                plan,
+                Plan::SeqScan {
+                    tablesample: Some(_),
+                    ..
+                }
+            ) {
+                "Sample Scan"
             } else {
                 "Seq Scan"
             };
@@ -2590,23 +2603,29 @@ fn push_nonverbose_plan_details(
             true
         }
         Plan::SeqScan {
-            tablesample: Some(sample),
+            disabled,
+            tablesample,
             ..
-        } => {
-            let args = sample
-                .args
-                .iter()
-                .map(|expr| render_verbose_expr(expr, &[], ctx))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let mut detail = format!("{} ({})", sample.method.to_ascii_lowercase(), args);
-            if let Some(repeatable) = &sample.repeatable {
-                detail.push_str(&format!(
-                    " REPEATABLE ({})",
-                    render_verbose_expr(repeatable, &[], ctx)
-                ));
+        } if *disabled || tablesample.is_some() => {
+            if *disabled {
+                lines.push(format!("{prefix}Disabled: true"));
             }
-            lines.push(format!("{prefix}Sampling: {detail}"));
+            if let Some(sample) = tablesample {
+                let args = sample
+                    .args
+                    .iter()
+                    .map(|expr| render_tablesample_verbose_arg(expr, "real", ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut detail = format!("{} ({})", sample.method.to_ascii_lowercase(), args);
+                if let Some(repeatable) = &sample.repeatable {
+                    detail.push_str(&format!(
+                        " REPEATABLE ({})",
+                        render_tablesample_verbose_arg(repeatable, "double precision", ctx)
+                    ));
+                }
+                lines.push(format!("{prefix}Sampling: {detail}"));
+            }
             true
         }
         Plan::TidScan {
@@ -2942,6 +2961,10 @@ fn push_nonverbose_scan_details(
             ctx,
             lines,
         ),
+        Plan::SeqScan { disabled, .. } if *disabled => {
+            let prefix = explain_detail_prefix(indent);
+            lines.push(format!("{prefix}Disabled: true"));
+        }
         _ => {}
     }
 }
@@ -4120,13 +4143,6 @@ fn relation_name_without_alias(relation_name: &str) -> &str {
         .unwrap_or(relation_name)
 }
 
-fn relation_base_without_temp_schema(relation_name: &str) -> String {
-    let base_name = relation_name_without_alias(relation_name);
-    relation_base_temp_schema_stripped(base_name)
-        .unwrap_or(base_name)
-        .to_string()
-}
-
 fn relation_name_with_temp_schema_stripped(relation_name: &str) -> Option<String> {
     let (base_name, alias) = relation_name
         .rsplit_once(' ')
@@ -4141,7 +4157,23 @@ fn relation_name_with_temp_schema_stripped(relation_name: &str) -> Option<String
 
 fn relation_base_temp_schema_stripped(relation_name: &str) -> Option<&str> {
     let (schema_name, base_name) = relation_name.split_once('.')?;
-    schema_name.starts_with("pg_temp_").then_some(base_name)
+    let suffix = schema_name.strip_prefix("pg_temp_")?;
+    if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(base_name)
+}
+
+fn nonverbose_relation_name_without_alias(relation_name: &str) -> std::borrow::Cow<'_, str> {
+    let name = relation_name_without_alias(relation_name);
+    if let Some(stripped) = relation_base_temp_schema_stripped(name) {
+        return std::borrow::Cow::Owned(stripped.to_string());
+    }
+    std::borrow::Cow::Borrowed(name)
+}
+
+fn relation_base_without_temp_schema(relation_name: &str) -> std::borrow::Cow<'_, str> {
+    nonverbose_relation_name_without_alias(relation_name)
 }
 
 fn nonverbose_index_scan_label(
@@ -4173,7 +4205,7 @@ fn nonverbose_relation_scan_label(
     is_child: bool,
 ) -> Option<String> {
     if let Some(alias) = alias {
-        let relation_name = relation_base_without_temp_schema(relation_name);
+        let relation_name = nonverbose_relation_name_without_alias(relation_name);
         return Some(format!("{scan_name} on {relation_name} {alias}"));
     }
     if let Some(relation_name) = relation_name_with_temp_schema_stripped(relation_name) {
@@ -4183,7 +4215,12 @@ fn nonverbose_relation_scan_label(
         && let Some((base_name, alias)) = relation_name.rsplit_once(' ')
         && let Some(root_alias) = inherited_root_alias(alias)
     {
+        let base_name = nonverbose_relation_name_without_alias(base_name);
         return Some(format!("{scan_name} on {base_name} {root_alias}"));
+    }
+    let display_name = nonverbose_relation_name_without_alias(relation_name);
+    if matches!(display_name, std::borrow::Cow::Owned(_)) {
+        return Some(format!("{scan_name} on {display_name}"));
     }
     None
 }
@@ -8453,6 +8490,26 @@ fn aggregate_call_starts_at(chars: &[char], index: usize) -> bool {
                 .get(index..index.saturating_add(prefix.len()))
                 .is_some_and(|candidate| candidate == prefix.as_slice())
         })
+}
+
+fn render_tablesample_verbose_arg(
+    expr: &Expr,
+    type_name: &'static str,
+    ctx: &VerboseExplainContext,
+) -> String {
+    match expr {
+        Expr::Const(value) => format!("'{}'::{type_name}", render_explain_literal(value)),
+        Expr::Cast(inner, ty)
+            if matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
+                && matches!(inner.as_ref(), Expr::Const(_)) =>
+        {
+            render_verbose_expr(expr, &[], ctx)
+        }
+        Expr::Cast(inner, ty) if matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) => {
+            render_verbose_expr(inner, &[], ctx)
+        }
+        _ => render_verbose_expr(expr, &[], ctx),
+    }
 }
 
 fn render_verbose_op_arg(

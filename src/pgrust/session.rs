@@ -5,6 +5,7 @@ use std::io::Write as _;
 use std::mem;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -29,29 +30,33 @@ use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredConstraintSnapshot, DeferredForeignKeyTracker, ExecError, ExecutorContext,
-    ExecutorTransactionState, Expr, RelationDesc, SessionReplicationRole, StatementResult, Value,
-    cast_value, cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
+    ExecutorTransactionState, Expr, MaterializedCteTable, MaterializedRow, RelationDesc,
+    SessionReplicationRole, StatementResult, TupleSlot, Value, cast_value,
+    cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text, render_sql_literal,
     substitute_named_arg, substitute_positional_args,
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, BoundCte, CallStatement, CatalogLookup, CommonTableExpr,
-    CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
-    CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
-    CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause, DeallocateStatement,
-    DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource,
-    InsertStatement, OrderByItem, ParseError, ParseOptions, PrepareStatement,
-    PreparedExternalParam, PreparedInsert, PreparedStatementQuery, RawTypeName, RawWindowFrame,
-    RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem, SelectStatement, SqlCallArgs,
-    SqlExpr, SqlFunctionArg, Statement, TransactionOptions, UpdateStatement, ValuesStatement,
-    bind_delete, bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
-    bind_insert_with_outer_scopes_and_ctes, bind_update, bind_update_with_outer_scopes_and_ctes,
-    bound_cte_from_query_rows, cte_body_references_table, delete_statement_references_table,
+    AlterTableAddColumnStatement, BoundCte, BoundModifyingCte, BoundWritableCte, CallStatement,
+    CatalogLookup, CommonTableExpr, CopyFormat as ParserCopyFormat, CopyFromStatement,
+    CopyOptions as ParserCopyOptions, CopySource, CopyToDestination, CopyToSource, CopyToStatement,
+    CreateFunctionStatement, CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause,
+    DeallocateStatement, DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem,
+    GroupByItem, InsertSource, InsertStatement, MergeAction, MergeInsertSource, MergeStatement,
+    OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
+    PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
+    RuleEvent, SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType,
+    SqlTypeKind, Statement, TransactionOptions, UpdateStatement, ValuesStatement,
+    analyze_select_query_with_outer, bind_delete, bind_delete_with_outer_scopes_and_ctes,
+    bind_insert, bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes,
+    bind_scalar_expr_in_named_slot_scope, bind_update, bind_update_with_outer_scopes_and_ctes,
+    bound_cte_from_query_columns, cte_body_references_table, delete_statement_references_table,
     insert_statement_references_table, merge_statement_references_table, pg_plan_query_with_config,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
-    plan_merge, plan_merge_with_outer_ctes, select_statement_references_table,
-    update_statement_references_table,
+    plan_merge, plan_merge_with_outer_ctes, raw_type_name_is_unknown, resolve_raw_type_name,
+    select_statement_references_table, update_statement_references_table,
+    with_external_param_types,
 };
 use crate::backend::rewrite::{
     load_view_return_query, relation_has_security_invoker,
@@ -87,7 +92,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::execnodes::ScalarType;
 use crate::include::nodes::pathnodes::PlannerConfig;
-use crate::include::nodes::primnodes::{QueryColumn, set_returning_call_exprs};
+use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, set_returning_call_exprs};
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::commands::privilege::{
@@ -1730,6 +1735,7 @@ impl ActiveTransaction {
 struct PreparedSelectStatement {
     query: PreparedStatementQuery,
     query_sql: String,
+    source_sql: String,
     parameter_types: Vec<RawTypeName>,
     result_columns: Option<Vec<QueryColumn>>,
     generic_plans: usize,
@@ -3920,6 +3926,10 @@ impl Session {
         let object_kind = token_after(&tokens, &["on"])
             .ok_or_else(|| unsupported_object_address_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
         let objtype = default_acl_objtype(&object_kind)?;
+        let is_grant = tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("grant"));
+        let grantee_name = token_after(&tokens, &["to"]);
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
         let role = if let Some(role_name) = role_name {
             catalog
@@ -3959,13 +3969,24 @@ impl Session {
                     })
             })
             .transpose()?;
-        db.object_addresses.write().upsert_default_acl(
-            role.oid,
-            role.rolname,
-            namespace.as_ref().map(|row| row.oid),
-            namespace.map(|row| row.nspname),
-            objtype,
-        );
+        let namespace_oid = namespace.as_ref().map(|row| row.oid);
+        let namespace_name = namespace.map(|row| row.nspname);
+        let mut object_addresses = db.object_addresses.write();
+        if is_grant
+            && grantee_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&role.rolname))
+        {
+            object_addresses.remove_default_acl(role.oid, namespace_oid, objtype);
+        } else {
+            object_addresses.upsert_default_acl(
+                role.oid,
+                role.rolname,
+                namespace_oid,
+                namespace_name,
+                objtype,
+            );
+        }
         Ok(())
     }
 
@@ -4452,13 +4473,18 @@ impl Session {
             .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
     }
 
-    fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> CteBody {
+    fn prepend_ctes_to_modifying_body(
+        body: &CteBody,
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+    ) -> CteBody {
         match body {
             CteBody::Insert(insert) => {
                 let mut insert = (**insert).clone();
                 let mut with = ctes.to_vec();
                 with.extend(insert.with);
                 insert.with = with;
+                insert.with_recursive |= with_recursive;
                 CteBody::Insert(Box::new(insert))
             }
             CteBody::Update(update) => {
@@ -4466,6 +4492,7 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(update.with);
                 update.with = with;
+                update.with_recursive |= with_recursive;
                 CteBody::Update(Box::new(update))
             }
             CteBody::Delete(delete) => {
@@ -4473,6 +4500,7 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(delete.with);
                 delete.with = with;
+                delete.with_recursive |= with_recursive;
                 CteBody::Delete(Box::new(delete))
             }
             CteBody::Merge(merge) => {
@@ -4480,6 +4508,7 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(merge.with);
                 merge.with = with;
+                merge.with_recursive |= with_recursive;
                 CteBody::Merge(Box::new(merge))
             }
             _ => body.clone(),
@@ -4601,49 +4630,124 @@ impl Session {
             .iter()
             .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
             || select
+                .from
+                .as_ref()
+                .is_some_and(Self::from_item_has_writable_ctes)
+            || select
                 .set_operation
                 .as_ref()
                 .is_some_and(|setop| setop.inputs.iter().any(Self::select_has_writable_ctes))
     }
 
-    fn materialized_cte_from_dml_result(
-        cte: &CommonTableExpr,
-        result: StatementResult,
-    ) -> Result<Option<BoundCte>, ExecError> {
-        match result {
-            StatementResult::Query { columns, rows, .. } => {
-                let columns = Self::apply_writable_cte_column_aliases(cte, columns)?;
-                Ok(Some(bound_cte_from_query_rows(
-                    cte.name.clone(),
-                    columns,
-                    &rows,
-                )))
+    fn select_has_non_top_level_writable_ctes(select: &SelectStatement) -> bool {
+        select
+            .from
+            .as_ref()
+            .is_some_and(Self::from_item_has_writable_ctes)
+            || select
+                .set_operation
+                .as_ref()
+                .is_some_and(|setop| setop.inputs.iter().any(Self::select_has_writable_ctes))
+    }
+
+    fn from_item_has_writable_ctes(item: &FromItem) -> bool {
+        match item {
+            FromItem::Table { .. }
+            | FromItem::Values { .. }
+            | FromItem::FunctionCall { .. }
+            | FromItem::RowsFrom { .. }
+            | FromItem::JsonTable(_)
+            | FromItem::XmlTable(_) => false,
+            FromItem::TableSample { source, .. }
+            | FromItem::Lateral(source)
+            | FromItem::Alias { source, .. } => Self::from_item_has_writable_ctes(source),
+            FromItem::DerivedTable(select) => Self::select_has_writable_ctes(select),
+            FromItem::Join { left, right, .. } => {
+                Self::from_item_has_writable_ctes(left) || Self::from_item_has_writable_ctes(right)
             }
-            StatementResult::AffectedRows(_) => Ok(None),
         }
     }
 
-    fn execute_modifying_cte_body(
-        &mut self,
-        db: &Database,
+    fn bound_returning_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+        targets
+            .iter()
+            .map(|target| QueryColumn {
+                name: target.name.clone(),
+                sql_type: target.sql_type,
+                wire_type_oid: None,
+            })
+            .collect()
+    }
+
+    fn returning_columns_for_modifying_cte(
+        cte: &CommonTableExpr,
+        source: &BoundModifyingCte,
+    ) -> Result<Vec<QueryColumn>, ExecError> {
+        let targets = match source {
+            BoundModifyingCte::Insert(stmt) => &stmt.returning,
+            BoundModifyingCte::Update(stmt) => &stmt.returning,
+            BoundModifyingCte::Delete(stmt) => &stmt.returning,
+            BoundModifyingCte::Merge(stmt) => &stmt.returning,
+        };
+        Self::apply_writable_cte_column_aliases(cte, Self::bound_returning_columns(targets))
+    }
+
+    fn bind_modifying_cte_body(
         cte: &CommonTableExpr,
         catalog: &dyn CatalogLookup,
-        ctx: &mut ExecutorContext,
-        xid: TransactionId,
-        cid: CommandId,
         materialized_ctes: &[BoundCte],
-    ) -> Result<Option<BoundCte>, ExecError> {
-        let result = match &cte.body {
-            CteBody::Insert(cte_insert) => {
-                let bound = bind_insert_with_outer_scopes_and_ctes(
+    ) -> Result<BoundModifyingCte, ExecError> {
+        match &cte.body {
+            CteBody::Insert(cte_insert) => Ok(BoundModifyingCte::Insert(
+                bind_insert_with_outer_scopes_and_ctes(
                     cte_insert,
                     catalog,
                     &[],
                     materialized_ctes,
-                )?;
+                )?,
+            )),
+            CteBody::Update(cte_update) => Ok(BoundModifyingCte::Update(
+                bind_update_with_outer_scopes_and_ctes(
+                    cte_update,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?,
+            )),
+            CteBody::Delete(cte_delete) => Ok(BoundModifyingCte::Delete(
+                bind_delete_with_outer_scopes_and_ctes(
+                    cte_delete,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?,
+            )),
+            CteBody::Merge(cte_merge) => Ok(BoundModifyingCte::Merge(plan_merge_with_outer_ctes(
+                cte_merge,
+                catalog,
+                materialized_ctes,
+            )?)),
+            _ => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "expected a data-modifying CTE".into(),
+            ))),
+        }
+    }
+
+    fn execute_bound_modifying_cte(
+        &mut self,
+        db: &Database,
+        source: &BoundModifyingCte,
+        catalog: &dyn CatalogLookup,
+        ctx: &mut ExecutorContext,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<StatementResult, ExecError> {
+        match source {
+            BoundModifyingCte::Insert(bound) => {
                 let prepared =
                     crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
-                        bound, catalog,
+                        bound.clone(),
+                        catalog,
                     )?;
                 crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
                     prepared.stmt.relation_oid,
@@ -4662,18 +4766,13 @@ impl Session {
                     ctx,
                     xid,
                     cid,
-                )?
+                )
             }
-            CteBody::Update(cte_update) => {
-                let bound = bind_update_with_outer_scopes_and_ctes(
-                    cte_update,
-                    catalog,
-                    &[],
-                    materialized_ctes,
-                )?;
+            BoundModifyingCte::Update(bound) => {
                 let prepared =
                     crate::pgrust::database::commands::rules::prepare_bound_update_for_execution(
-                        bound, catalog,
+                        bound.clone(),
+                        catalog,
                     )?;
                 for target in &prepared.stmt.targets {
                     crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
@@ -4697,18 +4796,13 @@ impl Session {
                     xid,
                     cid,
                     Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
-                )?
+                )
             }
-            CteBody::Delete(cte_delete) => {
-                let bound = bind_delete_with_outer_scopes_and_ctes(
-                    cte_delete,
-                    catalog,
-                    &[],
-                    materialized_ctes,
-                )?;
+            BoundModifyingCte::Delete(bound) => {
                 let prepared =
                     crate::pgrust::database::commands::rules::prepare_bound_delete_for_execution(
-                        bound, catalog,
+                        bound.clone(),
+                        catalog,
                     )?;
                 for target in &prepared.stmt.targets {
                     crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
@@ -4731,31 +4825,64 @@ impl Session {
                     ctx,
                     xid,
                     Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
-                )?
+                )
             }
-            CteBody::Merge(cte_merge) => {
-                let bound = plan_merge_with_outer_ctes(cte_merge, catalog, materialized_ctes)?;
-                execute_merge(bound, catalog, ctx, xid, cid)?
-            }
-            _ => return Ok(None),
-        };
-        Self::materialized_cte_from_dml_result(cte, result)
+            BoundModifyingCte::Merge(bound) => execute_merge(bound.clone(), catalog, ctx, xid, cid),
+        }
     }
 
-    fn materialize_modifying_ctes<F>(
+    fn pin_bound_writable_cte_result(
+        ctx: &mut ExecutorContext,
+        bound: &BoundWritableCte,
+        result: StatementResult,
+    ) {
+        if bound.cte.desc.columns.is_empty() {
+            return;
+        }
+        let StatementResult::Query { rows, .. } = result else {
+            return;
+        };
+        let rows = rows
+            .into_iter()
+            .map(|mut row| {
+                Value::materialize_all(&mut row);
+                MaterializedRow::new(TupleSlot::virtual_row(row), Vec::new())
+            })
+            .collect();
+        ctx.pinned_cte_tables.insert(
+            bound.cte.cte_id,
+            Rc::new(RefCell::new(MaterializedCteTable { rows, eof: true })),
+        );
+    }
+
+    fn execute_bound_modifying_ctes(
         &mut self,
         db: &Database,
-        ctes: &[CommonTableExpr],
-        with_recursive: bool,
+        bound_ctes: &[BoundWritableCte],
         catalog: &dyn CatalogLookup,
         ctx: &mut ExecutorContext,
         xid: TransactionId,
         cid: CommandId,
+    ) -> Result<(), ExecError> {
+        ctx.pinned_cte_tables.clear();
+        for bound in bound_ctes {
+            let result =
+                self.execute_bound_modifying_cte(db, &bound.source, catalog, ctx, xid, cid)?;
+            Self::pin_bound_writable_cte_result(ctx, bound, result);
+        }
+        Ok(())
+    }
+
+    fn bind_modifying_ctes<F>(
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+        catalog: &dyn CatalogLookup,
         outer_references: F,
-    ) -> Result<(Vec<BoundCte>, Vec<CommonTableExpr>), ExecError>
+    ) -> Result<(Vec<BoundWritableCte>, Vec<BoundCte>, Vec<CommonTableExpr>), ExecError>
     where
         F: Fn(&str) -> bool,
     {
+        let mut bound_writable_ctes = Vec::new();
         let mut materialized_ctes = Vec::new();
         let mut remaining_ctes = Vec::new();
 
@@ -4797,21 +4924,24 @@ impl Session {
                 with_recursive,
                 &remaining_ctes,
             );
-            executable.body = Self::prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes);
-            if let Some(bound) = self.execute_modifying_cte_body(
-                db,
-                &executable,
-                catalog,
-                ctx,
-                xid,
-                cid,
-                &materialized_ctes,
-            )? {
-                materialized_ctes.push(bound);
+            executable.body = Self::prepend_ctes_to_modifying_body(
+                &cte.body,
+                &visible_select_ctes,
+                with_recursive,
+            );
+            let source = Self::bind_modifying_cte_body(&executable, catalog, &materialized_ctes)?;
+            let columns = Self::returning_columns_for_modifying_cte(cte, &source)?;
+            let bound_cte = bound_cte_from_query_columns(cte.name.clone(), columns);
+            if !bound_cte.desc.columns.is_empty() {
+                materialized_ctes.push(bound_cte.clone());
             }
+            bound_writable_ctes.push(BoundWritableCte {
+                cte: bound_cte,
+                source,
+            });
         }
 
-        Ok((materialized_ctes, remaining_ctes))
+        Ok((bound_writable_ctes, materialized_ctes, remaining_ctes))
     }
 
     fn read_only_write_error(command: &'static str) -> ExecError {
@@ -7178,7 +7308,7 @@ impl Session {
             Statement::Do(_) => {
                 self.execute_call_stmt_autocommit(db, stmt, statement_lock_scope_id)
             }
-            Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
+            Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(db, prepare_stmt),
             Statement::Execute(ref execute_stmt) => {
                 self.execute_prepared_statement(db, execute_stmt, statement_lock_scope_id)
             }
@@ -9987,8 +10117,596 @@ impl Session {
         }
     }
 
+    fn prepared_statement_external_types(
+        parameter_types: &[RawTypeName],
+        catalog: &dyn CatalogLookup,
+    ) -> Result<Vec<(usize, SqlType)>, ParseError> {
+        parameter_types
+            .iter()
+            .enumerate()
+            .map(|(index, raw)| resolve_raw_type_name(raw, catalog).map(|ty| (index + 1, ty)))
+            .collect()
+    }
+
+    fn query_columns_type_oids(columns: &[QueryColumn], catalog: &dyn CatalogLookup) -> Vec<u32> {
+        columns
+            .iter()
+            .filter_map(|column| {
+                column.wire_type_oid.or_else(|| {
+                    catalog.type_oid_for_sql_type(column.sql_type).or_else(|| {
+                        (column.sql_type.type_oid != 0).then_some(column.sql_type.type_oid)
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn target_entries_to_query_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+        targets
+            .iter()
+            .filter(|target| !target.resjunk)
+            .map(|target| QueryColumn {
+                name: target.name.clone(),
+                sql_type: target.sql_type,
+                wire_type_oid: None,
+            })
+            .collect()
+    }
+
+    fn prepared_result_columns(
+        query: &PreparedStatementQuery,
+        parameter_types: &[RawTypeName],
+        catalog: &dyn CatalogLookup,
+    ) -> Result<Option<Vec<QueryColumn>>, ExecError> {
+        let external_types = Self::prepared_statement_external_types(parameter_types, catalog)
+            .map_err(ExecError::Parse)?;
+        with_external_param_types(&external_types, || match query {
+            PreparedStatementQuery::Select(select) => {
+                let (query, _) =
+                    analyze_select_query_with_outer(select, catalog, &[], None, None, &[], &[])?;
+                Ok(Some(Self::target_entries_to_query_columns(
+                    &query.target_list,
+                )))
+            }
+            PreparedStatementQuery::Insert(insert) => {
+                let bound = bind_insert(insert, catalog)?;
+                Ok((!bound.returning.is_empty())
+                    .then(|| Self::target_entries_to_query_columns(&bound.returning)))
+            }
+            PreparedStatementQuery::Update(update) => {
+                let bound = bind_update(update, catalog)?;
+                Ok((!bound.returning.is_empty())
+                    .then(|| Self::target_entries_to_query_columns(&bound.returning)))
+            }
+            PreparedStatementQuery::Merge(merge) => {
+                let bound = plan_merge(merge, catalog)?;
+                Ok((!bound.returning.is_empty())
+                    .then(|| Self::target_entries_to_query_columns(&bound.returning)))
+            }
+        })
+        .map_err(ExecError::Parse)
+    }
+
+    fn infer_prepare_statement_parameter_types(
+        prepare_stmt: &PrepareStatement,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<Vec<RawTypeName>, ExecError> {
+        let highest = Self::max_prepared_param_in_sql(&prepare_stmt.query_sql);
+        if !prepare_stmt.parameter_types.is_empty() && highest > prepare_stmt.parameter_types.len()
+        {
+            return Err(Self::prepared_statement_param_error(highest));
+        }
+        let count = highest.max(prepare_stmt.parameter_types.len());
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut inferred = vec![None; count];
+        for (index, raw) in prepare_stmt.parameter_types.iter().enumerate() {
+            if raw_type_name_is_unknown(raw) {
+                continue;
+            }
+            inferred[index] = Some(resolve_raw_type_name(raw, catalog).map_err(ExecError::Parse)?);
+        }
+        match &prepare_stmt.query {
+            PreparedStatementQuery::Select(select) => {
+                Self::infer_select_prepared_parameter_types(select, catalog, &mut inferred)?;
+            }
+            PreparedStatementQuery::Insert(insert) => {
+                Self::infer_insert_prepared_parameter_types(insert, catalog, &mut inferred)?;
+            }
+            PreparedStatementQuery::Update(update) => {
+                Self::infer_update_prepared_parameter_types(update, catalog, &mut inferred)?;
+            }
+            PreparedStatementQuery::Merge(merge) => {
+                Self::infer_merge_prepared_parameter_types(merge, catalog, &mut inferred)?;
+            }
+        }
+        Ok(inferred
+            .into_iter()
+            .map(|ty| RawTypeName::Builtin(ty.unwrap_or_else(|| SqlType::new(SqlTypeKind::Text))))
+            .collect())
+    }
+
+    fn infer_select_prepared_parameter_types(
+        select: &SelectStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let mut columns = BTreeMap::new();
+        if let Some(from) = &select.from {
+            Self::collect_prepared_from_item_columns(from, catalog, &mut columns);
+        }
+        if let Some(where_clause) = &select.where_clause {
+            Self::infer_prepared_expr_parameter_types(where_clause, &columns, catalog, inferred)?;
+        }
+        Ok(())
+    }
+
+    fn infer_update_prepared_parameter_types(
+        update: &UpdateStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let Some(relation) = catalog.lookup_any_relation(&update.table_name) else {
+            return Ok(());
+        };
+        let mut columns = BTreeMap::new();
+        Self::insert_relation_desc_columns(&mut columns, None, &relation.desc);
+        for assignment in &update.assignments {
+            if let Some(column) = relation.desc.columns.iter().find(|column| {
+                !column.dropped && column.name.eq_ignore_ascii_case(&assignment.target.column)
+            }) {
+                Self::infer_prepared_expr_against_type(
+                    &assignment.expr,
+                    column.sql_type,
+                    catalog,
+                    inferred,
+                )?;
+            }
+        }
+        if let Some(where_clause) = &update.where_clause {
+            Self::infer_prepared_expr_parameter_types(where_clause, &columns, catalog, inferred)?;
+        }
+        Ok(())
+    }
+
+    fn infer_merge_prepared_parameter_types(
+        merge: &MergeStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let Some(relation) = catalog.lookup_any_relation(&merge.target_table) else {
+            return Ok(());
+        };
+        let mut columns = BTreeMap::new();
+        Self::insert_relation_desc_columns(&mut columns, None, &relation.desc);
+        let target_qualifier = merge
+            .target_alias
+            .as_deref()
+            .or_else(|| merge.target_table.rsplit('.').next());
+        Self::insert_relation_desc_columns(&mut columns, target_qualifier, &relation.desc);
+        Self::collect_prepared_from_item_columns(&merge.source, catalog, &mut columns);
+        Self::infer_prepared_expr_parameter_types(
+            &merge.join_condition,
+            &columns,
+            catalog,
+            inferred,
+        )?;
+        for clause in &merge.when_clauses {
+            if let Some(condition) = &clause.condition {
+                Self::infer_prepared_expr_parameter_types(condition, &columns, catalog, inferred)?;
+            }
+            match &clause.action {
+                MergeAction::DoNothing | MergeAction::Delete => {}
+                MergeAction::Update { assignments } => {
+                    for assignment in assignments {
+                        if let Some(column) = relation.desc.columns.iter().find(|column| {
+                            !column.dropped
+                                && column.name.eq_ignore_ascii_case(&assignment.target.column)
+                        }) {
+                            Self::infer_prepared_expr_against_type(
+                                &assignment.expr,
+                                column.sql_type,
+                                catalog,
+                                inferred,
+                            )?;
+                        }
+                    }
+                }
+                MergeAction::Insert {
+                    columns, source, ..
+                } => {
+                    let target_types = columns
+                        .as_ref()
+                        .map(|targets| {
+                            targets
+                                .iter()
+                                .filter_map(|target| {
+                                    relation
+                                        .desc
+                                        .columns
+                                        .iter()
+                                        .find(|column| {
+                                            !column.dropped
+                                                && column.name.eq_ignore_ascii_case(&target.column)
+                                        })
+                                        .map(|column| column.sql_type)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_else(|| {
+                            relation
+                                .desc
+                                .columns
+                                .iter()
+                                .filter(|column| !column.dropped)
+                                .map(|column| column.sql_type)
+                                .collect::<Vec<_>>()
+                        });
+                    if let MergeInsertSource::Values(values) = source {
+                        for (expr, target_type) in values.iter().zip(target_types.iter()) {
+                            Self::infer_prepared_expr_against_type(
+                                expr,
+                                *target_type,
+                                catalog,
+                                inferred,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        for target in &merge.returning {
+            Self::infer_prepared_expr_parameter_types(&target.expr, &columns, catalog, inferred)?;
+        }
+        Ok(())
+    }
+
+    fn infer_insert_prepared_parameter_types(
+        insert: &InsertStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let Some(relation) = catalog.lookup_any_relation(&insert.table_name) else {
+            return Ok(());
+        };
+        let target_types = insert
+            .columns
+            .as_ref()
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter_map(|target| {
+                        relation
+                            .desc
+                            .columns
+                            .iter()
+                            .find(|column| {
+                                !column.dropped && column.name.eq_ignore_ascii_case(&target.column)
+                            })
+                            .map(|column| column.sql_type)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                relation
+                    .desc
+                    .columns
+                    .iter()
+                    .filter(|column| !column.dropped)
+                    .map(|column| column.sql_type)
+                    .collect::<Vec<_>>()
+            });
+        if let InsertSource::Values(rows) = &insert.source {
+            for row in rows {
+                for (expr, target_type) in row.iter().zip(target_types.iter()) {
+                    Self::infer_prepared_expr_against_type(expr, *target_type, catalog, inferred)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_prepared_from_item_columns(
+        item: &FromItem,
+        catalog: &dyn CatalogLookup,
+        columns: &mut BTreeMap<String, SqlType>,
+    ) {
+        match item {
+            FromItem::Table { name, .. } => {
+                if let Some(relation) = catalog.lookup_any_relation(name) {
+                    let qualifier = name.rsplit('.').next();
+                    Self::insert_relation_desc_columns(columns, qualifier, &relation.desc);
+                    Self::insert_relation_desc_columns(columns, None, &relation.desc);
+                }
+            }
+            FromItem::Alias { source, alias, .. } => {
+                Self::collect_prepared_from_item_columns(source, catalog, columns);
+                if let Some(desc) = Self::prepared_from_item_relation_desc(source, catalog) {
+                    Self::insert_relation_desc_columns(columns, Some(alias), &desc);
+                }
+            }
+            FromItem::Join { left, right, .. } => {
+                Self::collect_prepared_from_item_columns(left, catalog, columns);
+                Self::collect_prepared_from_item_columns(right, catalog, columns);
+            }
+            FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
+                Self::collect_prepared_from_item_columns(source, catalog, columns);
+            }
+            FromItem::DerivedTable(_)
+            | FromItem::Values { .. }
+            | FromItem::FunctionCall { .. }
+            | FromItem::RowsFrom { .. }
+            | FromItem::JsonTable(_)
+            | FromItem::XmlTable(_) => {}
+        }
+    }
+
+    fn prepared_from_item_relation_desc(
+        item: &FromItem,
+        catalog: &dyn CatalogLookup,
+    ) -> Option<RelationDesc> {
+        match item {
+            FromItem::Table { name, .. } => catalog.lookup_any_relation(name).map(|rel| rel.desc),
+            FromItem::Alias { source, .. }
+            | FromItem::Lateral(source)
+            | FromItem::TableSample { source, .. } => {
+                Self::prepared_from_item_relation_desc(source, catalog)
+            }
+            _ => None,
+        }
+    }
+
+    fn insert_relation_desc_columns(
+        columns: &mut BTreeMap<String, SqlType>,
+        qualifier: Option<&str>,
+        desc: &RelationDesc,
+    ) {
+        for column in &desc.columns {
+            if column.dropped {
+                continue;
+            }
+            columns.insert(column.name.to_ascii_lowercase(), column.sql_type);
+            if let Some(qualifier) = qualifier {
+                columns.insert(
+                    format!(
+                        "{}.{}",
+                        qualifier.to_ascii_lowercase(),
+                        column.name.to_ascii_lowercase()
+                    ),
+                    column.sql_type,
+                );
+            }
+        }
+    }
+
+    fn infer_prepared_expr_parameter_types(
+        expr: &SqlExpr,
+        columns: &BTreeMap<String, SqlType>,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        match expr {
+            SqlExpr::Eq(left, right)
+            | SqlExpr::NotEq(left, right)
+            | SqlExpr::Lt(left, right)
+            | SqlExpr::LtEq(left, right)
+            | SqlExpr::Gt(left, right)
+            | SqlExpr::GtEq(left, right) => {
+                if let Some(target) = Self::prepared_expr_type(right, columns, catalog) {
+                    Self::infer_prepared_expr_against_type(left, target, catalog, inferred)?;
+                }
+                if let Some(target) = Self::prepared_expr_type(left, columns, catalog) {
+                    Self::infer_prepared_expr_against_type(right, target, catalog, inferred)?;
+                }
+                Self::infer_prepared_expr_parameter_types(left, columns, catalog, inferred)?;
+                Self::infer_prepared_expr_parameter_types(right, columns, catalog, inferred)?;
+            }
+            SqlExpr::And(left, right) | SqlExpr::Or(left, right) => {
+                Self::infer_prepared_expr_parameter_types(left, columns, catalog, inferred)?;
+                Self::infer_prepared_expr_parameter_types(right, columns, catalog, inferred)?;
+            }
+            SqlExpr::Cast(inner, raw) => {
+                let target = resolve_raw_type_name(raw, catalog).map_err(ExecError::Parse)?;
+                Self::infer_prepared_expr_against_type(inner, target, catalog, inferred)?;
+            }
+            SqlExpr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                Self::infer_prepared_expr_against_type(
+                    expr,
+                    SqlType::new(SqlTypeKind::Text),
+                    catalog,
+                    inferred,
+                )?;
+                Self::infer_prepared_expr_against_type(
+                    pattern,
+                    SqlType::new(SqlTypeKind::Text),
+                    catalog,
+                    inferred,
+                )?;
+                if let Some(escape) = escape {
+                    Self::infer_prepared_expr_against_type(
+                        escape,
+                        SqlType::new(SqlTypeKind::Text),
+                        catalog,
+                        inferred,
+                    )?;
+                }
+            }
+            SqlExpr::Not(inner)
+            | SqlExpr::IsNull(inner)
+            | SqlExpr::IsNotNull(inner)
+            | SqlExpr::UnaryPlus(inner)
+            | SqlExpr::Negate(inner)
+            | SqlExpr::BitNot(inner)
+            | SqlExpr::PrefixOperator { expr: inner, .. }
+            | SqlExpr::GeometryUnaryOp { expr: inner, .. } => {
+                Self::infer_prepared_expr_parameter_types(inner, columns, catalog, inferred)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn infer_prepared_expr_against_type(
+        expr: &SqlExpr,
+        target: SqlType,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        match expr {
+            SqlExpr::Parameter(index) | SqlExpr::ParamRef(index) => {
+                Self::set_inferred_prepared_parameter_type(inferred, *index, target);
+            }
+            SqlExpr::Cast(inner, raw) => {
+                let target = resolve_raw_type_name(raw, catalog).map_err(ExecError::Parse)?;
+                Self::infer_prepared_expr_against_type(inner, target, catalog, inferred)?;
+            }
+            _ => {
+                let empty = BTreeMap::new();
+                Self::infer_prepared_expr_parameter_types(expr, &empty, catalog, inferred)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepared_expr_type(
+        expr: &SqlExpr,
+        columns: &BTreeMap<String, SqlType>,
+        catalog: &dyn CatalogLookup,
+    ) -> Option<SqlType> {
+        match expr {
+            SqlExpr::Column(name) => columns.get(&name.to_ascii_lowercase()).copied(),
+            SqlExpr::Cast(_, raw) => resolve_raw_type_name(raw, catalog).ok(),
+            SqlExpr::Const(Value::Int16(_)) => Some(SqlType::new(SqlTypeKind::Int2)),
+            SqlExpr::Const(Value::Int32(_)) | SqlExpr::IntegerLiteral(_) => {
+                Some(SqlType::new(SqlTypeKind::Int4))
+            }
+            SqlExpr::Const(Value::Int64(_)) => Some(SqlType::new(SqlTypeKind::Int8)),
+            SqlExpr::Const(Value::Float64(_)) => Some(SqlType::new(SqlTypeKind::Float8)),
+            SqlExpr::NumericLiteral(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
+            SqlExpr::Const(Value::Bool(_)) => Some(SqlType::new(SqlTypeKind::Bool)),
+            SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) => {
+                Some(SqlType::new(SqlTypeKind::Text))
+            }
+            SqlExpr::CurrentUser | SqlExpr::SessionUser | SqlExpr::CurrentRole => {
+                Some(SqlType::new(SqlTypeKind::Name))
+            }
+            SqlExpr::CurrentCatalog | SqlExpr::CurrentSchema => {
+                Some(SqlType::new(SqlTypeKind::Text))
+            }
+            SqlExpr::UnaryPlus(inner) | SqlExpr::Negate(inner) => {
+                Self::prepared_expr_type(inner, columns, catalog)
+            }
+            _ => None,
+        }
+    }
+
+    fn set_inferred_prepared_parameter_type(
+        inferred: &mut [Option<SqlType>],
+        parameter: usize,
+        target: SqlType,
+    ) {
+        if parameter == 0 {
+            return;
+        }
+        if let Some(slot) = inferred.get_mut(parameter - 1)
+            && slot.is_none()
+        {
+            *slot = Some(target);
+        }
+    }
+
+    fn validate_prepared_execute_arg_types(
+        &self,
+        execute_stmt: &ExecuteStatement,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<(), ExecError> {
+        let prepared = self.resolve_prepared_statement(execute_stmt)?;
+        let args = parse_prepared_execute_args(&execute_stmt.args_sql)?;
+        for (index, (arg, raw_type)) in args.iter().zip(prepared.parameter_types.iter()).enumerate()
+        {
+            let target_type = resolve_raw_type_name(raw_type, catalog).map_err(ExecError::Parse)?;
+            let (_, source_type) =
+                bind_scalar_expr_in_named_slot_scope(arg, &[], &[], catalog, &[])
+                    .map_err(ExecError::Parse)?;
+            if !Self::prepared_execute_arg_can_coerce(source_type, target_type, catalog) {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!(
+                        "parameter ${} of type {} cannot be coerced to the expected type {}",
+                        index + 1,
+                        format_sql_type_name(source_type),
+                        format_sql_type_name(target_type)
+                    ),
+                    detail: None,
+                    hint: Some("You will need to rewrite or cast the expression.".into()),
+                    sqlstate: "42804",
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    fn prepared_execute_arg_can_coerce(
+        source: SqlType,
+        target: SqlType,
+        catalog: &dyn CatalogLookup,
+    ) -> bool {
+        if source == target {
+            return true;
+        }
+        let source_oid = catalog
+            .type_oid_for_sql_type(source)
+            .or_else(|| (source.type_oid != 0).then_some(source.type_oid));
+        let target_oid = catalog
+            .type_oid_for_sql_type(target)
+            .or_else(|| (target.type_oid != 0).then_some(target.type_oid));
+        if source_oid.is_some() && source_oid == target_oid {
+            return true;
+        }
+        if !source.is_array && !target.is_array && matches!(source.kind, SqlTypeKind::Text) {
+            return true;
+        }
+        if !source.is_array
+            && !target.is_array
+            && matches!(target.kind, SqlTypeKind::Text | SqlTypeKind::Name)
+        {
+            return true;
+        }
+        if Self::prepared_numeric_family(source) && Self::prepared_numeric_family(target) {
+            return true;
+        }
+        let Some(source_oid) = source_oid else {
+            return false;
+        };
+        let Some(target_oid) = target_oid else {
+            return false;
+        };
+        catalog
+            .cast_by_source_target(source_oid, target_oid)
+            .is_some_and(|row| matches!(row.castcontext, 'i' | 'a'))
+    }
+
+    fn prepared_numeric_family(sql_type: SqlType) -> bool {
+        !sql_type.is_array
+            && matches!(
+                sql_type.kind,
+                SqlTypeKind::Int2
+                    | SqlTypeKind::Int4
+                    | SqlTypeKind::Int8
+                    | SqlTypeKind::Float4
+                    | SqlTypeKind::Float8
+                    | SqlTypeKind::Numeric
+            )
+    }
+
     fn apply_prepare_statement(
         &mut self,
+        db: &Database,
         prepare_stmt: &PrepareStatement,
     ) -> Result<StatementResult, ExecError> {
         let name = Self::prepared_statement_name(&prepare_stmt.name);
@@ -10000,11 +10718,17 @@ impl Session {
                 sqlstate: "42P05",
             }));
         }
+        let catalog = self.catalog_lookup(db);
+        let parameter_types =
+            Self::infer_prepare_statement_parameter_types(prepare_stmt, &catalog)?;
+        let result_columns =
+            Self::prepared_result_columns(&prepare_stmt.query, &parameter_types, &catalog)?;
         let prepared = PreparedSelectStatement {
             query: prepare_stmt.query.clone(),
             query_sql: prepare_stmt.query_sql.clone(),
-            parameter_types: prepare_stmt.parameter_types.clone(),
-            result_columns: None,
+            source_sql: prepare_stmt.source_sql.clone(),
+            parameter_types,
+            result_columns,
             generic_plans: 0,
             custom_plans: 0,
             prepare_time: crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
@@ -10064,19 +10788,22 @@ impl Session {
             .iter()
             .map(|(name, prepared)| SessionPreparedStatementViewRow {
                 name: name.clone(),
-                statement: prepared.query_sql.clone(),
+                statement: prepared.source_sql.clone(),
                 prepare_time: prepared.prepare_time,
                 parameter_type_oids: prepared
                     .parameter_types
                     .iter()
-                    .filter_map(|raw| raw.as_builtin())
+                    .filter_map(|raw| resolve_raw_type_name(raw, catalog).ok())
                     .filter_map(|ty| {
                         catalog
                             .type_oid_for_sql_type(ty)
                             .or_else(|| (ty.type_oid != 0).then_some(ty.type_oid))
                     })
                     .collect(),
-                result_type_oids: Vec::new(),
+                result_type_oids: prepared
+                    .result_columns
+                    .as_ref()
+                    .map(|columns| Self::query_columns_type_oids(columns, catalog)),
                 from_sql: true,
                 generic_plans: prepared.generic_plans as i64,
                 custom_plans: prepared.custom_plans as i64,
@@ -10500,9 +11227,11 @@ impl Session {
             prepared.parameter_types.len()
         };
         if args.len() != expected {
-            return Err(Self::prepared_statement_param_count_error(
-                expected,
+            let name = Self::prepared_statement_name(&execute_stmt.name);
+            return Err(Self::prepared_statement_arg_count_error(
+                &name,
                 args.len(),
+                expected,
             ));
         }
         let statement = match prepared.query {
@@ -10873,11 +11602,13 @@ impl Session {
                 CteBody::RecursiveUnion {
                     all,
                     left_nested,
+                    anchor_with_is_subquery,
                     anchor,
                     recursive,
                 } => CteBody::RecursiveUnion {
                     all: *all,
                     left_nested: *left_nested,
+                    anchor_with_is_subquery: *anchor_with_is_subquery,
                     anchor: Box::new(Self::substitute_cte_body(anchor, subst)?),
                     recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
                 },
@@ -10933,11 +11664,13 @@ impl Session {
             CteBody::RecursiveUnion {
                 all,
                 left_nested,
+                anchor_with_is_subquery,
                 anchor,
                 recursive,
             } => CteBody::RecursiveUnion {
                 all: *all,
                 left_nested: *left_nested,
+                anchor_with_is_subquery: *anchor_with_is_subquery,
                 anchor: Box::new(Self::substitute_cte_body(anchor, subst)?),
                 recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
             },
@@ -11667,6 +12400,8 @@ impl Session {
     ) -> Result<StatementResult, ExecError> {
         let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
         self.check_read_only_statement_allowed(db, &resolved.statement)?;
+        let validation_catalog = self.catalog_lookup(db);
+        self.validate_prepared_execute_arg_types(execute_stmt, &validation_catalog)?;
         if self.active_txn.is_some() {
             let _plan_kind = self.record_prepared_plan_use(&execute_stmt.name, None)?;
             // Transactional prepared execution still uses the older substitution path until
@@ -11724,9 +12459,12 @@ impl Session {
         };
         let search_path = self.configured_search_path();
         let plan_kind = if self.active_txn.is_some() {
+            let catalog = self.catalog_lookup(db);
+            self.validate_prepared_execute_arg_types(execute_stmt, &catalog)?;
             self.record_prepared_plan_use(&execute_stmt.name, None)?
         } else {
             let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
+            self.validate_prepared_execute_arg_types(execute_stmt, &catalog)?;
             self.record_prepared_plan_use(&execute_stmt.name, Some(&catalog as &dyn CatalogLookup))?
         };
         let mut resolved_explain = explain_stmt.clone();
@@ -13708,7 +14446,9 @@ impl Session {
                     Ok(StatementResult::AffectedRows(0))
                 }
                 Statement::Do(ref do_stmt) => self.execute_plpgsql_do(db, do_stmt, xid, cid),
-                Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
+                Statement::Prepare(ref prepare_stmt) => {
+                    self.apply_prepare_statement(db, prepare_stmt)
+                }
                 Statement::Execute(ref execute_stmt) => {
                     self.execute_prepared_statement(db, execute_stmt, None)
                 }
@@ -16343,19 +17083,24 @@ impl Session {
                         let mut outer_merge = merge_stmt.clone();
                         outer_merge.with.clear();
                         let refs_merge = outer_merge.clone();
-                        let (materialized_ctes, remaining_ctes) = self.materialize_modifying_ctes(
+                        let (bound_writable_ctes, materialized_ctes, remaining_ctes) =
+                            Self::bind_modifying_ctes(
+                                &merge_stmt.with,
+                                merge_stmt.with_recursive,
+                                &catalog,
+                                |name| merge_statement_references_table(&refs_merge, name),
+                            )?;
+                        outer_merge.with = remaining_ctes;
+                        let bound =
+                            plan_merge_with_outer_ctes(&outer_merge, &catalog, &materialized_ctes)?;
+                        self.execute_bound_modifying_ctes(
                             db,
-                            &merge_stmt.with,
-                            merge_stmt.with_recursive,
+                            &bound_writable_ctes,
                             &catalog,
                             &mut ctx,
                             xid,
                             cid,
-                            |name| merge_statement_references_table(&refs_merge, name),
                         )?;
-                        outer_merge.with = remaining_ctes;
-                        let bound =
-                            plan_merge_with_outer_ctes(&outer_merge, &catalog, &materialized_ctes)?;
                         execute_merge(bound, &catalog, &mut ctx, xid, cid)
                     })();
                     self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
@@ -16389,18 +17134,17 @@ impl Session {
                     let result = match stmt {
                         Statement::Select(select) if Self::select_has_writable_ctes(&select) => {
                             (|| {
+                                if Self::select_has_non_top_level_writable_ctes(&select) {
+                                    return Err(Self::nested_modifying_cte_error());
+                                }
                                 let mut outer_select = select.clone();
                                 outer_select.with.clear();
                                 let refs_select = outer_select.clone();
-                                let (materialized_ctes, remaining_ctes) = self
-                                    .materialize_modifying_ctes(
-                                        db,
+                                let (bound_writable_ctes, materialized_ctes, remaining_ctes) =
+                                    Self::bind_modifying_ctes(
                                         &select.with,
                                         select.with_recursive,
                                         &catalog,
-                                        &mut ctx,
-                                        xid,
-                                        cid,
                                         |name| {
                                             select_statement_references_table(&refs_select, name)
                                         },
@@ -16413,7 +17157,17 @@ impl Session {
                                     &materialized_ctes,
                                 )?;
                                 check_planned_stmt_select_privileges(&planned, &ctx)?;
-                                execute_planned_stmt(planned, &mut ctx)
+                                self.execute_bound_modifying_ctes(
+                                    db,
+                                    &bound_writable_ctes,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    cid,
+                                )?;
+                                let result = execute_planned_stmt(planned, &mut ctx);
+                                ctx.pinned_cte_tables.clear();
+                                result
                             })()
                         }
                         Statement::Values(values) if Self::values_has_writable_ctes(&values) => {
@@ -16421,15 +17175,11 @@ impl Session {
                                 let mut outer_values = values.clone();
                                 outer_values.with.clear();
                                 let refs_body = CteBody::Values(outer_values.clone());
-                                let (materialized_ctes, remaining_ctes) = self
-                                    .materialize_modifying_ctes(
-                                        db,
+                                let (bound_writable_ctes, materialized_ctes, remaining_ctes) =
+                                    Self::bind_modifying_ctes(
                                         &values.with,
                                         values.with_recursive,
                                         &catalog,
-                                        &mut ctx,
-                                        xid,
-                                        cid,
                                         |name| cte_body_references_table(&refs_body, name),
                                     )?;
                                 outer_values.with = remaining_ctes;
@@ -16439,7 +17189,17 @@ impl Session {
                                     &[],
                                     &materialized_ctes,
                                 )?;
-                                execute_planned_stmt(planned, &mut ctx)
+                                self.execute_bound_modifying_ctes(
+                                    db,
+                                    &bound_writable_ctes,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    cid,
+                                )?;
+                                let result = execute_planned_stmt(planned, &mut ctx);
+                                ctx.pinned_cte_tables.clear();
+                                result
                             })()
                         }
                         Statement::Select(select) if select.locking_clause.is_some() => {
@@ -16531,16 +17291,13 @@ impl Session {
                         let mut outer_insert = insert_stmt.clone();
                         outer_insert.with.clear();
                         let refs_insert = outer_insert.clone();
-                        let (materialized_ctes, remaining_ctes) = self.materialize_modifying_ctes(
-                            db,
-                            &insert_stmt.with,
-                            insert_stmt.with_recursive,
-                            &catalog,
-                            &mut ctx,
-                            xid,
-                            cid,
-                            |name| insert_statement_references_table(&refs_insert, name),
-                        )?;
+                        let (bound_writable_ctes, materialized_ctes, remaining_ctes) =
+                            Self::bind_modifying_ctes(
+                                &insert_stmt.with,
+                                insert_stmt.with_recursive,
+                                &catalog,
+                                |name| insert_statement_references_table(&refs_insert, name),
+                            )?;
                         outer_insert.with = remaining_ctes;
 
                         let bound = bind_insert_with_outer_scopes_and_ctes(
@@ -16570,6 +17327,14 @@ impl Session {
                             cid,
                             &mut ctx,
                             waited_for_lock,
+                        )?;
+                        self.execute_bound_modifying_ctes(
+                            db,
+                            &bound_writable_ctes,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            cid,
                         )?;
                         crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
                             prepared.stmt,
@@ -16606,21 +17371,19 @@ impl Session {
                             .with
                             .iter()
                             .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
+                        let mut bound_writable_ctes = Vec::new();
                         let bound = if has_writable_ctes {
                             let mut outer_update = update_stmt.clone();
                             outer_update.with.clear();
                             let refs_update = outer_update.clone();
-                            let (materialized_ctes, remaining_ctes) = self
-                                .materialize_modifying_ctes(
-                                    db,
+                            let (writable_ctes, materialized_ctes, remaining_ctes) =
+                                Self::bind_modifying_ctes(
                                     &update_stmt.with,
                                     update_stmt.with_recursive,
                                     &catalog,
-                                    &mut ctx,
-                                    xid,
-                                    cid,
                                     |name| update_statement_references_table(&refs_update, name),
                                 )?;
+                            bound_writable_ctes = writable_ctes;
                             outer_update.with = remaining_ctes;
                             bind_update_with_outer_scopes_and_ctes(
                                 &outer_update,
@@ -16657,6 +17420,16 @@ impl Session {
                             &mut ctx,
                             waited_for_lock,
                         )?;
+                        if has_writable_ctes {
+                            self.execute_bound_modifying_ctes(
+                                db,
+                                &bound_writable_ctes,
+                                &catalog,
+                                &mut ctx,
+                                xid,
+                                cid,
+                            )?;
+                        }
                         crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -16693,21 +17466,19 @@ impl Session {
                             .with
                             .iter()
                             .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
+                        let mut bound_writable_ctes = Vec::new();
                         let bound = if has_writable_ctes {
                             let mut outer_delete = delete_stmt.clone();
                             outer_delete.with.clear();
                             let refs_delete = outer_delete.clone();
-                            let (materialized_ctes, remaining_ctes) = self
-                                .materialize_modifying_ctes(
-                                    db,
+                            let (writable_ctes, materialized_ctes, remaining_ctes) =
+                                Self::bind_modifying_ctes(
                                     &delete_stmt.with,
                                     delete_stmt.with_recursive,
                                     &catalog,
-                                    &mut ctx,
-                                    xid,
-                                    cid,
                                     |name| delete_statement_references_table(&refs_delete, name),
                                 )?;
+                            bound_writable_ctes = writable_ctes;
                             outer_delete.with = remaining_ctes;
                             bind_delete_with_outer_scopes_and_ctes(
                                 &outer_delete,
@@ -16744,6 +17515,16 @@ impl Session {
                             &mut ctx,
                             waited_for_lock,
                         )?;
+                        if has_writable_ctes {
+                            self.execute_bound_modifying_ctes(
+                                db,
+                                &bound_writable_ctes,
+                                &catalog,
+                                &mut ctx,
+                                xid,
+                                cid,
+                            )?;
+                        }
                         crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -22077,6 +22858,416 @@ mod tests {
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int32(11), Value::Int32(12)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_with_writable_delete_cte_materializes_returning_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_delete_select");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session
+            .execute(&db, "insert into src values (1), (2), (3)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with del(id) as (delete from src where id <= 2 returning id) \
+                 select count(*), sum(id) from del",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(2), Value::Int64(3)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select id from src").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unreferenced_writable_cte_runs_to_completion() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_unreferenced");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        match session
+            .execute(
+                &db,
+                "with ins as (insert into src values (1), (2), (3) returning id) \
+                 select 99",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(99)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select count(*) from src").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(3)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outer_limit_does_not_stop_writable_cte_completion() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_outer_limit");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session
+            .execute(&db, "insert into src values (1), (2), (3), (4)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with upd(id) as (update src set id = id * 10 returning id) \
+                 select id from upd order by id limit 1",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(10)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(id), max(id) from src")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(4), Value::Int32(10), Value::Int32(40)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_base_table_write_is_not_visible_to_outer_scan() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_visibility");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session.execute(&db, "insert into src values (1)").unwrap();
+        match session
+            .execute(
+                &db,
+                "with ins(id) as (insert into src values (2) returning id) \
+                 select id from src order by id",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select id from src order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recursive_writable_cte_forward_dependency_runs_in_dependency_order() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_forward_dep");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table y (a int4)").unwrap();
+        session.execute(&db, "create table yy (a int4)").unwrap();
+        session
+            .execute(&db, "insert into y values (1), (2), (3)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with recursive t1 as ( \
+                   insert into yy select * from t2 returning * \
+                 ), t2 as ( \
+                   insert into y select * from y returning * \
+                 ) \
+                 select 1",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(a), max(a) from y")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(6), Value::Int32(1), Value::Int32(3)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(a), max(a) from yy")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(3), Value::Int32(1), Value::Int32(3)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn referenced_writable_cte_without_returning_is_rejected() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_no_returning");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        let err = session
+            .execute(
+                &db,
+                "with ins as (insert into src values (1)) select * from ins",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::Parse(err) => {
+                assert_eq!(
+                    err.to_string(),
+                    "WITH query \"ins\" does not have a RETURNING clause"
+                );
+            }
+            other => panic!("expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_writable_cte_is_rejected_as_not_top_level() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_nested");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        let err = session
+            .execute(
+                &db,
+                "select * from ( \
+                   with upd as (update src set id = id + 1 returning *) \
+                   select * from upd \
+                 ) ss",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::Parse(err) => {
+                assert_eq!(
+                    err.to_string(),
+                    "WITH clause containing a data-modifying statement must be at the top level"
+                );
+            }
+            other => panic!("expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn database_execute_select_with_writable_cte_autocommit_materializes_returning_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_db_execute");
+        let db = Database::open(&base, 16).unwrap();
+
+        db.execute(1, "create table src (id int4)").unwrap();
+        match db
+            .execute(
+                1,
+                "with ins(id) as (insert into src values (7) returning id) select id from ins",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(7)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match db.execute(1, "select id from src").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(7)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_delete_statement_level_instead_rule_runs_once() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_delete_rule");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table y (a int4)").unwrap();
+        session
+            .execute(&db, "insert into y values (1), (2), (3)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule y_rule as on delete to y do instead \
+                 insert into y values (42) returning *",
+            )
+            .unwrap();
+
+        match session
+            .execute(&db, "with t as (delete from y returning *) select * from t")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(42)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select a from y order by a").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(42)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_insert_instead_select_rule_joins_original_source() {
+        let base = crate::pgrust::test_support::seeded_temp_dir(
+            "session",
+            "writable_cte_insert_select_rule",
+        );
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table y (i int4)").unwrap();
+        session
+            .execute(&db, "create table rule_rows (i int4)")
+            .unwrap();
+        session
+            .execute(&db, "insert into y values (10), (20), (30)")
+            .unwrap();
+        session
+            .execute(&db, "insert into rule_rows values (1), (2), (3)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule y_ins as on insert to y do instead select i from rule_rows",
+            )
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "with t as (delete from y returning *) insert into y select * from t",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select i from y").unwrap() {
+            StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_on_conflict_update_same_row_returns_no_outer_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_on_conflict");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table withz (k int4 unique, v text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into withz values (2, 'seed')")
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "with simpletup as (select 2 k, 'Green' v), \
+                 upsert_cte as ( \
+                   insert into withz values (2, 'Blue') on conflict (k) do \
+                   update set (k, v) = (select k, v from simpletup where simpletup.k = withz.k) \
+                   returning k, v \
+                 ) \
+                 insert into withz values (2, 'Red') on conflict (k) do \
+                 update set (k, v) = (select k, v from upsert_cte where upsert_cte.k = withz.k) \
+                 returning k, v",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select k, v from withz").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(2), Value::Text("Green".into())]]
+                );
             }
             other => panic!("expected query result, got {other:?}"),
         }

@@ -3737,6 +3737,43 @@ fn planner_keeps_recursive_cte_filter_semantic_until_setrefs() {
 }
 
 #[test]
+fn planner_handles_recursive_cte_non_output_filter_column() {
+    for set_op in ["union all", "union"] {
+        let sql = format!(
+            "with recursive \
+             tab(id_key, link) as (values (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)), \
+             iter(id_key, row_type, link) as ( \
+               select 0, 'base', 17 \
+               {set_op} ( \
+                 with remaining(id_key, row_type, link, min) as ( \
+                   select tab.id_key, 'true'::text, iter.link, min(tab.id_key) over () \
+                   from tab inner join iter using (link) \
+                   where tab.id_key > iter.id_key \
+                 ), \
+                 first_remaining as ( \
+                   select id_key, row_type, link from remaining where id_key = min \
+                 ), \
+                 effect as ( \
+                   select tab.id_key, 'new'::text, tab.link \
+                   from first_remaining e inner join tab on e.id_key = tab.id_key \
+                   where e.row_type = 'false' \
+                 ) \
+                 select * from first_remaining \
+                 {set_op} select * from effect \
+               ) \
+             ) \
+             select * from iter"
+        );
+        let planned = planned_stmt_for_sql(&sql);
+
+        assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::RecursiveUnion { .. }
+        )));
+    }
+}
+
+#[test]
 fn planner_keeps_recursive_project_set_scalar_semantic_until_setrefs() {
     let planned = planned_stmt_for_sql(
         "with recursive t(n) as (values (1) union all select n + 1 from t where n < 2) \

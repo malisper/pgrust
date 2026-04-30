@@ -6536,15 +6536,7 @@ fn set_seq_scan_references(
 }
 
 fn lower_tablesample_metadata_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
-    // :HACK: TableSampleClause is EXPLAIN metadata while pgrust executes
-    // TABLESAMPLE through the lowered sampling qual. Lateral sample arguments
-    // can still contain same-level semantic Vars here, so keep those display
-    // expressions intact instead of forcing them through Scalar lowering.
-    if expr_contains_local_semantic_var(&expr) {
-        expr
-    } else {
-        lower_expr(ctx, expr, LowerMode::Scalar)
-    }
+    lower_expr(ctx, expr, LowerMode::Scalar)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8327,7 +8319,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relation_oid,
             relkind,
             relispopulated,
-            disabled,
+            disabled || ctx.root.is_some_and(|root| !root.config.enable_seqscan),
             toast,
             tablesample,
             desc,

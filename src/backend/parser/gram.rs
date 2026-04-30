@@ -360,6 +360,12 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
             .with_position(sql_position_from_byte_offset(sql, leading + position)),
         );
     }
+    if (lowered.starts_with("select ") || lowered.starts_with("with "))
+        && let Some(position) = derived_table_tablesample_syntax_error_position(trimmed)
+    {
+        let token = syntax_error_token_at(trimmed, position);
+        return Some(syntax_error_at(sql, leading + position, &token));
+    }
 
     if lowered.starts_with("select ")
         && keyword_boundary(trimmed, "group by grouping sets").is_some()
@@ -371,6 +377,70 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     }
 
     None
+}
+
+fn derived_table_tablesample_syntax_error_position(input: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(relative) = find_keyword_any_depth(input, "tablesample", start) {
+        let position = relative;
+        let depth = nesting_depth_at(input, position);
+        if let Some(item_start) = find_from_item_start_before(input, position, depth) {
+            let item = input[item_start..position].trim_start();
+            if parenthesized_from_item_starts_with_query(item) {
+                return Some(position);
+            }
+        }
+        start = position + "tablesample".len();
+    }
+    None
+}
+
+fn find_from_item_start_before(input: &str, position: usize, target_depth: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    let mut item_start = None;
+    while index < bytes.len() && index < position {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == target_depth => item_start = Some(index + 1),
+            _ if depth == target_depth && keyword_at_boundary(input, index, "from") => {
+                item_start = Some(index + "from".len());
+            }
+            _ if depth == target_depth && keyword_at_boundary(input, index, "join") => {
+                item_start = Some(index + "join".len());
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    item_start
+}
+
+fn parenthesized_from_item_starts_with_query(item: &str) -> bool {
+    if !item.starts_with('(') {
+        return false;
+    }
+    let Ok((inner, _rest)) = take_parenthesized_segment(item) else {
+        return false;
+    };
+    let inner = inner.trim_start();
+    keyword_at_start(inner, "select") || keyword_at_start(inner, "with")
 }
 
 fn json_table_exists_on_empty_behavior_position(input: &str) -> Option<usize> {
@@ -1594,6 +1664,7 @@ fn try_parse_prepared_statement(
 }
 
 fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<Statement, ParseError> {
+    let source_sql = normalize_prepared_source_sql(sql);
     let rest = consume_keyword(sql, "prepare").trim_start();
     let (name, mut rest) = parse_unqualified_identifier(rest, "prepared statement name")?;
     rest = rest.trim_start();
@@ -1638,7 +1709,13 @@ fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<State
         parameter_types,
         query,
         query_sql,
+        source_sql,
     }))
+}
+
+fn normalize_prepared_source_sql(sql: &str) -> String {
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    format!("{trimmed};")
 }
 
 fn build_raw_execute_statement(sql: &str) -> Result<Statement, ParseError> {
@@ -18824,6 +18901,7 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
 }
 
 fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
+    let source_sql = normalize_prepared_source_sql(pair.as_str());
     let mut name = None;
     let mut query = None;
     let mut query_sql = None;
@@ -18866,6 +18944,7 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
         parameter_types,
         query: query.ok_or(ParseError::UnexpectedEof)?,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
+        source_sql,
     })
 }
 
@@ -20427,6 +20506,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             Ok(CteBody::RecursiveUnion {
                 all,
                 left_nested: false,
+                anchor_with_is_subquery: true,
                 anchor: Box::new(anchor),
                 recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
             })
@@ -20443,6 +20523,7 @@ fn select_statement_as_cte_body(stmt: SelectStatement) -> CteBody {
         return CteBody::RecursiveUnion {
             all,
             left_nested,
+            anchor_with_is_subquery: false,
             anchor: Box::new(select_term_as_cte_body(anchor)),
             recursive: Box::new(recursive),
         };
@@ -20912,13 +20993,19 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             }
             Ok(item)
         }
-        Rule::aliased_from_item => {
+        Rule::aliased_from_item | Rule::sampled_from_item | Rule::unsampled_from_item => {
             let mut source = None;
             let mut alias = None;
             let mut column_aliases = AliasColumnSpec::None;
             let mut sample = None;
             for part in pair.into_inner() {
                 match part.as_rule() {
+                    Rule::sampled_from_item | Rule::unsampled_from_item => {
+                        source = Some(build_from_item(part)?)
+                    }
+                    Rule::sampleable_from_primary | Rule::unsampleable_from_primary => {
+                        source = Some(build_from_item(part)?)
+                    }
                     Rule::only_table_from_item
                     | Rule::table_from_item
                     | Rule::lateral_from_item
@@ -20963,6 +21050,10 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 };
             }
             Ok(item)
+        }
+        Rule::sampleable_from_primary | Rule::unsampleable_from_primary => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_from_item(inner)
         }
         Rule::only_table_from_item => Ok(FromItem::Table {
             name: build_identifier(

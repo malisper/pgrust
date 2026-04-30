@@ -108,6 +108,14 @@ impl ObjectAddressState {
         oid
     }
 
+    pub fn remove_default_acl(&mut self, role_oid: u32, namespace_oid: Option<u32>, objtype: char) {
+        self.default_acls.retain(|row| {
+            !(row.role_oid == role_oid
+                && row.namespace_oid == namespace_oid
+                && row.objtype == objtype)
+        });
+    }
+
     pub fn upsert_transform(&mut self, type_oid: u32, language_oid: u32) -> u32 {
         if let Some(row) = self
             .transforms

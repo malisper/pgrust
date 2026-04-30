@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::BLCKSZ;
+use crate::backend::access::gin::wal::gin_redo;
 use crate::backend::access::gist::wal::gist_redo;
 use crate::backend::access::hash::wal::hash_redo;
 use crate::backend::access::nbtree::nbtxlog::btree_redo;
@@ -14,9 +15,9 @@ use crate::backend::storage::smgr::md::MdStorageManager;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 
 use super::{
-    INVALID_LSN, Lsn, RM_BTREE_ID, RM_GIST_ID, RM_HASH_ID, RM_HEAP_ID, RM_HEAP2_ID, RM_XACT_ID,
-    RM_XLOG_ID, WalError, WalReader, XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI,
-    XLOG_HEAP_INSERT, XLOG_XACT_ABORT, XLOG_XACT_COMMIT, XLOG_XACT_PREPARE,
+    INVALID_LSN, Lsn, RM_BTREE_ID, RM_GIN_ID, RM_GIST_ID, RM_HASH_ID, RM_HEAP_ID, RM_HEAP2_ID,
+    RM_XACT_ID, RM_XLOG_ID, WalError, WalReader, XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN,
+    XLOG_FPI, XLOG_HEAP_INSERT, XLOG_XACT_ABORT, XLOG_XACT_COMMIT, XLOG_XACT_PREPARE,
 };
 use crate::include::access::heapam_xlog::XLOG_HEAP2_VISIBLE;
 
@@ -111,6 +112,14 @@ pub fn perform_wal_recovery_from_preserving_xids(
                     .filter(|block| block.image.is_some())
                     .count() as u64;
                 gist_redo(smgr, record_lsn, &record)?;
+            }
+            (RM_GIN_ID, _) => {
+                stats.fpis += record
+                    .blocks
+                    .iter()
+                    .filter(|block| block.image.is_some())
+                    .count() as u64;
+                gin_redo(smgr, record_lsn, &record)?;
             }
             (RM_HASH_ID, _) => {
                 stats.fpis += record

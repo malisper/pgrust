@@ -257,6 +257,7 @@ pub(super) fn optimize_path_with_config(
             } => {
                 let stats = relation_stats(catalog, relation_oid, &desc);
                 let base = seq_scan_estimate(&stats);
+                let disabled = disabled || !config.enable_seqscan;
                 Path::SeqScan {
                     plan_info: base,
                     pathtarget,
@@ -1958,7 +1959,11 @@ fn estimate_gin_bitmap_candidate(
         .class_row_by_oid(spec.index.relation_oid)
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
-    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
+    let qual_selectivity = gin_bitmap_selectivity(
+        &spec,
+        stats,
+        clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples),
+    );
     let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
     let index_startup_cost = spec
         .used_quals
@@ -1993,7 +1998,10 @@ fn estimate_gin_bitmap_candidate(
     let rows = recheck_expr
         .as_ref()
         .map(|expr| {
-            clamp_rows(stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples))
+            let rechecked_rows = clamp_rows(
+                stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples),
+            );
+            rechecked_rows.min(index_rows)
         })
         .unwrap_or(index_rows);
     let heap_pages = stats.relpages.max(1.0).min(rows.max(1.0));
@@ -2037,6 +2045,59 @@ fn estimate_gin_bitmap_candidate(
     }
 
     AccessCandidate { total_cost, plan }
+}
+
+fn gin_bitmap_selectivity(spec: &IndexPathSpec, stats: &RelationStats, fallback: f64) -> f64 {
+    let mut selectivity = fallback;
+    let mut saw_array_key = false;
+    for key in &spec.keys {
+        let Some(value) = key.argument.as_const() else {
+            continue;
+        };
+        let Some(array) = value.as_array_value() else {
+            continue;
+        };
+        saw_array_key = true;
+        let element_count = array.elements.len();
+        let key_selectivity = match key.strategy {
+            // overlap
+            1 => {
+                if element_count == 0 {
+                    0.0
+                } else {
+                    (element_count as f64 * 0.05).min(0.25)
+                }
+            }
+            // contains: GIN array probes are usually much cheaper than the
+            // generic expression selectivity fallback, especially for
+            // rare+frequent searches in PostgreSQL's gin regression.
+            2 => {
+                if element_count == 0 {
+                    1.0
+                } else {
+                    let per_element = 0.02_f64.powi(element_count as i32);
+                    per_element.max(1.0 / stats.reltuples.max(1.0))
+                }
+            }
+            // contained-by is broad for GIN array_ops and relies on recheck.
+            3 => 0.5,
+            // equality
+            4 => {
+                if element_count == 0 {
+                    0.01
+                } else {
+                    0.02_f64.powi(element_count as i32)
+                }
+            }
+            _ => fallback,
+        };
+        selectivity = selectivity.min(key_selectivity);
+    }
+    if saw_array_key {
+        selectivity.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
 }
 
 pub(super) fn estimate_bitmap_candidate(
@@ -2274,8 +2335,10 @@ pub(super) fn estimate_index_candidate(
         index_rows = index_rows.min(1.0);
     }
     let unordered_probe = order_items.is_none();
-    let broad_unordered_btree_range =
-        unordered_btree_range_probe_needs_heap_penalty(&spec, stats, scan_sel);
+    let scalar_array_range_index_only =
+        target_index_only_btree_scalar_array_range(target_index_only, &spec);
+    let broad_unordered_btree_range = !scalar_array_range_index_only
+        && unordered_btree_range_probe_needs_heap_penalty(&spec, stats, scan_sel);
     let (startup_cost, mut base_cost) = if is_gist_like_am(spec.index.index_meta.am_oid) {
         estimate_gist_scan_cost(
             index_pages,
@@ -2330,6 +2393,13 @@ pub(super) fn estimate_index_candidate(
         } else {
             base_cost -= index_rows * CPU_TUPLE_COST;
         }
+    }
+    if scalar_array_range_index_only {
+        base_cost = base_cost.min(
+            index_pages * SEQ_PAGE_COST
+                + index_rows * CPU_INDEX_TUPLE_COST
+                + unused_btree_column_cost,
+        );
     }
     let scan_info = PlanEstimate::new(startup_cost, base_cost, index_rows, stats.width);
     let mut total_cost = scan_info.total_cost.as_f64();
@@ -2474,6 +2544,22 @@ fn runtime_equality_index_rows(spec: &IndexPathSpec, stats: &RelationStats) -> O
         saw_runtime_eq = true;
     }
     saw_runtime_eq.then(|| clamp_rows(stats.reltuples * selectivity))
+}
+
+fn target_index_only_btree_scalar_array_range(
+    target_index_only: bool,
+    spec: &IndexPathSpec,
+) -> bool {
+    target_index_only
+        && spec.index.index_meta.am_oid == BTREE_AM_OID
+        && spec.keys.iter().any(|key| {
+            key.strategy == 3
+                && matches!(
+                    key.argument.as_const(),
+                    Some(Value::Array(_) | Value::PgArray(_))
+                )
+        })
+        && spec.keys.iter().any(|key| key.strategy != 3)
 }
 
 fn unordered_btree_range_probe_needs_heap_penalty(
@@ -5115,8 +5201,31 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
     }
 }
 
+fn table_sample_uses_immediate_outer_columns(sample: Option<&TableSampleClause>) -> bool {
+    sample.is_some_and(|sample| {
+        sample.args.iter().any(expr_uses_immediate_outer_columns)
+            || sample
+                .repeatable
+                .as_ref()
+                .is_some_and(expr_uses_immediate_outer_columns)
+    })
+}
+
 fn expr_uses_outer_relids(expr: &Expr, relids: &[usize]) -> bool {
     expr_uses_outer_relids_at_level(expr, relids, 0)
+}
+
+fn table_sample_uses_outer_relids(sample: Option<&TableSampleClause>, relids: &[usize]) -> bool {
+    sample.is_some_and(|sample| {
+        sample
+            .args
+            .iter()
+            .any(|expr| expr_uses_outer_relids(expr, relids))
+            || sample
+                .repeatable
+                .as_ref()
+                .is_some_and(|expr| expr_uses_outer_relids(expr, relids))
+    })
 }
 
 fn var_uses_outer_relids_at_level(var: &Var, relids: &[usize], sublevels_up: usize) -> bool {
@@ -5269,9 +5378,18 @@ fn query_uses_outer_relids_at_level(query: &Query, relids: &[usize], sublevels_u
             RangeTblEntryKind::Cte { query, .. } | RangeTblEntryKind::Subquery { query } => {
                 query_uses_outer_relids_at_level(query, relids, sublevels_up + 1)
             }
-            RangeTblEntryKind::Result
-            | RangeTblEntryKind::Relation { .. }
-            | RangeTblEntryKind::WorkTable { .. } => false,
+            RangeTblEntryKind::Relation { tablesample, .. } => {
+                tablesample.as_ref().is_some_and(|sample| {
+                    sample
+                        .args
+                        .iter()
+                        .any(|expr| expr_uses_outer_relids_at_level(expr, relids, sublevels_up))
+                        || sample.repeatable.as_ref().is_some_and(|expr| {
+                            expr_uses_outer_relids_at_level(expr, relids, sublevels_up)
+                        })
+                })
+            }
+            RangeTblEntryKind::Result | RangeTblEntryKind::WorkTable { .. } => false,
         })
 }
 
@@ -5448,11 +5566,13 @@ fn project_set_target_uses_outer_relids(target: &ProjectSetTarget, relids: &[usi
 fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
     match path {
         Path::Result { .. }
-        | Path::SeqScan { .. }
         | Path::IndexOnlyScan { .. }
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
+        Path::SeqScan { tablesample, .. } => {
+            table_sample_uses_outer_relids(tablesample.as_ref(), relids)
+        }
         Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => children
             .iter()
             .any(|child| path_uses_outer_relids(child, relids)),
@@ -5670,11 +5790,13 @@ fn project_set_target_uses_immediate_outer_columns(target: &ProjectSetTarget) ->
 fn path_uses_immediate_outer_columns(path: &Path) -> bool {
     match path {
         Path::Result { .. }
-        | Path::SeqScan { .. }
         | Path::IndexOnlyScan { .. }
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
+        Path::SeqScan { tablesample, .. } => {
+            table_sample_uses_immediate_outer_columns(tablesample.as_ref())
+        }
         Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
             children.iter().any(path_uses_immediate_outer_columns)
         }
@@ -9556,6 +9678,9 @@ fn commuted_op_expr_kind(kind: OpExprKind) -> Option<OpExprKind> {
         OpExprKind::LtEq => OpExprKind::GtEq,
         OpExprKind::Gt => OpExprKind::Lt,
         OpExprKind::GtEq => OpExprKind::LtEq,
+        OpExprKind::ArrayOverlap => OpExprKind::ArrayOverlap,
+        OpExprKind::ArrayContains => OpExprKind::ArrayContained,
+        OpExprKind::ArrayContained => OpExprKind::ArrayContains,
         _ => return None,
     })
 }
@@ -10440,24 +10565,8 @@ fn row_prefix_index_expr(index: &BoundIndexRelation, expr: &Expr, strategy: u16)
     if prefix_len == 0 {
         return None;
     }
-    let strategy = row_prefix_effective_strategy(strategy, prefix_len, left_fields.len())?;
-    let op_kind = btree_strategy_expr_kind(strategy)?;
-    if prefix_len == 1 {
-        let (_, left_expr) = left_fields.first()?;
-        let (_, right_expr) = right_fields.first()?;
-        return Some(Expr::op_auto(
-            op_kind,
-            vec![left_expr.clone(), right_expr.clone()],
-        ));
-    }
-    Some(Expr::op(
-        op_kind,
-        SqlType::new(SqlTypeKind::Bool),
-        vec![
-            truncated_row_expr(&left_desc, &left_fields, prefix_len),
-            truncated_row_expr(&right_desc, &right_fields, prefix_len),
-        ],
-    ))
+    let _ = (left_desc, right_desc, strategy, prefix_len);
+    Some(expr.clone())
 }
 
 fn row_prefix_qual_is_fully_covered(index: &BoundIndexRelation, expr: &Expr) -> bool {
@@ -10504,19 +10613,6 @@ fn row_expr_parts_for_index(expr: &Expr) -> Option<(RecordDescriptor, Vec<(Strin
                 .collect(),
         )),
         _ => None,
-    }
-}
-
-fn truncated_row_expr(
-    descriptor: &crate::include::nodes::datum::RecordDescriptor,
-    fields: &[(String, Expr)],
-    prefix_len: usize,
-) -> Expr {
-    let mut descriptor = descriptor.clone();
-    descriptor.fields.truncate(prefix_len);
-    Expr::Row {
-        descriptor,
-        fields: fields.iter().take(prefix_len).cloned().collect(),
     }
 }
 
@@ -10868,16 +10964,29 @@ fn indexable_qual_with_argument(
                 );
             }
             if let Some(argument) = argument_for(&op.args[0]) {
-                return mk(
+                let commuted_kind = commuted_op_expr_kind(op.op)?;
+                let mut qual = mk(
                     strip_casts(&op.args[1]),
                     super::super::IndexStrategyLookup::Operator {
                         oid: operator_commutator_oid(op.opno).unwrap_or(0),
-                        kind: commuted_op_expr_kind(op.op)?,
+                        kind: commuted_kind,
                     },
                     argument,
                     expr,
                     false,
-                );
+                )?;
+                if matches!(
+                    commuted_kind,
+                    OpExprKind::ArrayOverlap
+                        | OpExprKind::ArrayContains
+                        | OpExprKind::ArrayContained
+                ) {
+                    qual.index_expr = Expr::op_auto(
+                        commuted_kind,
+                        vec![strip_casts(&op.args[1]).clone(), op.args[0].clone()],
+                    );
+                }
+                return Some(qual);
             }
             None
         }
@@ -11142,7 +11251,7 @@ fn row_prefix_indexable_qual_for_sides(
         index_expr: index_expr.clone(),
         recheck_expr: None,
         expr: original_expr.clone(),
-        residual_expr: Some(original_expr.clone()),
+        residual_expr: None,
         is_not_null: false,
         row_prefix: true,
     })

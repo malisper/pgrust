@@ -12,7 +12,7 @@ use crate::include::catalog::builtin_type_row_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RecursiveUnionQuery, SetOperationQuery,
-    SqlType, SqlTypeKind,
+    SqlType, SqlTypeKind, TableSampleClause,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen,
@@ -186,9 +186,39 @@ fn simplify_rte(rte: RangeTblEntry) -> Result<RangeTblEntry, ParseError> {
             RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
                 query: Box::new(simplify_query(*query)?),
             },
+            RangeTblEntryKind::Relation {
+                rel,
+                relation_oid,
+                relkind,
+                relispopulated,
+                toast,
+                tablesample,
+            } => RangeTblEntryKind::Relation {
+                rel,
+                relation_oid,
+                relkind,
+                relispopulated,
+                toast,
+                tablesample: tablesample.map(simplify_table_sample).transpose()?,
+            },
             other => other,
         },
         ..rte
+    })
+}
+
+fn simplify_table_sample(sample: TableSampleClause) -> Result<TableSampleClause, ParseError> {
+    Ok(TableSampleClause {
+        method: sample.method,
+        args: sample
+            .args
+            .into_iter()
+            .map(|expr| simplify_expr(expr, None))
+            .collect::<Result<Vec<_>, _>>()?,
+        repeatable: sample
+            .repeatable
+            .map(|expr| simplify_expr(expr, None))
+            .transpose()?,
     })
 }
 
