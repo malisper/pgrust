@@ -24910,24 +24910,67 @@ fn select_cte_can_capture_outer_value_through_scalar_subquery() {
     let base = temp_dir("select_cte_outer_value_scalar_subquery");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
-    assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select (
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select (
                 with cte(foo) as (values (x))
                 select (select foo from cte)
              )
              from (values (0), (123456), (-123456)) as t(x)",
-        )
-        .unwrap(),
-        vec![
-            vec![Value::Int32(0)],
-            vec![Value::Int32(123456)],
-            vec![Value::Int32(-123456)],
-        ],
-    );
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["foo".to_string()]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(0)],
+                    vec![Value::Int32(123456)],
+                    vec![Value::Int32(-123456)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_cte_scalar_values_subquery_uses_values_column_name() {
+    let base = temp_dir("select_cte_outer_value_scalar_values_subquery");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select (
+                with cte(foo) as (values (x))
+                values((select foo from cte))
+             )
+             from (values (0), (123456), (-123456)) as t(x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["column1".to_string()]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(0)],
+                    vec![Value::Int32(123456)],
+                    vec![Value::Int32(-123456)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]
