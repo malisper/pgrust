@@ -18756,22 +18756,32 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
         Rule::delete_stmt => Ok(CteBody::Delete(Box::new(build_delete(pair)?))),
         Rule::merge_stmt => Ok(CteBody::Merge(Box::new(build_merge(pair)?))),
         Rule::recursive_union_cte_body => {
+            let raw = pair.as_str();
+            let body_start = pair.as_span().start();
             let mut inner = pair.into_inner();
-            let anchor = build_cte_body(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-            let mut all = false;
+            let anchor_pair = inner.next().ok_or(ParseError::UnexpectedEof)?;
+            let anchor_end = anchor_pair.as_span().end();
+            let anchor = build_cte_body(anchor_pair)?;
             let mut recursive = None;
+            let mut recursive_start = None;
             for part in inner {
                 match part.as_rule() {
-                    Rule::kw_all => all = true,
                     Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
+                        recursive_start = Some(part.as_span().start());
                         recursive = Some(build_select(part)?)
                     }
                     Rule::parenthesized_set_operation_term => {
+                        recursive_start = Some(part.as_span().start());
                         recursive = Some(build_set_operation_term(part)?)
                     }
                     _ => {}
                 }
             }
+            let between = &raw[anchor_end - body_start
+                ..recursive_start.ok_or(ParseError::UnexpectedEof)? - body_start];
+            let all = between
+                .split_ascii_whitespace()
+                .any(|token| token.eq_ignore_ascii_case("all"));
             Ok(CteBody::RecursiveUnion {
                 all,
                 left_nested: false,
