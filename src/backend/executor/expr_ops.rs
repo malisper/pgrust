@@ -2055,24 +2055,25 @@ impl NumericValue {
                 Self::Finite {
                     coeff: lcoeff,
                     scale: lscale,
-                    ..
+                    dscale: ldscale,
                 },
                 Self::Finite {
                     coeff: rcoeff,
                     scale: rscale,
-                    ..
+                    dscale: rdscale,
                 },
             ) => {
+                let dscale = (*ldscale).max(*rdscale);
                 if lscale == rscale {
                     return Self::finite(lcoeff + rcoeff, *lscale)
-                        .with_dscale(*lscale)
+                        .with_dscale(dscale)
                         .normalize();
                 }
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
                 Self::finite(left + right, scale)
-                    .with_dscale(scale)
+                    .with_dscale(dscale)
                     .normalize()
             }
         }
@@ -2739,6 +2740,14 @@ mod tests {
             numerator.div(&denominator, 0),
             Some(NumericValue::from_i64(6))
         );
+    }
+
+    #[test]
+    fn numeric_addition_preserves_display_scale() {
+        let left = super::parse_numeric_text("1.0000000000000000").unwrap();
+        let right = super::parse_numeric_text("-1").unwrap();
+
+        assert_eq!(left.add(&right).render(), "0.0000000000000000");
     }
 
     #[test]

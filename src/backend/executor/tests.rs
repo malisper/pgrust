@@ -13497,6 +13497,34 @@ fn numeric_transcendentals_match_postgres_reference_values() {
 }
 
 #[test]
+fn typmodded_numeric_transcendentals_use_numeric_overloads() {
+    let base = temp_dir("typmodded_numeric_transcendentals");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let result = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \
+            sqrt(abs('85243.39540024977626076239847863600785982737155858270959890014613035727868293618673807776733416230953723818527101593495895350807775607346277892835514324320448949370623441059033804864158715021903312693889518990256881059434042443507529601095150710777634743301398926463888783847290873199395304998050753365215426971278237920063435565949203678024225270616295573678510929020831006146661747271783837653203039829647102027431761129518881525935216608429897041525858540380754759125150233053469999022855035'::numeric(1000,800))), \
+            pow(10::numeric, 2::numeric) = power(10::numeric, 2::numeric)",
+    )
+    .unwrap();
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result, got {result:?}");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][1], Value::Bool(true));
+    let Value::Numeric(value) = &rows[0][0] else {
+        panic!("expected numeric result, got {:?}", rows[0][0]);
+    };
+    assert!(
+        value
+            .render()
+            .starts_with("291.96471601933302149494775382123896090546")
+    );
+}
+
+#[test]
 fn numeric_exp_underflow_zero_semantics() {
     let base = temp_dir("numeric_exp_underflow");
     let txns = TransactionManager::new_durable(&base).unwrap();
