@@ -4815,6 +4815,7 @@ fn explain_expr_matches_postgres_filter_formatting() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Jsonb),
+            collation_oid: None,
         }),
         Expr::Const(Value::JsonPath(r#"($."wait" == null)"#.into())),
     );

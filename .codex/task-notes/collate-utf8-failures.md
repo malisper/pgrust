@@ -7,6 +7,7 @@ Added PostgreSQL-compatible builtin pg_collation rows/metadata, CREATE COLLATION
 Preserved implicit column collation through Var and FuncExpr metadata, generated relation output expressions, and setrefs slot Vars.
 The final regression-only mismatch was the SELECT header for top-level ~*/!~* expressions rewritten through regexp_like; select-list naming now keeps ?column? for those operator spellings.
 CI exposed setrefs panics where intermediate path tlists dropped Var collation metadata. Matched PostgreSQL setrefs behavior more closely: Var lookup uses varno/varattno identity rather than collation, and replacement slot Vars preserve collation from the expression being lowered when available.
+After origin/perf-optimization advanced to f609345, the GitHub synthetic merge found two new Var initializers without collation_oid. Merged the new base and set JSONB test Vars to no collation plus subquery pathkey display Vars to the pathkey collation.
 
 Files touched:
 Parser/catalog/planner/executor collation paths, plus focused parser/catalog/database/executor tests.
@@ -26,6 +27,7 @@ scripts/cargo_isolated.sh test --lib --quiet recursive_cte_cycle_tracking_return
 scripts/cargo_isolated.sh test --lib --quiet update_from_updates_rows_and_returns_source_columns
 scripts/cargo_isolated.sh test --lib --quiet text_tsearch_match_operator_accepts_tsquery
 scripts/run_regression.sh --test collate.utf8 --jobs 1 --timeout 120 --port 55434
+scripts/cargo_isolated.sh test --lib --no-run --locked
 
 Remaining:
 No remaining collate.utf8 failures; regression passed 59/59 queries.
