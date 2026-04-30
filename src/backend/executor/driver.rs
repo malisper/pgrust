@@ -396,7 +396,7 @@ fn execute_statement_with_source(
             expected: "COMMENT ON DATABASE handled by database/session layer",
             actual: "COMMENT ON DATABASE".into(),
         })),
-        Statement::CommentOnTable(_) | Statement::CommentOnColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+        Statement::CommentOnTable(_) | Statement::CommentOnColumn(_) | Statement::CommentOnSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
         })),
@@ -758,8 +758,8 @@ fn execute_statement_with_source(
             )))
         }
         Statement::Begin(_)
-        | Statement::Commit
-        | Statement::Rollback
+        | Statement::Commit(_)
+        | Statement::Rollback(_)
         | Statement::Savepoint(_)
         | Statement::ReleaseSavepoint(_)
         | Statement::RollbackTo(_) => {
@@ -863,12 +863,12 @@ pub fn execute_readonly_statement_with_config(
             Ok(StatementResult::AffectedRows(0))
         }
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
-        Statement::CommentOnTable(_) | Statement::CommentOnColumn(_) => {
-            Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "read-only statement",
-                actual: "COMMENT ON TABLE".into(),
-            }))
-        }
+        Statement::CommentOnTable(_)
+        | Statement::CommentOnColumn(_)
+        | Statement::CommentOnSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON TABLE".into(),
+        })),
         Statement::CommentOnView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON VIEW".into(),

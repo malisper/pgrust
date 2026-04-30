@@ -718,6 +718,12 @@ fn run_statement(
         Statement::Unsupported(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("{}: {}", stmt.feature, stmt.sql),
         ))),
+        Statement::CommentOnSequence(stmt) => Err(ExecError::Parse(
+            ParseError::FeatureNotSupported(format!(
+                "COMMENT ON SEQUENCE in query_repl: {}",
+                stmt.sequence_name
+            )),
+        )),
         Statement::CommentOnTable(stmt) => {
             let xid = txns.write().begin();
             let result = {
@@ -1597,8 +1603,8 @@ fn run_statement(
         | Statement::ClosePortal(_)
         | Statement::SetTransaction(_)
         | Statement::Begin(_)
-        | Statement::Commit
-        | Statement::Rollback
+        | Statement::Commit(_)
+        | Statement::Rollback(_)
         | Statement::Savepoint(_)
         | Statement::ReleaseSavepoint(_)
         | Statement::RollbackTo(_) => {

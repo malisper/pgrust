@@ -128,7 +128,7 @@ fn lookup_any_relation_for_rename(
     if_exists: bool,
 ) -> Result<Option<BoundRelation>, ExecError> {
     match catalog.lookup_any_relation(relation_name) {
-        Some(relation) if matches!(relation.relkind, 'r' | 'p' | 'f' | 'i' | 'I' | 'v') => {
+        Some(relation) if matches!(relation.relkind, 'r' | 'p' | 'f' | 'i' | 'I' | 'v' | 'S') => {
             Ok(Some(relation))
         }
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {

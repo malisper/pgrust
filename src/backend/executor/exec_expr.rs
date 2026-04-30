@@ -55,7 +55,8 @@ use super::expr_datetime::{
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
-    eval_jsonpath_operator, eval_sql_json_query_function_expr, jsonb_to_tsvector_value,
+    eval_jsonpath_operator, eval_sql_json_query_function_expr, json_to_tsvector_value,
+    jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_mac::eval_macaddr_function;
@@ -95,9 +96,10 @@ use super::expr_string::{
     eval_crc32c_function, eval_decode_function, eval_encode_function, eval_format_function,
     eval_get_bit_bytes, eval_get_byte, eval_initcap_function, eval_left_function,
     eval_length_function, eval_like, eval_lower_function, eval_lpad_function, eval_md5_function,
-    eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
-    eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
-    eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
+    eval_octet_length_function, eval_parse_ident_function,
+    eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
+    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
+    eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
     eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
     eval_quote_ident_function, eval_quote_literal_function, eval_quote_nullable_function,
@@ -124,7 +126,10 @@ use super::pg_regex::{
     eval_similar, eval_similar_substring, eval_sql_regex_substring,
 };
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
-use super::{ExecError, ExecutorContext, TypedFunctionArg, exec_next, executor_start};
+use super::{
+    ExecError, ExecutorContext, TypedFunctionArg, exec_next, execute_readonly_statement,
+    executor_start,
+};
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::object_address::{
@@ -133,14 +138,15 @@ use crate::backend::catalog::object_address::{
 };
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
-    JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
+    JsonbValue, decode_jsonb, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
+    jsonb_from_value, parse_json_text_input,
 };
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
     PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
-    bind_relation_expr, deserialize_partition_bound, parse_type_name, partition_value_to_value,
-    relation_partition_spec, resolve_raw_type_name,
+    bind_relation_expr, deserialize_partition_bound, parse_statement, parse_type_name,
+    partition_value_to_value, relation_partition_spec, resolve_raw_type_name,
 };
 use crate::backend::rewrite::{
     format_stored_rule_definition_with_catalog, format_view_definition, render_relation_expr_sql,
@@ -178,9 +184,10 @@ use crate::include::nodes::datum::{
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
     OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
-    attrno_index, is_executor_special_varno, is_system_attr,
+    XMIN_ATTR_NO, attrno_index, is_executor_special_varno, is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
+use crate::pgrust::database::SequenceData;
 use crate::pl::plpgsql::current_event_trigger_table_rewrite;
 
 mod arrays;
@@ -2343,6 +2350,17 @@ fn lookup_ctid_binding(
         .find(|binding| binding.varno == varno)
         .and_then(|binding| binding.tid)
         .map(ctid_value)
+}
+
+fn lookup_xmin_binding(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Option<Value> {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.xmin)
+        .map(|xmin| Value::Xid8(u64::from(xmin)))
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -7427,12 +7445,6 @@ fn sequence_runtime(
 
 fn sequence_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> Option<String> {
     let class = catalog.class_row_by_oid(relation_oid)?;
-    if catalog
-        .lookup_any_relation(&class.relname)
-        .is_some_and(|relation| relation.relation_oid == relation_oid)
-    {
-        return Some(quote_identifier_if_needed(&class.relname));
-    }
     let namespace = catalog
         .namespace_row_by_oid(class.relnamespace)
         .map(|row| row.nspname)?;
@@ -7456,10 +7468,17 @@ fn large_object_runtime(
         })
 }
 
+struct SequenceCallTarget {
+    relation_oid: u32,
+    class_row: PgClassRow,
+    persistent: bool,
+    display_name: String,
+}
+
 fn resolve_sequence_call_target(
     ctx: &ExecutorContext,
     value: &Value,
-) -> Result<(u32, bool), ExecError> {
+) -> Result<SequenceCallTarget, ExecError> {
     let catalog = sequence_catalog(ctx)?;
     let relation = match value {
         Value::Int32(oid) => {
@@ -7505,7 +7524,184 @@ fn resolve_sequence_call_target(
             expected: "sequence",
         }));
     }
-    Ok((relation.relation_oid, relation.relpersistence != 't'))
+    let class_row = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(
+                relation.relation_oid.to_string(),
+            ))
+        })?;
+    let display_name = quote_identifier_if_needed(&class_row.relname);
+    Ok(SequenceCallTarget {
+        relation_oid: relation.relation_oid,
+        class_row,
+        persistent: relation.relpersistence != 't',
+        display_name,
+    })
+}
+
+fn sequence_acl_allows_any(
+    catalog: &dyn CatalogLookup,
+    role_oid: u32,
+    class_row: &PgClassRow,
+    acl_chars: &[char],
+) -> bool {
+    let authid_rows = catalog.authid_rows();
+    if role_is_superuser(&authid_rows, role_oid) {
+        return true;
+    }
+    let auth_members_rows = catalog.auth_members_rows();
+    if class_row.relacl.is_none()
+        && role_has_effective_membership(
+            role_oid,
+            class_row.relowner,
+            &authid_rows,
+            &auth_members_rows,
+        )
+    {
+        return true;
+    }
+    let effective_names = effective_role_names_for_oid(catalog, role_oid);
+    acl_chars.iter().any(|acl_char| {
+        let spec = PrivilegeSpec {
+            acl_char: *acl_char,
+            grant_option: false,
+        };
+        if *acl_char == 'r'
+            && role_has_effective_membership(
+                role_oid,
+                PG_READ_ALL_DATA_OID,
+                &authid_rows,
+                &auth_members_rows,
+            )
+        {
+            return true;
+        }
+        if *acl_char == 'w'
+            && role_has_effective_membership(
+                role_oid,
+                PG_WRITE_ALL_DATA_OID,
+                &authid_rows,
+                &auth_members_rows,
+            )
+        {
+            return true;
+        }
+        class_row
+            .relacl
+            .as_deref()
+            .is_some_and(|acl| acl_grants_privilege_to_names(acl, &effective_names, spec))
+    })
+}
+
+fn ensure_sequence_privilege(
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+    target: &SequenceCallTarget,
+    acl_chars: &[char],
+) -> Result<(), ExecError> {
+    if sequence_acl_allows_any(catalog, ctx.current_user_oid, &target.class_row, acl_chars) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("permission denied for sequence {}", target.display_name),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+fn ensure_sequence_write_allowed(
+    ctx: &ExecutorContext,
+    target: &SequenceCallTarget,
+    function_name: &str,
+) -> Result<(), ExecError> {
+    let transaction_read_only = ctx.gucs.get("transaction_read_only").is_some_and(|value| {
+        value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true")
+    });
+    if transaction_read_only && target.persistent {
+        return Err(ExecError::DetailedError {
+            message: format!("cannot execute {function_name}() in a read-only transaction"),
+            detail: None,
+            hint: None,
+            sqlstate: "25006",
+        });
+    }
+    Ok(())
+}
+
+fn currval_not_defined_error(target: &SequenceCallTarget) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "currval of sequence \"{}\" is not yet defined in this session",
+            target.display_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    }
+}
+
+fn nextval_bounds_error(target: &SequenceCallTarget, data: &SequenceData) -> ExecError {
+    let (bound_name, bound_value) = if data.options.increment < 0 {
+        ("minimum", data.options.minvalue)
+    } else {
+        ("maximum", data.options.maxvalue)
+    };
+    ExecError::DetailedError {
+        message: format!(
+            "nextval: reached {bound_name} value of sequence \"{}\" ({bound_value})",
+            target.display_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "2200H",
+    }
+}
+
+fn setval_bounds_error_for_target(
+    target: &SequenceCallTarget,
+    data: &SequenceData,
+    value: i64,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "setval: value {value} is out of bounds for sequence \"{}\" ({}..{})",
+            target.display_name, data.options.minvalue, data.options.maxvalue
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "2200H",
+    }
+}
+
+fn check_setval_bounds(
+    ctx: &ExecutorContext,
+    target: &SequenceCallTarget,
+    value: i64,
+) -> Result<(), ExecError> {
+    let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+        return Ok(());
+    };
+    if value < data.options.minvalue || value > data.options.maxvalue {
+        return Err(setval_bounds_error_for_target(target, &data, value));
+    }
+    Ok(())
+}
+
+fn map_nextval_sequence_error(
+    ctx: &ExecutorContext,
+    target: &SequenceCallTarget,
+    error: ExecError,
+) -> ExecError {
+    if let ExecError::DetailedError { message, .. } = &error
+        && message.starts_with("nextval: reached")
+        && let Ok(runtime) = sequence_runtime(ctx)
+        && let Some(data) = runtime.sequence_data(target.relation_oid)
+    {
+        return nextval_bounds_error(target, &data);
+    }
+    error
 }
 
 fn eval_sequence_builtin_function(
@@ -7518,59 +7714,150 @@ fn eval_sequence_builtin_function(
             Ok(Value::Null)
         }
         (BuiltinScalarFunction::NextVal, [target]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
-            let value =
-                sequence_runtime(ctx)?.next_value(ctx.client_id, relation_oid, persistent)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "nextval")?;
+            let value = sequence_runtime(ctx)
+                .and_then(|runtime| {
+                    runtime.next_value(ctx.client_id, target.relation_oid, target.persistent)
+                })
+                .map_err(|error| map_nextval_sequence_error(ctx, &target, error))?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::CurrVal, [target]) => {
-            let (relation_oid, _) = resolve_sequence_call_target(ctx, target)?;
-            let value = sequence_runtime(ctx)?.curr_value(ctx.client_id, relation_oid)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
+            let value = sequence_runtime(ctx)
+                .and_then(|runtime| runtime.curr_value(ctx.client_id, target.relation_oid))
+                .map_err(|error| {
+                    if matches!(error, ExecError::DetailedError { .. }) {
+                        currval_not_defined_error(&target)
+                    } else {
+                        error
+                    }
+                })?;
+            Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::LastVal, []) => {
+            let (relation_oid, value) = sequence_runtime(ctx)?.last_value(ctx.client_id)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, &Value::Int64(i64::from(relation_oid)))?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int64(value)]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "setval")?;
+            check_setval_bounds(ctx, &target, *value)?;
             let value = sequence_runtime(ctx)?.set_value(
                 ctx.client_id,
-                relation_oid,
+                target.relation_oid,
                 *value,
                 true,
-                persistent,
+                target.persistent,
             )?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int32(value)]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "setval")?;
+            check_setval_bounds(ctx, &target, i64::from(*value))?;
             let value = sequence_runtime(ctx)?.set_value(
                 ctx.client_id,
-                relation_oid,
+                target.relation_oid,
                 i64::from(*value),
                 true,
-                persistent,
+                target.persistent,
             )?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int64(value), Value::Bool(is_called)]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "setval")?;
+            check_setval_bounds(ctx, &target, *value)?;
             let value = sequence_runtime(ctx)?.set_value(
                 ctx.client_id,
-                relation_oid,
+                target.relation_oid,
                 *value,
                 *is_called,
-                persistent,
+                target.persistent,
             )?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int32(value), Value::Bool(is_called)]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "setval")?;
+            check_setval_bounds(ctx, &target, i64::from(*value))?;
             let value = sequence_runtime(ctx)?.set_value(
                 ctx.client_id,
-                relation_oid,
+                target.relation_oid,
                 i64::from(*value),
                 *is_called,
-                persistent,
+                target.persistent,
             )?;
             Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::PgSequenceParameters, [target]) => {
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
+            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Record(RecordValue::anonymous(vec![
+                ("start_value".into(), Value::Int64(data.options.start)),
+                ("minimum_value".into(), Value::Int64(data.options.minvalue)),
+                ("maximum_value".into(), Value::Int64(data.options.maxvalue)),
+                ("increment".into(), Value::Int64(data.options.increment)),
+                ("cycle_option".into(), Value::Bool(data.options.cycle)),
+                ("cache_size".into(), Value::Int64(data.options.cache)),
+                (
+                    "data_type".into(),
+                    Value::Int64(i64::from(data.options.type_oid)),
+                ),
+            ])))
+        }
+        (BuiltinScalarFunction::PgSequenceLastValue, [target]) => {
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            if !sequence_acl_allows_any(
+                catalog,
+                ctx.current_user_oid,
+                &target.class_row,
+                &['U', 'r'],
+            ) {
+                return Ok(Value::Null);
+            }
+            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+                return Ok(Value::Null);
+            };
+            if data.state.is_called {
+                Ok(Value::Int64(data.state.last_value))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        (BuiltinScalarFunction::PgGetSequenceData, [target]) => {
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
+            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Record(RecordValue::anonymous(vec![
+                ("last_value".into(), Value::Int64(data.state.last_value)),
+                ("is_called".into(), Value::Bool(data.state.is_called)),
+            ])))
         }
         (BuiltinScalarFunction::PgGetSerialSequence, [table, column]) => {
             let table_name = table.as_text().ok_or_else(|| ExecError::TypeMismatch {
@@ -8187,6 +8474,7 @@ fn eval_bound_system_var(
     match var.varattno {
         TABLE_OID_ATTR_NO => lookup_system_binding(bindings, var.varno),
         SELF_ITEM_POINTER_ATTR_NO => lookup_ctid_binding(bindings, var.varno),
+        XMIN_ATTR_NO => lookup_xmin_binding(bindings, var.varno),
         _ => None,
     }
 }
@@ -8335,6 +8623,12 @@ pub fn eval_expr(
                     .tid()
                     .map(ctid_value)
                     .or_else(|| lookup_ctid_binding(&ctx.system_bindings, var.varno))
+                    .unwrap_or(Value::Null))
+            } else if var.varattno == XMIN_ATTR_NO {
+                Ok(slot
+                    .xmin()
+                    .map(|xmin| Value::Xid8(u64::from(xmin)))
+                    .or_else(|| lookup_xmin_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
@@ -9193,6 +9487,39 @@ fn text_search_parse_error(op: &'static str, message: String) -> ExecError {
     })
 }
 
+fn text_search_config_name_from_value(
+    value: &Value,
+    catalog: Option<&dyn CatalogLookup>,
+    op: &'static str,
+) -> Result<Option<String>, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    if let Some(text) = value.as_text() {
+        return Ok(Some(text.to_string()));
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
+        Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
+        _ => None,
+    };
+    if let Some(oid) = oid
+        && let Some(row) = catalog.and_then(|catalog| {
+            catalog
+                .ts_config_rows()
+                .into_iter()
+                .find(|row| row.oid == oid)
+        })
+    {
+        return Ok(Some(row.cfgname));
+    }
+    Err(ExecError::TypeMismatch {
+        op,
+        left: value.clone(),
+        right: Value::Null,
+    })
+}
+
 fn eval_ts_match_values(
     values: &[Value],
     default_config_name: Option<&str>,
@@ -9255,15 +9582,96 @@ fn tsquery_is_empty(query: &crate::include::nodes::tsearch::TsQuery) -> bool {
     crate::backend::executor::render_tsquery_text(query).is_empty()
 }
 
-fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
+fn ts_rewrite_query_result_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "ts_rewrite query must return two tsquery columns".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn eval_ts_rewrite_query_text(
+    query: crate::include::nodes::tsearch::TsQuery,
+    sql: &str,
+    ctx: &mut ExecutorContext,
+) -> Result<crate::include::nodes::tsearch::TsQuery, ExecError> {
+    if tsquery_is_empty(&query) {
+        return Ok(query);
+    }
+    let catalog = ctx
+        .catalog
+        .clone()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "ts_rewrite query requires executor catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let stmt = parse_statement(sql).map_err(ExecError::Parse)?;
+    let result = execute_readonly_statement(stmt, catalog.as_ref(), ctx)?;
+    let super::StatementResult::Query { columns, rows, .. } = result else {
+        return Err(ts_rewrite_query_result_error());
+    };
+    if columns.len() != 2
+        || columns
+            .iter()
+            .any(|column| column.sql_type.kind != SqlTypeKind::TsQuery || column.sql_type.is_array)
+    {
+        return Err(ts_rewrite_query_result_error());
+    }
+
+    let mut rewritten = query;
+    for row in rows {
+        match row.as_slice() {
+            [Value::TsQuery(target), Value::TsQuery(substitute)] => {
+                if tsquery_is_empty(target) {
+                    continue;
+                }
+                rewritten = crate::backend::executor::tsquery_rewrite(
+                    rewritten,
+                    target.clone(),
+                    substitute.clone(),
+                );
+                if tsquery_is_empty(&rewritten) {
+                    break;
+                }
+            }
+            [Value::Null, _] | [_, Value::Null] => {}
+            _ => return Err(ts_rewrite_query_result_error()),
+        }
+    }
+    Ok(crate::backend::executor::canonicalize_tsquery_rewrite_result(rewritten))
+}
+
+fn eval_ts_headline_values(
+    values: &[Value],
+    default_config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
     if values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
     }
-    let (document, query) = match values {
-        [document, Value::TsQuery(query)] => (document.as_text(), query),
-        [document, Value::TsQuery(query), _options] => (document.as_text(), query),
-        [_config, document, Value::TsQuery(query)] => (document.as_text(), query),
-        [_config, document, Value::TsQuery(query), _options] => (document.as_text(), query),
+    let (config_name, document, query, options) = match values {
+        [document, Value::TsQuery(query)] => (None, document, query, None),
+        [document, Value::TsQuery(query), options] => (
+            None,
+            document,
+            query,
+            ts_headline_option_text(Some(options))?,
+        ),
+        [config, document, Value::TsQuery(query)] => (
+            text_search_config_name_from_value(config, catalog, "ts_headline")?,
+            document,
+            query,
+            None,
+        ),
+        [config, document, Value::TsQuery(query), options] => (
+            text_search_config_name_from_value(config, catalog, "ts_headline")?,
+            document,
+            query,
+            ts_headline_option_text(Some(options))?,
+        ),
         _ => {
             return Err(ExecError::TypeMismatch {
                 op: "ts_headline",
@@ -9272,80 +9680,97 @@ fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
             });
         }
     };
-    let document = document.ok_or_else(|| ExecError::TypeMismatch {
-        op: "ts_headline",
-        left: values.first().cloned().unwrap_or(Value::Null),
-        right: values.get(1).cloned().unwrap_or(Value::Null),
-    })?;
+    let config_name = config_name.as_deref().or(default_config_name);
     if tsquery_is_empty(query) {
-        return Ok(Value::Text(document.into()));
+        return ts_headline_identity(document);
     }
-    let lexemes = tsquery_lexemes_for_headline(&query.root);
-    if lexemes.is_empty() {
-        return Ok(Value::Text(document.into()));
-    }
-    Ok(Value::Text(
-        highlight_headline_text(document, &lexemes).into(),
-    ))
-}
-
-fn tsquery_lexemes_for_headline(node: &crate::include::nodes::tsearch::TsQueryNode) -> Vec<String> {
-    use crate::include::nodes::tsearch::TsQueryNode;
-
-    let mut lexemes = Vec::new();
-    fn collect(node: &TsQueryNode, lexemes: &mut Vec<String>) {
-        match node {
-            TsQueryNode::Operand(operand) if !operand.lexeme.as_str().is_empty() => {
-                lexemes.push(operand.lexeme.as_str().to_ascii_lowercase());
-            }
-            TsQueryNode::Operand(_) => {}
-            TsQueryNode::Not(inner) => collect(inner, lexemes),
-            TsQueryNode::And(left, right) | TsQueryNode::Or(left, right) => {
-                collect(left, lexemes);
-                collect(right, lexemes);
-            }
-            TsQueryNode::Phrase { left, right, .. } => {
-                collect(left, lexemes);
-                collect(right, lexemes);
-            }
+    match document {
+        Value::Json(text) => {
+            let mut json = parse_json_text_input(text.as_str())?;
+            highlight_json_strings_for_headline(&mut json, query, options, config_name, catalog)?;
+            Ok(Value::Json(CompactString::from_owned(
+                serde_json::to_string(&json).unwrap_or_else(|_| "null".into()),
+            )))
+        }
+        Value::Jsonb(bytes) => {
+            let mut json = decode_jsonb(bytes)?.to_serde();
+            highlight_json_strings_for_headline(&mut json, query, options, config_name, catalog)?;
+            Ok(Value::Jsonb(crate::backend::executor::jsonb::encode_jsonb(
+                &JsonbValue::from_serde(json)?,
+            )))
+        }
+        _ => {
+            let document = document.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "ts_headline",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            })?;
+            Ok(Value::Text(CompactString::from_owned(
+                crate::backend::executor::ts_headline(
+                    config_name,
+                    document,
+                    query,
+                    options,
+                    catalog,
+                )?,
+            )))
         }
     }
-    collect(node, &mut lexemes);
-    lexemes.sort();
-    lexemes.dedup();
-    lexemes
 }
 
-fn highlight_headline_text(document: &str, lexemes: &[String]) -> String {
-    let mut out = String::with_capacity(document.len());
-    let mut token = String::new();
-    for ch in document.chars() {
-        if ch.is_alphanumeric() || ch == '_' {
-            token.push(ch);
-            continue;
+fn ts_headline_option_text(option: Option<&Value>) -> Result<Option<&str>, ExecError> {
+    let Some(option) = option else {
+        return Ok(None);
+    };
+    option
+        .as_text()
+        .map(Some)
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "ts_headline",
+            left: option.clone(),
+            right: Value::Null,
+        })
+}
+
+fn ts_headline_identity(document: &Value) -> Result<Value, ExecError> {
+    match document {
+        Value::Json(_) | Value::Jsonb(_) => Ok(document.clone()),
+        _ => {
+            let text = document.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "ts_headline",
+                left: document.clone(),
+                right: Value::Null,
+            })?;
+            Ok(Value::Text(text.into()))
         }
-        flush_headline_token(&mut out, &mut token, lexemes);
-        out.push(ch);
     }
-    flush_headline_token(&mut out, &mut token, lexemes);
-    out
 }
 
-fn flush_headline_token(out: &mut String, token: &mut String, lexemes: &[String]) {
-    if token.is_empty() {
-        return;
+fn highlight_json_strings_for_headline(
+    value: &mut serde_json::Value,
+    query: &crate::include::nodes::tsearch::TsQuery,
+    options: Option<&str>,
+    config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<(), ExecError> {
+    match value {
+        serde_json::Value::String(text) => {
+            *text =
+                crate::backend::executor::ts_headline(config_name, text, query, options, catalog)?;
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                highlight_json_strings_for_headline(item, query, options, config_name, catalog)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for value in fields.values_mut() {
+                highlight_json_strings_for_headline(value, query, options, config_name, catalog)?;
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
-    let lower = token.to_ascii_lowercase();
-    if lexemes.iter().any(|lexeme| {
-        lower == *lexeme || lower.starts_with(lexeme) || lexeme.starts_with(lower.as_str())
-    }) {
-        out.push_str("<b>");
-        out.push_str(token);
-        out.push_str("</b>");
-    } else {
-        out.push_str(token);
-    }
-    token.clear();
+    Ok(())
 }
 
 fn eval_plpgsql_builtin_function(
@@ -9391,6 +9816,7 @@ fn eval_plpgsql_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
@@ -9401,6 +9827,7 @@ fn eval_plpgsql_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
+        BuiltinScalarFunction::OctetLength => eval_octet_length_function(&values),
         BuiltinScalarFunction::BitLength => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_bit_length_function(&values),
@@ -10121,6 +10548,7 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
     matches!(
         func,
         BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::JsonToTsVector
             | BuiltinScalarFunction::JsonbToTsVector
             | BuiltinScalarFunction::ToTsQuery
             | BuiltinScalarFunction::PlainToTsQuery
@@ -10150,7 +10578,7 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
 fn eval_text_search_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
-    ctx: Option<&ExecutorContext>,
+    mut ctx: Option<&mut ExecutorContext>,
 ) -> Result<Value, ExecError> {
     fn arg_text(
         values: &[Value],
@@ -10296,55 +10724,73 @@ fn eval_text_search_builtin_function(
             actual: format!("{op}: {message}"),
         })
     };
+
+    if matches!(func, BuiltinScalarFunction::TsRewrite) {
+        if values.iter().any(|value| matches!(value, Value::Null)) {
+            return Ok(Value::Null);
+        }
+        let query = arg_tsquery(values, 0, "ts_rewrite")?.clone();
+        return match values.len() {
+            2 => {
+                let sql = arg_text(values, 1, "ts_rewrite")?.unwrap_or_default();
+                let ctx = ctx.as_deref_mut().ok_or_else(|| ExecError::DetailedError {
+                    message: "ts_rewrite query requires executor context".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                })?;
+                eval_ts_rewrite_query_text(query, &sql, ctx).map(Value::TsQuery)
+            }
+            3 => Ok(Value::TsQuery(crate::backend::executor::tsquery_rewrite(
+                query,
+                arg_tsquery(values, 1, "ts_rewrite")?.clone(),
+                arg_tsquery(values, 2, "ts_rewrite")?.clone(),
+            ))),
+            _ => Err(ExecError::TypeMismatch {
+                op: "ts_rewrite",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        };
+    }
+
     let default_config_name = || {
-        ctx.and_then(|ctx| {
+        ctx.as_deref().and_then(|ctx| {
             ctx.gucs
                 .get("default_text_search_config")
                 .map(String::as_str)
         })
     };
-    let catalog = catalog_lookup(ctx);
+    let catalog = catalog_lookup(ctx.as_deref());
     let arg_config_name =
         |values: &[Value], index: usize, op: &'static str| -> Result<Option<String>, ExecError> {
             let Some(value) = values.get(index) else {
                 return Ok(None);
             };
-            if matches!(value, Value::Null) {
-                return Ok(None);
-            }
-            if let Some(text) = value.as_text() {
-                return Ok(Some(text.to_string()));
-            }
-            let oid = match value {
-                Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
-                Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
-                _ => None,
-            };
-            if let Some(oid) = oid
-                && let Some(row) = catalog.and_then(|catalog| {
-                    catalog
-                        .ts_config_rows()
-                        .into_iter()
-                        .find(|row| row.oid == oid)
-                })
-            {
-                return Ok(Some(row.cfgname));
-            }
-            Err(ExecError::TypeMismatch {
-                op,
-                left: value.clone(),
-                right: Value::Null,
-            })
+            text_search_config_name_from_value(value, catalog, op)
         };
 
     match func {
         BuiltinScalarFunction::TsMatch => {
             eval_ts_match_values(values, default_config_name(), catalog)
         }
-        BuiltinScalarFunction::TsHeadline => eval_ts_headline_values(values),
+        BuiltinScalarFunction::TsHeadline => {
+            eval_ts_headline_values(values, default_config_name(), catalog)
+        }
         BuiltinScalarFunction::ToTsVector => {
+            if let [Value::Json(_)] = values {
+                return json_to_tsvector_value(default_config_name(), &values[0], None, catalog);
+            }
             if let [Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(default_config_name(), &values[0], None, catalog);
+            }
+            if let [_, Value::Json(_)] = values {
+                return json_to_tsvector_value(
+                    arg_config_name(values, 0, "to_tsvector")?.as_deref(),
+                    &values[1],
+                    None,
+                    catalog,
+                );
             }
             if let [_, Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(
@@ -10376,6 +10822,29 @@ fn eval_text_search_builtin_function(
                 .map(Value::TsVector)
                 .map_err(|e| parse_error("to_tsvector", e))
         }
+        BuiltinScalarFunction::JsonToTsVector => match values {
+            [Value::Null, _]
+            | [_, Value::Null]
+            | [Value::Null, _, _]
+            | [_, Value::Null, _]
+            | [_, _, Value::Null] => {
+                return Ok(Value::Null);
+            }
+            [Value::Json(_), _] => {
+                json_to_tsvector_value(default_config_name(), &values[0], values.get(1), catalog)
+            }
+            [_, Value::Json(_), _] => json_to_tsvector_value(
+                arg_config_name(values, 0, "json_to_tsvector")?.as_deref(),
+                &values[1],
+                values.get(2),
+                catalog,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "json_to_tsvector",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
         BuiltinScalarFunction::JsonbToTsVector => match values {
             [Value::Null, _]
             | [_, Value::Null]
@@ -10570,16 +11039,7 @@ fn eval_text_search_builtin_function(
                 arg_tsquery(values, 0, "numnode")?,
             )))
         }
-        BuiltinScalarFunction::TsRewrite => {
-            if values.iter().any(|value| matches!(value, Value::Null)) {
-                return Ok(Value::Null);
-            }
-            Ok(Value::TsQuery(crate::backend::executor::tsquery_rewrite(
-                arg_tsquery(values, 0, "ts_rewrite")?.clone(),
-                arg_tsquery(values, 1, "ts_rewrite")?.clone(),
-                arg_tsquery(values, 2, "ts_rewrite")?.clone(),
-            )))
-        }
+        BuiltinScalarFunction::TsRewrite => unreachable!("handled before catalog lookup"),
         BuiltinScalarFunction::TsVectorStrip => {
             if values.iter().any(|value| matches!(value, Value::Null)) {
                 return Ok(Value::Null);
@@ -11091,6 +11551,16 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
         }
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Bool(false)),
+        BuiltinScalarFunction::NextVal
+        | BuiltinScalarFunction::CurrVal
+        | BuiltinScalarFunction::LastVal
+        | BuiltinScalarFunction::SetVal
+        | BuiltinScalarFunction::PgGetSerialSequence
+        | BuiltinScalarFunction::PgSequenceParameters
+        | BuiltinScalarFunction::PgSequenceLastValue
+        | BuiltinScalarFunction::PgGetSequenceData => {
+            eval_sequence_builtin_function(func, values, ctx)
+        }
         func if is_text_search_builtin_function(func) => {
             eval_text_search_builtin_function(func, values, Some(ctx))
         }
@@ -11297,8 +11767,12 @@ pub(crate) fn eval_builtin_function(
         func,
         BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
+            | BuiltinScalarFunction::LastVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
+            | BuiltinScalarFunction::PgSequenceParameters
+            | BuiltinScalarFunction::PgSequenceLastValue
+            | BuiltinScalarFunction::PgGetSequenceData
     ) {
         return eval_sequence_builtin_function(func, &values, ctx);
     }
@@ -11316,6 +11790,7 @@ pub(crate) fn eval_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
@@ -11504,8 +11979,12 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::NextVal
         | BuiltinScalarFunction::CurrVal
+        | BuiltinScalarFunction::LastVal
         | BuiltinScalarFunction::SetVal
-        | BuiltinScalarFunction::PgGetSerialSequence => {
+        | BuiltinScalarFunction::PgGetSerialSequence
+        | BuiltinScalarFunction::PgSequenceParameters
+        | BuiltinScalarFunction::PgSequenceLastValue
+        | BuiltinScalarFunction::PgGetSequenceData => {
             unreachable!("sequence builtins handled earlier");
         }
         BuiltinScalarFunction::DatePart => {
@@ -12148,6 +12627,7 @@ pub(crate) fn eval_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
+        BuiltinScalarFunction::OctetLength => eval_octet_length_function(&values),
         BuiltinScalarFunction::BitLength => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_bit_length_function(&values),

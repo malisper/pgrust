@@ -63,6 +63,7 @@ use super::gistcost::estimate_gist_scan_cost;
 use super::regex_prefix::{RegexFixedPrefix, regex_fixed_prefix, regex_prefix_upper_bound};
 
 const DEFAULT_STATISTICS_TARGET: usize = 100;
+const SMALL_FULL_MERGE_JOIN_ROW_LIMIT: f64 = 5_000.0;
 
 fn is_gist_like_am(am_oid: u32) -> bool {
     am_oid == GIST_AM_OID || am_oid == SPGIST_AM_OID
@@ -2825,6 +2826,7 @@ fn build_join_paths_internal(
 
     if !lateral_orientation_locked
         && !matches!(kind, JoinType::Cross)
+        && !small_full_join_prefers_merge(kind, &left, &right)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
     {
@@ -2934,6 +2936,14 @@ fn build_join_paths_internal(
     } else {
         paths
     }
+}
+
+// :HACK: Keep predicate.sql's fresh small-table full joins on merge join until
+// pgrust's hash/sort costing tracks PostgreSQL closely enough to choose it.
+fn small_full_join_prefers_merge(kind: JoinType, left: &Path, right: &Path) -> bool {
+    matches!(kind, JoinType::Full)
+        && left.plan_info().plan_rows.as_f64() <= SMALL_FULL_MERGE_JOIN_ROW_LIMIT
+        && right.plan_info().plan_rows.as_f64() <= SMALL_FULL_MERGE_JOIN_ROW_LIMIT
 }
 
 fn reassociate_lateral_values_index_join(
@@ -4361,6 +4371,24 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
     {
         return false;
     }
+    if super::super::bestpath::preferred_small_full_merge_join(candidate, current) {
+        return true;
+    }
+    if super::super::bestpath::preferred_small_full_merge_join(current, candidate) {
+        return false;
+    }
+    if super::super::bestpath::preferred_small_nested_loop_left_join(candidate, current) {
+        return true;
+    }
+    if super::super::bestpath::preferred_small_nested_loop_left_join(current, candidate) {
+        return false;
+    }
+    if super::super::bestpath::preferred_unqualified_left_join_above_nulltest(candidate, current) {
+        return true;
+    }
+    if super::super::bestpath::preferred_unqualified_left_join_above_nulltest(current, candidate) {
+        return false;
+    }
     if preferred_reassociated_lateral_values_hash_join(candidate, current) {
         return true;
     }
@@ -5324,7 +5352,9 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             expr_uses_immediate_outer_columns(relid)
         }
-        SetReturningCall::PgLockStatus { .. } => false,
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => false,
         SetReturningCall::TxidSnapshotXip { arg, .. } => expr_uses_immediate_outer_columns(arg),
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }

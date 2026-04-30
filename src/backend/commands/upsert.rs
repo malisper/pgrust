@@ -15,11 +15,11 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::tablecmds::{
     WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
-    index_key_values_for_row, insert_index_entry_for_row, materialize_generated_columns,
-    project_returning_row_with_old_new, rollback_inserted_row, row_matches_index_predicate,
-    slot_toast_context, temporal_arbiter_conflicts_with_existing_row,
-    validate_pending_no_action_checks, validate_pending_outbound_foreign_key_checks,
-    write_insert_heap_row, write_updated_row,
+    exclusion_arbiter_conflicts_with_existing_row, index_key_values_for_row,
+    insert_index_entry_for_row, materialize_generated_columns, project_returning_row_with_old_new,
+    rollback_inserted_row, row_matches_index_predicate, slot_toast_context,
+    temporal_arbiter_conflicts_with_existing_row, validate_pending_no_action_checks,
+    validate_pending_outbound_foreign_key_checks, write_insert_heap_row, write_updated_row,
 };
 use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 
@@ -202,6 +202,22 @@ fn probe_temporal_arbiter_conflict(
             values,
             None,
             ctx,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn probe_exclusion_arbiter_conflict(
+    stmt: &BoundInsertStatement,
+    on_conflict: &BoundOnConflictClause,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    for constraint in &on_conflict.arbiter_exclusion_constraints {
+        if exclusion_arbiter_conflicts_with_existing_row(
+            stmt.rel, stmt.toast, &stmt.desc, constraint, values, None, ctx,
         )? {
             return Ok(true);
         }
@@ -600,6 +616,11 @@ pub(crate) fn execute_insert_on_conflict_rows(
             ctx.check_for_interrupts()?;
             if matches!(on_conflict.action, BoundOnConflictAction::Nothing)
                 && probe_temporal_arbiter_conflict(stmt, on_conflict, &values, ctx)?
+            {
+                break;
+            }
+            if matches!(on_conflict.action, BoundOnConflictAction::Nothing)
+                && probe_exclusion_arbiter_conflict(stmt, on_conflict, &values, ctx)?
             {
                 break;
             }

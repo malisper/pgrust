@@ -14,11 +14,11 @@ use crate::backend::parser::{
     CteBody, DeleteStatement, FromItem, InsertSource, InsertStatement, OnConflictAction,
     OnConflictClause, OnConflictTarget, OrderByItem, ParseError, RawWindowFrame,
     RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn,
-    SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement, UpdateStatement,
-    ValuesStatement, XmlTableColumn, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
-    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
-    parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
-    pg_plan_query_with_outer_scopes_and_ctes_config,
+    SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement, TablePersistence,
+    UpdateStatement, ValuesStatement, XmlTableColumn, bind_delete_with_outer_scopes,
+    bind_insert_with_outer_scopes, bind_scalar_expr_in_named_slot_scope,
+    bind_update_with_outer_scopes, parse_expr, parse_statement, parse_type_name,
+    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_query_with_outer_scopes_and_ctes_config,
     pg_plan_values_query_with_outer_scopes_and_ctes,
     pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
 };
@@ -49,6 +49,7 @@ pub(crate) struct CompiledBlock {
 pub struct CompiledFunction {
     pub(crate) name: String,
     pub(crate) proc_oid: u32,
+    pub(crate) provolatile: char,
     pub(crate) proconfig: Option<Vec<String>>,
     pub(crate) print_strict_params: Option<bool>,
     pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
@@ -381,6 +382,11 @@ pub(crate) enum CompiledStmt {
         scope: RuntimeSqlScope,
         line: usize,
     },
+    ReturnSelect {
+        plan: PlannedStmt,
+        sql: String,
+        line: usize,
+    },
     ReturnNext {
         expr: Option<CompiledExpr>,
     },
@@ -481,6 +487,9 @@ pub(crate) enum CompiledStmt {
     },
     CreateTable {
         stmt: CreateTableStatement,
+    },
+    ExecSql {
+        sql: String,
     },
 }
 
@@ -950,6 +959,7 @@ pub(crate) fn compile_do_function(
     Ok(CompiledFunction {
         name: "inline_code_block".into(),
         proc_oid: 0,
+        provolatile: 'v',
         proconfig: None,
         print_strict_params: None,
         parameter_slots: Vec::new(),
@@ -1084,6 +1094,7 @@ pub(crate) fn compile_function_from_proc(
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proc_oid: row.oid,
+        provolatile: row.provolatile,
         proconfig: row.proconfig.clone(),
         print_strict_params,
         parameter_slots,
@@ -1187,6 +1198,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proc_oid: row.oid,
+        provolatile: row.provolatile,
         proconfig: row.proconfig.clone(),
         print_strict_params,
         parameter_slots: Vec::new(),
@@ -1216,6 +1228,7 @@ pub(crate) fn compile_event_trigger_function_from_proc(
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proc_oid: row.oid,
+        provolatile: row.provolatile,
         proconfig: row.proconfig.clone(),
         print_strict_params: None,
         parameter_slots: Vec::new(),
@@ -2033,6 +2046,9 @@ fn compile_return_stmt(
             sqlstate: "42804",
         }),
         (FunctionReturnContract::Scalar { setof: false, .. }, Some(expr)) => {
+            if let Some((sql, plan)) = compile_return_select_expr(expr, catalog, env)? {
+                return Ok(CompiledStmt::ReturnSelect { plan, sql, line });
+            }
             if let Some(sql) = runtime_return_query_sql(expr, env)? {
                 return Ok(CompiledStmt::ReturnRuntimeQuery {
                     sql,
@@ -2964,6 +2980,7 @@ fn compile_exec_sql_stmt(
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
     let stmt = normalize_plpgsql_sql_statement(parse_statement(&rewritten_sql)?, env);
     let outer_scope = outer_scope_for_sql(env);
+    let outer_scopes = [outer_scope];
     match stmt {
         Statement::Select(stmt) => Ok(CompiledStmt::Perform {
             plan: plan_select_for_env(&stmt, catalog, env)?,
@@ -2978,10 +2995,10 @@ fn compile_exec_sql_stmt(
         Statement::Insert(stmt) => match bind_insert_with_outer_scopes(
             &normalize_plpgsql_insert(stmt, env),
             catalog,
-            &[outer_scope],
+            &outer_scopes,
         ) {
             Ok(stmt) => Ok(CompiledStmt::ExecInsert { stmt }),
-            Err(err) if should_fallback_to_runtime_sql(&err) => Ok(CompiledStmt::RuntimeSql {
+            Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
                 sql: rewritten_sql,
                 scope: runtime_sql_scope(env),
             }),
@@ -2990,10 +3007,10 @@ fn compile_exec_sql_stmt(
         Statement::Update(stmt) => match bind_update_with_outer_scopes(
             &normalize_plpgsql_update(stmt, env),
             catalog,
-            &[outer_scope],
+            &outer_scopes,
         ) {
             Ok(stmt) => Ok(CompiledStmt::ExecUpdate { stmt }),
-            Err(err) if should_fallback_to_runtime_sql(&err) => Ok(CompiledStmt::RuntimeSql {
+            Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
                 sql: rewritten_sql,
                 scope: runtime_sql_scope(env),
             }),
@@ -3002,17 +3019,21 @@ fn compile_exec_sql_stmt(
         Statement::Delete(stmt) => match bind_delete_with_outer_scopes(
             &normalize_plpgsql_delete(stmt, env),
             catalog,
-            &[outer_scope],
+            &outer_scopes,
         ) {
             Ok(stmt) => Ok(CompiledStmt::ExecDelete { stmt }),
-            Err(err) if should_fallback_to_runtime_sql(&err) => Ok(CompiledStmt::RuntimeSql {
+            Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
                 sql: rewritten_sql,
                 scope: runtime_sql_scope(env),
             }),
             Err(err) => Err(err),
         },
+        Statement::CreateTable(stmt) if stmt.persistence == TablePersistence::Temporary => {
+            Ok(CompiledStmt::ExecSql { sql: rewritten_sql })
+        }
         Statement::CreateTable(stmt) => Ok(CompiledStmt::CreateTable { stmt }),
         Statement::CreateTableAs(stmt) => Ok(CompiledStmt::CreateTableAs { stmt }),
+        Statement::Analyze(_) => Ok(CompiledStmt::ExecSql { sql: rewritten_sql }),
         Statement::CreateView(_) | Statement::DropTable(_) => Ok(CompiledStmt::RuntimeSql {
             sql: rewritten_sql,
             scope: runtime_sql_scope(env),
@@ -3033,6 +3054,16 @@ fn compile_exec_sql_stmt(
             actual: format!("{other:?}"),
         }),
     }
+}
+
+fn should_defer_plpgsql_sql_to_runtime(err: &ParseError) -> bool {
+    should_fallback_to_runtime_sql(err)
+        && matches!(
+            err.unpositioned(),
+            ParseError::UnknownTable(_)
+                | ParseError::TableDoesNotExist(_)
+                | ParseError::MissingFromClauseEntry(_)
+        )
 }
 
 fn persistent_object_transition_table_reference(
@@ -4428,6 +4459,29 @@ fn compile_condition_text(
         }
         Err(err) => Err(err),
     }
+}
+
+fn compile_return_select_expr(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<Option<(String, PlannedStmt)>, ParseError> {
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    let Some(from_idx) = find_keyword_at_top_level(&rewritten_sql, "from") else {
+        return Ok(None);
+    };
+    let expr = rewritten_sql[..from_idx].trim();
+    let from_clause = rewritten_sql[from_idx + "from".len()..].trim();
+    if expr.is_empty() || from_clause.is_empty() || !looks_like_aggregate_expr(expr) {
+        return Ok(None);
+    }
+    // :HACK: PL/pgSQL normally compiles SQL expressions through SPI.  Keep this
+    // focused on PostgreSQL regression's aggregate RETURN shape until PL/pgSQL
+    // has a general SPI expression-plan path.
+    let query_sql = format!("select {expr} from {from_clause}");
+    let select = normalize_plpgsql_select(crate::backend::parser::parse_select(&query_sql)?, env);
+    let plan = plan_select_for_env(&select, catalog, env)?;
+    Ok(Some((query_sql, plan)))
 }
 
 struct ParsedQueryCondition<'a> {

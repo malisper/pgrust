@@ -2194,6 +2194,9 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if actual_type.is_array != target_type.is_array {
         return None;
     }
+    if same_type_ignoring_function_typmod(actual_type, target_type) {
+        return Some(0);
+    }
     if !target_type.is_array
         && target_type.kind == SqlTypeKind::Record
         && matches!(
@@ -2227,6 +2230,42 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     None
 }
 
+fn same_type_ignoring_function_typmod(actual: SqlType, target: SqlType) -> bool {
+    if actual.is_array != target.is_array {
+        return false;
+    }
+    if actual.is_array {
+        return same_type_ignoring_function_typmod(actual.element_type(), target.element_type());
+    }
+    if actual.kind != target.kind || target.typmod != SqlType::NO_TYPEMOD {
+        return false;
+    }
+    if actual.type_oid != 0 && target.type_oid != 0 && actual.type_oid != target.type_oid {
+        return false;
+    }
+    if actual.typrelid != target.typrelid
+        || actual.range_subtype_oid != target.range_subtype_oid
+        || actual.range_multitype_oid != target.range_multitype_oid
+        || actual.range_discrete != target.range_discrete
+        || actual.multirange_range_oid != target.multirange_range_oid
+    {
+        return false;
+    }
+    matches!(
+        actual.kind,
+        SqlTypeKind::Numeric
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Bit
+            | SqlTypeKind::VarBit
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
+            | SqlTypeKind::Interval
+    )
+}
+
 fn numeric_type_match_cost(actual: SqlTypeKind, target: SqlTypeKind) -> Option<usize> {
     use SqlTypeKind::*;
     Some(match (actual, target) {
@@ -2251,12 +2290,16 @@ pub(super) fn validate_scalar_function_arity(
         })
         .unwrap_or_else(|| match func {
             BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::JsonToTsVector
             | BuiltinScalarFunction::JsonbToTsVector
             | BuiltinScalarFunction::ToTsQuery
             | BuiltinScalarFunction::PlainToTsQuery
             | BuiltinScalarFunction::PhraseToTsQuery
             | BuiltinScalarFunction::WebSearchToTsQuery => {
-                if matches!(func, BuiltinScalarFunction::JsonbToTsVector) {
+                if matches!(
+                    func,
+                    BuiltinScalarFunction::JsonToTsVector | BuiltinScalarFunction::JsonbToTsVector
+                ) {
                     matches!(args.len(), 2 | 3)
                 } else {
                     matches!(args.len(), 1 | 2)
@@ -2458,9 +2501,13 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgControlRecovery
             | BuiltinScalarFunction::PgControlInit
             | BuiltinScalarFunction::TestRelpath => args.is_empty(),
+            BuiltinScalarFunction::LastVal => args.is_empty(),
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
+            BuiltinScalarFunction::PgSequenceParameters
+            | BuiltinScalarFunction::PgSequenceLastValue
+            | BuiltinScalarFunction::PgGetSequenceData => args.len() == 1,
             BuiltinScalarFunction::PgGetAcl => args.len() == 3,
             BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
@@ -2577,6 +2624,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Abs
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::OctetLength
             | BuiltinScalarFunction::BitLength
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Upper
@@ -2824,6 +2872,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::JsonbBuildArray | BuiltinScalarFunction::JsonbBuildObject => {
                 true
             }
+            BuiltinScalarFunction::JsonbConcat => args.len() == 2,
             BuiltinScalarFunction::JsonbPathExists
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
@@ -3012,6 +3061,8 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::Corr => args.len() == 2,
             AggFunc::StringAgg
             | AggFunc::JsonObjectAgg
+            | AggFunc::JsonObjectAggUnique
+            | AggFunc::JsonObjectAggUniqueStrict
             | AggFunc::JsonbObjectAgg
             | AggFunc::JsonbObjectAggUnique
             | AggFunc::JsonbObjectAggUniqueStrict => args.len() == 2,
@@ -3049,7 +3100,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TsQueryContains | BuiltinScalarFunction::TsQueryContainedBy => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
-        BuiltinScalarFunction::ToTsVector | BuiltinScalarFunction::JsonbToTsVector => {
+        BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonToTsVector
+        | BuiltinScalarFunction::JsonbToTsVector => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
         }
         BuiltinScalarFunction::ToTsQuery
@@ -4135,6 +4188,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("test_relpath", BuiltinScalarFunction::TestRelpath),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
+        ("lastval", BuiltinScalarFunction::LastVal),
         ("setval", BuiltinScalarFunction::SetVal),
         ("setval_oid", BuiltinScalarFunction::SetVal),
         ("setval_text", BuiltinScalarFunction::SetVal),
@@ -4143,6 +4197,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
+        ),
+        (
+            "pg_sequence_parameters",
+            BuiltinScalarFunction::PgSequenceParameters,
+        ),
+        (
+            "pg_sequence_last_value",
+            BuiltinScalarFunction::PgSequenceLastValue,
+        ),
+        (
+            "pg_get_sequence_data",
+            BuiltinScalarFunction::PgGetSequenceData,
         ),
         ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
         (
@@ -4553,6 +4619,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
         ("to_tsvector_byid", BuiltinScalarFunction::ToTsVector),
+        ("json_to_tsvector", BuiltinScalarFunction::JsonToTsVector),
+        (
+            "json_to_tsvector_byid",
+            BuiltinScalarFunction::JsonToTsVector,
+        ),
         (
             "jsonb_string_to_tsvector",
             BuiltinScalarFunction::ToTsVector,
@@ -4699,6 +4770,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "jsonb_build_object",
             BuiltinScalarFunction::JsonbBuildObject,
         ),
+        ("jsonb_concat", BuiltinScalarFunction::JsonbConcat),
         ("jsonb_contains", BuiltinScalarFunction::JsonbContains),
         ("jsonb_contained", BuiltinScalarFunction::JsonbContained),
         ("jsonb_delete", BuiltinScalarFunction::JsonbDelete),
@@ -4730,6 +4802,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("rpad", BuiltinScalarFunction::RPad),
         ("repeat", BuiltinScalarFunction::Repeat),
         ("length", BuiltinScalarFunction::Length),
+        ("octet_length", BuiltinScalarFunction::OctetLength),
         ("bit_length", BuiltinScalarFunction::BitLength),
         ("array_ndims", BuiltinScalarFunction::ArrayNdims),
         ("array_dims", BuiltinScalarFunction::ArrayDims),
@@ -5020,6 +5093,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cbrt", BuiltinScalarFunction::Cbrt),
         ("dcbrt", BuiltinScalarFunction::Cbrt),
         ("power", BuiltinScalarFunction::Power),
+        ("pow", BuiltinScalarFunction::Power),
         ("dpow", BuiltinScalarFunction::Power),
         ("numeric_power", BuiltinScalarFunction::Power),
         ("exp", BuiltinScalarFunction::Exp),
@@ -5620,8 +5694,12 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgTsConfigIsVisible
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
+            | BuiltinScalarFunction::LastVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
+            | BuiltinScalarFunction::PgSequenceParameters
+            | BuiltinScalarFunction::PgSequenceLastValue
+            | BuiltinScalarFunction::PgGetSequenceData
             | BuiltinScalarFunction::PgGetAcl
             | BuiltinScalarFunction::MakeAclItem
             | BuiltinScalarFunction::PgGetUserById
@@ -5724,6 +5802,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::JsonbExtractPathText
             | BuiltinScalarFunction::JsonbBuildArray
             | BuiltinScalarFunction::JsonbBuildObject
+            | BuiltinScalarFunction::JsonbConcat
             | BuiltinScalarFunction::JsonbDelete
             | BuiltinScalarFunction::JsonbDeletePath
             | BuiltinScalarFunction::JsonbSet
@@ -5739,6 +5818,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RPad
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::OctetLength
             | BuiltinScalarFunction::BitLength
             | BuiltinScalarFunction::ArrayNdims
             | BuiltinScalarFunction::ArrayDims
@@ -5929,6 +6009,8 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
             | AggFunc::JsonObjectAgg
+            | AggFunc::JsonObjectAggUnique
+            | AggFunc::JsonObjectAggUniqueStrict
             | AggFunc::JsonbObjectAgg
             | AggFunc::JsonbObjectAggUnique
             | AggFunc::JsonbObjectAggUniqueStrict
@@ -6027,6 +6109,8 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         SQL_JSON_OBJECTAGG_FUNC | "json_objectagg" => Some(AggFunc::JsonObjectAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
+        "json_object_agg_unique" => Some(AggFunc::JsonObjectAggUnique),
+        "json_object_agg_unique_strict" => Some(AggFunc::JsonObjectAggUniqueStrict),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
         "jsonb_object_agg_unique" => Some(AggFunc::JsonbObjectAggUnique),
         "jsonb_object_agg_unique_strict" => Some(AggFunc::JsonbObjectAggUniqueStrict),

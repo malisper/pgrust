@@ -13,6 +13,7 @@ pub struct Snapshot {
     pub xmin: TransactionId,
     pub xmax: TransactionId,
     pub(crate) in_progress: BTreeSet<TransactionId>,
+    pub(crate) own_xids: BTreeSet<TransactionId>,
 }
 
 impl Snapshot {
@@ -23,6 +24,7 @@ impl Snapshot {
             xmin: 1,
             xmax: 1,
             in_progress: BTreeSet::new(),
+            own_xids: BTreeSet::new(),
         }
     }
 
@@ -32,6 +34,10 @@ impl Snapshot {
             && xid >= self.xmin
             && xid < self.xmax
             && self.in_progress.contains(&xid)
+    }
+
+    pub fn transaction_is_own(&self, xid: TransactionId) -> bool {
+        xid != INVALID_TRANSACTION_ID && (xid == self.current_xid || self.own_xids.contains(&xid))
     }
 }
 

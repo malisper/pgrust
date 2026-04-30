@@ -28,9 +28,9 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy,
     PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
     RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    SetSessionAuthorizationStatement, SqlCallArgs, SubscriptionOptionValue, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
-    UserMappingUser, ViewCheckOption,
+    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
+    TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -396,7 +396,10 @@ fn parse_drop_and_comment_on_subscription() {
 fn parse_set_session_authorization_string_literal() {
     assert!(matches!(
         parse_statement("set session authorization 'tenant'").unwrap(),
-        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement { role_name })
+        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
+            role_name,
+            is_local: false,
+        })
             if role_name == "tenant"
     ));
 }
@@ -2834,7 +2837,43 @@ fn parse_transaction_alias_statements() {
     );
     assert_eq!(
         parse_statement("commit transaction").unwrap(),
-        Statement::Commit
+        Statement::Commit(TransactionEndOptions { chain: false })
+    );
+    assert_eq!(
+        parse_statement("commit and chain").unwrap(),
+        Statement::Commit(TransactionEndOptions { chain: true })
+    );
+    assert_eq!(
+        parse_statement("rollback and no chain").unwrap(),
+        Statement::Rollback(TransactionEndOptions { chain: false })
+    );
+}
+
+#[test]
+fn parse_transaction_characteristic_gucs() {
+    assert_eq!(
+        parse_statement("reset transaction_read_only").unwrap(),
+        Statement::Reset(ResetStatement {
+            name: Some("transaction_read_only".into())
+        })
+    );
+    assert_eq!(
+        parse_statement("show transaction_read_only").unwrap(),
+        Statement::Show(ShowStatement {
+            name: "transaction_read_only".into()
+        })
+    );
+    assert_eq!(
+        parse_statement("set session characteristics as transaction read only").unwrap(),
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::SessionCharacteristics,
+            options: TransactionOptions {
+                isolation_level: None,
+                read_only: Some(true),
+                deferrable: None,
+            },
+            snapshot_id: None,
+        })
     );
 }
 
@@ -5567,6 +5606,7 @@ fn parse_set_session_authorization_statement() {
         stmt,
         Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
             role_name: "regress_tenant".into(),
+            is_local: false,
         })
     );
 }
@@ -6868,6 +6908,7 @@ fn parse_set_transaction_isolation_level_serializable() {
                 isolation_level: Some(TransactionIsolationLevel::Serializable),
                 ..TransactionOptions::default()
             },
+            snapshot_id: None,
         })
     );
 }
@@ -6885,6 +6926,19 @@ fn parse_set_session_transaction_characteristics() {
                 isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
                 ..TransactionOptions::default()
             },
+            snapshot_id: None,
+        })
+    );
+}
+
+#[test]
+fn parse_set_transaction_snapshot() {
+    assert_eq!(
+        parse_statement("set transaction snapshot 'FFF-FFF-F'").unwrap(),
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::Transaction,
+            options: TransactionOptions::default(),
+            snapshot_id: Some("FFF-FFF-F".into()),
         })
     );
 }
@@ -10746,13 +10800,11 @@ fn build_plan_constant_folds_nullif_filter_to_false() {
     let plan = build_plan(&stmt, &catalog()).unwrap();
 
     match plan {
-        Plan::Filter {
-            predicate, input, ..
-        } => {
+        Plan::Result { .. } => {}
+        Plan::Filter { predicate, .. } => {
             assert_eq!(predicate, Expr::Const(Value::Bool(false)));
-            assert!(matches!(*input, Plan::SeqScan { .. }));
         }
-        other => panic!("expected filter, got {:?}", other),
+        other => panic!("expected constant-false plan, got {:?}", other),
     }
 }
 
@@ -11583,6 +11635,9 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("vacuum pgbench_branches").unwrap(), Statement::Vacuum(VacuumStatement { analyze: false, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "pgbench_branches".into(), columns: vec![], only: false }])
     );
     assert!(
+        matches!(parse_statement("vacuum").unwrap(), Statement::Vacuum(VacuumStatement { analyze: false, targets, .. }) if targets.is_empty())
+    );
+    assert!(
         matches!(parse_statement("vacuum analyze vactst, vacparted (a)").unwrap(), Statement::Vacuum(VacuumStatement { analyze: true, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }, MaintenanceTarget { table_name: "vacparted".into(), columns: vec!["a".into()], only: false }])
     );
     assert!(
@@ -12269,7 +12324,7 @@ fn bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let catalog = catalog_with_people_partial_unique_index();
-            let stmt = match parse_statement("delete from people where id = 1").unwrap() {
+            let stmt = match parse_statement("delete from people where id = 0").unwrap() {
                 Statement::Delete(stmt) => stmt,
                 other => panic!("expected delete statement, got {other:?}"),
             };
@@ -12478,7 +12533,7 @@ fn bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weak
             let weaker_stmt = people_insert_with_on_conflict(
                 Some(inference_target_with_predicate(
                     &["id"],
-                    parse_expr("id > 1").unwrap(),
+                    parse_expr("id >= 0").unwrap(),
                 )),
                 OnConflictAction::Nothing,
                 vec![],
@@ -17895,6 +17950,142 @@ fn pg_locks_expected_columns_and_types() -> Vec<(String, SqlType)> {
         ("fastpath".into(), SqlType::new(SqlTypeKind::Bool)),
         ("waitstart".into(), SqlType::new(SqlTypeKind::TimestampTz)),
     ]
+}
+
+#[test]
+fn analyze_sysviews_srf_backed_views_and_functions_bind() {
+    let catalog = catalog();
+    for sql in [
+        "select count(*) from pg_available_extension_versions",
+        "select count(*) from pg_available_extensions",
+        "select count(*) from pg_backend_memory_contexts",
+        "select count(*) from pg_config",
+        "select count(*) from pg_cursors",
+        "select count(*) from pg_file_settings",
+        "select count(*) from pg_hba_file_rules",
+        "select count(*) from pg_ident_file_mappings",
+        "select count(*) from pg_prepared_xacts",
+        "select count(*) from pg_prepared_statements",
+        "select count(*) from pg_stat_wal_receiver",
+        "select count(*) from pg_wait_events",
+        "select count(*) from pg_timezone_names",
+        "select count(*) from pg_timezone_abbrevs",
+        "select count(*) from pg_available_extension_versions()",
+        "select count(*) from pg_available_extensions()",
+        "select count(*) from pg_get_backend_memory_contexts()",
+        "select count(*) from pg_config()",
+        "select count(*) from pg_cursor()",
+        "select count(*) from pg_show_all_file_settings()",
+        "select count(*) from pg_hba_file_rules()",
+        "select count(*) from pg_ident_file_mappings()",
+        "select count(*) from pg_prepared_xact()",
+        "select count(*) from pg_prepared_statement()",
+        "select count(*) from pg_stat_get_wal_receiver()",
+        "select count(*) from pg_get_wait_events()",
+        "select count(*) from pg_timezone_names()",
+        "select count(*) from pg_timezone_abbrevs_zone()",
+        "select count(*) from pg_timezone_abbrevs_abbrevs()",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+            .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    }
+}
+
+#[test]
+fn analyze_sysviews_srf_backed_views_use_expected_columns_and_types() {
+    let cases = [
+        (
+            "select * from pg_settings",
+            vec![
+                ("name".into(), SqlType::new(SqlTypeKind::Text)),
+                ("setting".into(), SqlType::new(SqlTypeKind::Text)),
+                ("unit".into(), SqlType::new(SqlTypeKind::Text)),
+                ("category".into(), SqlType::new(SqlTypeKind::Text)),
+                ("short_desc".into(), SqlType::new(SqlTypeKind::Text)),
+                ("extra_desc".into(), SqlType::new(SqlTypeKind::Text)),
+                ("context".into(), SqlType::new(SqlTypeKind::Text)),
+                ("vartype".into(), SqlType::new(SqlTypeKind::Text)),
+                ("source".into(), SqlType::new(SqlTypeKind::Text)),
+                ("min_val".into(), SqlType::new(SqlTypeKind::Text)),
+                ("max_val".into(), SqlType::new(SqlTypeKind::Text)),
+                (
+                    "enumvals".into(),
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                ),
+                ("boot_val".into(), SqlType::new(SqlTypeKind::Text)),
+                ("reset_val".into(), SqlType::new(SqlTypeKind::Text)),
+                ("sourcefile".into(), SqlType::new(SqlTypeKind::Text)),
+                ("sourceline".into(), SqlType::new(SqlTypeKind::Int4)),
+                ("pending_restart".into(), SqlType::new(SqlTypeKind::Bool)),
+            ],
+        ),
+        (
+            "select * from pg_backend_memory_contexts",
+            vec![
+                ("name".into(), SqlType::new(SqlTypeKind::Text)),
+                ("ident".into(), SqlType::new(SqlTypeKind::Text)),
+                ("type".into(), SqlType::new(SqlTypeKind::Text)),
+                ("level".into(), SqlType::new(SqlTypeKind::Int4)),
+                (
+                    "path".into(),
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
+                ),
+                ("total_bytes".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("total_nblocks".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("free_bytes".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("free_chunks".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("used_bytes".into(), SqlType::new(SqlTypeKind::Int8)),
+            ],
+        ),
+        (
+            "select * from pg_prepared_statements",
+            vec![
+                ("name".into(), SqlType::new(SqlTypeKind::Text)),
+                ("statement".into(), SqlType::new(SqlTypeKind::Text)),
+                (
+                    "prepare_time".into(),
+                    SqlType::new(SqlTypeKind::TimestampTz),
+                ),
+                (
+                    "parameter_types".into(),
+                    SqlType::array_of(SqlType::new(SqlTypeKind::RegType)),
+                ),
+                (
+                    "result_types".into(),
+                    SqlType::array_of(SqlType::new(SqlTypeKind::RegType)),
+                ),
+                ("from_sql".into(), SqlType::new(SqlTypeKind::Bool)),
+                ("generic_plans".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("custom_plans".into(), SqlType::new(SqlTypeKind::Int8)),
+            ],
+        ),
+        (
+            "select * from pg_wait_events",
+            vec![
+                ("type".into(), SqlType::new(SqlTypeKind::Text)),
+                ("name".into(), SqlType::new(SqlTypeKind::Text)),
+                ("description".into(), SqlType::new(SqlTypeKind::Text)),
+            ],
+        ),
+        (
+            "select * from pg_timezone_abbrevs",
+            vec![
+                ("abbrev".into(), SqlType::new(SqlTypeKind::Text)),
+                ("utc_offset".into(), SqlType::new(SqlTypeKind::Interval)),
+                ("is_dst".into(), SqlType::new(SqlTypeKind::Bool)),
+            ],
+        ),
+    ];
+
+    let catalog = catalog();
+    for (sql, expected) in cases {
+        let stmt = parse_select(sql).unwrap();
+        let (query, _) =
+            analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+
+        assert_eq!(query_column_names_and_types(&query), expected, "{sql}");
+    }
 }
 
 #[test]

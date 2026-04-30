@@ -182,7 +182,9 @@ fn integral_is_odd(value: &NumericValue) -> bool {
 }
 
 fn numeric_to_f64_approx(value: &NumericValue) -> f64 {
-    if let Some(exact) = numeric_to_f64(value) {
+    if let Some(exact) = numeric_to_f64(value)
+        && (exact.is_finite() || !matches!(value, NumericValue::Finite { .. }))
+    {
         return exact;
     }
     match value {
@@ -1892,5 +1894,31 @@ mod tests {
             numeric_pow_integer(&numeric("10"), 131072, 0),
             Err(ExecError::InvalidStorageValue { .. })
         ));
+    }
+
+    #[test]
+    fn high_scale_sqrt_keeps_numeric_precision() {
+        let value = numeric("85243.39540024977626076239847863600785982737155858270959890014613035727868293618673807776733416230953723818527101593495895350807775607346277892835514324320448949370623441059033804864158715021903312693889518990256881059434042443507529601095150710777634743301398926463888783847290873199395304998050753365215426971278237920063435565949203678024225270616295573678510929020831006146661747271783837653203039829647102027431761129518881525935216608429897041525858540380754759125150233053469999022855035")
+            .round_to_scale(800)
+            .unwrap();
+        let result = eval_sqrt_numeric(&value).unwrap();
+        assert!(
+            result
+                .render()
+                .starts_with("291.96471601933302149494775382123896090546")
+        );
+    }
+
+    #[test]
+    fn high_scale_power_keeps_near_overflow_precision() {
+        let result = eval_power_numeric(&numeric("0.12"), &numeric("-2829.8369"))
+            .unwrap()
+            .render();
+        assert!(
+            result
+                .starts_with("584639489500117524652804931602937908454943289393209666330184932486"),
+            "{result}"
+        );
+        assert!(result.ends_with(".3432"), "{result}");
     }
 }

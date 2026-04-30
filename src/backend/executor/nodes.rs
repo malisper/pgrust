@@ -14,6 +14,7 @@ use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::expr_casts::cast_value;
 use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::expr_ops::compare_order_values;
+use crate::backend::executor::jsonb::{compare_jsonb, decode_jsonb};
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_project_set_returning_call, eval_set_returning_call,
@@ -41,9 +42,9 @@ use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
     BTREE_AM_OID, C_COLLATION_OID, DATE_TYPE_OID, DEFAULT_COLLATION_OID, GIST_AM_OID,
-    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_SUBSCRIPTION_RELATION_OID, POSIX_COLLATION_OID, SPGIST_AM_OID,
-    TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    GIST_TSQUERY_FAMILY_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID,
+    PG_LARGEOBJECT_METADATA_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_SUBSCRIPTION_RELATION_OID,
+    POSIX_COLLATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::{ArrayValue, Value};
@@ -62,11 +63,11 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
-    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var, attrno_index,
-    is_special_varno,
+    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, SubLinkType, Var,
+    attrno_index, is_special_varno,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
@@ -205,6 +206,28 @@ pub(crate) fn pg_sql_sort_by<T>(
     }
 
     sort(values, &mut compare);
+}
+
+fn aggregate_key_value_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Jsonb(left_bytes), Value::Jsonb(right_bytes)) => {
+            match (decode_jsonb(left_bytes), decode_jsonb(right_bytes)) {
+                (Ok(left_json), Ok(right_json)) => {
+                    compare_jsonb(&left_json, &right_json) == std::cmp::Ordering::Equal
+                }
+                _ => left_bytes == right_bytes,
+            }
+        }
+        _ => left == right,
+    }
+}
+
+fn aggregate_key_values_equal(left: &[Value], right: &[Value]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| aggregate_key_value_equal(left, right))
 }
 
 #[cfg(test)]
@@ -806,7 +829,23 @@ fn recheck_lossy_index_scan_tuple(
     state: &mut IndexScanState,
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
-    for key in state.keys.clone() {
+    recheck_lossy_index_scan_keys(&state.keys, &state.index_meta, &mut state.slot, ctx)
+}
+
+fn recheck_lossy_index_only_scan_tuple(
+    state: &mut IndexOnlyScanState,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    recheck_lossy_index_scan_keys(&state.keys, &state.index_meta, &mut state.slot, ctx)
+}
+
+fn recheck_lossy_index_scan_keys(
+    keys: &[IndexScanKey],
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    for key in keys.iter().cloned() {
         let Some(index_pos) = key
             .attribute_number
             .checked_sub(1)
@@ -814,34 +853,50 @@ fn recheck_lossy_index_scan_tuple(
         else {
             continue;
         };
-        if state.index_meta.opfamily_oids.get(index_pos).copied() != Some(GIST_TSVECTOR_FAMILY_OID)
-        {
+        let opfamily = index_meta.opfamily_oids.get(index_pos).copied();
+        if !matches!(
+            opfamily,
+            Some(GIST_TSVECTOR_FAMILY_OID | GIST_TSQUERY_FAMILY_OID)
+        ) {
             continue;
         }
-        let Some(heap_attno) = state.index_meta.indkey.get(index_pos).copied() else {
+        let Some(heap_attno) = index_meta.indkey.get(index_pos).copied() else {
             return Err(internal_exec_error(
-                "GiST tsvector recheck key missing indkey",
+                "GiST text-search recheck key missing indkey",
             ));
         };
         if heap_attno <= 0 {
             continue;
         }
-        let query = match eval_index_scan_key_argument(&key.argument, &mut state.slot, ctx)? {
+        let query_value = match eval_index_scan_key_argument(&key.argument, slot, ctx)? {
             Value::TsQuery(query) => query,
             Value::Null => return Ok(false),
             _ => continue,
         };
-        let vector = state.slot.get_attr(heap_attno as usize - 1)?.clone();
-        match vector {
-            Value::TsVector(vector) => {
+        let heap_value = slot.get_attr(heap_attno as usize - 1)?.clone();
+        match (opfamily, heap_value) {
+            (Some(GIST_TSVECTOR_FAMILY_OID), Value::TsVector(vector)) => {
                 if !crate::backend::executor::tsearch::eval_tsvector_matches_tsquery(
-                    &vector, &query,
+                    &vector,
+                    &query_value,
                 ) {
                     return Ok(false);
                 }
             }
-            Value::Null => return Ok(false),
-            _ => continue,
+            (Some(GIST_TSQUERY_FAMILY_OID), Value::TsQuery(indexed_query)) => {
+                let matches = match key.strategy {
+                    7 => crate::backend::executor::tsquery_contains(&indexed_query, &query_value),
+                    8 => {
+                        crate::backend::executor::tsquery_contained_by(&indexed_query, &query_value)
+                    }
+                    _ => true,
+                };
+                if !matches {
+                    return Ok(false);
+                }
+            }
+            (_, Value::Null) => return Ok(false),
+            _ => {}
         }
     }
     Ok(true)
@@ -1286,6 +1341,7 @@ impl AppendState {
                             varno: self.source_id,
                             table_oid: binding.table_oid,
                             tid: binding.tid,
+                            xmin: binding.xmin,
                         }]
                     })
                     .unwrap_or_default();
@@ -1570,12 +1626,14 @@ impl PlanNode for MergeAppendState {
         let row = &rows[idx];
         let table_oid = row.slot.table_oid;
         let tid = row.slot.tid();
+        let xmin = row.system_bindings.first().and_then(|binding| binding.xmin);
         self.current_bindings = table_oid
             .map(|table_oid| {
                 vec![SystemVarBinding {
                     varno: self.source_id,
                     table_oid,
                     tid,
+                    xmin,
                 }]
             })
             .unwrap_or_default();
@@ -1817,6 +1875,7 @@ impl PlanNode for SeqScanState {
                     varno: self.source_id,
                     table_oid: self.relation_oid,
                     tid: None,
+                    xmin: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
                 if let Some(qual) = &self.qual {
@@ -1875,6 +1934,7 @@ impl PlanNode for SeqScanState {
                     varno: self.source_id,
                     table_oid: self.relation_oid,
                     tid: None,
+                    xmin: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
                 if let Some(qual) = &self.qual {
@@ -1913,6 +1973,7 @@ impl PlanNode for SeqScanState {
                     varno: self.source_id,
                     table_oid: self.relation_oid,
                     tid: None,
+                    xmin: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
                 if let Some(qual) = &self.qual {
@@ -1955,6 +2016,7 @@ impl PlanNode for SeqScanState {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
                 tid: None,
+                xmin: None,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2033,10 +2095,12 @@ impl PlanNode for SeqScanState {
                     self.slot.tts_values.clear();
                     self.slot.decode_offset = 0;
                     self.slot.table_oid = Some(self.relation_oid);
+                    let xmin = self.slot.xmin();
                     self.current_bindings = vec![SystemVarBinding {
                         varno: self.source_id,
                         table_oid: self.relation_oid,
                         tid: Some(tid),
+                        xmin,
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2222,7 +2286,7 @@ impl PlanNode for IndexOnlyScanState {
                 return Ok(None);
             }
 
-            let (tid, index_tuple) = {
+            let (tid, index_tuple, needs_index_recheck) = {
                 let scan = self
                     .scan
                     .as_ref()
@@ -2231,6 +2295,7 @@ impl PlanNode for IndexOnlyScanState {
                     scan.xs_heaptid
                         .expect("index-only scan tuple must set heap tid"),
                     scan.xs_itup.clone(),
+                    scan.xs_recheck,
                 )
             };
             if !self.array_scan_seen_tids.insert(tid) {
@@ -2269,8 +2334,14 @@ impl PlanNode for IndexOnlyScanState {
                     varno: self.source_id,
                     table_oid: self.relation_oid,
                     tid: Some(tid),
+                    xmin: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
+
+                if needs_index_recheck && !recheck_lossy_index_only_scan_tuple(self, ctx)? {
+                    note_filtered_row(&mut self.stats);
+                    continue;
+                }
 
                 if let Some(qual) = &self.qual {
                     let outer_values = materialize_slot_values(&mut self.slot)?;
@@ -2317,12 +2388,19 @@ impl PlanNode for IndexOnlyScanState {
             self.slot.tts_values.clear();
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
+            let xmin = self.slot.xmin();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
                 tid: Some(tid),
+                xmin,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
+
+            if needs_index_recheck && !recheck_lossy_index_only_scan_tuple(self, ctx)? {
+                note_filtered_row(&mut self.stats);
+                continue;
+            }
 
             if let Some(qual) = &self.qual {
                 let outer_values = materialize_slot_values(&mut self.slot)?;
@@ -2552,6 +2630,7 @@ impl PlanNode for IndexScanState {
                         varno: self.source_id,
                         table_oid: self.relation_oid,
                         tid: Some(tid),
+                        xmin: None,
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2602,10 +2681,12 @@ impl PlanNode for IndexScanState {
             self.slot.tts_values.clear();
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
+            let xmin = self.slot.xmin();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
                 tid: Some(tid),
+                xmin,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -3426,6 +3507,7 @@ impl PlanNode for BitmapHeapScanState {
             self.slot.tts_values.clear();
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
+            let xmin = self.slot.xmin();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
@@ -3433,6 +3515,7 @@ impl PlanNode for BitmapHeapScanState {
                     block_number: self.bitmap_pages[self.current_page_index - 1],
                     offset_number: offset,
                 }),
+                xmin,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -4933,6 +5016,7 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::Lower => "lower".into(),
         BuiltinScalarFunction::Upper => "upper".into(),
         BuiltinScalarFunction::Length => "length".into(),
+        BuiltinScalarFunction::OctetLength => "octet_length".into(),
         BuiltinScalarFunction::JsonBuildArray => "json_build_array".into(),
         BuiltinScalarFunction::JsonBuildObject => "json_build_object".into(),
         BuiltinScalarFunction::JsonbBuildArray => "jsonb_build_array".into(),
@@ -5475,8 +5559,74 @@ pub(crate) fn render_explain_join_expr_inner(
             render_explain_join_expr_inner(expr, outer_names, inner_names)
         }),
         Expr::Func(func) => render_explain_join_func_expr(func, outer_names, inner_names),
+        Expr::SubPlan(subplan) => match subplan.sublink_type {
+            SubLinkType::ExistsSubLink => format!("EXISTS(SubPlan {})", subplan.plan_id + 1),
+            _ if subplan.par_param.is_empty() => format!("(InitPlan {}).col1", subplan.plan_id + 1),
+            _ => format!("(SubPlan {})", subplan.plan_id + 1),
+        },
+        Expr::Row { fields, .. } => render_explain_join_whole_row(fields, outer_names, inner_names)
+            .unwrap_or_else(|| {
+                let fields = fields
+                    .iter()
+                    .map(|(_, expr)| render_explain_join_expr_inner(expr, outer_names, inner_names))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("ROW({fields})")
+            }),
+        Expr::Case(case_expr) => {
+            if let Some(rendered) =
+                render_explain_join_whole_row_case(case_expr, outer_names, inner_names)
+            {
+                rendered
+            } else {
+                format!("{expr:?}")
+            }
+        }
         other => format!("{other:?}"),
     }
+}
+
+fn render_explain_join_whole_row_case(
+    case_expr: &crate::include::nodes::primnodes::CaseExpr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> Option<String> {
+    if case_expr.arg.is_some() || case_expr.args.len() != 1 {
+        return None;
+    }
+    if !matches!(case_expr.args[0].result, Expr::Const(Value::Null)) {
+        return None;
+    }
+    let Expr::Row { fields, .. } = case_expr.defresult.as_ref() else {
+        return None;
+    };
+    render_explain_join_whole_row(fields, outer_names, inner_names)
+}
+
+fn render_explain_join_whole_row(
+    fields: &[(String, Expr)],
+    outer_names: &[String],
+    inner_names: &[String],
+) -> Option<String> {
+    let mut prefix = None::<String>;
+    for (_, expr) in fields {
+        let Expr::Var(var) = expr else {
+            return None;
+        };
+        let names = match var.varno {
+            OUTER_VAR => outer_names,
+            INNER_VAR | INDEX_VAR => inner_names,
+            _ => return None,
+        };
+        let name = render_explain_var_name(var, names)?;
+        let (candidate, _) = name.rsplit_once('.')?;
+        match &prefix {
+            Some(existing) if existing != candidate => return None,
+            Some(_) => {}
+            None => prefix = Some(candidate.to_string()),
+        }
+    }
+    prefix.map(|prefix| format!("{prefix}.*"))
 }
 
 fn render_explain_join_func_expr(
@@ -7996,7 +8146,7 @@ fn new_aggregate_group(
         accum_states,
         distinct_inputs: accumulators
             .iter()
-            .map(|accum| accum.distinct.then(HashSet::new))
+            .map(|accum| accum.distinct.then(Vec::new))
             .collect(),
         direct_arg_values: vec![None; accumulators.len()],
         ordered_inputs: vec![Vec::new(); accumulators.len()],
@@ -8046,10 +8196,14 @@ fn advance_aggregate_group(
             .iter()
             .map(|arg| eval_expr(arg, slot, ctx))
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(seen_inputs) = group.distinct_inputs[i].as_mut()
-            && !seen_inputs.insert(values.clone())
-        {
-            continue;
+        if let Some(seen_inputs) = group.distinct_inputs[i].as_mut() {
+            if seen_inputs
+                .iter()
+                .any(|seen| aggregate_key_values_equal(seen, &values))
+            {
+                continue;
+            }
+            seen_inputs.push(values.clone());
         }
         if accum.order_by.is_empty() {
             runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
@@ -8166,8 +8320,9 @@ impl PlanNode for AggregateState {
                     self.key_buffer.push(eval_expr(expr, slot, ctx)?);
                 }
 
-                let group_idx = if let Some(index) =
-                    groups.iter().position(|g| g.key_values == self.key_buffer)
+                let group_idx = if let Some(index) = groups
+                    .iter()
+                    .position(|g| aggregate_key_values_equal(&g.key_values, &self.key_buffer))
                 {
                     index
                 } else {

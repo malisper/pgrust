@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
 
 use crate::backend::executor::expr_range::compare_range_values;
+use crate::backend::executor::jsonb::{compare_jsonb, decode_jsonb};
 use crate::backend::executor::{
-    compare_multirange_values, compare_network_values, compare_order_values,
+    compare_multirange_values, compare_network_values, compare_order_values, compare_tsquery,
+    compare_tsvector,
 };
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::{NumericValue, Value};
@@ -56,9 +58,15 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         (Value::Range(a), Value::Range(b)) => compare_range_values(a, b),
         (Value::Interval(a), Value::Interval(b)) => a.cmp_key().cmp(&b.cmp_key()),
         (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
+        (Value::TsQuery(a), Value::TsQuery(b)) => compare_tsquery(a, b),
+        (Value::TsVector(a), Value::TsVector(b)) => compare_tsvector(a, b),
         (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => {
             compare_network_values(a, b)
         }
+        (Value::Jsonb(a), Value::Jsonb(b)) => match (decode_jsonb(a), decode_jsonb(b)) {
+            (Ok(left_json), Ok(right_json)) => compare_jsonb(&left_json, &right_json),
+            _ => a.cmp(b),
+        },
         (Value::Record(_), Value::Record(_)) => {
             compare_order_values(left, right, None, None, false)
                 .expect("btree record comparisons use implicit default collation")
@@ -215,6 +223,21 @@ mod tests {
             ),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn bt_compare_orders_text_search_values() {
+        let left =
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("moscow").unwrap());
+        let right =
+            Value::TsQuery(crate::include::nodes::tsearch::TsQuery::parse("new <-> york").unwrap());
+        assert_ne!(compare_bt_values(&left, &right), Ordering::Equal);
+
+        let left =
+            Value::TsVector(crate::include::nodes::tsearch::TsVector::parse("'aaa':1").unwrap());
+        let right =
+            Value::TsVector(crate::include::nodes::tsearch::TsVector::parse("'bbb':1").unwrap());
+        assert_eq!(compare_bt_values(&left, &right), Ordering::Less);
     }
 
     #[test]

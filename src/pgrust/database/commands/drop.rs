@@ -1029,7 +1029,9 @@ fn drop_table_direct_dependencies(
             continue;
         }
         match row.classid {
-            PG_CLASS_RELATION_OID if row.deptype == DEPENDENCY_NORMAL => {
+            PG_CLASS_RELATION_OID
+                if row.deptype == DEPENDENCY_NORMAL || row.deptype == DEPENDENCY_AUTO =>
+            {
                 if !relation_oids.insert(row.objid) {
                     continue;
                 }
@@ -1042,7 +1044,7 @@ fn drop_table_direct_dependencies(
                 deps.push(DropTableDependency::Relation {
                     relation_oid: row.objid,
                     relkind: class.relkind,
-                    is_partition: class.relispartition,
+                    is_partition: class.relispartition || row.deptype == DEPENDENCY_AUTO,
                     display_name: drop_table_display_relation_name(
                         ctx.catalog,
                         row.objid,
@@ -1132,6 +1134,40 @@ fn drop_table_direct_dependencies(
                 });
             }
             _ => {}
+        }
+    }
+
+    if let Some(relation) = ctx.catalog.relation_by_oid(relation_oid) {
+        for attnum in 1..=relation.desc.columns.len() as i32 {
+            for row in ctx.graph.dependents(ObjectAddress::new(
+                PG_CLASS_RELATION_OID,
+                relation_oid,
+                attnum,
+            )) {
+                if row.classid != PG_CLASS_RELATION_OID
+                    || row.objsubid != 0
+                    || row.deptype != DEPENDENCY_AUTO
+                    || !relation_oids.insert(row.objid)
+                {
+                    continue;
+                }
+                let Some(class) = ctx.catalog.class_row_by_oid(row.objid) else {
+                    continue;
+                };
+                if class.relkind != 'S' {
+                    continue;
+                }
+                deps.push(DropTableDependency::Relation {
+                    relation_oid: row.objid,
+                    relkind: class.relkind,
+                    is_partition: true,
+                    display_name: drop_table_display_relation_name(
+                        ctx.catalog,
+                        row.objid,
+                        ctx.search_path,
+                    ),
+                });
+            }
         }
     }
 

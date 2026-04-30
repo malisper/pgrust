@@ -1446,6 +1446,16 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
         SetReturningCall::PgLockStatus {
             with_ordinality, ..
         } => ("pg_lock_status".to_string(), Vec::new(), *with_ordinality),
+        SetReturningCall::PgSequences {
+            with_ordinality, ..
+        } => ("pg_sequences".to_string(), Vec::new(), *with_ordinality),
+        SetReturningCall::InformationSchemaSequences {
+            with_ordinality, ..
+        } => (
+            "information_schema.sequences".to_string(),
+            Vec::new(),
+            *with_ordinality,
+        ),
         SetReturningCall::TxidSnapshotXip {
             arg,
             with_ordinality,
@@ -3561,6 +3571,7 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::Repeat => "repeat",
         BuiltinScalarFunction::Strpos => "strpos",
         BuiltinScalarFunction::Length => "length",
+        BuiltinScalarFunction::OctetLength => "octet_length",
         BuiltinScalarFunction::Lower => "lower",
         BuiltinScalarFunction::Upper => "upper",
         BuiltinScalarFunction::Replace => "replace",

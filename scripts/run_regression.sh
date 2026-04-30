@@ -627,6 +627,9 @@ direct_test_dependencies() {
         aggregates)
             echo "create_aggregate"
             ;;
+        numeric_big)
+            echo "numeric"
+            ;;
         join)
             echo "create_index create_misc"
             ;;

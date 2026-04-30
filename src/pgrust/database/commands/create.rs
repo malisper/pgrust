@@ -1072,7 +1072,9 @@ fn collect_set_returning_call_rule_dependencies(
                 }
             }
         }
-        SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => {}
     }
 }
 
@@ -1102,7 +1104,9 @@ fn set_returning_proc_oid(call: &SetReturningCall) -> Option<u32> {
         | SetReturningCall::TxidSnapshotXip { func_oid, .. } => *func_oid,
         SetReturningCall::UserDefined { proc_oid, .. } => *proc_oid,
         SetReturningCall::RowsFrom { .. } => 0,
-        SetReturningCall::TextSearchTableFunction { .. }
+        SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. }
+        | SetReturningCall::TextSearchTableFunction { .. }
         | SetReturningCall::SqlJsonTable(_)
         | SetReturningCall::SqlXmlTable(_) => 0,
     };
@@ -4824,6 +4828,17 @@ impl Database {
             column.default_sequence_oid = Some(created.sequence_oid);
             column.missing_default_value = None;
         }
+        for column in &mut desc.columns {
+            if column.default_sequence_oid.is_none()
+                && let Some(default_expr) = column.default_expr.as_deref()
+            {
+                column.default_sequence_oid =
+                    crate::pgrust::database::default_sequence_oid_from_default_expr_with_catalog(
+                        default_expr,
+                        &catalog,
+                    );
+            }
+        }
 
         let relation_relkind = created_relkind(&lowered);
         let reloptions = normalize_create_table_reloptions(&create_stmt.options)?;
@@ -5133,7 +5148,7 @@ impl Database {
                         cid: table_cid.saturating_add(1),
                         client_id,
                         waiter: None,
-                        interrupts,
+                        interrupts: Arc::clone(&interrupts),
                     };
                     let inherit_effect = self
                         .catalog
@@ -5210,6 +5225,31 @@ impl Database {
                             partition_spec: None,
                         }
                     };
+                for created_sequence in &created_sequences {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: table_cid.saturating_add(1),
+                        client_id,
+                        waiter: None,
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .set_sequence_owned_by_dependency_mvcc(
+                            created_sequence.sequence_oid,
+                            Some((
+                                relation.relation_oid,
+                                created_sequence.column_index.saturating_add(1) as i32,
+                            )),
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                }
                 let mut constraint_cid_base = table_cid.saturating_add(1);
                 if !lowered.parent_oids.is_empty() {
                     constraint_cid_base = constraint_cid_base.max(table_cid.saturating_add(2));

@@ -13,11 +13,26 @@ pub enum SyntheticSystemViewKind {
     PgIndexes,
     PgPolicies,
     PgPublicationTables,
+    PgSequences,
     PgRules,
     PgStats,
     PgStatsExt,
     PgStatsExtExprs,
     PgSettings,
+    PgAvailableExtensions,
+    PgAvailableExtensionVersions,
+    PgBackendMemoryContexts,
+    PgConfig,
+    PgCursors,
+    PgFileSettings,
+    PgHbaFileRules,
+    PgIdentFileMappings,
+    PgPreparedXacts,
+    PgPreparedStatements,
+    PgStatWalReceiver,
+    PgWaitEvents,
+    PgTimezoneNames,
+    PgTimezoneAbbrevs,
     PgUserMappings,
     PgRoles,
     PgStatActivity,
@@ -38,6 +53,7 @@ pub enum SyntheticSystemViewKind {
     PgLocks,
     InformationSchemaTables,
     InformationSchemaViews,
+    InformationSchemaSequences,
     InformationSchemaColumns,
     InformationSchemaColumnColumnUsage,
     InformationSchemaColumnDomainUsage,
@@ -82,6 +98,12 @@ pub struct SyntheticSystemView {
     pub view_definition_sql: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyntheticSystemViewFunction {
+    pub proc_oid: u32,
+    pub function_name: &'static str,
+}
+
 impl SyntheticSystemView {
     pub fn matches_name(&self, name: &str) -> bool {
         self.canonical_name.eq_ignore_ascii_case(name)
@@ -112,6 +134,32 @@ impl SyntheticSystemView {
     pub fn has_metadata_definition(&self) -> bool {
         !self.view_definition_sql.is_empty()
     }
+
+    pub fn set_returning_function(&self) -> Option<SyntheticSystemViewFunction> {
+        use SyntheticSystemViewKind::*;
+        let (proc_oid, function_name) = match self.kind {
+            PgAvailableExtensions => (3082, "pg_available_extensions"),
+            PgAvailableExtensionVersions => (3083, "pg_available_extension_versions"),
+            PgBackendMemoryContexts => (2282, "pg_get_backend_memory_contexts"),
+            PgConfig => (3400, "pg_config"),
+            PgCursors => (2511, "pg_cursor"),
+            PgFileSettings => (3329, "pg_show_all_file_settings"),
+            PgHbaFileRules => (3401, "pg_hba_file_rules"),
+            PgIdentFileMappings => (6250, "pg_ident_file_mappings"),
+            PgPreparedXacts => (1065, "pg_prepared_xact"),
+            PgPreparedStatements => (2510, "pg_prepared_statement"),
+            PgSettings => (2084, "pg_show_all_settings"),
+            PgStatWalReceiver => (3317, "pg_stat_get_wal_receiver"),
+            PgWaitEvents => (6318, "pg_get_wait_events"),
+            PgTimezoneNames => (2856, "pg_timezone_names"),
+            PgTimezoneAbbrevs => (2599, "pg_timezone_abbrevs_abbrevs"),
+            _ => return None,
+        };
+        Some(SyntheticSystemViewFunction {
+            proc_oid,
+            function_name,
+        })
+    }
 }
 
 pub fn synthetic_system_view(name: &str) -> Option<&'static SyntheticSystemView> {
@@ -121,7 +169,7 @@ pub fn synthetic_system_view(name: &str) -> Option<&'static SyntheticSystemView>
 }
 
 pub fn synthetic_system_views() -> &'static [SyntheticSystemView] {
-    &SYNTHETIC_SYSTEM_VIEWS
+    SYNTHETIC_SYSTEM_VIEWS
 }
 
 const PG_VIEW_ALIASES: &[&str] = &["pg_views", "pg_catalog.pg_views"];
@@ -135,12 +183,44 @@ const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
 const PG_POLICIES_ALIASES: &[&str] = &["pg_policies", "pg_catalog.pg_policies"];
 const PG_PUBLICATION_TABLES_ALIASES: &[&str] =
     &["pg_publication_tables", "pg_catalog.pg_publication_tables"];
+const PG_SEQUENCES_ALIASES: &[&str] = &["pg_sequences", "pg_catalog.pg_sequences"];
 const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
 const PG_STATS_ALIASES: &[&str] = &["pg_stats", "pg_catalog.pg_stats"];
 const PG_STATS_EXT_ALIASES: &[&str] = &["pg_stats_ext", "pg_catalog.pg_stats_ext"];
 const PG_STATS_EXT_EXPRS_ALIASES: &[&str] =
     &["pg_stats_ext_exprs", "pg_catalog.pg_stats_ext_exprs"];
 const PG_SETTINGS_ALIASES: &[&str] = &["pg_settings", "pg_catalog.pg_settings"];
+const PG_AVAILABLE_EXTENSIONS_ALIASES: &[&str] = &[
+    "pg_available_extensions",
+    "pg_catalog.pg_available_extensions",
+];
+const PG_AVAILABLE_EXTENSION_VERSIONS_ALIASES: &[&str] = &[
+    "pg_available_extension_versions",
+    "pg_catalog.pg_available_extension_versions",
+];
+const PG_BACKEND_MEMORY_CONTEXTS_ALIASES: &[&str] = &[
+    "pg_backend_memory_contexts",
+    "pg_catalog.pg_backend_memory_contexts",
+];
+const PG_CONFIG_ALIASES: &[&str] = &["pg_config", "pg_catalog.pg_config"];
+const PG_CURSORS_ALIASES: &[&str] = &["pg_cursors", "pg_catalog.pg_cursors"];
+const PG_FILE_SETTINGS_ALIASES: &[&str] = &["pg_file_settings", "pg_catalog.pg_file_settings"];
+const PG_HBA_FILE_RULES_ALIASES: &[&str] = &["pg_hba_file_rules", "pg_catalog.pg_hba_file_rules"];
+const PG_IDENT_FILE_MAPPINGS_ALIASES: &[&str] = &[
+    "pg_ident_file_mappings",
+    "pg_catalog.pg_ident_file_mappings",
+];
+const PG_PREPARED_XACTS_ALIASES: &[&str] = &["pg_prepared_xacts", "pg_catalog.pg_prepared_xacts"];
+const PG_PREPARED_STATEMENTS_ALIASES: &[&str] = &[
+    "pg_prepared_statements",
+    "pg_catalog.pg_prepared_statements",
+];
+const PG_STAT_WAL_RECEIVER_ALIASES: &[&str] =
+    &["pg_stat_wal_receiver", "pg_catalog.pg_stat_wal_receiver"];
+const PG_WAIT_EVENTS_ALIASES: &[&str] = &["pg_wait_events", "pg_catalog.pg_wait_events"];
+const PG_TIMEZONE_NAMES_ALIASES: &[&str] = &["pg_timezone_names", "pg_catalog.pg_timezone_names"];
+const PG_TIMEZONE_ABBREVS_ALIASES: &[&str] =
+    &["pg_timezone_abbrevs", "pg_catalog.pg_timezone_abbrevs"];
 const PG_USER_MAPPINGS_ALIASES: &[&str] = &["pg_user_mappings", "pg_catalog.pg_user_mappings"];
 const PG_ROLES_ALIASES: &[&str] = &["pg_roles", "pg_catalog.pg_roles"];
 const PG_STAT_ACTIVITY_ALIASES: &[&str] = &["pg_stat_activity", "pg_catalog.pg_stat_activity"];
@@ -175,6 +255,7 @@ const PG_STAT_PROGRESS_COPY_ALIASES: &[&str] =
 const PG_LOCKS_ALIASES: &[&str] = &["pg_locks", "pg_catalog.pg_locks"];
 const INFORMATION_SCHEMA_TABLES_ALIASES: &[&str] = &["information_schema.tables"];
 const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
+const INFORMATION_SCHEMA_SEQUENCES_ALIASES: &[&str] = &["information_schema.sequences"];
 const INFORMATION_SCHEMA_COLUMNS_ALIASES: &[&str] = &["information_schema.columns"];
 const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES: &[&str] =
     &["information_schema.column_column_usage"];
@@ -545,6 +626,181 @@ const PG_STAT_ACTIVITY_COLUMNS: &[SyntheticSystemViewColumn] = &[
 const PG_SETTINGS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("name"),
     SyntheticSystemViewColumn::text("setting"),
+    SyntheticSystemViewColumn::text("unit"),
+    SyntheticSystemViewColumn::text("category"),
+    SyntheticSystemViewColumn::text("short_desc"),
+    SyntheticSystemViewColumn::text("extra_desc"),
+    SyntheticSystemViewColumn::text("context"),
+    SyntheticSystemViewColumn::text("vartype"),
+    SyntheticSystemViewColumn::text("source"),
+    SyntheticSystemViewColumn::text("min_val"),
+    SyntheticSystemViewColumn::text("max_val"),
+    SyntheticSystemViewColumn::new(
+        "enumvals",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+    ),
+    SyntheticSystemViewColumn::text("boot_val"),
+    SyntheticSystemViewColumn::text("reset_val"),
+    SyntheticSystemViewColumn::text("sourcefile"),
+    SyntheticSystemViewColumn::new("sourceline", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("pending_restart", SqlType::new(SqlTypeKind::Bool)),
+];
+
+const PG_AVAILABLE_EXTENSIONS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("name", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::text("default_version"),
+    SyntheticSystemViewColumn::text("installed_version"),
+    SyntheticSystemViewColumn::text("comment"),
+];
+
+const PG_AVAILABLE_EXTENSION_VERSIONS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("name", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::text("version"),
+    SyntheticSystemViewColumn::new("installed", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("superuser", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("trusted", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("relocatable", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("schema", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new(
+        "requires",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Name)),
+    ),
+    SyntheticSystemViewColumn::text("comment"),
+];
+
+const PG_BACKEND_MEMORY_CONTEXTS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::text("ident"),
+    SyntheticSystemViewColumn::text("type"),
+    SyntheticSystemViewColumn::new("level", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("path", SqlType::array_of(SqlType::new(SqlTypeKind::Int4))),
+    SyntheticSystemViewColumn::new("total_bytes", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("total_nblocks", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("free_bytes", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("free_chunks", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("used_bytes", SqlType::new(SqlTypeKind::Int8)),
+];
+
+const PG_CONFIG_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::text("setting"),
+];
+
+const PG_CURSORS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::text("statement"),
+    SyntheticSystemViewColumn::new("is_holdable", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("is_binary", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("is_scrollable", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("creation_time", SqlType::new(SqlTypeKind::TimestampTz)),
+];
+
+const PG_FILE_SETTINGS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("sourcefile"),
+    SyntheticSystemViewColumn::new("sourceline", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("seqno", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::text("setting"),
+    SyntheticSystemViewColumn::new("applied", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::text("error"),
+];
+
+const PG_HBA_FILE_RULES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("rule_number", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("file_name"),
+    SyntheticSystemViewColumn::new("line_number", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("type"),
+    SyntheticSystemViewColumn::new(
+        "database",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "user_name",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+    ),
+    SyntheticSystemViewColumn::text("address"),
+    SyntheticSystemViewColumn::text("netmask"),
+    SyntheticSystemViewColumn::text("auth_method"),
+    SyntheticSystemViewColumn::new(
+        "options",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+    ),
+    SyntheticSystemViewColumn::text("error"),
+];
+
+const PG_IDENT_FILE_MAPPINGS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("map_number", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("file_name"),
+    SyntheticSystemViewColumn::new("line_number", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("map_name"),
+    SyntheticSystemViewColumn::text("sys_name"),
+    SyntheticSystemViewColumn::text("pg_username"),
+    SyntheticSystemViewColumn::text("error"),
+];
+
+const PG_PREPARED_XACTS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("transaction", SqlType::new(SqlTypeKind::Xid)),
+    SyntheticSystemViewColumn::text("gid"),
+    SyntheticSystemViewColumn::new("prepared", SqlType::new(SqlTypeKind::TimestampTz)),
+    SyntheticSystemViewColumn::new("owner", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new("database", SqlType::new(SqlTypeKind::Name)),
+];
+
+const PG_PREPARED_STATEMENTS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::text("statement"),
+    SyntheticSystemViewColumn::new("prepare_time", SqlType::new(SqlTypeKind::TimestampTz)),
+    SyntheticSystemViewColumn::new(
+        "parameter_types",
+        SqlType::array_of(SqlType::new(SqlTypeKind::RegType)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "result_types",
+        SqlType::array_of(SqlType::new(SqlTypeKind::RegType)),
+    ),
+    SyntheticSystemViewColumn::new("from_sql", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("generic_plans", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("custom_plans", SqlType::new(SqlTypeKind::Int8)),
+];
+
+const PG_STAT_WAL_RECEIVER_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("pid", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("status"),
+    SyntheticSystemViewColumn::new("receive_start_lsn", SqlType::new(SqlTypeKind::PgLsn)),
+    SyntheticSystemViewColumn::new("receive_start_tli", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("written_lsn", SqlType::new(SqlTypeKind::PgLsn)),
+    SyntheticSystemViewColumn::new("flushed_lsn", SqlType::new(SqlTypeKind::PgLsn)),
+    SyntheticSystemViewColumn::new("received_tli", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("last_msg_send_time", SqlType::new(SqlTypeKind::TimestampTz)),
+    SyntheticSystemViewColumn::new(
+        "last_msg_receipt_time",
+        SqlType::new(SqlTypeKind::TimestampTz),
+    ),
+    SyntheticSystemViewColumn::new("latest_end_lsn", SqlType::new(SqlTypeKind::PgLsn)),
+    SyntheticSystemViewColumn::new("latest_end_time", SqlType::new(SqlTypeKind::TimestampTz)),
+    SyntheticSystemViewColumn::text("slot_name"),
+    SyntheticSystemViewColumn::text("sender_host"),
+    SyntheticSystemViewColumn::new("sender_port", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("conninfo"),
+];
+
+const PG_WAIT_EVENTS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("type"),
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::text("description"),
+];
+
+const PG_TIMEZONE_NAMES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::text("abbrev"),
+    SyntheticSystemViewColumn::new("utc_offset", SqlType::new(SqlTypeKind::Interval)),
+    SyntheticSystemViewColumn::new("is_dst", SqlType::new(SqlTypeKind::Bool)),
+];
+
+const PG_TIMEZONE_ABBREVS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("abbrev"),
+    SyntheticSystemViewColumn::new("utc_offset", SqlType::new(SqlTypeKind::Interval)),
+    SyntheticSystemViewColumn::new("is_dst", SqlType::new(SqlTypeKind::Bool)),
 ];
 
 const PG_STAT_DATABASE_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -1015,7 +1271,36 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 52] = [
+const PG_SEQUENCES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("schemaname"),
+    SyntheticSystemViewColumn::text("sequencename"),
+    SyntheticSystemViewColumn::text("sequenceowner"),
+    SyntheticSystemViewColumn::text("data_type"),
+    SyntheticSystemViewColumn::new("start_value", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("min_value", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("max_value", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("increment_by", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("cycle", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("cache_size", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("last_value", SqlType::new(SqlTypeKind::Int8)),
+];
+
+const INFORMATION_SCHEMA_SEQUENCES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("sequence_catalog"),
+    SyntheticSystemViewColumn::text("sequence_schema"),
+    SyntheticSystemViewColumn::text("sequence_name"),
+    SyntheticSystemViewColumn::text("data_type"),
+    SyntheticSystemViewColumn::new("numeric_precision", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_precision_radix", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_scale", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("start_value"),
+    SyntheticSystemViewColumn::text("minimum_value"),
+    SyntheticSystemViewColumn::text("maximum_value"),
+    SyntheticSystemViewColumn::text("increment"),
+    SyntheticSystemViewColumn::text("cycle_option"),
+];
+
+const SYNTHETIC_SYSTEM_VIEWS: &[SyntheticSystemView] = &[
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -1087,6 +1372,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 52] = [
         view_definition_sql: PG_PUBLICATION_TABLES_DEFINITION_SQL,
     },
     SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgSequences,
+        canonical_name: "pg_catalog.pg_sequences",
+        aliases: PG_SEQUENCES_ALIASES,
+        columns: PG_SEQUENCES_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgRules,
         canonical_name: "pg_catalog.pg_rules",
         aliases: PG_RULES_ALIASES,
@@ -1119,6 +1411,104 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 52] = [
         canonical_name: "pg_catalog.pg_settings",
         aliases: PG_SETTINGS_ALIASES,
         columns: PG_SETTINGS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgAvailableExtensions,
+        canonical_name: "pg_catalog.pg_available_extensions",
+        aliases: PG_AVAILABLE_EXTENSIONS_ALIASES,
+        columns: PG_AVAILABLE_EXTENSIONS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgAvailableExtensionVersions,
+        canonical_name: "pg_catalog.pg_available_extension_versions",
+        aliases: PG_AVAILABLE_EXTENSION_VERSIONS_ALIASES,
+        columns: PG_AVAILABLE_EXTENSION_VERSIONS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgBackendMemoryContexts,
+        canonical_name: "pg_catalog.pg_backend_memory_contexts",
+        aliases: PG_BACKEND_MEMORY_CONTEXTS_ALIASES,
+        columns: PG_BACKEND_MEMORY_CONTEXTS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgConfig,
+        canonical_name: "pg_catalog.pg_config",
+        aliases: PG_CONFIG_ALIASES,
+        columns: PG_CONFIG_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgCursors,
+        canonical_name: "pg_catalog.pg_cursors",
+        aliases: PG_CURSORS_ALIASES,
+        columns: PG_CURSORS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgFileSettings,
+        canonical_name: "pg_catalog.pg_file_settings",
+        aliases: PG_FILE_SETTINGS_ALIASES,
+        columns: PG_FILE_SETTINGS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgHbaFileRules,
+        canonical_name: "pg_catalog.pg_hba_file_rules",
+        aliases: PG_HBA_FILE_RULES_ALIASES,
+        columns: PG_HBA_FILE_RULES_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgIdentFileMappings,
+        canonical_name: "pg_catalog.pg_ident_file_mappings",
+        aliases: PG_IDENT_FILE_MAPPINGS_ALIASES,
+        columns: PG_IDENT_FILE_MAPPINGS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgPreparedXacts,
+        canonical_name: "pg_catalog.pg_prepared_xacts",
+        aliases: PG_PREPARED_XACTS_ALIASES,
+        columns: PG_PREPARED_XACTS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgPreparedStatements,
+        canonical_name: "pg_catalog.pg_prepared_statements",
+        aliases: PG_PREPARED_STATEMENTS_ALIASES,
+        columns: PG_PREPARED_STATEMENTS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatWalReceiver,
+        canonical_name: "pg_catalog.pg_stat_wal_receiver",
+        aliases: PG_STAT_WAL_RECEIVER_ALIASES,
+        columns: PG_STAT_WAL_RECEIVER_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgWaitEvents,
+        canonical_name: "pg_catalog.pg_wait_events",
+        aliases: PG_WAIT_EVENTS_ALIASES,
+        columns: PG_WAIT_EVENTS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgTimezoneNames,
+        canonical_name: "pg_catalog.pg_timezone_names",
+        aliases: PG_TIMEZONE_NAMES_ALIASES,
+        columns: PG_TIMEZONE_NAMES_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgTimezoneAbbrevs,
+        canonical_name: "pg_catalog.pg_timezone_abbrevs",
+        aliases: PG_TIMEZONE_ABBREVS_ALIASES,
+        columns: PG_TIMEZONE_ABBREVS_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {
@@ -1259,6 +1649,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 52] = [
         canonical_name: "information_schema.views",
         aliases: INFORMATION_SCHEMA_VIEWS_ALIASES,
         columns: INFORMATION_SCHEMA_VIEWS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaSequences,
+        canonical_name: "information_schema.sequences",
+        aliases: INFORMATION_SCHEMA_SEQUENCES_ALIASES,
+        columns: INFORMATION_SCHEMA_SEQUENCES_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {
