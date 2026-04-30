@@ -2,6 +2,13 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgLargeobjectRow {
+    pub loid: u32,
+    pub pageno: i32,
+    pub data: Vec<u8>,
+}
+
 pub fn pg_largeobject_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![

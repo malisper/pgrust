@@ -78,6 +78,7 @@ const PG_CAST_SOURCE_TARGET_INDEX_OID: u32 = 2661;
 const PG_FOREIGN_TABLE_RELID_INDEX_OID: u32 = 3119;
 const PG_NAMESPACE_OID_INDEX_OID: u32 = 2685;
 const PG_STATISTIC_RELID_ATT_INH_INDEX_OID: u32 = 2696;
+const PG_TABLESPACE_OID_INDEX_OID: u32 = 2697;
 
 impl CatalogStore {
     pub fn create_relation_mvcc_with_relkind(
@@ -1149,6 +1150,7 @@ impl CatalogStore {
         &mut self,
         tablespace_name: &str,
         owner_oid: u32,
+        spcoptions: Option<Vec<String>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         let oid = self.allocate_next_oid(0)?;
@@ -1159,6 +1161,8 @@ impl CatalogStore {
                 oid,
                 spcname: tablespace_name.to_string(),
                 spcowner: owner_oid,
+                spcacl: None,
+                spcoptions,
             }],
             ..PhysicalCatalogRows::default()
         };
@@ -1167,6 +1171,111 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         Ok((oid, effect))
+    }
+
+    pub fn drop_tablespace_mvcc(
+        &mut self,
+        tablespace_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let row = tablespace_row_by_oid_mvcc(self, ctx, tablespace_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(tablespace_oid.to_string()))?;
+        let kinds = [BootstrapCatalogKind::PgTablespace];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                tablespaces: vec![row],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok(effect)
+    }
+
+    pub fn alter_tablespace_options_mvcc(
+        &mut self,
+        tablespace_oid: u32,
+        spcoptions: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.update_tablespace_row_mvcc(tablespace_oid, ctx, |row| {
+            row.spcoptions = spcoptions;
+        })
+    }
+
+    pub fn alter_tablespace_owner_mvcc(
+        &mut self,
+        tablespace_oid: u32,
+        new_owner_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.update_tablespace_row_mvcc(tablespace_oid, ctx, |row| {
+            row.spcowner = new_owner_oid;
+        })
+    }
+
+    pub fn alter_tablespace_rename_mvcc(
+        &mut self,
+        tablespace_oid: u32,
+        new_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.update_tablespace_row_mvcc(tablespace_oid, ctx, |row| {
+            row.spcname = new_name.to_string();
+        })
+    }
+
+    pub fn alter_tablespace_acl_mvcc(
+        &mut self,
+        tablespace_oid: u32,
+        spcacl: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.update_tablespace_row_mvcc(tablespace_oid, ctx, |row| {
+            row.spcacl = spcacl;
+        })
+    }
+
+    fn update_tablespace_row_mvcc<F>(
+        &mut self,
+        tablespace_oid: u32,
+        ctx: &CatalogWriteContext,
+        mutator: F,
+    ) -> Result<CatalogMutationEffect, CatalogError>
+    where
+        F: FnOnce(&mut PgTablespaceRow),
+    {
+        let existing = tablespace_row_by_oid_mvcc(self, ctx, tablespace_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(tablespace_oid.to_string()))?;
+        let mut updated = existing.clone();
+        mutator(&mut updated);
+        let kinds = [BootstrapCatalogKind::PgTablespace];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                tablespaces: vec![existing],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                tablespaces: vec![updated],
+                ..PhysicalCatalogRows::default()
+            },
+            1,
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok(effect)
     }
 
     pub fn create_proc_mvcc(
@@ -8319,6 +8428,15 @@ impl CatalogStore {
         relation_oids: &[u32],
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.rewrite_relation_storage_mvcc_with_tablespace(relation_oids, None, ctx)
+    }
+
+    pub fn rewrite_relation_storage_mvcc_with_tablespace(
+        &mut self,
+        relation_oids: &[u32],
+        tablespace_oid: Option<u32>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
         let mut control = self.control_state()?;
         let kinds = vec![BootstrapCatalogKind::PgClass];
         let mut old_rows = PhysicalCatalogRows::default();
@@ -8335,6 +8453,9 @@ impl CatalogStore {
                 .map(|row| row.relname)
                 .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
             let mut new_entry = old_entry.clone();
+            if let Some(tablespace_oid) = tablespace_oid {
+                new_entry.rel.spc_oid = tablespace_oid;
+            }
             new_entry.rel.rel_number = control.next_rel_number;
             control.next_rel_number = control.next_rel_number.saturating_add(1);
             old_rows
@@ -8352,6 +8473,40 @@ impl CatalogStore {
         delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
         insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
+        Ok(effect)
+    }
+
+    pub fn set_relation_tablespace_mvcc(
+        &mut self,
+        relation_oid: u32,
+        tablespace_oid: u32,
+        rewrite_storage: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        if rewrite_storage {
+            let entry = catalog_entry_by_oid_mvcc(self, ctx, relation_oid)?;
+            if relkind_has_storage(entry.relkind) {
+                return self.rewrite_relation_storage_mvcc_with_tablespace(
+                    &[relation_oid],
+                    Some(tablespace_oid),
+                    ctx,
+                );
+            }
+        }
+
+        let (old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                entry.rel.spc_oid = tablespace_oid;
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if old_entry.rel != new_entry.rel {
+            effect_record_rel(&mut effect.dropped_rels, old_entry.rel);
+            effect_record_rel(&mut effect.created_rels, new_entry.rel);
+        }
         Ok(effect)
     }
 
@@ -9552,6 +9707,36 @@ fn syscache_relname(name: &str) -> String {
         .map(|(_, relname)| relname)
         .unwrap_or_else(|| normalize_catalog_name(name))
         .to_ascii_lowercase()
+}
+
+fn tablespace_row_by_oid_mvcc(
+    _store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    tablespace_oid: u32,
+) -> Result<Option<PgTablespaceRow>, CatalogError> {
+    let snapshot = ctx
+        .txns
+        .read()
+        .snapshot_for_command(ctx.xid, ctx.cid)
+        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    Ok(probe_system_catalog_rows_visible_in_db(
+        &ctx.pool,
+        &ctx.txns,
+        &snapshot,
+        ctx.client_id,
+        1,
+        PG_TABLESPACE_OID_INDEX_OID,
+        vec![crate::include::access::scankey::ScanKeyData {
+            attribute_number: 1,
+            strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+            argument: Value::Int64(i64::from(tablespace_oid)),
+        }],
+    )?
+    .into_iter()
+    .map(crate::backend::catalog::rowcodec::pg_tablespace_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?
+    .into_iter()
+    .next())
 }
 
 fn build_relation_entry(
@@ -10848,7 +11033,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relowner: entry.owner_oid,
         relam: entry.am_oid,
         relfilenode: entry.rel.rel_number,
-        reltablespace: 0,
+        reltablespace: entry.rel.spc_oid,
         relpages: entry.relpages,
         reltuples: entry.reltuples,
         relallvisible: entry.relallvisible,
@@ -11875,8 +12060,11 @@ fn catalog_entry_from_relation_row(
     class_row: &PgClassRow,
     relation: &RelCacheEntry,
 ) -> CatalogEntry {
+    let mut rel = relation.rel;
+    rel.rel_number = class_row.relfilenode;
+    rel.spc_oid = class_row.reltablespace;
     CatalogEntry {
-        rel: relation.rel,
+        rel,
         relation_oid: relation.relation_oid,
         namespace_oid: relation.namespace_oid,
         owner_oid: relation.owner_oid,
@@ -12123,6 +12311,7 @@ fn catalog_entry_by_oid_mvcc_for_drop(
         rel: relation_locator_for_class_row(
             class_row.oid,
             class_row.relfilenode,
+            class_row.reltablespace,
             store.scope_db_oid(),
         ),
         relation_oid: class_row.oid,

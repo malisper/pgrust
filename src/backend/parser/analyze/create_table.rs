@@ -785,6 +785,7 @@ fn expand_like_clause(
                         columns,
                         include_columns: Vec::new(),
                         without_overlaps,
+                        tablespace: None,
                     }
                 } else {
                     TableConstraint::Unique {
@@ -792,6 +793,7 @@ fn expand_like_clause(
                         columns,
                         include_columns: Vec::new(),
                         without_overlaps,
+                        tablespace: None,
                     }
                 },
             ));
@@ -1139,6 +1141,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "a".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
@@ -1176,6 +1179,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "u".into(),
                 ty: RawTypeName::Named {
@@ -1222,6 +1226,7 @@ mod tests {
                 of_type_name: None,
                 persistence: TablePersistence::Permanent,
                 on_commit: OnCommitAction::PreserveRows,
+                tablespace: None,
                 elements: vec![CreateTableElement::Column(ColumnDef {
                     name: "u".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
@@ -1278,6 +1283,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![
                 CreateTableElement::Column(ColumnDef {
                     name: "id".into(),
@@ -1291,6 +1297,7 @@ mod tests {
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
+                        tablespace: None,
                     }],
                 }),
                 CreateTableElement::Column(ColumnDef {
@@ -1445,6 +1452,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![CreateTableElement::Like(CreateTableLikeClause {
                 relation_name: "source_table".into(),
                 options: vec![CreateTableLikeOption::IncludingAll],
@@ -1510,6 +1518,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![CreateTableElement::Like(CreateTableLikeClause {
                 relation_name: "source_table".into(),
                 options: vec![CreateTableLikeOption::IncludingDefaults],
@@ -1553,6 +1562,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![
                 CreateTableElement::Column(ColumnDef {
                     name: "id".into(),
@@ -1566,6 +1576,7 @@ mod tests {
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
+                        tablespace: None,
                     }],
                 }),
                 CreateTableElement::Constraint(crate::backend::parser::TableConstraint::NotNull {
@@ -1604,6 +1615,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
@@ -1648,6 +1660,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
@@ -1688,6 +1701,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "f1".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
@@ -1727,6 +1741,7 @@ mod tests {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "f1".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),

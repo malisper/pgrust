@@ -1,9 +1,10 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use super::super::*;
 use super::constraint::{validate_not_null_rows, verify_not_null_pk_compatible};
+use super::tablespace::resolve_relation_tablespace_oid;
 use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::{CatalogEntry, CatalogIndexBuildOptions};
 use crate::backend::executor::RelationDesc;
@@ -22,6 +23,7 @@ struct PartitionedKeySpec {
     primary: bool,
     nulls_not_distinct: bool,
     without_overlaps: Option<String>,
+    tablespace: Option<String>,
     deferrable: bool,
     initially_deferred: bool,
 }
@@ -33,6 +35,7 @@ impl PartitionedKeySpec {
             primary: action.primary,
             nulls_not_distinct: action.nulls_not_distinct,
             without_overlaps: action.without_overlaps.clone(),
+            tablespace: action.tablespace.clone(),
             deferrable: action.deferrable,
             initially_deferred: action.initially_deferred,
         }
@@ -75,6 +78,7 @@ struct PartitionedKeyInstaller<'a> {
     xid: TransactionId,
     next_cid: &'a mut CommandId,
     configured_search_path: Option<&'a [String]>,
+    gucs: Option<&'a HashMap<String, String>>,
     catalog_effects: &'a mut Vec<CatalogMutationEffect>,
     interrupts: Arc<crate::backend::utils::misc::interrupts::InterruptState>,
     relation_cache: RefCell<BTreeMap<u32, BoundRelation>>,
@@ -543,9 +547,39 @@ impl<'a> PartitionedKeyInstaller<'a> {
         build_options: &CatalogIndexBuildOptions,
         index_columns: &[IndexColumnDef],
     ) -> Result<CatalogEntry, ExecError> {
+        let default_tablespace = self
+            .gucs
+            .and_then(|gucs| gucs.get("default_tablespace"))
+            .map(String::as_str)
+            .filter(|name| !name.trim().is_empty());
+        if spec
+            .tablespace
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("pg_default"))
+            || (spec.tablespace.is_none()
+                && default_tablespace.is_some_and(|name| name.eq_ignore_ascii_case("pg_default")))
+        {
+            return Err(ExecError::DetailedError {
+                message: "cannot specify default tablespace for partitioned relations".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        let tablespace_oid = if relation.relpersistence == 't' {
+            0
+        } else {
+            resolve_relation_tablespace_oid(
+                self.db,
+                self.client_id,
+                Some((self.xid, self.visible_cid())),
+                spec.tablespace.as_deref(),
+                self.gucs,
+            )?
+        };
         let cid = self.take_cid();
         let ctx = self.write_ctx(cid);
-        let (index_entry, effect) = self
+        let (mut index_entry, effect) = self
             .db
             .catalog
             .write()
@@ -561,6 +595,22 @@ impl<'a> PartitionedKeyInstaller<'a> {
             )
             .map_err(map_catalog_error)?;
         self.apply_effect(effect)?;
+        if tablespace_oid != index_entry.rel.spc_oid {
+            let cid = self.take_cid();
+            let ctx = self.write_ctx(cid);
+            let effect = self
+                .db
+                .catalog
+                .write()
+                .set_relation_tablespace_mvcc(index_entry.relation_oid, tablespace_oid, false, &ctx)
+                .map_err(map_catalog_error)?;
+            index_entry.rel = effect.created_rels.first().copied().unwrap_or_else(|| {
+                let mut rel = index_entry.rel;
+                rel.spc_oid = tablespace_oid;
+                rel
+            });
+            self.apply_effect(effect)?;
+        }
         if relation.relpersistence == 't' {
             let temp_index_meta = index_entry.index_meta.clone().ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
@@ -866,6 +916,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 .then(|| Self::column_names_for_attnums(&relation.desc, &attnums).ok())
                 .flatten()
                 .and_then(|columns| columns.last().cloned()),
+            tablespace: None,
             deferrable: constraint.condeferrable,
             initially_deferred: constraint.condeferred,
         })
@@ -906,6 +957,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     without_overlaps: spec.without_overlaps.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    tablespace: None,
                     deferrable: spec.deferrable,
                     initially_deferred: spec.initially_deferred,
                 }],
@@ -1041,6 +1093,17 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 true,
                 spec.primary,
                 spec.nulls_not_distinct,
+                if relation.relpersistence == 't' {
+                    None
+                } else {
+                    Some(resolve_relation_tablespace_oid(
+                        self.db,
+                        self.client_id,
+                        Some((self.xid, index_cid)),
+                        spec.tablespace.as_deref(),
+                        self.gucs,
+                    )?)
+                },
                 self.xid,
                 index_cid,
                 access_method_oid,
@@ -1102,6 +1165,7 @@ impl Database {
         actions: &[IndexBackedConstraintAction],
         recurse: bool,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
         let interrupts = self.interrupt_state(client_id);
@@ -1112,6 +1176,7 @@ impl Database {
             xid,
             next_cid: &mut next_cid,
             configured_search_path,
+            gucs,
             catalog_effects,
             interrupts,
             relation_cache: RefCell::new(BTreeMap::new()),
@@ -1151,6 +1216,7 @@ impl Database {
             xid,
             next_cid: &mut next_cid,
             configured_search_path,
+            gucs: None,
             catalog_effects,
             interrupts,
             relation_cache: RefCell::new(BTreeMap::new()),

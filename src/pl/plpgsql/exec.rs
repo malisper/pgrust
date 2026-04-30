@@ -3691,6 +3691,7 @@ fn exec_dynamic_create_table_as(
         cid,
         None,
         planner_config_from_executor_gucs(&ctx.gucs),
+        Some(&ctx.gucs),
         &mut ctx.catalog_effects,
         &mut ctx.temp_effects,
     );
@@ -3722,12 +3723,13 @@ fn exec_dynamic_create_table(
     let cid = ctx.next_command_id;
     let effect_start = ctx.catalog_effects.len();
     let mut sequence_effects = Vec::new();
-    let result = db.execute_create_table_stmt_in_transaction_with_search_path(
+    let result = db.execute_create_table_stmt_in_transaction_with_search_path_and_gucs(
         ctx.client_id,
         stmt,
         xid,
         cid,
         None,
+        Some(&ctx.gucs),
         &mut ctx.catalog_effects,
         &mut ctx.temp_effects,
         &mut sequence_effects,
@@ -6859,6 +6861,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
         "not_null_violation" => Some("23502"),
         "check_violation" => Some("23514"),
         "foreign_key_violation" => Some("23503"),
+        "undefined_file" => Some("58P01"),
         "invalid_parameter_value" => Some("22023"),
         "null_value_not_allowed" => Some("22004"),
         "syntax_error" => Some("42601"),

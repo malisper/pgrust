@@ -1045,6 +1045,7 @@ fn default_acl_objtype(name: &str) -> Result<char, ExecError> {
         "function" | "functions" | "routine" | "routines" => Ok('f'),
         "type" | "types" => Ok('T'),
         "schema" | "schemas" => Ok('n'),
+        "large" | "large object" | "large objects" => Ok('L'),
         _ => Err(ExecError::DetailedError {
             message: format!("unrecognized default ACL object type \"{name}\""),
             detail: None,
@@ -1814,6 +1815,92 @@ pub enum ByteaOutputFormat {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum LargeObjectFastpathCall {
+    Create {
+        oid: u32,
+    },
+    Import {
+        path: String,
+        oid: Option<u32>,
+    },
+    Export {
+        oid: u32,
+        path: String,
+    },
+    Open {
+        oid: u32,
+        mode: i32,
+    },
+    Close {
+        fd: i32,
+    },
+    Read {
+        fd: i32,
+        len: i32,
+    },
+    Write {
+        fd: i32,
+        data: Vec<u8>,
+    },
+    Lseek {
+        fd: i32,
+        offset: i64,
+        whence: i32,
+        result_i64: bool,
+    },
+    Creat {
+        mode: i32,
+    },
+    Tell {
+        fd: i32,
+        result_i64: bool,
+    },
+    Unlink {
+        oid: u32,
+    },
+    Truncate {
+        fd: i32,
+        len: i64,
+    },
+    FromBytea {
+        oid: u32,
+        data: Vec<u8>,
+    },
+    Get {
+        oid: u32,
+        offset: Option<i64>,
+        len: Option<i32>,
+    },
+    Put {
+        oid: u32,
+        offset: i64,
+        data: Vec<u8>,
+    },
+}
+
+impl LargeObjectFastpathCall {
+    fn requires_xid(&self) -> bool {
+        match self {
+            Self::Create { .. }
+            | Self::Import { .. }
+            | Self::Creat { .. }
+            | Self::Unlink { .. }
+            | Self::Write { .. }
+            | Self::Truncate { .. }
+            | Self::FromBytea { .. }
+            | Self::Put { .. } => true,
+            Self::Open { mode, .. } => *mode & crate::pgrust::database::INV_WRITE != 0,
+            Self::Export { .. }
+            | Self::Close { .. }
+            | Self::Read { .. }
+            | Self::Lseek { .. }
+            | Self::Tell { .. }
+            | Self::Get { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct ResolvedCallProcedure {
     row: PgProcRow,
     input_arg_sql: Vec<String>,
@@ -2364,6 +2451,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "transaction_read_only" => Some("off"),
         "default_transaction_deferrable" => Some("off"),
         "transaction_deferrable" => Some("off"),
+        "lo_compat_privileges" => Some("off"),
         "vacuum_cost_delay" => Some("0"),
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
@@ -3525,7 +3613,7 @@ impl Session {
     }
 
     fn execute_object_address_unsupported_stmt(
-        &self,
+        &mut self,
         db: &Database,
         stmt: &crate::backend::parser::UnsupportedStatement,
         xid: TransactionId,
@@ -3545,7 +3633,7 @@ impl Session {
     }
 
     fn execute_alter_default_privileges_for_object_address(
-        &self,
+        &mut self,
         db: &Database,
         sql: &str,
         xid: TransactionId,
@@ -3553,24 +3641,71 @@ impl Session {
     ) -> Result<(), ExecError> {
         // :HACK: Track only the default-ACL identity rows needed by object_address.sql.
         // This is not a privilege executor or dependency implementation.
+        if let Some(spec) = crate::pgrust::database::parse_large_object_default_privileges_sql(sql)?
+        {
+            let role_oid = if let Some(role_name) = spec.role_name.as_deref() {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                catalog
+                    .authid_rows()
+                    .into_iter()
+                    .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("role \"{role_name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42704",
+                    })?
+                    .oid
+            } else {
+                self.current_user_oid()
+            };
+            let txn = self
+                .active_txn
+                .as_mut()
+                .ok_or_else(|| unsupported_object_address_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
+            db.execute_alter_default_privileges_large_objects(
+                self.client_id,
+                role_oid,
+                &spec.grantee_names,
+                &spec.privilege_chars,
+                spec.with_grant_option,
+                spec.revoke,
+                xid,
+                cid,
+                &mut txn.catalog_effects,
+            )?;
+            return Ok(());
+        }
         let tokens = sql_tokens(sql);
-        let role_name = token_after(&tokens, &["for", "role"])
-            .ok_or_else(|| unsupported_object_address_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
+        let role_name = token_after(&tokens, &["for", "role"]);
         let namespace_name = token_after(&tokens, &["in", "schema"]);
         let object_kind = token_after(&tokens, &["on"])
             .ok_or_else(|| unsupported_object_address_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
         let objtype = default_acl_objtype(&object_kind)?;
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let role = catalog
-            .authid_rows()
-            .into_iter()
-            .find(|row| row.rolname.eq_ignore_ascii_case(&role_name))
-            .ok_or_else(|| ExecError::DetailedError {
-                message: format!("role \"{role_name}\" does not exist"),
-                detail: None,
-                hint: None,
-                sqlstate: "42704",
-            })?;
+        let role = if let Some(role_name) = role_name {
+            catalog
+                .authid_rows()
+                .into_iter()
+                .find(|row| row.rolname.eq_ignore_ascii_case(&role_name))
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("role \"{role_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?
+        } else {
+            catalog
+                .authid_rows()
+                .into_iter()
+                .find(|row| row.oid == self.current_user_oid())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("role with OID {} does not exist", self.current_user_oid()),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?
+        };
         let namespace = namespace_name
             .as_deref()
             .map(|name| {
@@ -4687,6 +4822,8 @@ impl Session {
             | Statement::AlterTableRename(_)
             | Statement::AlterTableSetSchema(_)
             | Statement::AlterTableSetTablespace(_)
+            | Statement::AlterIndexSetTablespace(_)
+            | Statement::AlterMoveAllTablespace(_)
             | Statement::AlterTableSetPersistence(_)
             | Statement::AlterTableSetWithoutCluster(_)
             | Statement::AlterTableSet(_)
@@ -4705,6 +4842,7 @@ impl Session {
             | Statement::AlterTableTriggerState(_)
             | Statement::AlterTableRuleState(_) => Some("ALTER TABLE"),
             Statement::AlterRuleRename(_) => Some("ALTER RULE"),
+            Statement::AlterLargeObjectOwner(_) => Some("ALTER LARGE OBJECT"),
             Statement::AlterPolicy(_) => Some("ALTER POLICY"),
             Statement::CommentOnTable(_)
             | Statement::CommentOnColumn(_)
@@ -4725,6 +4863,7 @@ impl Session {
             | Statement::CommentOnAggregate(_)
             | Statement::CommentOnFunction(_)
             | Statement::CommentOnOperator(_)
+            | Statement::CommentOnLargeObject(_)
             | Statement::CommentOnDatabase(_) => Some("COMMENT"),
             Statement::GrantObject(_) => Some("GRANT"),
             Statement::RevokeObject(_) => Some("REVOKE"),
@@ -6102,6 +6241,7 @@ impl Session {
                         .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
                     db.row_locks
                         .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+                    db.large_objects.close_all(self.client_id);
                     self.stats_state.write().commit_top_level_xact(&db.stats);
                     Ok(r)
                 })()
@@ -6158,6 +6298,7 @@ impl Session {
             .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
         db.row_locks
             .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+        db.large_objects.close_all(self.client_id);
         crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
             db,
             self.client_id,
@@ -6232,6 +6373,326 @@ impl Session {
             self.interrupts.reset_statement_state();
         }
         result
+    }
+
+    pub(crate) fn execute_large_object_fastpath(
+        &mut self,
+        db: &Database,
+        call: LargeObjectFastpathCall,
+    ) -> Result<Value, ExecError> {
+        let _interrupt_guard = self.statement_interrupt_guard()?;
+        let statement_lock_scope = StatementLockScopeGuard::new(
+            Arc::clone(&db.advisory_locks),
+            Arc::clone(&db.row_locks),
+            self.client_id,
+            self.active_txn
+                .is_none()
+                .then(|| db.allocate_statement_lock_scope_id()),
+        );
+        db.install_auth_state(self.client_id, self.auth.clone());
+        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+        db.install_session_replication_role(self.client_id, self.session_replication_role());
+        db.install_temp_backend_id(self.client_id, self.temp_backend_id);
+        db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
+        db.install_plpgsql_function_cache(self.client_id, Arc::clone(&self.plpgsql_function_cache));
+        self.install_session_view_state(db);
+        let _prepared_guard = self.push_prepared_statement_thread_context();
+        let result = stacker::grow(32 * 1024 * 1024, || {
+            StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb).run(|| {
+                self.execute_large_object_fastpath_internal(
+                    db,
+                    call,
+                    statement_lock_scope.scope_id(),
+                )
+            })
+        });
+        if matches!(result, Err(ExecError::Interrupted(_))) {
+            self.interrupts.reset_statement_state();
+        }
+        result
+    }
+
+    fn execute_large_object_fastpath_internal(
+        &mut self,
+        db: &Database,
+        call: LargeObjectFastpathCall,
+        statement_lock_scope_id: Option<u64>,
+    ) -> Result<Value, ExecError> {
+        db.install_interrupt_state(self.client_id, self.interrupts());
+        if self.active_txn.is_none() {
+            db.accept_invalidation_messages(self.client_id);
+            self.active_txn = Some(self.active_transaction_without_xid(db));
+            self.stats_state.write().begin_top_level_xact();
+            let result = self
+                .execute_large_object_fastpath_in_transaction(db, call, statement_lock_scope_id)
+                .and_then(|value| {
+                    self.validate_constraints_for_active_txn(db, false)?;
+                    Ok(value)
+                });
+            let txn = self.active_txn.take().unwrap();
+            let mut value = None;
+            let finalize_result = match result {
+                Ok(result_value) => {
+                    value = Some(result_value);
+                    Ok(StatementResult::AffectedRows(0))
+                }
+                Err(err) => Err(err),
+            };
+            let result = self.finalize_taken_transaction(db, txn, finalize_result);
+            if result.is_ok() {
+                self.portals.drop_transaction_portals(true);
+            } else {
+                self.portals.drop_transaction_portals(false);
+            }
+            return result.map(|_| value.unwrap_or(Value::Null));
+        }
+
+        if self.transaction_failed() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "ROLLBACK",
+                actual:
+                    "current transaction is aborted, commands ignored until end of transaction block"
+                        .into(),
+            }));
+        }
+        let result =
+            self.execute_large_object_fastpath_in_transaction(db, call, statement_lock_scope_id);
+        if result.is_err() {
+            self.mark_transaction_failed();
+        }
+        result
+    }
+
+    fn execute_large_object_fastpath_in_transaction(
+        &mut self,
+        db: &Database,
+        call: LargeObjectFastpathCall,
+        statement_lock_scope_id: Option<u64>,
+    ) -> Result<Value, ExecError> {
+        let effect_start = self
+            .active_txn
+            .as_ref()
+            .map(|txn| txn.catalog_effects.len())
+            .unwrap_or(0);
+        let cid = {
+            let txn = self.active_txn.as_mut().unwrap();
+            let cid = txn.next_command_id;
+            txn.next_command_id = txn.next_command_id.saturating_add(1);
+            cid
+        };
+        let xid = if call.requires_xid() {
+            self.ensure_top_xid(db)
+        } else {
+            self.active_txn
+                .as_ref()
+                .and_then(|txn| txn.xid)
+                .unwrap_or(INVALID_TRANSACTION_ID)
+        };
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+        let snapshot = self.snapshot_for_command(db, xid, cid)?;
+        let deferred_foreign_keys = self
+            .active_txn
+            .as_ref()
+            .map(|txn| txn.deferred_foreign_keys.clone());
+        let mut ctx = self.executor_context_for_catalog(
+            db,
+            snapshot,
+            cid,
+            &catalog,
+            deferred_foreign_keys,
+            statement_lock_scope_id,
+        );
+        let mut result = self.execute_large_object_fastpath_call(db, &mut ctx, call);
+        if let Some(xid) = ctx.transaction_xid() {
+            self.note_context_xid(xid);
+        }
+        self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+        if result.is_ok() {
+            self.advance_catalog_command_id_after_statement(cid, effect_start);
+            self.process_catalog_command_end(db, effect_start);
+            if let Err(err) = self.validate_constraints_for_active_txn(db, true) {
+                result = Err(err);
+            }
+        }
+        result
+    }
+
+    fn execute_large_object_fastpath_call(
+        &self,
+        db: &Database,
+        ctx: &mut ExecutorContext,
+        call: LargeObjectFastpathCall,
+    ) -> Result<Value, ExecError> {
+        match call {
+            LargeObjectFastpathCall::Create { oid } => Ok(Value::Int64(i64::from(
+                db.large_object_create(ctx, oid, ctx.current_user_oid, None)?,
+            ))),
+            LargeObjectFastpathCall::Import { path, oid } => {
+                crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_import")?;
+                Self::ensure_large_object_file_function_allowed(ctx, "lo_import")?;
+                let data = fs::read(&path).map_err(|err| ExecError::DetailedError {
+                    message: format!("could not open server file \"{path}\": {err}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "58P01",
+                })?;
+                Ok(Value::Int64(i64::from(db.large_object_create(
+                    ctx,
+                    oid.unwrap_or(0),
+                    ctx.current_user_oid,
+                    Some(&data),
+                )?)))
+            }
+            LargeObjectFastpathCall::Export { oid, path } => {
+                Self::ensure_large_object_file_function_allowed(ctx, "lo_export")?;
+                let data = db.large_object_get(ctx, oid, None, None)?;
+                fs::write(&path, data).map_err(|err| ExecError::DetailedError {
+                    message: format!("could not create server file \"{path}\": {err}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "58P01",
+                })?;
+                Ok(Value::Int32(1))
+            }
+            LargeObjectFastpathCall::Open { oid, mode } => {
+                Ok(Value::Int32(db.large_object_open(ctx, oid, mode)?))
+            }
+            LargeObjectFastpathCall::Close { fd } => Ok(Value::Int32(
+                db.large_objects.close_descriptor(ctx.client_id, fd)?,
+            )),
+            LargeObjectFastpathCall::Read { fd, len } => {
+                let desc = db.large_objects.descriptor(ctx.client_id, fd)?;
+                if !desc.can_read {
+                    return Err(Self::large_object_descriptor_mode_error("reading"));
+                }
+                let bytes = db.large_object_read(ctx, desc.loid, desc.offset, len)?;
+                db.large_objects.set_descriptor_offset(
+                    ctx.client_id,
+                    fd,
+                    desc.offset.saturating_add(bytes.len() as i64),
+                )?;
+                Ok(Value::Bytea(bytes))
+            }
+            LargeObjectFastpathCall::Write { fd, data } => {
+                crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lowrite")?;
+                let desc = db.large_objects.descriptor(ctx.client_id, fd)?;
+                if !desc.can_write {
+                    return Err(Self::large_object_descriptor_mode_error("writing"));
+                }
+                let written = db.large_object_write(ctx, desc.loid, desc.offset, &data)?;
+                db.large_objects.set_descriptor_offset(
+                    ctx.client_id,
+                    fd,
+                    desc.offset.saturating_add(i64::from(written)),
+                )?;
+                Ok(Value::Int32(written))
+            }
+            LargeObjectFastpathCall::Lseek {
+                fd,
+                offset,
+                whence,
+                result_i64,
+            } => {
+                let desc = db.large_objects.descriptor(ctx.client_id, fd)?;
+                let new_offset = db.large_object_seek(ctx, desc, offset, whence)?;
+                db.large_objects
+                    .set_descriptor_offset(ctx.client_id, fd, new_offset)?;
+                if result_i64 {
+                    Ok(Value::Int64(new_offset))
+                } else {
+                    Ok(Value::Int32(i32::try_from(new_offset).map_err(|_| {
+                        Self::large_object_position_overflow_error()
+                    })?))
+                }
+            }
+            LargeObjectFastpathCall::Creat { mode: _ } => Ok(Value::Int64(i64::from({
+                crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_creat")?;
+                db.large_object_create(ctx, 0, ctx.current_user_oid, None)?
+            }))),
+            LargeObjectFastpathCall::Tell { fd, result_i64 } => {
+                let offset = db.large_objects.descriptor(ctx.client_id, fd)?.offset;
+                if result_i64 {
+                    Ok(Value::Int64(offset))
+                } else {
+                    Ok(Value::Int32(i32::try_from(offset).map_err(|_| {
+                        Self::large_object_position_overflow_error()
+                    })?))
+                }
+            }
+            LargeObjectFastpathCall::Unlink { oid } => {
+                Ok(Value::Int32(db.large_object_unlink(ctx, oid)?))
+            }
+            LargeObjectFastpathCall::Truncate { fd, len } => {
+                crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_truncate")?;
+                let desc = db.large_objects.descriptor(ctx.client_id, fd)?;
+                if !desc.can_write {
+                    return Err(Self::large_object_descriptor_mode_error("writing"));
+                }
+                db.large_object_truncate(ctx, desc.loid, len)?;
+                Ok(Value::Int32(0))
+            }
+            LargeObjectFastpathCall::FromBytea { oid, data } => {
+                crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_from_bytea")?;
+                Ok(Value::Int64(i64::from(db.large_object_create(
+                    ctx,
+                    oid,
+                    ctx.current_user_oid,
+                    Some(&data),
+                )?)))
+            }
+            LargeObjectFastpathCall::Get { oid, offset, len } => {
+                Ok(Value::Bytea(db.large_object_get(ctx, oid, offset, len)?))
+            }
+            LargeObjectFastpathCall::Put { oid, offset, data } => {
+                crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_put")?;
+                db.large_object_put(ctx, oid, offset, &data)?;
+                Ok(Value::Null)
+            }
+        }
+    }
+
+    fn ensure_large_object_file_function_allowed(
+        ctx: &ExecutorContext,
+        function_name: &'static str,
+    ) -> Result<(), ExecError> {
+        let is_superuser = ctx
+            .catalog
+            .as_ref()
+            .map(|catalog| {
+                catalog
+                    .authid_rows()
+                    .into_iter()
+                    .any(|row| row.oid == ctx.current_user_oid && row.rolsuper)
+            })
+            .unwrap_or(ctx.current_user_oid == crate::include::catalog::BOOTSTRAP_SUPERUSER_OID);
+        if is_superuser {
+            Ok(())
+        } else {
+            Err(ExecError::DetailedError {
+                message: format!("permission denied for function {function_name}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            })
+        }
+    }
+
+    fn large_object_descriptor_mode_error(operation: &'static str) -> ExecError {
+        ExecError::DetailedError {
+            message: format!("large object descriptor was not opened for {operation}"),
+            detail: None,
+            hint: None,
+            sqlstate: "55000",
+        }
+    }
+
+    fn large_object_position_overflow_error() -> ExecError {
+        ExecError::DetailedError {
+            message: "large object position exceeds integer range".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
+        }
     }
 
     pub(crate) fn fire_login_event_triggers(&mut self, db: &Database) -> Result<(), ExecError> {
@@ -6727,6 +7188,32 @@ impl Session {
                     )
                 }
             }
+            Statement::DropTablespace(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    db.execute_drop_tablespace_stmt(self.client_id, drop_stmt)
+                }
+            }
+            Statement::AlterTablespace(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    db.execute_alter_tablespace_stmt(self.client_id, alter_stmt)
+                }
+            }
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_domain_stmt_with_search_path(
@@ -7039,6 +7526,7 @@ impl Session {
                     self.client_id,
                     create_stmt,
                     search_path.as_deref(),
+                    Some(&self.gucs),
                     self.maintenance_work_mem_kb()?,
                 )
             }
@@ -7113,6 +7601,23 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterLargeObjectOwner(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_alter_large_object_owner_stmt(
+                        self.client_id,
+                        alter_stmt.oid,
+                        &alter_stmt.new_owner,
+                    )
+                }
+            }
             Statement::AlterTableRename(ref rename_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -7165,6 +7670,37 @@ impl Session {
                         alter_stmt,
                         search_path.as_deref(),
                     )
+                }
+            }
+            Statement::AlterIndexSetTablespace(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_set_tablespace_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterMoveAllTablespace(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    db.execute_alter_move_all_tablespace_stmt(self.client_id, alter_stmt)
                 }
             }
             Statement::AlterTableSetPersistence(ref alter_stmt) => {
@@ -7745,6 +8281,7 @@ impl Session {
                         alter_stmt,
                         search_path.as_deref(),
                         Some(&self.datetime_config),
+                        Some(&self.gucs),
                     )
                 }
             }
@@ -8269,6 +8806,7 @@ impl Session {
                         0,
                         search_path.as_deref(),
                         self.planner_config(),
+                        Some(&self.gucs),
                     )
                 }
             }
@@ -8503,6 +9041,23 @@ impl Session {
                         self.client_id,
                         comment_stmt,
                         search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::CommentOnLargeObject(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_comment_on_large_object_stmt(
+                        self.client_id,
+                        comment_stmt.oid,
+                        comment_stmt.comment.as_deref(),
                     )
                 }
             }
@@ -10979,6 +11534,7 @@ impl Session {
         db.table_locks.unlock_all_for_client(self.client_id);
         db.advisory_locks.unlock_all_session(self.client_id);
         db.row_locks.unlock_all_session(self.client_id);
+        db.large_objects.close_all(self.client_id);
     }
 
     fn lock_table_requires_transaction_error() -> ExecError {
@@ -12100,6 +12656,7 @@ impl Session {
                         xid,
                         cid,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                         maintenance_work_mem_kb,
                         catalog_effects,
                     )
@@ -12387,6 +12944,17 @@ impl Session {
                         &mut txn.catalog_effects,
                     )
                 }
+                Statement::AlterLargeObjectOwner(ref alter_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_large_object_owner_stmt_in_transaction(
+                        client_id,
+                        alter_stmt.oid,
+                        &alter_stmt.new_owner,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
                 Statement::AlterTableRename(ref rename_stmt) => {
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     if let Some(relation) = catalog.lookup_any_relation(&rename_stmt.table_name) {
@@ -12445,10 +13013,45 @@ impl Session {
                         })?;
                     self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                     let search_path = self.configured_search_path();
-                    db.execute_alter_table_set_tablespace_stmt_with_search_path(
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_set_tablespace_stmt_in_transaction_with_search_path(
                         client_id,
                         alter_stmt,
+                        xid,
+                        cid,
                         search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterIndexSetTablespace(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let relation = catalog
+                        .lookup_any_relation(&alter_stmt.table_name)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(
+                                alter_stmt.table_name.clone(),
+                            ))
+                        })?;
+                    self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_set_tablespace_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterMoveAllTablespace(ref alter_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_move_all_tablespace_stmt_in_transaction(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
                     )
                 }
                 Statement::AlterTableSetPersistence(ref alter_stmt) => {
@@ -13129,6 +13732,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         Some(&self.datetime_config),
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                     )
                 }
@@ -14153,6 +14757,17 @@ impl Session {
                         &mut txn.catalog_effects,
                     )
                 }
+                Statement::CommentOnLargeObject(ref comment_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_comment_on_large_object_stmt_in_transaction(
+                        client_id,
+                        comment_stmt.oid,
+                        comment_stmt.comment.as_deref(),
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
                 Statement::CommentOnConstraint(ref comment_stmt) => {
                     if comment_stmt.domain_name.is_none() {
                         let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -14879,15 +15494,36 @@ impl Session {
                         &mut txn.catalog_effects,
                     )
                 }
+                Statement::DropTablespace(ref drop_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_drop_tablespace_stmt_in_transaction(
+                        client_id,
+                        drop_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterTablespace(ref alter_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_tablespace_stmt_in_transaction(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
                 Statement::CreateTable(ref create_stmt) => {
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
-                    db.execute_create_table_stmt_in_transaction_with_search_path(
+                    db.execute_create_table_stmt_in_transaction_with_search_path_and_gucs(
                         client_id,
                         create_stmt,
                         xid,
                         cid,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                         &mut txn.temp_effects,
                         &mut txn.sequence_effects,
@@ -15118,6 +15754,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         planner_config,
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                         &mut txn.temp_effects,
                     )
@@ -15906,6 +16543,7 @@ impl Session {
                 db.advisory_locks.unlock_all_session(self.client_id);
                 db.row_locks.unlock_all_session(self.client_id);
                 db.sequences.clear_session_sequence_state(self.client_id);
+                db.large_objects.close_all(self.client_id);
 
                 let mut state = self.capture_guc_state();
                 reset_all_gucs_in_state(&mut state, &self.reset_datetime_config);
@@ -17887,7 +18525,8 @@ fn apply_guc_value_to_state(
         "default_transaction_read_only"
         | "transaction_read_only"
         | "default_transaction_deferrable"
-        | "transaction_deferrable" => {
+        | "transaction_deferrable"
+        | "lo_compat_privileges" => {
             let bool_value = parse_bool_guc(value).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
             })?;

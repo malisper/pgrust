@@ -365,6 +365,8 @@ pub enum Statement {
     AlterDatabase(AlterDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
     CreateTablespace(CreateTablespaceStatement),
+    DropTablespace(DropTablespaceStatement),
+    AlterTablespace(AlterTablespaceStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
     Prepare(PrepareStatement),
@@ -407,6 +409,7 @@ pub enum Statement {
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
     AlterIndexSet(AlterIndexSetStatement),
+    AlterIndexSetTablespace(AlterTableSetTablespaceStatement),
     AlterViewRename(AlterTableRenameStatement),
     AlterViewRenameColumn(AlterTableRenameColumnStatement),
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
@@ -434,10 +437,12 @@ pub enum Statement {
     AlterTableRename(AlterTableRenameStatement),
     AlterTableSetSchema(AlterRelationSetSchemaStatement),
     AlterTableSetTablespace(AlterTableSetTablespaceStatement),
+    AlterMoveAllTablespace(AlterMoveAllTablespaceStatement),
     AlterViewSetSchema(AlterRelationSetSchemaStatement),
     AlterMaterializedViewSetSchema(AlterRelationSetSchemaStatement),
     AlterMaterializedViewSetAccessMethod(AlterMaterializedViewSetAccessMethodStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
+    AlterLargeObjectOwner(AlterLargeObjectOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterSchemaRename(AlterSchemaRenameStatement),
     AlterTableSetPersistence(AlterTableSetPersistenceStatement),
@@ -490,6 +495,7 @@ pub enum Statement {
     CommentOnAggregate(CommentOnAggregateStatement),
     CommentOnFunction(CommentOnFunctionStatement),
     CommentOnOperator(CommentOnOperatorStatement),
+    CommentOnLargeObject(CommentOnLargeObjectStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
     CreateCollation(CreateCollationStatement),
@@ -2240,6 +2246,7 @@ pub struct CreateTableStatement {
     pub partition_of: Option<String>,
     pub partition_bound: Option<RawPartitionBoundSpec>,
     pub if_not_exists: bool,
+    pub tablespace: Option<String>,
 }
 
 impl CreateTableStatement {
@@ -2391,7 +2398,29 @@ pub enum RoleSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTablespaceStatement {
     pub tablespace_name: String,
+    pub owner: Option<RoleSpec>,
     pub location: String,
+    pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropTablespaceStatement {
+    pub tablespace_name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTablespaceAction {
+    SetOptions(Vec<RelOption>),
+    ResetOptions(Vec<String>),
+    Rename { new_name: String },
+    OwnerTo { new_owner: RoleSpec },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTablespaceStatement {
+    pub tablespace_name: String,
+    pub action: AlterTablespaceAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2406,6 +2435,7 @@ pub struct CreateTableAsStatement {
     pub if_not_exists: bool,
     pub object_type: TableAsObjectType,
     pub skip_data: bool,
+    pub tablespace: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2610,6 +2640,7 @@ pub struct CreateIndexStatement {
     pub predicate: Option<SqlExpr>,
     pub predicate_sql: Option<String>,
     pub options: Vec<RelOption>,
+    pub tablespace: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2769,6 +2800,20 @@ pub struct AlterTableSetTablespaceStatement {
     pub only: bool,
     pub table_name: String,
     pub tablespace_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveAllTablespaceObjectKind {
+    Table,
+    Index,
+    MaterializedView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterMoveAllTablespaceStatement {
+    pub object_kind: MoveAllTablespaceObjectKind,
+    pub source_tablespace: String,
+    pub target_tablespace: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3034,6 +3079,12 @@ pub struct AlterRelationOwnerStatement {
     pub if_exists: bool,
     pub only: bool,
     pub relation_name: String,
+    pub new_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterLargeObjectOwnerStatement {
+    pub oid: u32,
     pub new_owner: String,
 }
 
@@ -3850,6 +3901,12 @@ pub struct CommentOnOperatorStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnLargeObjectStatement {
+    pub oid: u32,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantTableColumnPrivilege {
     pub privilege: GrantObjectPrivilege,
     pub columns: Vec<String>,
@@ -3872,12 +3929,18 @@ pub enum GrantObjectPrivilege {
     AllPrivilegesOnSchema,
     CreateOnSchema,
     UsageOnSchema,
+    AllPrivilegesOnTablespace,
+    CreateOnTablespace,
     UsageOnType,
     UsageOnLanguage,
     AllPrivilegesOnLanguage,
     ExecuteOnFunction,
     ExecuteOnProcedure,
     ExecuteOnRoutine,
+    AllPrivilegesOnLargeObject,
+    SelectOnLargeObject,
+    UpdateOnLargeObject,
+    LargeObjectPrivileges(String),
     UsageOnForeignDataWrapper,
     UsageOnForeignServer,
     AllPrivilegesOnForeignDataWrapper,
@@ -4035,6 +4098,7 @@ pub enum ReindexTargetKind {
 pub struct ReindexIndexStatement {
     pub concurrently: bool,
     pub verbose: bool,
+    pub tablespace: Option<String>,
     pub kind: ReindexTargetKind,
     pub index_name: String,
 }
@@ -4480,9 +4544,11 @@ pub enum ColumnConstraint {
     },
     PrimaryKey {
         attributes: ConstraintAttributes,
+        tablespace: Option<String>,
     },
     Unique {
         attributes: ConstraintAttributes,
+        tablespace: Option<String>,
     },
     References {
         attributes: ConstraintAttributes,
@@ -4500,8 +4566,8 @@ impl ColumnConstraint {
         match self {
             Self::NotNull { attributes }
             | Self::Check { attributes, .. }
-            | Self::PrimaryKey { attributes }
-            | Self::Unique { attributes }
+            | Self::PrimaryKey { attributes, .. }
+            | Self::Unique { attributes, .. }
             | Self::References { attributes, .. } => attributes,
         }
     }
@@ -4522,20 +4588,24 @@ pub enum TableConstraint {
         columns: Vec<String>,
         include_columns: Vec<String>,
         without_overlaps: Option<String>,
+        tablespace: Option<String>,
     },
     Unique {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
         include_columns: Vec<String>,
         without_overlaps: Option<String>,
+        tablespace: Option<String>,
     },
     PrimaryKeyUsingIndex {
         attributes: ConstraintAttributes,
         index_name: String,
+        tablespace: Option<String>,
     },
     UniqueUsingIndex {
         attributes: ConstraintAttributes,
         index_name: String,
+        tablespace: Option<String>,
     },
     Exclusion {
         attributes: ConstraintAttributes,

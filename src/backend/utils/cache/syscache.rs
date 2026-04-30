@@ -1554,6 +1554,7 @@ impl CatalogStore {
             rel: relation_locator_for_class_row(
                 class_row.oid,
                 class_row.relfilenode,
+                class_row.reltablespace,
                 self.scope_db_oid(),
             ),
             relation_oid: class_row.oid,
@@ -1955,7 +1956,12 @@ pub(crate) fn relation_id_get_relation_db(
         .transpose()?;
 
     let mut entry = RelCacheEntry {
-        rel: relation_locator_for_class_row(class_row.oid, class_row.relfilenode, db.database_oid),
+        rel: relation_locator_for_class_row(
+            class_row.oid,
+            class_row.relfilenode,
+            class_row.reltablespace,
+            db.database_oid,
+        ),
         relation_oid: class_row.oid,
         namespace_oid: class_row.relnamespace,
         owner_oid: class_row.relowner,

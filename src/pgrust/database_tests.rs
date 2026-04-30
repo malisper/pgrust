@@ -53187,6 +53187,81 @@ fn has_privilege_builtins_match_missing_object_and_largeobject_edges() {
 }
 
 #[test]
+fn large_object_acl_and_default_privileges_follow_metadata_rows() {
+    let dir = temp_dir("large_object_acl_defaults");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role lo_reader login").unwrap();
+    db.execute(1, "select lo_create(6101)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_largeobject_privilege('lo_reader', 6101::oid, 'select'), \
+                    has_largeobject_privilege('lo_reader', 6101::oid, 'update')",
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+
+    db.execute(1, "grant select on large object 6101 to lo_reader")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_largeobject_privilege('lo_reader', 6101::oid, 'select'), \
+                    has_largeobject_privilege('lo_reader', 6101::oid, 'update')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(false)]]
+    );
+
+    let schema_error = db
+        .execute(
+            1,
+            "alter default privileges in schema public grant all on large objects to public",
+        )
+        .unwrap_err();
+    assert_sqlstate(
+        schema_error,
+        "42601",
+        "cannot use IN SCHEMA clause when using GRANT/REVOKE ON LARGE OBJECTS",
+    );
+
+    db.execute(
+        1,
+        "alter default privileges grant select on large objects to lo_reader",
+    )
+    .unwrap();
+    db.execute(1, "select lo_create(6102)").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_largeobject_privilege('lo_reader', 6102::oid, 'select'), \
+                    has_largeobject_privilege('lo_reader', 6102::oid, 'update')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(false)]]
+    );
+
+    db.execute(
+        1,
+        "alter default privileges grant update on large objects to lo_reader",
+    )
+    .unwrap();
+    db.execute(1, "select lo_create(6103)").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_largeobject_privilege('lo_reader', 6103::oid, 'select'), \
+                    has_largeobject_privilege('lo_reader', 6103::oid, 'update')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn pg_get_userbyid_returns_role_name() {
     let dir = temp_dir("pg_get_userbyid");
     let db = Database::open(&dir, 64).unwrap();

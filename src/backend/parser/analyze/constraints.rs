@@ -23,6 +23,7 @@ pub struct IndexBackedConstraintAction {
     pub exclusion: bool,
     pub nulls_not_distinct: bool,
     pub without_overlaps: Option<String>,
+    pub tablespace: Option<String>,
     pub access_method: Option<String>,
     pub exclusion_operators: Vec<String>,
     pub deferrable: bool,
@@ -207,6 +208,7 @@ struct PendingIndexConstraint {
     exclusion: bool,
     nulls_not_distinct: bool,
     without_overlaps: Option<String>,
+    tablespace: Option<String>,
     access_method: Option<String>,
     exclusion_operators: Vec<String>,
     deferrable: bool,
@@ -660,7 +662,10 @@ pub fn normalize_create_table_constraints(
                         enforced: attributes.enforced.unwrap_or(true),
                     });
                 }
-                ColumnConstraint::PrimaryKey { attributes } => {
+                ColumnConstraint::PrimaryKey {
+                    attributes,
+                    tablespace,
+                } => {
                     let (deferrable, initially_deferred) =
                         validate_key_attributes(attributes, "PRIMARY KEY")?;
                     index_constraints.push(PendingIndexConstraint {
@@ -678,13 +683,17 @@ pub fn normalize_create_table_constraints(
                         exclusion: false,
                         nulls_not_distinct: false,
                         without_overlaps: None,
+                        tablespace: tablespace.clone(),
                         access_method: None,
                         exclusion_operators: Vec::new(),
                         deferrable,
                         initially_deferred,
                     });
                 }
-                ColumnConstraint::Unique { attributes } => {
+                ColumnConstraint::Unique {
+                    attributes,
+                    tablespace,
+                } => {
                     let (deferrable, initially_deferred) =
                         validate_key_attributes(attributes, "UNIQUE")?;
                     index_constraints.push(PendingIndexConstraint {
@@ -702,6 +711,7 @@ pub fn normalize_create_table_constraints(
                         exclusion: false,
                         nulls_not_distinct: attributes.nulls_not_distinct,
                         without_overlaps: None,
+                        tablespace: tablespace.clone(),
                         access_method: None,
                         exclusion_operators: Vec::new(),
                         deferrable,
@@ -787,6 +797,7 @@ pub fn normalize_create_table_constraints(
                 columns: key_columns,
                 include_columns,
                 without_overlaps,
+                tablespace,
             } => {
                 let (deferrable, initially_deferred) =
                     validate_key_attributes(attributes, "PRIMARY KEY")?;
@@ -817,6 +828,7 @@ pub fn normalize_create_table_constraints(
                     exclusion: false,
                     nulls_not_distinct: false,
                     without_overlaps: without_overlaps.clone(),
+                    tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
                     deferrable,
@@ -828,6 +840,7 @@ pub fn normalize_create_table_constraints(
                 columns: key_columns,
                 include_columns,
                 without_overlaps,
+                tablespace,
             } => {
                 let (deferrable, initially_deferred) =
                     validate_key_attributes(attributes, "UNIQUE")?;
@@ -867,6 +880,7 @@ pub fn normalize_create_table_constraints(
                     exclusion: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
                     without_overlaps: without_overlaps.clone(),
+                    tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
                     deferrable,
@@ -914,6 +928,7 @@ pub fn normalize_create_table_constraints(
                     primary: false,
                     nulls_not_distinct: false,
                     without_overlaps: None,
+                    tablespace: None,
                     exclusion: true,
                     access_method: Some(using_method.clone()),
                     exclusion_operators: elements
@@ -1083,6 +1098,7 @@ pub fn normalize_create_table_constraints(
             exclusion: constraint.exclusion,
             nulls_not_distinct: constraint.nulls_not_distinct,
             without_overlaps: constraint.without_overlaps,
+            tablespace: constraint.tablespace,
             access_method: constraint.access_method,
             exclusion_operators: constraint.exclusion_operators,
             deferrable: constraint.deferrable,
@@ -1742,6 +1758,7 @@ pub fn normalize_alter_table_add_constraint(
             columns,
             include_columns,
             without_overlaps,
+            tablespace,
         } => {
             let (deferrable, initially_deferred) =
                 validate_key_attributes(attributes, "PRIMARY KEY")?;
@@ -1785,6 +1802,7 @@ pub fn normalize_alter_table_add_constraint(
                     exclusion: false,
                     nulls_not_distinct: false,
                     without_overlaps: without_overlaps.clone(),
+                    tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
                     deferrable,
@@ -1797,6 +1815,7 @@ pub fn normalize_alter_table_add_constraint(
             columns,
             include_columns,
             without_overlaps,
+            tablespace,
         } => {
             let (deferrable, initially_deferred) = validate_key_attributes(attributes, "UNIQUE")?;
             let resolved = resolve_relation_index_constraint_columns(
@@ -1835,6 +1854,7 @@ pub fn normalize_alter_table_add_constraint(
                     exclusion: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
                     without_overlaps: without_overlaps.clone(),
+                    tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
                     deferrable,
@@ -1883,6 +1903,7 @@ pub fn normalize_alter_table_add_constraint(
                     primary: false,
                     nulls_not_distinct: false,
                     without_overlaps: None,
+                    tablespace: None,
                     exclusion: true,
                     access_method: Some(using_method.clone()),
                     exclusion_operators: elements
@@ -1897,6 +1918,7 @@ pub fn normalize_alter_table_add_constraint(
         TableConstraint::PrimaryKeyUsingIndex {
             attributes,
             index_name,
+            tablespace,
         } => {
             let (deferrable, initially_deferred) =
                 validate_key_attributes(attributes, "PRIMARY KEY")?;
@@ -1943,6 +1965,7 @@ pub fn normalize_alter_table_add_constraint(
                     exclusion: false,
                     nulls_not_distinct,
                     without_overlaps: None,
+                    tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
                     deferrable,
@@ -1953,6 +1976,7 @@ pub fn normalize_alter_table_add_constraint(
         TableConstraint::UniqueUsingIndex {
             attributes,
             index_name,
+            tablespace,
         } => {
             let (deferrable, initially_deferred) = validate_key_attributes(attributes, "UNIQUE")?;
             let (columns, include_columns, nulls_not_distinct) = index_columns_for_existing_index(
@@ -1983,6 +2007,7 @@ pub fn normalize_alter_table_add_constraint(
                     exclusion: false,
                     nulls_not_distinct,
                     without_overlaps: None,
+                    tablespace: tablespace.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
                     deferrable,

@@ -1,5 +1,9 @@
 use super::super::*;
 use super::reloptions::normalize_btree_reloptions;
+use super::tablespace::{
+    ensure_non_global_relation_tablespace, ensure_tablespace_create_privilege,
+    resolve_relation_tablespace_oid, tablespace_oid_by_name,
+};
 use crate::backend::access::nbtree::nbtree::UNIQUE_BUILD_DETAIL_SEPARATOR;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
@@ -53,6 +57,12 @@ enum ReindexCatalogFilter {
     UserOnly,
 }
 
+#[derive(Clone, Debug)]
+struct ReindexTablespaceTarget {
+    name: String,
+    oid: u32,
+}
+
 fn is_system_catalog_relation_oid(relation_oid: u32) -> bool {
     crate::backend::catalog::bootstrap::bootstrap_catalog_kinds()
         .into_iter()
@@ -65,6 +75,18 @@ fn is_system_catalog_relation_oid(relation_oid: u32) -> bool {
 fn cannot_reindex_system_catalogs_concurrently_error() -> ExecError {
     ExecError::DetailedError {
         message: "cannot reindex system catalogs concurrently".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn cannot_move_system_relation_error(name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot move system relation \"{}\"",
+            unqualified_relation_name(name)
+        ),
         detail: None,
         hint: None,
         sqlstate: "0A000",
@@ -94,6 +116,7 @@ fn missing_catalog_toast_index_reindex_error(
     kind: &crate::backend::parser::ReindexTargetKind,
     index_name: &str,
     concurrently: bool,
+    moving_tablespace: bool,
 ) -> Option<ExecError> {
     if !matches!(kind, crate::backend::parser::ReindexTargetKind::Index) {
         return None;
@@ -105,6 +128,9 @@ fn missing_catalog_toast_index_reindex_error(
     }
     if concurrently {
         return Some(cannot_reindex_system_catalogs_concurrently_error());
+    }
+    if moving_tablespace {
+        return Some(cannot_move_system_relation_error(basename));
     }
     // :HACK: Some bootstrap catalog toast indexes are not materialized as
     // normal relcache entries yet. Match PostgreSQL's SQL-visible permission
@@ -147,6 +173,12 @@ fn reindex_missing_relation_error(name: &str) -> ExecError {
     }
 }
 
+fn unqualified_relation_name(name: &str) -> &str {
+    name.rsplit_once('.')
+        .map(|(_, basename)| basename)
+        .unwrap_or(name)
+}
+
 fn relation_name_for_reindex_notice(
     catalog: &dyn crate::backend::parser::CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
@@ -169,6 +201,31 @@ fn qualified_index_name_for_reindex_warning(
                 .map(|namespace| format!("{}.{}", namespace.nspname, row.relname))
         })
         .unwrap_or_else(|| index.name.clone())
+}
+
+fn system_relation_name_for_reindex_move_error(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+) -> String {
+    catalog
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .map(|index| index.name)
+        .next()
+        .unwrap_or_else(|| {
+            let relation_name = relation_name_for_reindex_notice(catalog, relation);
+            if relation.relkind == 't'
+                && relation_name
+                    .rsplit_once('.')
+                    .map(|(_, basename)| basename)
+                    .unwrap_or(&relation_name)
+                    .starts_with("pg_toast_")
+            {
+                format!("{}_index", unqualified_relation_name(&relation_name))
+            } else {
+                relation_name
+            }
+        })
 }
 
 fn ensure_reindex_schema_owner(
@@ -1877,6 +1934,7 @@ impl Database {
         unique: bool,
         primary: bool,
         nulls_not_distinct: bool,
+        tablespace_oid: Option<u32>,
         xid: TransactionId,
         cid: CommandId,
         access_method_oid: u32,
@@ -1903,7 +1961,7 @@ impl Database {
             ..build_options.clone()
         };
         let table_entry = catalog_entry_from_bound_relation(relation);
-        let (index_entry, effect) = catalog_guard
+        let (mut index_entry, effect) = catalog_guard
             .create_index_for_entry_mvcc_with_options(
                 index_name.to_string(),
                 table_entry,
@@ -1923,6 +1981,31 @@ impl Database {
             self.apply_catalog_mutation_effect_immediate(&effect)?;
         }
         catalog_effects.push(effect);
+        if let Some(tablespace_oid) = tablespace_oid
+            && tablespace_oid != index_entry.rel.spc_oid
+        {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(1),
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .set_relation_tablespace_mvcc(index_entry.relation_oid, tablespace_oid, false, &ctx)
+                .map_err(map_catalog_error)?;
+            index_entry.rel = effect.created_rels.first().copied().unwrap_or_else(|| {
+                let mut rel = index_entry.rel;
+                rel.spc_oid = tablespace_oid;
+                rel
+            });
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
 
         let has_expression_keys = index_entry
             .index_meta
@@ -2499,6 +2582,7 @@ impl Database {
         client_id: ClientId,
         create_stmt: &CreateIndexStatement,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         maintenance_work_mem_kb: usize,
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
@@ -2515,6 +2599,7 @@ impl Database {
             xid,
             0,
             configured_search_path,
+            gucs,
             maintenance_work_mem_kb,
             &mut catalog_effects,
         );
@@ -2550,6 +2635,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         maintenance_work_mem_kb: usize,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
@@ -2762,6 +2848,17 @@ impl Database {
         } else {
             create_stmt.index_name.clone()
         };
+        let index_tablespace_oid = if entry.relpersistence == 't' {
+            None
+        } else {
+            Some(resolve_relation_tablespace_oid(
+                self,
+                client_id,
+                Some((xid, cid)),
+                create_stmt.tablespace.as_deref(),
+                gucs,
+            )?)
+        };
         if entry.relkind == 'p' {
             match self.build_partitioned_index_in_transaction(
                 client_id,
@@ -2777,6 +2874,7 @@ impl Database {
                 access_method_oid,
                 access_method_handler,
                 &build_options,
+                index_tablespace_oid,
                 maintenance_work_mem_kb,
                 configured_search_path,
                 catalog_effects,
@@ -2804,6 +2902,7 @@ impl Database {
             create_stmt.unique,
             false,
             create_stmt.nulls_not_distinct,
+            index_tablespace_oid,
             xid,
             cid,
             access_method_oid,
@@ -2855,6 +2954,7 @@ impl Database {
         client_id: ClientId,
         heap: &crate::backend::parser::BoundRelation,
         index: &crate::backend::parser::BoundIndexRelation,
+        target_tablespace_oid: Option<u32>,
         visible_catalog: Option<crate::backend::executor::ExecutorCatalog>,
         xid: TransactionId,
         cid: CommandId,
@@ -2876,9 +2976,14 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut rebuilt_index = index.clone();
-        if let Some(rel) =
-            self.rewrite_index_storage_for_reindex(client_id, xid, cid, index, catalog_effects)?
-        {
+        if let Some(rel) = self.rewrite_index_storage_for_reindex(
+            client_id,
+            xid,
+            cid,
+            index,
+            target_tablespace_oid,
+            catalog_effects,
+        )? {
             rebuilt_index.rel = rel;
         }
         let mut ctx = ExecutorContext {
@@ -2973,6 +3078,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         index: &crate::backend::parser::BoundIndexRelation,
+        target_tablespace_oid: Option<u32>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<Option<crate::backend::storage::smgr::RelFileLocator>, ExecError> {
         let ctx = CatalogWriteContext {
@@ -2987,7 +3093,11 @@ impl Database {
         let effect = self
             .catalog
             .write()
-            .rewrite_relation_storage_mvcc(&[index.relation_oid], &ctx)
+            .rewrite_relation_storage_mvcc_with_tablespace(
+                &[index.relation_oid],
+                target_tablespace_oid,
+                &ctx,
+            )
             .map_err(map_catalog_error)?;
         let rewritten_rel = effect.created_rels.first().copied();
         self.apply_catalog_mutation_effect_immediate(&effect)?;
@@ -3033,6 +3143,11 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, 0)), configured_search_path);
+        let _target_tablespace = self.resolve_reindex_tablespace_target(
+            client_id,
+            Some((xid, 0)),
+            reindex_stmt.tablespace.as_deref(),
+        )?;
         let locked_rel = match reindex_stmt.kind {
             crate::backend::parser::ReindexTargetKind::Index
             | crate::backend::parser::ReindexTargetKind::Table => {
@@ -3043,6 +3158,7 @@ impl Database {
                             &reindex_stmt.kind,
                             &reindex_stmt.index_name,
                             reindex_stmt.concurrently,
+                            reindex_stmt.tablespace.is_some(),
                         )
                         .unwrap_or_else(|| reindex_missing_relation_error(&reindex_stmt.index_name))
                     })?;
@@ -3073,6 +3189,23 @@ impl Database {
         result
     }
 
+    fn resolve_reindex_tablespace_target(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        tablespace: Option<&str>,
+    ) -> Result<Option<ReindexTablespaceTarget>, ExecError> {
+        let Some(name) = tablespace.map(str::trim).filter(|name| !name.is_empty()) else {
+            return Ok(None);
+        };
+        let oid = tablespace_oid_by_name(self, client_id, txn_ctx, name)?;
+        ensure_tablespace_create_privilege(self, client_id, txn_ctx, oid)?;
+        Ok(Some(ReindexTablespaceTarget {
+            name: name.to_string(),
+            oid,
+        }))
+    }
+
     pub(crate) fn execute_reindex_index_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -3083,6 +3216,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let target_tablespace = self.resolve_reindex_tablespace_target(
+            client_id,
+            Some((xid, cid)),
+            reindex_stmt.tablespace.as_deref(),
+        )?;
         match reindex_stmt.kind {
             crate::backend::parser::ReindexTargetKind::Index => {
                 self.reindex_named_index_in_transaction(
@@ -3091,6 +3229,7 @@ impl Database {
                     &reindex_stmt.index_name,
                     reindex_stmt.concurrently,
                     reindex_stmt.verbose,
+                    target_tablespace.as_ref(),
                     xid,
                     cid,
                     catalog_effects,
@@ -3116,6 +3255,18 @@ impl Database {
                 {
                     return Err(cannot_reindex_system_catalogs_concurrently_error());
                 }
+                if let Some(target) = target_tablespace.as_ref() {
+                    if is_system_catalog_relation_oid(relation.relation_oid) {
+                        return Err(cannot_move_system_relation_error(
+                            &system_relation_name_for_reindex_move_error(&catalog, &relation),
+                        ));
+                    }
+                    ensure_non_global_relation_tablespace(
+                        &target.name,
+                        target.oid,
+                        reindex_stmt.concurrently,
+                    )?;
+                }
                 if let Err(err) =
                     ensure_relation_owner(self, client_id, &relation, &reindex_stmt.index_name)
                 {
@@ -3131,6 +3282,7 @@ impl Database {
                         &relation,
                         reindex_stmt.concurrently,
                         reindex_stmt.verbose,
+                        target_tablespace.as_ref(),
                         xid,
                         cid,
                         catalog_effects,
@@ -3153,6 +3305,7 @@ impl Database {
                         &relation,
                         reindex_stmt.concurrently,
                         reindex_stmt.verbose,
+                        target_tablespace.as_ref(),
                         xid,
                         cid,
                         catalog_effects,
@@ -3198,6 +3351,7 @@ impl Database {
                     namespace_oid,
                     reindex_stmt.concurrently,
                     reindex_stmt.verbose,
+                    target_tablespace.as_ref(),
                     xid,
                     cid,
                     catalog_effects,
@@ -3228,6 +3382,7 @@ impl Database {
                     ReindexCatalogFilter::All,
                     reindex_stmt.concurrently,
                     reindex_stmt.verbose,
+                    target_tablespace.as_ref(),
                     xid,
                     cid,
                     catalog_effects,
@@ -3253,6 +3408,7 @@ impl Database {
                     ReindexCatalogFilter::UserOnly,
                     reindex_stmt.concurrently,
                     reindex_stmt.verbose,
+                    target_tablespace.as_ref(),
                     xid,
                     cid,
                     catalog_effects,
@@ -3291,6 +3447,7 @@ impl Database {
                     ReindexCatalogFilter::SystemOnly,
                     reindex_stmt.concurrently,
                     reindex_stmt.verbose,
+                    target_tablespace.as_ref(),
                     xid,
                     cid,
                     catalog_effects,
@@ -3307,6 +3464,7 @@ impl Database {
         index_name: &str,
         concurrently: bool,
         verbose: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3316,6 +3474,7 @@ impl Database {
                 &crate::backend::parser::ReindexTargetKind::Index,
                 index_name,
                 concurrently,
+                target_tablespace.is_some(),
             )
             .unwrap_or_else(|| reindex_missing_relation_error(index_name))
         })?;
@@ -3326,6 +3485,7 @@ impl Database {
                 catalog,
                 index_entry.relation_oid,
                 concurrently,
+                target_tablespace,
                 xid,
                 cid,
                 catalog_effects,
@@ -3349,6 +3509,12 @@ impl Database {
         if concurrently && is_system_catalog_relation_oid(heap.relation_oid) {
             return Err(cannot_reindex_system_catalogs_concurrently_error());
         }
+        if let Some(target) = target_tablespace {
+            if is_system_catalog_relation_oid(heap.relation_oid) {
+                return Err(cannot_move_system_relation_error(&index.name));
+            }
+            ensure_non_global_relation_tablespace(&target.name, target.oid, concurrently)?;
+        }
         if concurrently && index.index_meta.indisexclusion {
             return Err(cannot_reindex_exclusion_index_concurrently_error());
         }
@@ -3356,6 +3522,7 @@ impl Database {
             client_id,
             &heap,
             &index,
+            target_tablespace.map(|target| target.oid),
             None,
             xid,
             cid,
@@ -3384,6 +3551,51 @@ impl Database {
         relation: &crate::backend::parser::BoundRelation,
         concurrently: bool,
         verbose: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        if let Some(target) = target_tablespace {
+            ensure_non_global_relation_tablespace(&target.name, target.oid, concurrently)?;
+        }
+        self.reindex_relation_index_set_in_transaction(
+            client_id,
+            catalog,
+            relation,
+            concurrently,
+            verbose,
+            target_tablespace,
+            xid,
+            cid,
+            catalog_effects,
+        )?;
+        if let Some(toast) = relation.toast
+            && let Some(toast_relation) = catalog.lookup_relation_by_oid(toast.relation_oid)
+        {
+            self.reindex_relation_index_set_in_transaction(
+                client_id,
+                catalog,
+                &toast_relation,
+                concurrently,
+                verbose,
+                None,
+                xid,
+                cid,
+                catalog_effects,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn reindex_relation_index_set_in_transaction(
+        &self,
+        client_id: ClientId,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        relation: &crate::backend::parser::BoundRelation,
+        concurrently: bool,
+        verbose: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3413,6 +3625,7 @@ impl Database {
                 client_id,
                 relation,
                 &index,
+                target_tablespace.map(|target| target.oid),
                 None,
                 xid,
                 cid,
@@ -3431,6 +3644,7 @@ impl Database {
         catalog: &dyn crate::backend::parser::CatalogLookup,
         partitioned_index_oid: u32,
         concurrently: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3456,10 +3670,17 @@ impl Database {
             if concurrently && is_system_catalog_relation_oid(heap.relation_oid) {
                 return Err(cannot_reindex_system_catalogs_concurrently_error());
             }
+            if let Some(target) = target_tablespace {
+                if is_system_catalog_relation_oid(heap.relation_oid) {
+                    return Err(cannot_move_system_relation_error(&index.name));
+                }
+                ensure_non_global_relation_tablespace(&target.name, target.oid, concurrently)?;
+            }
             self.rebuild_index_relation_in_transaction(
                 client_id,
                 &heap,
                 &index,
+                target_tablespace.map(|target| target.oid),
                 None,
                 xid,
                 cid,
@@ -3476,6 +3697,7 @@ impl Database {
         partitioned_relation: &crate::backend::parser::BoundRelation,
         concurrently: bool,
         verbose: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3499,6 +3721,7 @@ impl Database {
                 &relation,
                 concurrently,
                 verbose,
+                target_tablespace,
                 xid,
                 cid,
                 catalog_effects,
@@ -3514,6 +3737,7 @@ impl Database {
         namespace_oid: u32,
         concurrently: bool,
         verbose: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3547,6 +3771,7 @@ impl Database {
                 &relation,
                 concurrently,
                 verbose,
+                target_tablespace,
                 xid,
                 cid,
                 catalog_effects,
@@ -3582,6 +3807,7 @@ impl Database {
         catalog_filter: ReindexCatalogFilter,
         concurrently: bool,
         verbose: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3611,6 +3837,13 @@ impl Database {
                 }
                 continue;
             }
+            if target_tablespace.is_some() && is_system_catalog {
+                push_warning("cannot move system relations, skipping all");
+                continue;
+            }
+            if let Some(target) = target_tablespace {
+                ensure_non_global_relation_tablespace(&target.name, target.oid, concurrently)?;
+            }
             let Some(relation) = catalog.lookup_relation_by_oid(class_row.oid) else {
                 continue;
             };
@@ -3621,6 +3854,7 @@ impl Database {
                 &relation,
                 concurrently,
                 verbose,
+                target_tablespace,
                 xid,
                 cid,
                 catalog_effects,

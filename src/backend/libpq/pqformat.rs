@@ -1706,10 +1706,6 @@ pub fn format_bytea_text(bytes: &[u8], output: ByteaOutputFormat) -> String {
                 match byte {
                     b'\\' => out.push_str("\\\\"),
                     0x20..=0x7e => out.push(byte as char),
-                    0x01..=0x1f | 0x7f => {
-                        use std::fmt::Write as _;
-                        let _ = write!(&mut out, "\\x{byte:02x}");
-                    }
                     _ => {
                         use std::fmt::Write as _;
                         let _ = write!(&mut out, "\\{:03o}", byte);
