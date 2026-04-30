@@ -12788,6 +12788,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
         ("pg_numa_available", BuiltinScalarFunction::PgNumaAvailable),
         (
+            "gin_clean_pending_list",
+            BuiltinScalarFunction::GinCleanPendingList,
+        ),
+        (
             "brin_summarize_new_values",
             BuiltinScalarFunction::BrinSummarizeNewValues,
         ),
@@ -16535,6 +16539,18 @@ fn brin_support_proc_rows() -> Vec<PgProcRow> {
             false,
             'f',
             'i',
+        ),
+        proc_row(
+            3789,
+            "gin_clean_pending_list",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID]),
+            "gin_clean_pending_list",
+            1,
+            false,
+            false,
+            'f',
+            'v',
         ),
         proc_row(
             3952,

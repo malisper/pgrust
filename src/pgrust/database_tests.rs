@@ -25467,6 +25467,107 @@ fn create_gin_jsonb_index_uses_bitmap_scan_and_rechecks() {
 }
 
 #[test]
+fn gin_clean_pending_list_moves_fastupdate_tuples() {
+    let base = temp_dir("gin_clean_pending_list");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table docs (id int4 not null, j jsonb)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index docs_j_gin on docs using gin (j) \
+         with (fastupdate = on, gin_pending_list_limit = 4096)",
+    )
+    .unwrap();
+    db.execute(1, "insert into docs values (1, '{\"a\":1}'::jsonb)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from docs where j @> '{\"a\":1}'"),
+        vec![vec![Value::Int64(1)]]
+    );
+    let cleaned = query_rows(&db, 1, "select gin_clean_pending_list('docs_j_gin')");
+    let Some(Value::Int64(cleaned_pages)) = cleaned.first().and_then(|row| row.first()) else {
+        panic!("unexpected gin_clean_pending_list result: {cleaned:?}");
+    };
+    assert!(*cleaned_pages > 0);
+    assert_eq!(
+        query_rows(&db, 1, "select gin_clean_pending_list('docs_j_gin')"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn alter_gin_fastupdate_off_bypasses_pending_list() {
+    let base = temp_dir("gin_alter_fastupdate_off");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table docs (id int4 not null, j jsonb)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index docs_j_gin on docs using gin (j) \
+         with (fastupdate = on, gin_pending_list_limit = 4096)",
+    )
+    .unwrap();
+    db.execute(1, "insert into docs values (1, '{\"a\":1}'::jsonb)")
+        .unwrap();
+    query_rows(&db, 1, "select gin_clean_pending_list('docs_j_gin')");
+
+    db.execute(1, "alter index docs_j_gin set (fastupdate = off)")
+        .unwrap();
+    db.execute(1, "insert into docs values (2, '{\"a\":1}'::jsonb)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select gin_clean_pending_list('docs_j_gin')"),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from docs where j @> '{\"a\":1}'"),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn gin_clean_pending_list_handles_local_temp_index() {
+    let base = temp_dir("gin_temp_clean_pending_list");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table docs (id int4 not null, tags int4[])",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index docs_tags_gin on docs using gin (tags)")
+        .unwrap();
+    session
+        .execute(&db, "insert into docs values (1, ARRAY[1,2]::int4[])")
+        .unwrap();
+
+    let cleaned = session_query_rows(
+        &mut session,
+        &db,
+        "select gin_clean_pending_list('docs_tags_gin')",
+    );
+    let Some(Value::Int64(cleaned_pages)) = cleaned.first().and_then(|row| row.first()) else {
+        panic!("unexpected temp gin_clean_pending_list result: {cleaned:?}");
+    };
+    assert!(*cleaned_pages > 0);
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where tags @> ARRAY[1]::int4[]",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
 fn create_gin_array_index_builds_and_vacuums() {
     let base = temp_dir("gin_array_vacuum");
     let db = Database::open(&base, 16).unwrap();
