@@ -1811,6 +1811,74 @@ fn to_timestamp_invalid_value_error(value: &str, field: &str, detail: &str) -> E
     }
 }
 
+fn to_timestamp_invalid_integer_error(value: &str, field: &str) -> ExecError {
+    to_timestamp_invalid_value_error(value, field, "Value must be an integer.")
+}
+
+fn to_timestamp_source_too_short_error(
+    field: &str,
+    required: usize,
+    remaining: usize,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("source string too short for \"{field}\" formatting field"),
+        detail: Some(format!(
+            "Field requires {required} characters, but only {remaining} remain."
+        )),
+        hint: Some(
+            "If your source string is not fixed-width, try using the \"FM\" modifier.".into(),
+        ),
+        sqlstate: "22007",
+    }
+}
+
+fn to_timestamp_fixed_width_parse_error(
+    value: &str,
+    field: &str,
+    required: usize,
+    parsed: usize,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid value \"{value}\" for \"{field}\""),
+        detail: Some(format!(
+            "Field requires {required} characters, but only {parsed} could be parsed."
+        )),
+        hint: Some(
+            "If your source string is not fixed-width, try using the \"FM\" modifier.".into(),
+        ),
+        sqlstate: "22007",
+    }
+}
+
+fn to_timestamp_value_out_of_range_error(field: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("value for \"{field}\" in source string is out of range"),
+        detail: Some("Value must be in the range -2147483648 to 2147483647.".into()),
+        hint: None,
+        sqlstate: "22003",
+    }
+}
+
+fn to_timestamp_conflicting_field_error(field: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("conflicting values for \"{field}\" field in formatting string"),
+        detail: Some("This value contradicts a previous setting for the same field type.".into()),
+        hint: None,
+        sqlstate: "22007",
+    }
+}
+
+fn to_timestamp_mixed_date_conventions_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "invalid combination of date conventions".into(),
+        detail: None,
+        hint: Some(
+            "Do not mix Gregorian and ISO week date conventions in a formatting template.".into(),
+        ),
+        sqlstate: "22007",
+    }
+}
+
 fn read_digits(input: &str, pos: &mut usize, min: usize, max: usize) -> Option<i32> {
     let bytes = input.as_bytes();
     let start = *pos;
@@ -1841,11 +1909,117 @@ fn read_signed_digits(input: &str, pos: &mut usize, min: usize, max: usize) -> O
     read_digits(input, pos, min, max).map(|value| sign * value)
 }
 
+fn read_int_field(
+    input: &str,
+    pos: &mut usize,
+    field: &str,
+    min: usize,
+    max: usize,
+    fixed_width: Option<usize>,
+) -> Result<i32, ExecError> {
+    if let Some(width) = fixed_width {
+        let remaining = input.len().saturating_sub(*pos);
+        if remaining < width {
+            return Err(to_timestamp_source_too_short_error(field, width, remaining));
+        }
+        let end = *pos + width;
+        let text = &input[*pos..end];
+        let parsed = text
+            .as_bytes()
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if parsed < width {
+            return Err(to_timestamp_fixed_width_parse_error(
+                text, field, width, parsed,
+            ));
+        }
+        *pos = end;
+        return text
+            .parse::<i32>()
+            .map_err(|_| to_timestamp_value_out_of_range_error(field));
+    }
+
+    let start = *pos;
+    match read_digits(input, pos, min, max) {
+        Some(value) => Ok(value),
+        None => {
+            let end = input
+                .get(start..)
+                .and_then(|rest| {
+                    rest.char_indices()
+                        .nth(max.saturating_sub(1))
+                        .map(|(idx, ch)| start + idx + ch.len_utf8())
+                })
+                .unwrap_or(input.len());
+            Err(to_timestamp_invalid_integer_error(
+                &input[start..end],
+                field,
+            ))
+        }
+    }
+}
+
+fn read_signed_int_field(
+    input: &str,
+    pos: &mut usize,
+    field: &str,
+    min: usize,
+    max: usize,
+) -> Result<i32, ExecError> {
+    let start = *pos;
+    if input
+        .as_bytes()
+        .get(*pos)
+        .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+    {
+        *pos += 1;
+    }
+    let digit_start = *pos;
+    while *pos < input.len() && input.as_bytes()[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
+    let digit_count = *pos - digit_start;
+    if digit_count < min {
+        *pos = start;
+        let end = input
+            .get(start..)
+            .and_then(|rest| {
+                rest.chars()
+                    .next()
+                    .filter(|ch| ch.is_ascii_alphabetic())
+                    .map(|_| {
+                        start
+                            + rest
+                                .chars()
+                                .take_while(|ch| ch.is_ascii_alphabetic())
+                                .map(char::len_utf8)
+                                .sum::<usize>()
+                    })
+            })
+            .unwrap_or_else(|| (start + max).min(input.len()));
+        return Err(to_timestamp_invalid_integer_error(
+            &input[start..end],
+            field,
+        ));
+    }
+    if digit_count > max {
+        return Err(to_timestamp_value_out_of_range_error(field));
+    }
+    input[start..*pos]
+        .parse::<i32>()
+        .map_err(|_| to_timestamp_value_out_of_range_error(field))
+}
+
 fn read_alpha(input: &str, pos: &mut usize) -> Option<String> {
+    read_alpha_with_max(input, pos, usize::MAX)
+}
+
+fn read_alpha_with_max(input: &str, pos: &mut usize, max: usize) -> Option<String> {
     let bytes = input.as_bytes();
     let start = *pos;
     let mut end = start;
-    while end < bytes.len() && bytes[end].is_ascii_alphabetic() {
+    while end < bytes.len() && bytes[end].is_ascii_alphabetic() && end - start < max {
         end += 1;
     }
     if end == start {
@@ -1855,12 +2029,54 @@ fn read_alpha(input: &str, pos: &mut usize) -> Option<String> {
     Some(input[start..end].to_string())
 }
 
-fn read_month_field(input: &str, pos: &mut usize) -> Option<String> {
+fn plus_is_after_spaced_plus(input: &str, plus_pos: usize) -> bool {
+    if input.as_bytes().get(plus_pos) != Some(&b'+') || plus_pos == 0 {
+        return false;
+    }
+    let mut index = plus_pos;
+    let mut saw_whitespace = false;
+    while index > 0 && input.as_bytes()[index - 1].is_ascii_whitespace() {
+        saw_whitespace = true;
+        index -= 1;
+    }
+    saw_whitespace && index > 0 && input.as_bytes()[index - 1] == b'+'
+}
+
+fn read_month_field(
+    input: &str,
+    pos: &mut usize,
+    max_alpha: usize,
+    allow_spaced_plus: bool,
+) -> Option<String> {
     if matches!(input.as_bytes().get(*pos), Some(b'+')) {
+        if !allow_spaced_plus && plus_is_after_spaced_plus(input, *pos) {
+            return None;
+        }
         *pos += 1;
+        while matches!(input.as_bytes().get(*pos), Some(b'+')) {
+            *pos += 1;
+        }
         skip_ascii_whitespace(input, pos);
     }
-    read_alpha(input, pos)
+    read_alpha_with_max(input, pos, max_alpha)
+}
+
+fn invalid_month_value(input: &str, pos: usize) -> String {
+    let rest = input.get(pos..).unwrap_or_default();
+    if rest.starts_with('+') {
+        return "+".into();
+    }
+    rest.split_whitespace().next().unwrap_or(rest).to_string()
+}
+
+fn preceding_format_spaces(format: &str, pos: usize) -> usize {
+    let mut count = 0usize;
+    let mut index = pos;
+    while index > 0 && format.as_bytes()[index - 1].is_ascii_whitespace() {
+        count += 1;
+        index -= 1;
+    }
+    count
 }
 
 fn read_offset_token(input: &str, pos: &mut usize) -> Option<String> {
@@ -1878,6 +2094,16 @@ fn read_offset_token(input: &str, pos: &mut usize) -> Option<String> {
     }
     *pos = end;
     Some(input[start..end].to_string())
+}
+
+fn invalid_offset_value_fragment(input: &str, pos: usize) -> String {
+    let rest = input.get(pos..).unwrap_or_default();
+    let without_sign = rest
+        .strip_prefix('+')
+        .or_else(|| rest.strip_prefix('-'))
+        .unwrap_or(rest);
+    let after_colon = without_sign.rsplit(':').next().unwrap_or(without_sign);
+    after_colon.chars().take(2).collect()
 }
 
 fn read_timezone_token(input: &str, pos: &mut usize) -> Option<String> {
@@ -1949,6 +2175,43 @@ fn skip_to_timestamp_ordinal_suffix(input: &str, pos: &mut usize) {
     }
 }
 
+fn escaped_quote_delimiter_len(format: &str, pos: usize) -> Option<usize> {
+    let bytes = format.as_bytes();
+    let mut index = pos;
+    while bytes.get(index) == Some(&b'\\') {
+        index += 1;
+    }
+    (index > pos && bytes.get(index) == Some(&b'"')).then_some(index - pos + 1)
+}
+
+fn find_format_quote_end(format: &str, start: usize) -> Option<usize> {
+    let bytes = format.as_bytes();
+    let mut index = start;
+    while index < bytes.len() {
+        if bytes[index] == b'"' && (index == 0 || bytes[index - 1] != b'\\') {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn unescape_format_quoted_literal(literal: &str) -> String {
+    let mut out = String::with_capacity(literal.len());
+    let mut chars = literal.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && let Some('"') = chars.clone().next()
+        {
+            chars.next();
+            out.push('"');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn consume_to_timestamp_literal(input: &str, pos: &mut usize, literal: &str, exact: bool) -> bool {
     if literal.is_empty() {
         return true;
@@ -1988,7 +2251,7 @@ fn skip_template_separator(input: &str, pos: &mut usize, exact: bool, expected: 
         if input
             .as_bytes()
             .get(*pos)
-            .is_some_and(u8::is_ascii_whitespace)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || !byte.is_ascii_alphanumeric())
         {
             *pos += 1;
         }
@@ -2075,6 +2338,27 @@ struct ToTimestampFields {
     tz_hour: Option<i32>,
     tz_minute: Option<i32>,
     timezone: Option<String>,
+    has_gregorian: bool,
+    has_iso: bool,
+    hour_12: bool,
+}
+
+impl ToTimestampFields {
+    fn set_month(&mut self, value: u32, field: &str) -> Result<(), ExecError> {
+        if self.month.is_some_and(|existing| existing != value) {
+            return Err(to_timestamp_conflicting_field_error(field));
+        }
+        self.month = Some(value);
+        Ok(())
+    }
+
+    fn mark_gregorian(&mut self) {
+        self.has_gregorian = true;
+    }
+
+    fn mark_iso(&mut self) {
+        self.has_iso = true;
+    }
 }
 
 fn parse_to_timestamp_text_format(
@@ -2101,6 +2385,39 @@ fn parse_to_timestamp_text_format(
             fmt_pos += 2;
             continue;
         }
+        if let Some(open_len) = escaped_quote_delimiter_len(format, fmt_pos) {
+            let literal_start = fmt_pos + open_len;
+            let mut close_start = None;
+            let mut close_len = 0usize;
+            let mut search = literal_start;
+            while search < format.len() {
+                if let Some(len) = escaped_quote_delimiter_len(format, search) {
+                    close_start = Some(search);
+                    close_len = len;
+                    break;
+                }
+                search += 1;
+            }
+            let Some(close_start) = close_start else {
+                return Err(to_timestamp_parse_error(input));
+            };
+            let literal = &format[literal_start..close_start];
+            let mut quoted = String::from("\"");
+            quoted.push_str(literal);
+            quoted.push('"');
+            if input
+                .get(input_pos..)
+                .is_some_and(|rest| rest.starts_with('"'))
+            {
+                if !consume_to_timestamp_literal(input, &mut input_pos, &quoted, exact) {
+                    return Err(to_timestamp_parse_error(input));
+                }
+            } else if !consume_to_timestamp_literal(input, &mut input_pos, literal, exact) {
+                return Err(to_timestamp_parse_error(input));
+            }
+            fmt_pos = close_start + close_len;
+            continue;
+        }
         if format[fmt_pos..].starts_with("\"\"")
             && let Some(close_rel) = format[fmt_pos + 2..].find("\"\"")
         {
@@ -2115,14 +2432,25 @@ fn parse_to_timestamp_text_format(
             continue;
         }
         if format.as_bytes().get(fmt_pos) == Some(&b'"') {
-            let Some(end_rel) = format[fmt_pos + 1..].find('"') else {
+            let Some(end) = find_format_quote_end(format, fmt_pos + 1) else {
                 return Err(to_timestamp_parse_error(input));
             };
-            let literal = &format[fmt_pos + 1..fmt_pos + 1 + end_rel];
-            if !consume_to_timestamp_literal(input, &mut input_pos, literal, exact) {
+            let literal = unescape_format_quoted_literal(&format[fmt_pos + 1..end]);
+            if input
+                .get(input_pos..)
+                .is_some_and(|rest| rest.starts_with('"'))
+                && !(literal.starts_with('"') && literal.ends_with('"'))
+            {
+                let mut quoted = String::from("\"");
+                quoted.push_str(&literal);
+                quoted.push('"');
+                if !consume_to_timestamp_literal(input, &mut input_pos, &quoted, exact) {
+                    return Err(to_timestamp_parse_error(input));
+                }
+            } else if !consume_to_timestamp_literal(input, &mut input_pos, &literal, exact) {
                 return Err(to_timestamp_parse_error(input));
             }
-            fmt_pos += end_rel + 2;
+            fmt_pos = end + 1;
             continue;
         }
         if format[fmt_pos..].starts_with("\\\"")
@@ -2155,6 +2483,19 @@ fn parse_to_timestamp_text_format(
         }
         let mut consumed_token = true;
         if rest.starts_with("Y,YYY") {
+            if input[input_pos..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .count()
+                > 1
+            {
+                return Err(ExecError::DetailedError {
+                    message: "value for \"Y,YYY\" in source string is out of range".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22003",
+                });
+            }
             let hi = read_digits(input, &mut input_pos, 1, 1)
                 .ok_or_else(|| to_timestamp_parse_error(input))?;
             consume_to_timestamp_literal(input, &mut input_pos, ",", exact);
@@ -2162,6 +2503,7 @@ fn parse_to_timestamp_text_format(
                 .ok_or_else(|| to_timestamp_parse_error(input))?;
             fields.year = Some(hi * 1000 + lo);
             fields.year_digits = Some(4);
+            fields.mark_gregorian();
             fmt_pos += 5;
         } else if rest.starts_with("IYYY") {
             let max = if fill_mode || !next_template_part_is_adjacent_numeric(&upper, fmt_pos + 4) {
@@ -2173,121 +2515,147 @@ fn parse_to_timestamp_text_format(
                 read_signed_digits(input, &mut input_pos, 1, max)
                     .ok_or_else(|| to_timestamp_parse_error(input))?,
             );
+            fields.mark_iso();
             fmt_pos += 4;
         } else if rest.starts_with("YYYY") {
-            let max = if fill_mode || !next_template_part_is_adjacent_numeric(&upper, fmt_pos + 4) {
-                9
+            let adjacent = next_template_part_is_adjacent_numeric(&upper, fmt_pos + 4);
+            let max = if fill_mode || !adjacent { 10 } else { 4 };
+            fields.year = Some(if adjacent && !fill_mode {
+                read_signed_digits(input, &mut input_pos, 4, 4)
+                    .ok_or_else(|| to_timestamp_parse_error(input))?
             } else {
-                4
-            };
-            fields.year = Some(
-                read_signed_digits(input, &mut input_pos, 1, max)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+                read_signed_int_field(input, &mut input_pos, "YYYY", 1, max)?
+            });
             fields.year_digits = Some(4);
+            fields.mark_gregorian();
             fmt_pos += 4;
         } else if rest.starts_with("YYY") {
-            let value = read_digits(input, &mut input_pos, 3, 3)
-                .ok_or_else(|| to_timestamp_parse_error(input))?;
+            let value = read_int_field(input, &mut input_pos, "YYY", 3, 3, Some(3))?;
             fields.year = Some(if value >= 100 { 1000 + value } else { value });
             fields.year_digits = Some(3);
+            fields.mark_gregorian();
             fmt_pos += 3;
         } else if rest.starts_with("IYY") {
-            fields.iso_year = Some(
-                2000 + read_digits(input, &mut input_pos, 3, 3)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.iso_year =
+                Some(2000 + read_int_field(input, &mut input_pos, "IYY", 3, 3, Some(3))?);
+            fields.mark_iso();
             fmt_pos += 3;
         } else if rest.starts_with("YY") {
-            fields.year = Some(
-                read_digits(input, &mut input_pos, 2, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.year = Some(read_int_field(input, &mut input_pos, "YY", 2, 2, Some(2))?);
             fields.year_digits = Some(2);
+            fields.mark_gregorian();
             fmt_pos += 2;
         } else if rest.starts_with('Y') {
-            fields.year = Some(
-                read_digits(input, &mut input_pos, 1, 1)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.year = Some(read_int_field(input, &mut input_pos, "Y", 1, 1, Some(1))?);
             fields.year_digits = Some(1);
+            fields.mark_gregorian();
             fmt_pos += 1;
         } else if rest.starts_with("IY") {
-            fields.iso_year = Some(expand_two_digit_year(
-                read_digits(input, &mut input_pos, 2, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            ));
+            fields.iso_year = Some(expand_two_digit_year(read_int_field(
+                input,
+                &mut input_pos,
+                "IY",
+                2,
+                2,
+                Some(2),
+            )?));
+            fields.mark_iso();
             fmt_pos += 2;
         } else if rest.starts_with("MONTH") {
-            let word = read_month_field(input, &mut input_pos)
-                .ok_or_else(|| to_timestamp_parse_error(input))?;
-            fields.month =
-                Some(month_number(&word).ok_or_else(|| to_timestamp_parse_error(input))?);
+            let field = &format[fmt_pos..fmt_pos + 5];
+            let allow_spaced_plus = preceding_format_spaces(format, fmt_pos) >= 3;
+            let word = read_month_field(input, &mut input_pos, usize::MAX, allow_spaced_plus)
+                .ok_or_else(|| {
+                    to_timestamp_invalid_value_error(
+                        &invalid_month_value(input, input_pos),
+                        field,
+                        "The given value did not match any of the allowed values for this field.",
+                    )
+                })?;
+            let month = month_number(&word).ok_or_else(|| {
+                to_timestamp_invalid_value_error(
+                    &word,
+                    field,
+                    "The given value did not match any of the allowed values for this field.",
+                )
+            })?;
+            fields.set_month(month, field)?;
+            fields.mark_gregorian();
             fmt_pos += 5;
         } else if rest.starts_with("MON") {
-            let word = read_month_field(input, &mut input_pos)
-                .ok_or_else(|| to_timestamp_parse_error(input))?;
-            fields.month =
-                Some(month_number(&word).ok_or_else(|| to_timestamp_parse_error(input))?);
+            let field = &format[fmt_pos..fmt_pos + 3];
+            let allow_spaced_plus = preceding_format_spaces(format, fmt_pos) >= 3;
+            let word =
+                read_month_field(input, &mut input_pos, 3, allow_spaced_plus).ok_or_else(|| {
+                    to_timestamp_invalid_value_error(
+                        &invalid_month_value(input, input_pos),
+                        field,
+                        "The given value did not match any of the allowed values for this field.",
+                    )
+                })?;
+            let month = month_number(&word).ok_or_else(|| {
+                to_timestamp_invalid_value_error(
+                    &word,
+                    field,
+                    "The given value did not match any of the allowed values for this field.",
+                )
+            })?;
+            fields.set_month(month, field)?;
+            fields.mark_gregorian();
             fmt_pos += 3;
         } else if rest.starts_with("MM") {
-            fields.month = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            let fixed = (!fill_mode && next_template_part_is_adjacent_numeric(&upper, fmt_pos + 2))
+                .then_some(2);
+            let month = read_int_field(input, &mut input_pos, "MM", 1, 2, fixed)? as u32;
+            fields.set_month(month, "MM")?;
+            fields.mark_gregorian();
             fmt_pos += 2;
         } else if rest.starts_with("DDD") {
-            fields.ordinal_day = Some(
-                read_digits(input, &mut input_pos, if fill_mode { 1 } else { 3 }, 3)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.ordinal_day = Some(read_int_field(
+                input,
+                &mut input_pos,
+                "DDD",
+                if fill_mode { 1 } else { 3 },
+                3,
+                (!fill_mode).then_some(3),
+            )? as u32);
+            fields.mark_gregorian();
             fmt_pos += 3;
         } else if rest.starts_with("DD") {
-            fields.day = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.day = Some(read_int_field(input, &mut input_pos, "DD", 1, 2, None)? as u32);
+            fields.mark_gregorian();
             fmt_pos += 2;
         } else if rest.starts_with("HH24") {
-            fields.hour = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.hour = Some(read_int_field(input, &mut input_pos, "HH24", 1, 2, None)? as u32);
             fmt_pos += 4;
         } else if rest.starts_with("HH12") {
-            fields.hour = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.hour = Some(read_int_field(input, &mut input_pos, "HH12", 1, 2, None)? as u32);
+            fields.hour_12 = true;
             fmt_pos += 4;
         } else if rest.starts_with("HH") {
-            fields.hour = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.hour = Some(read_int_field(input, &mut input_pos, "HH", 1, 2, None)? as u32);
+            fields.hour_12 = true;
             fmt_pos += 2;
         } else if rest.starts_with("MI") {
-            fields.minute = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.minute = Some(read_int_field(input, &mut input_pos, "MI", 1, 2, None)? as u32);
             fmt_pos += 2;
         } else if rest.starts_with("SSSSS") || rest.starts_with("SSSS") {
-            fields.seconds_of_day = Some(
-                read_digits(input, &mut input_pos, 1, 5)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.seconds_of_day =
+                Some(read_int_field(input, &mut input_pos, "SSSS", 1, 5, None)? as u32);
             fmt_pos += if rest.starts_with("SSSSS") { 5 } else { 4 };
         } else if rest.starts_with("SS") {
-            fields.second = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.second = Some(read_int_field(input, &mut input_pos, "SS", 1, 2, None)? as u32);
             fmt_pos += 2;
         } else if rest.starts_with("MS") {
             let start = input_pos;
-            let value = read_digits(input, &mut input_pos, 1, 3)
-                .ok_or_else(|| to_timestamp_parse_error(input))?;
+            if input
+                .as_bytes()
+                .get(input_pos)
+                .is_some_and(|byte| *byte == b'-')
+            {
+                return Err(to_timestamp_field_out_of_range(input));
+            }
+            let value = read_int_field(input, &mut input_pos, "MS", 1, 3, None)?;
             let digits = input_pos - start;
             fields.micros = i64::from(value) * 10_i64.pow(3 - digits as u32) * 1000;
             fmt_pos += 2;
@@ -2308,39 +2676,45 @@ fn parse_to_timestamp_text_format(
             if digits.len() > 6 {
                 return Err(to_timestamp_field_out_of_range(input));
             }
-            let micros_text = if digits.len() >= 6 {
-                digits[..6].to_string()
-            } else {
-                format!("{digits:0<6}")
-            };
-            fields.micros = micros_text[..width.min(6)]
+            let padded = format!("{digits:0<6}");
+            let mut micros = padded[..6]
                 .parse::<i64>()
-                .map_err(|_| to_timestamp_parse_error(input))?
-                * 10_i64.pow(6 - width as u32);
+                .map_err(|_| to_timestamp_invalid_integer_error(digits, "FF"))?;
+            let unit = 10_i64.pow((6 - width) as u32);
+            if width < 6
+                && digits
+                    .as_bytes()
+                    .get(width)
+                    .is_some_and(|byte| *byte >= b'5')
+            {
+                micros += unit;
+            }
+            fields.micros = micros / unit * unit;
             fmt_pos += 2 + precision.is_some() as usize;
         } else if rest.starts_with("TZH") {
-            fields.tz_hour = Some(
-                read_signed_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.tz_hour = Some(read_signed_int_field(input, &mut input_pos, "TZH", 1, 2)?);
             fmt_pos += 3;
         } else if rest.starts_with("TZM") {
-            fields.tz_minute = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.tz_minute = Some(read_int_field(input, &mut input_pos, "TZM", 1, 2, None)?);
             fmt_pos += 3;
         } else if rest.starts_with("TZ") {
-            fields.timezone = Some(
-                read_timezone_token(input, &mut input_pos)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.timezone =
+                Some(read_timezone_token(input, &mut input_pos).ok_or_else(|| {
+                    let value = input[input_pos..].chars().take(2).collect::<String>();
+                    to_timestamp_invalid_integer_error(&value, "TZ")
+                })?);
             fmt_pos += 2;
         } else if rest.starts_with("OF") {
-            fields.timezone = Some(
-                read_offset_token(input, &mut input_pos)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            let offset_start = input_pos;
+            let offset = read_offset_token(input, &mut input_pos).ok_or_else(|| {
+                let value = invalid_offset_value_fragment(input, offset_start);
+                to_timestamp_invalid_integer_error(&value, "OF")
+            })?;
+            if offset.ends_with(':') || parse_offset_seconds(&offset).is_none() {
+                let value = invalid_offset_value_fragment(input, offset_start);
+                return Err(to_timestamp_invalid_integer_error(&value, "OF"));
+            }
+            fields.timezone = Some(offset);
             fmt_pos += 2;
         } else if rest.starts_with("A.M.") || rest.starts_with("P.M.") {
             fields.pm = Some(
@@ -2363,75 +2737,71 @@ fn parse_to_timestamp_text_format(
                 .ok_or_else(|| to_timestamp_parse_error(input))?;
             fmt_pos += 2;
         } else if rest.starts_with("RM") {
-            let word = read_month_field(input, &mut input_pos)
+            let word = read_month_field(input, &mut input_pos, usize::MAX, false)
                 .ok_or_else(|| to_timestamp_parse_error(input))?;
-            fields.month =
-                Some(roman_month_number(&word).ok_or_else(|| to_timestamp_parse_error(input))?);
+            let month = roman_month_number(&word).ok_or_else(|| to_timestamp_parse_error(input))?;
+            fields.set_month(month, "RM")?;
+            fields.mark_gregorian();
             fmt_pos += 2;
         } else if rest.starts_with("IW") {
-            fields.iso_week = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.iso_week = Some(read_int_field(input, &mut input_pos, "IW", 1, 2, None)? as u32);
+            fields.mark_iso();
             fmt_pos += 2;
         } else if rest.starts_with("IDDD") {
-            fields.ordinal_day = Some(
-                read_digits(input, &mut input_pos, 1, 3)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.ordinal_day =
+                Some(read_int_field(input, &mut input_pos, "IDDD", 1, 3, None)? as u32);
+            fields.mark_iso();
             fmt_pos += 4;
         } else if rest.starts_with("ID") {
-            fields.iso_day_of_week = Some(
-                read_digits(input, &mut input_pos, 1, 1)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.iso_day_of_week =
+                Some(read_int_field(input, &mut input_pos, "ID", 1, 1, Some(1))? as u32);
+            fields.mark_iso();
             fmt_pos += 2;
         } else if rest.starts_with("I") {
-            fields.iso_year = Some(
-                2000 + read_digits(input, &mut input_pos, 1, 1)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.iso_year =
+                Some(2000 + read_int_field(input, &mut input_pos, "I", 1, 1, Some(1))?);
+            fields.mark_iso();
             fmt_pos += 1;
         } else if rest.starts_with("WW") {
-            fields.week = Some(
-                read_digits(input, &mut input_pos, 1, 2)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            let fixed = (!fill_mode && next_template_part_is_adjacent_numeric(&upper, fmt_pos + 2))
+                .then_some(2);
+            fields.week = Some(read_int_field(input, &mut input_pos, "WW", 1, 10, fixed)? as u32);
+            fields.mark_gregorian();
             fmt_pos += 2;
         } else if rest.starts_with('W') {
-            fields.week_of_month = Some(
-                read_digits(input, &mut input_pos, 1, 1)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            let fixed = (!fill_mode && next_template_part_is_adjacent_numeric(&upper, fmt_pos + 1))
+                .then_some(1);
+            fields.week_of_month =
+                Some(read_int_field(input, &mut input_pos, "W", 1, 10, fixed)? as u32);
+            fields.mark_gregorian();
             fmt_pos += 1;
         } else if rest.starts_with("CC") {
-            fields.century = Some(
-                read_signed_digits(input, &mut input_pos, 1, 10)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.century = Some(read_signed_int_field(input, &mut input_pos, "CC", 1, 10)?);
+            fields.mark_gregorian();
             fmt_pos += 2;
         } else if rest.starts_with('J') {
-            fields.julian_day = Some(
-                read_signed_digits(input, &mut input_pos, 1, 10)
-                    .ok_or_else(|| to_timestamp_parse_error(input))?,
-            );
+            fields.julian_day = Some(read_signed_int_field(input, &mut input_pos, "J", 1, 10)?);
             fmt_pos += 1;
         } else if rest.starts_with('Q') {
-            let _ = read_digits(input, &mut input_pos, 1, 1)
-                .ok_or_else(|| to_timestamp_parse_error(input))?;
+            let _ = read_int_field(input, &mut input_pos, "Q", 1, 1, Some(1))?;
+            fields.mark_gregorian();
             fmt_pos += 1;
         } else if rest.starts_with("DAY") || rest.starts_with("DY") {
-            let _ =
-                read_alpha(input, &mut input_pos).ok_or_else(|| to_timestamp_parse_error(input))?;
+            let max = if rest.starts_with("DAY") {
+                usize::MAX
+            } else {
+                3
+            };
+            let _ = read_alpha_with_max(input, &mut input_pos, max)
+                .ok_or_else(|| to_timestamp_parse_error(input))?;
             fmt_pos += if rest.starts_with("DAY") { 3 } else { 2 };
         } else if rest.starts_with("TH") {
             skip_to_timestamp_ordinal_suffix(input, &mut input_pos);
             fmt_pos += 2;
         } else if rest.starts_with('D') {
-            fields.day_of_week = Some(
-                read_digits(input, &mut input_pos, 1, 1)
-                    .ok_or_else(|| to_timestamp_parse_error(input))? as u32,
-            );
+            fields.day_of_week =
+                Some(read_int_field(input, &mut input_pos, "D", 1, 1, Some(1))? as u32);
+            fields.mark_gregorian();
             fmt_pos += 1;
         } else {
             consumed_token = false;
@@ -2456,6 +2826,9 @@ fn parse_to_timestamp_text_format(
         .any(|ch| !ch.is_ascii_whitespace())
     {
         return Err(to_timestamp_parse_error(input));
+    }
+    if fields.has_gregorian && fields.has_iso {
+        return Err(to_timestamp_mixed_date_conventions_error());
     }
 
     if let Some(julian_day) = fields.julian_day {
@@ -2522,6 +2895,9 @@ fn parse_to_timestamp_text_format(
     if fields.bc {
         year = -year;
     }
+    if year == 0 {
+        year = -1;
+    }
     let mut month = fields.month.unwrap_or(1);
     let mut day = fields.day.unwrap_or(1);
     if let (Some(iso_year), Some(ordinal)) = (fields.iso_year, fields.ordinal_day) {
@@ -2566,18 +2942,26 @@ fn parse_to_timestamp_text_format(
         month = date.month();
         day = date.day();
     } else if let Some(week) = fields.week {
-        let offset = (week - 1) * 7;
+        let offset = week
+            .checked_sub(1)
+            .and_then(|week| week.checked_mul(7))
+            .ok_or_else(|| to_timestamp_field_out_of_range(input))?;
+        let offset = i32::try_from(offset).map_err(|_| to_timestamp_field_out_of_range(input))?;
         let days = days_from_ymd(year, 1, 1)
-            .and_then(|first| first.checked_add(offset as i32))
+            .and_then(|first| first.checked_add(offset))
             .ok_or_else(|| to_timestamp_field_out_of_range(input))?;
         let (resolved_year, resolved_month, resolved_day) = ymd_from_days(days);
         year = resolved_year;
         month = resolved_month;
         day = resolved_day;
     } else if let Some(week) = fields.week_of_month {
-        let offset = (week - 1) * 7;
+        let offset = week
+            .checked_sub(1)
+            .and_then(|week| week.checked_mul(7))
+            .ok_or_else(|| to_timestamp_field_out_of_range(input))?;
+        let offset = i32::try_from(offset).map_err(|_| to_timestamp_field_out_of_range(input))?;
         let days = days_from_ymd(year, month, 1)
-            .and_then(|first| first.checked_add(offset as i32))
+            .and_then(|first| first.checked_add(offset))
             .ok_or_else(|| to_timestamp_field_out_of_range(input))?;
         let (resolved_year, resolved_month, resolved_day) = ymd_from_days(days);
         year = resolved_year;
@@ -2597,6 +2981,14 @@ fn parse_to_timestamp_text_format(
             fields.second.unwrap_or(0),
         )
     };
+    if fields.hour_12 && !(1..=12).contains(&hour) {
+        return Err(ExecError::DetailedError {
+            message: format!("hour \"{hour}\" is invalid for the 12-hour clock"),
+            detail: None,
+            hint: Some("Use the 24-hour clock, or give an hour between 1 and 12.".into()),
+            sqlstate: "22007",
+        });
+    }
     if let Some(pm) = fields.pm {
         if !(1..=12).contains(&hour) {
             return Err(ExecError::DetailedError {
@@ -3292,6 +3684,7 @@ fn to_date_template_error(err: ExecError, input: &str) -> ExecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::libpq::pqformat::format_exec_error;
     use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT};
 
     #[test]
@@ -3329,6 +3722,16 @@ mod tests {
             ),
             (
                 r#"15 "text between quote marks" 98 54 45"#,
+                r#"HH24 \\"text between quote marks\\" YY MI SS"#,
+                "1998-01-01 15:54:45+00",
+            ),
+            (
+                r#"15 "text between quote marks" 98 54 45"#,
+                r#"HH24 "\"text between quote marks\"" YY MI SS"#,
+                "1998-01-01 15:54:45+00",
+            ),
+            (
+                r#"15 "text between quote marks" 98 54 45"#,
                 r#"HH24 ""text between quote marks"" YY MI SS"#,
                 "1998-01-01 15:54:45+00",
             ),
@@ -3347,8 +3750,11 @@ mod tests {
                 "YYYY-MM-DD HH24:MI:SS BC",
                 "0044-02-01 11:12:13 BC",
             ),
+            ("2000 ++ JUN", "YYYY  MON", "2000-06-01 00:00:00+00"),
+            ("2000 + + JUN", "YYYY   MON", "2000-06-01 00:00:00+00"),
         ] {
-            let parsed = parse_to_timestamp_text_format(input, format, &config).unwrap();
+            let parsed = parse_to_timestamp_text_format(input, format, &config)
+                .unwrap_or_else(|err| panic!("{input} / {format}: {}", format_exec_error(&err)));
             let expected =
                 crate::backend::utils::time::timestamp::parse_timestamptz_text(expected, &config)
                     .unwrap();
@@ -3394,6 +3800,54 @@ mod tests {
     }
 
     #[test]
+    fn to_timestamp_template_reports_postgres_field_errors() {
+        let config = DateTimeConfig {
+            time_zone: "UTC".into(),
+            ..DateTimeConfig::default()
+        };
+        for (input, format, expected) in [
+            (
+                "2005527",
+                "YYYYIWID",
+                "invalid combination of date conventions",
+            ),
+            (
+                "19971",
+                "YYYYMMDD",
+                "source string too short for \"MM\" formatting field",
+            ),
+            (
+                "1997-11-Jan-16",
+                "YYYY-MM-Mon-DD",
+                "conflicting values for \"Mon\" field in formatting string",
+            ),
+            (
+                "2016-06-13 15:50:55",
+                "YYYY-MM-DD HH:MI:SS",
+                "hour \"15\" is invalid for the 12-hour clock",
+            ),
+            (
+                "2011-12-18 11:38 +xyz",
+                "YYYY-MM-DD HH12:MI OF",
+                "invalid value \"xy\" for \"OF\"",
+            ),
+            (
+                "2000 + + JUN",
+                "YYYY  MON",
+                "invalid value \"+\" for \"MON\"",
+            ),
+            (
+                "Fri 1-January-1999",
+                "DY DD MON YYYY",
+                "invalid value \"uary\" for \"YYYY\"",
+            ),
+        ] {
+            let err = parse_to_timestamp_text_format(input, format, &config).unwrap_err();
+            assert_eq!(format_exec_error(&err), expected, "{input} / {format}");
+        }
+    }
+
+    #[test]
     fn to_date_uses_postgres_template_parser_cases() {
         assert_eq!(
             eval_to_date_function(&[
@@ -3423,6 +3877,14 @@ mod tests {
             ])
             .unwrap(),
             Value::Date(DateADT(days_from_ymd(-43, 2, 1).unwrap()))
+        );
+        assert_eq!(
+            eval_to_date_function(&[
+                Value::Text("0000-02-01".into()),
+                Value::Text("YYYY-MM-DD".into()),
+            ])
+            .unwrap(),
+            Value::Date(DateADT(days_from_ymd(0, 2, 1).unwrap()))
         );
     }
 

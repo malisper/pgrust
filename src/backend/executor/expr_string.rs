@@ -22,9 +22,10 @@ use crate::backend::utils::crc32c;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
-    day_of_week_from_julian_day, day_of_year, days_from_ymd, iso_day_of_week_from_julian_day,
-    iso_week_and_year, julian_day_from_postgres_date, timestamp_parts_from_usecs,
-    timezone_offset_seconds_at_utc, ymd_from_days,
+    current_timezone_name, day_of_week_from_julian_day, day_of_year, days_from_ymd, format_offset,
+    iso_day_of_week_from_julian_day, iso_week_and_year, julian_day_from_postgres_date,
+    named_timezone_abbreviation_at_utc, timestamp_parts_from_usecs, timezone_offset_seconds_at_utc,
+    ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, USECS_PER_DAY,
@@ -113,11 +114,11 @@ const MONTH_NAMES: [&str; 12] = [
 ];
 const DATETIME_TO_CHAR_PATTERNS: &[&str] = &[
     "A.D.", "a.d.", "B.C.", "b.c.", "P.M.", "p.m.", "A.M.", "a.m.", "Y,YYY", "HH24", "HH12",
-    "IYYY", "IDDD", "YYYY", "MONTH", "Month", "month", "DAY", "Day", "day", "SSSS", "TZH", "tzh",
-    "TZM", "tzm", "FF1", "FF2", "FF3", "FF4", "FF5", "FF6", "ff1", "ff2", "ff3", "ff4", "ff5",
-    "ff6", "IYY", "YYY", "MON", "Mon", "mon", "DY", "Dy", "dy", "HH", "MI", "SS", "MS", "US",
-    "DDD", "YY", "CC", "MM", "WW", "DD", "IW", "IY", "ID", "RM", "rm", "AD", "ad", "BC", "bc",
-    "PM", "pm", "AM", "am", "OF", "of", "Y", "I", "Q", "J", "D",
+    "IYYY", "IDDD", "YYYY", "MONTH", "Month", "month", "DAY", "Day", "day", "SSSSS", "SSSS", "TZH",
+    "tzh", "TZM", "tzm", "TZ", "tz", "FF1", "FF2", "FF3", "FF4", "FF5", "FF6", "ff1", "ff2", "ff3",
+    "ff4", "ff5", "ff6", "IYY", "YYY", "MON", "Mon", "mon", "DY", "Dy", "dy", "HH", "MI", "SS",
+    "MS", "US", "DDD", "YY", "CC", "MM", "WW", "DD", "IW", "IY", "ID", "RM", "rm", "AD", "ad",
+    "BC", "bc", "PM", "pm", "AM", "am", "OF", "of", "Y", "I", "Q", "J", "D",
 ];
 
 struct TimestampFormatParts {
@@ -139,6 +140,7 @@ struct TimestampFormatParts {
     seconds_since_midnight: i64,
     micros: i64,
     offset_seconds: Option<i32>,
+    timezone_label: Option<String>,
 }
 
 fn titlecase_ascii(text: &str) -> String {
@@ -202,6 +204,7 @@ fn timestamp_century(year: i32) -> i32 {
 fn timestamp_to_char_parts(
     timestamp_usecs: i64,
     offset_seconds: Option<i32>,
+    timezone_label: Option<String>,
 ) -> Option<TimestampFormatParts> {
     if timestamp_usecs == TIMESTAMP_NOBEGIN || timestamp_usecs == TIMESTAMP_NOEND {
         return None;
@@ -243,6 +246,7 @@ fn timestamp_to_char_parts(
         seconds_since_midnight: time_usecs / USECS_PER_SEC,
         micros: time_usecs % USECS_PER_SEC,
         offset_seconds,
+        timezone_label,
     })
 }
 
@@ -320,6 +324,11 @@ fn format_timezone_hour(offset: Option<i32>) -> String {
 
 fn format_timezone_minute(offset: Option<i32>) -> String {
     format!("{:02}", offset.unwrap_or(0).abs() % 3600 / 60)
+}
+
+fn timezone_label_for_to_char(config: &DateTimeConfig, utc_usecs: i64, offset: i32) -> String {
+    let zone = current_timezone_name(config);
+    named_timezone_abbreviation_at_utc(zone, utc_usecs).unwrap_or_else(|| format_offset(offset))
 }
 
 fn render_datetime_to_char_pattern(
@@ -431,10 +440,20 @@ fn render_datetime_to_char_pattern(
         "HH24" => (format!("{:02}", parts.hour), Some(parts.hour.into())),
         "MI" => (format!("{:02}", parts.minute), Some(parts.minute.into())),
         "SS" => (format!("{:02}", parts.second), Some(parts.second.into())),
-        "SSSS" => (
+        "SSSS" | "SSSSS" => (
             parts.seconds_since_midnight.to_string(),
             Some(parts.seconds_since_midnight.into()),
         ),
+        "TZ" | "tz" => {
+            let Some(label) = parts.timezone_label.as_deref() else {
+                return (pattern.to_string(), None);
+            };
+            if pattern == "tz" {
+                (label.to_ascii_lowercase(), None)
+            } else {
+                (label.to_string(), None)
+            }
+        }
         "TZH" | "tzh" => (format_timezone_hour(parts.offset_seconds), None),
         "TZM" | "tzm" => (format_timezone_minute(parts.offset_seconds), None),
         "OF" | "of" => (format_timezone_offset(parts.offset_seconds), None),
@@ -485,8 +504,10 @@ fn to_char_timestamp_usecs(
     timestamp_usecs: i64,
     format: &str,
     offset_seconds: Option<i32>,
+    timezone_label: Option<String>,
 ) -> String {
-    let Some(parts) = timestamp_to_char_parts(timestamp_usecs, offset_seconds) else {
+    let Some(parts) = timestamp_to_char_parts(timestamp_usecs, offset_seconds, timezone_label)
+    else {
         return String::new();
     };
     let mut out = String::new();
@@ -627,14 +648,20 @@ fn eval_to_char_function_with_float4(
         Value::Float64(v) if float4 => to_char_float4(*v, fmt)?,
         Value::Float64(v) => to_char_float(*v, fmt)?,
         Value::Date(v) if matches!(v.0, DATEVAL_NOBEGIN | DATEVAL_NOEND) => String::new(),
-        Value::Date(v) => to_char_timestamp_usecs(i64::from(v.0) * USECS_PER_DAY, fmt, None),
-        Value::Timestamp(v) => to_char_timestamp_usecs(v.0, fmt, None),
+        Value::Date(v) => to_char_timestamp_usecs(i64::from(v.0) * USECS_PER_DAY, fmt, None, None),
+        Value::Timestamp(v) => to_char_timestamp_usecs(v.0, fmt, None, None),
         Value::TimestampTz(v) if matches!(v.0, TIMESTAMP_NOBEGIN | TIMESTAMP_NOEND) => {
             String::new()
         }
         Value::TimestampTz(v) => {
             let offset = timezone_offset_seconds_at_utc(datetime_config, v.0);
-            to_char_timestamp_usecs(v.0 + i64::from(offset) * USECS_PER_SEC, fmt, Some(offset))
+            let label = timezone_label_for_to_char(datetime_config, v.0, offset);
+            to_char_timestamp_usecs(
+                v.0 + i64::from(offset) * USECS_PER_SEC,
+                fmt,
+                Some(offset),
+                Some(label),
+            )
         }
         Value::Interval(v) if !v.is_finite() => String::new(),
         Value::Interval(v) => {
@@ -3841,9 +3868,13 @@ fn validate_bytea_bit_index(bytes: &[u8], index: i32) -> Result<(), ExecError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{eval_like, eval_pg_size_bytes_function, eval_pg_size_pretty_function};
+    use super::{
+        eval_like, eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_to_char_function,
+    };
     use crate::backend::executor::ExecError;
     use crate::backend::libpq::pqformat::format_exec_error;
+    use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+    use crate::backend::utils::time::timestamp::parse_timestamptz_text;
     use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
     use crate::include::nodes::datum::{NumericValue, Value};
 
@@ -3919,5 +3950,64 @@ mod tests {
                 ..
             } if detail == "Invalid size unit: \"AB\"." && sqlstate == "22023"
         ));
+    }
+
+    #[test]
+    fn to_char_formats_timestamptz_timezone_tokens() {
+        let la = DateTimeConfig {
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let timestamp = parse_timestamptz_text("2012-12-12 12:00", &la).unwrap();
+        assert_eq!(
+            eval_to_char_function(
+                &[
+                    Value::TimestampTz(timestamp),
+                    Value::Text("YYYY-MM-DD HH:MI:SS TZ".into()),
+                ],
+                &la,
+            )
+            .unwrap(),
+            Value::Text("2012-12-12 12:00:00 PST".into())
+        );
+        assert_eq!(
+            eval_to_char_function(
+                &[
+                    Value::TimestampTz(timestamp),
+                    Value::Text("YYYY-MM-DD HH:MI:SS tz".into()),
+                ],
+                &la,
+            )
+            .unwrap(),
+            Value::Text("2012-12-12 12:00:00 pst".into())
+        );
+
+        let fixed = DateTimeConfig {
+            time_zone: "+02".into(),
+            ..DateTimeConfig::default()
+        };
+        let timestamp = parse_timestamptz_text("2012-12-12 12:00", &fixed).unwrap();
+        assert_eq!(
+            eval_to_char_function(
+                &[
+                    Value::TimestampTz(timestamp),
+                    Value::Text("YYYY-MM-DD HH:MI:SS TZ".into()),
+                ],
+                &fixed,
+            )
+            .unwrap(),
+            Value::Text("2012-12-12 12:00:00 +02".into())
+        );
+        assert_eq!(
+            eval_to_char_function(
+                &[
+                    Value::TimestampTz(timestamp),
+                    Value::Text("YYYY-MM-DD SSSSS".into()),
+                ],
+                &fixed,
+            )
+            .unwrap(),
+            Value::Text("2012-12-12 43200".into())
+        );
     }
 }

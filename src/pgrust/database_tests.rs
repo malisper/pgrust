@@ -23145,7 +23145,7 @@ fn explain_inherited_append_uses_relation_names_and_sql_casts() {
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("'2009-08-01'::date"))
+            .any(|line| line.contains("'08-01-2009'::date"))
     );
     assert!(
         rendered.iter().all(|line| !line.contains("Projection")),
