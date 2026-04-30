@@ -867,6 +867,29 @@ fn is_physical_pg_type_relation_name(name: &str) -> bool {
 }
 
 fn passthrough_cte_target<'a>(cte: &'a BoundCte, ctes: &'a [BoundCte]) -> Option<&'a BoundCte> {
+    if cte.plan.command_type != crate::include::executor::execdesc::CommandType::Select
+        || cte.plan.depends_on_row_security
+        || cte.plan.distinct
+        || !cte.plan.distinct_on.is_empty()
+        || cte.plan.where_qual.is_some()
+        || !cte.plan.group_by.is_empty()
+        || !cte.plan.group_by_refs.is_empty()
+        || !cte.plan.grouping_sets.is_empty()
+        || !cte.plan.accumulators.is_empty()
+        || !cte.plan.window_clauses.is_empty()
+        || cte.plan.having_qual.is_some()
+        || !cte.plan.sort_clause.is_empty()
+        || cte.plan.limit_count.is_some()
+        || cte.plan.limit_offset.is_some()
+        || cte.plan.locking_clause.is_some()
+        || !cte.plan.locking_targets.is_empty()
+        || !cte.plan.row_marks.is_empty()
+        || cte.plan.has_target_srfs
+        || cte.plan.recursive_union.is_some()
+        || cte.plan.set_operation.is_some()
+    {
+        return None;
+    }
     let [rte] = cte.plan.rtable.as_slice() else {
         return None;
     };

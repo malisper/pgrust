@@ -9788,6 +9788,15 @@ impl PlanNode for CteScanState {
     }
 }
 
+impl RecursiveUnionState {
+    fn reset_iteration_ctes(&self, ctx: &mut ExecutorContext) {
+        for cte_id in &self.recursive_iteration_cte_ids {
+            ctx.cte_tables.remove(cte_id);
+            ctx.cte_producers.remove(cte_id);
+        }
+    }
+}
+
 impl PlanNode for RecursiveUnionState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -9828,6 +9837,7 @@ impl PlanNode for RecursiveUnionState {
                     return Ok(Some(&mut self.slot));
                 } else {
                     self.anchor_done = true;
+                    self.reset_iteration_ctes(ctx);
                     self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
                     continue;
                 }
@@ -9850,16 +9860,19 @@ impl PlanNode for RecursiveUnionState {
                 return Ok(Some(&mut self.slot));
             } else {
                 if self.intermediate_rows.is_empty() {
+                    self.reset_iteration_ctes(ctx);
                     ctx.recursive_worktables.remove(&self.worktable_id);
                     finish_eof(&mut self.stats, start, ctx);
                     return Ok(None);
                 }
                 if !self.recursive_references_worktable {
+                    self.reset_iteration_ctes(ctx);
                     ctx.recursive_worktables.remove(&self.worktable_id);
                     finish_eof(&mut self.stats, start, ctx);
                     return Ok(None);
                 }
                 self.worktable.borrow_mut().rows = std::mem::take(&mut self.intermediate_rows);
+                self.reset_iteration_ctes(ctx);
                 self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
             }
         }

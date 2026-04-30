@@ -16,7 +16,7 @@ use crate::include::nodes::primnodes::{
     set_returning_call_exprs,
 };
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 fn append_alias_prefix_from_relation_name(relation_name: &str) -> Option<String> {
@@ -192,6 +192,150 @@ fn recursive_union_distinct_hashable(sql_type: SqlType) -> bool {
         sql_type.element_type().kind,
         SqlTypeKind::VarBit | SqlTypeKind::Json | SqlTypeKind::JsonPath
     )
+}
+
+fn plan_references_worktable(
+    plan: &Plan,
+    target_worktable_id: usize,
+    cte_memo: &mut HashMap<usize, bool>,
+) -> bool {
+    match plan {
+        Plan::WorkTableScan { worktable_id, .. } => *worktable_id == target_worktable_id,
+        Plan::CteScan {
+            cte_id, cte_plan, ..
+        } => {
+            if let Some(references_worktable) = cte_memo.get(cte_id) {
+                return *references_worktable;
+            }
+            cte_memo.insert(*cte_id, false);
+            let references_worktable =
+                plan_references_worktable(cte_plan, target_worktable_id, cte_memo);
+            cte_memo.insert(*cte_id, references_worktable);
+            references_worktable
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children
+            .iter()
+            .any(|child| plan_references_worktable(child, target_worktable_id, cte_memo)),
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            plan_references_worktable(bitmapqual, target_worktable_id, cte_memo)
+        }
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => {
+            plan_references_worktable(input, target_worktable_id, cte_memo)
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_references_worktable(left, target_worktable_id, cte_memo)
+                || plan_references_worktable(right, target_worktable_id, cte_memo)
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            plan_references_worktable(anchor, target_worktable_id, cte_memo)
+                || plan_references_worktable(recursive, target_worktable_id, cte_memo)
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. } => false,
+    }
+}
+
+fn collect_worktable_dependent_cte_ids(
+    plan: &Plan,
+    target_worktable_id: usize,
+    ids: &mut HashSet<usize>,
+    cte_memo: &mut HashMap<usize, bool>,
+) {
+    match plan {
+        Plan::CteScan {
+            cte_id, cte_plan, ..
+        } => {
+            if plan_references_worktable(cte_plan, target_worktable_id, cte_memo) {
+                ids.insert(*cte_id);
+            }
+            collect_worktable_dependent_cte_ids(cte_plan, target_worktable_id, ids, cte_memo);
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => {
+            for child in children {
+                collect_worktable_dependent_cte_ids(child, target_worktable_id, ids, cte_memo);
+            }
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            collect_worktable_dependent_cte_ids(bitmapqual, target_worktable_id, ids, cte_memo);
+        }
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => {
+            collect_worktable_dependent_cte_ids(input, target_worktable_id, ids, cte_memo);
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            collect_worktable_dependent_cte_ids(left, target_worktable_id, ids, cte_memo);
+            collect_worktable_dependent_cte_ids(right, target_worktable_id, ids, cte_memo);
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_worktable_dependent_cte_ids(anchor, target_worktable_id, ids, cte_memo);
+            collect_worktable_dependent_cte_ids(recursive, target_worktable_id, ids, cte_memo);
+        }
+        Plan::Result { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. } => {}
+    }
+}
+
+fn worktable_dependent_cte_ids(plan: &Plan, worktable_id: usize) -> Vec<usize> {
+    let mut ids = HashSet::new();
+    let mut cte_memo = HashMap::new();
+    collect_worktable_dependent_cte_ids(plan, worktable_id, &mut ids, &mut cte_memo);
+    let mut ids = ids.into_iter().collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
 }
 
 fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
@@ -1496,11 +1640,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let distinct_hashable = output_columns
                 .iter()
                 .all(|column| recursive_union_distinct_hashable(column.sql_type));
+            let recursive_iteration_cte_ids =
+                worktable_dependent_cte_ids(recursive.as_ref(), worktable_id);
             Box::new(RecursiveUnionState {
                 worktable_id,
                 distinct,
                 distinct_hashable,
                 recursive_references_worktable,
+                recursive_iteration_cte_ids,
                 anchor: executor_start(*anchor),
                 recursive_plan: *recursive,
                 recursive_state: None,

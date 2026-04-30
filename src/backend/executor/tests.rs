@@ -25978,6 +25978,81 @@ select count(*) from segments
 }
 
 #[test]
+fn recursive_cte_resets_worktable_dependent_nested_ctes_each_iteration() {
+    let base = temp_dir("recursive_nested_cte_iteration_reset");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+with recursive
+  tab(id_key, link) as (values (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)),
+  iter(id_key, row_type, link) as (
+      select 0, 'base', 17
+    union all (
+      with remaining(id_key, row_type, link, min) as (
+        select tab.id_key, 'true'::text, iter.link, min(tab.id_key) over ()
+        from tab inner join iter using (link)
+        where tab.id_key > iter.id_key
+      ),
+      first_remaining as (
+        select id_key, row_type, link
+        from remaining
+        where id_key = min
+      ),
+      effect as (
+        select tab.id_key, 'new'::text, tab.link
+        from first_remaining e inner join tab on e.id_key = tab.id_key
+        where e.row_type = 'false'
+      )
+      select * from first_remaining
+      union all select * from effect
+    )
+  )
+select * from iter
+limit 7
+"#;
+
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Text("base".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(4),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(5),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(6),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+        ],
+    );
+}
+
+#[test]
 fn recursive_lsystem_points_query_executes() {
     let base = temp_dir("recursive_lsystem_points");
     let txns = TransactionManager::new_durable(&base).unwrap();
