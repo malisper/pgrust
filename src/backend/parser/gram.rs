@@ -23252,12 +23252,14 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::exclusion_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
-            let (using_method, elements, include_columns) = build_exclusion_constraint_body(body)?;
+            let (using_method, elements, include_columns, predicate_sql) =
+                build_exclusion_constraint_body(body)?;
             Ok(TableConstraint::Exclusion {
                 attributes,
                 using_method,
                 elements,
                 include_columns,
+                predicate_sql,
             })
         }
         Rule::check_table_constraint => {
@@ -23329,10 +23331,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
 
 fn build_exclusion_constraint_body(
     pair: Pair<'_, Rule>,
-) -> Result<(String, Vec<ExclusionElement>, Vec<String>), ParseError> {
+) -> Result<(String, Vec<ExclusionElement>, Vec<String>, Option<String>), ParseError> {
     let mut using_method = None;
     let mut elements = Vec::new();
     let mut include_columns = Vec::new();
+    let mut predicate_sql = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier if using_method.is_none() => {
@@ -23383,6 +23386,13 @@ fn build_exclusion_constraint_body(
                         .flat_map(|inner| inner.into_inner().map(build_identifier)),
                 );
             }
+            Rule::create_index_where_clause => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                predicate_sql = Some(expr.as_str().trim().to_string());
+            }
             _ => {}
         }
     }
@@ -23393,6 +23403,7 @@ fn build_exclusion_constraint_body(
         using_method.unwrap_or_else(|| "gist".into()),
         elements,
         include_columns,
+        predicate_sql,
     ))
 }
 

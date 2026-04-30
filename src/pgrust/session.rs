@@ -10668,6 +10668,9 @@ impl Session {
         if source_oid.is_some() && source_oid == target_oid {
             return true;
         }
+        if !source.is_array && target.is_array && matches!(source.kind, SqlTypeKind::Text) {
+            return true;
+        }
         if !source.is_array && !target.is_array && matches!(source.kind, SqlTypeKind::Text) {
             return true;
         }

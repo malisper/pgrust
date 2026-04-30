@@ -556,6 +556,23 @@ fn cast_text_to_regtype(
     expr_reg::resolve_regtype_oid(text, catalog).map(|oid| Value::Int64(oid as i64))
 }
 
+fn is_reg_object_type_kind(kind: SqlTypeKind) -> bool {
+    matches!(
+        kind,
+        SqlTypeKind::RegProc
+            | SqlTypeKind::RegProcedure
+            | SqlTypeKind::RegOper
+            | SqlTypeKind::RegOperator
+            | SqlTypeKind::RegClass
+            | SqlTypeKind::RegType
+            | SqlTypeKind::RegRole
+            | SqlTypeKind::RegNamespace
+            | SqlTypeKind::RegCollation
+            | SqlTypeKind::RegConfig
+            | SqlTypeKind::RegDictionary
+    )
+}
+
 fn regclass_text_input(value: &Value, source_type: Option<SqlType>) -> Option<&str> {
     let source_is_text_like = source_type.is_some_and(|ty| {
         matches!(
@@ -6635,6 +6652,10 @@ pub(crate) fn cast_text_value_with_catalog_and_config(
         && let Some(value) = parse_composite_text_input(text, ty, catalog, config)?
     {
         return enforce_domain_check(value, ty, Some(catalog));
+    }
+    if !ty.is_array && is_reg_object_type_kind(ty.kind) {
+        let value = expr_reg::cast_text_to_reg_object(text, ty.kind, catalog)?;
+        return enforce_domain_check(value, ty, catalog);
     }
     let value = cast_text_value_with_config(text, ty, explicit, config)?;
     enforce_domain_check(value, ty, catalog)

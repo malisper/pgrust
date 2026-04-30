@@ -4616,6 +4616,7 @@ pub enum TableConstraint {
         using_method: String,
         elements: Vec<ExclusionElement>,
         include_columns: Vec<String>,
+        predicate_sql: Option<String>,
     },
     ForeignKey {
         attributes: ConstraintAttributes,

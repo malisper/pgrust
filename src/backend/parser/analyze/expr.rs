@@ -3976,29 +3976,34 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     domain.as_ref(),
                 ));
             }
-            if target_type.kind == SqlTypeKind::RegRole
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegRole
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regrole);
             }
-            if target_type.kind == SqlTypeKind::RegClass
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegClass
                 && let Some(bound_regclass) =
                     bind_regclass_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regclass);
             }
-            if target_type.kind == SqlTypeKind::RegOperator
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegOperator
                 && let Some(bound_regoperator) =
                     bind_regoperator_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regoperator);
             }
-            if target_type.kind == SqlTypeKind::RegType
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegType
                 && let Some(bound_regtype) = bind_regtype_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regtype);
             }
-            if target_type.kind == SqlTypeKind::RegProcedure
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegProcedure
                 && let Some(bound_regprocedure) =
                     bind_regprocedure_literal_cast(inner, target_type, catalog)?
             {
