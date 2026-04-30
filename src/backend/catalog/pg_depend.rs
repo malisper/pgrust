@@ -1,6 +1,7 @@
 use crate::backend::catalog::catalog::{CatalogEntry, CatalogIndexMeta};
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::parse_expr;
+use crate::backend::parser::{SqlTypeKind, parse_expr};
+use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, DEPENDENCY_PARTITION_PRI,
     DEPENDENCY_PARTITION_SEC, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
@@ -364,6 +365,35 @@ pub fn derived_relation_depend_rows(
             deptype: DEPENDENCY_AUTO,
         })
     }));
+    let mut referenced_type_oids = BTreeSet::new();
+    for column in &desc.columns {
+        let type_oid = sql_type_oid(column.sql_type);
+        if type_oid != 0 {
+            referenced_type_oids.insert(type_oid);
+        }
+        if column.sql_type.is_array
+            && matches!(
+                column.sql_type.kind,
+                SqlTypeKind::Composite | SqlTypeKind::Record
+            )
+            && column.sql_type.type_oid != 0
+        {
+            referenced_type_oids.insert(column.sql_type.type_oid);
+        }
+    }
+    rows.extend(
+        referenced_type_oids
+            .into_iter()
+            .map(|type_oid| PgDependRow {
+                classid: PG_CLASS_RELATION_OID,
+                objid: relation_oid,
+                objsubid: 0,
+                refclassid: PG_TYPE_RELATION_OID,
+                refobjid: type_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            }),
+    );
     rows
 }
 

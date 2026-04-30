@@ -10,6 +10,8 @@ Parser/AST, cluster/reindex commands, PL/pgSQL exec, pg_depend/catalog row gener
 Tests run:
 Focused cargo tests for geometry counts, cluster-on parsing/execution, PL/pgSQL dynamic CTAS, reindex invalid/toast behavior, pg_depend rows, text-collation deparse, attstattarget reset, and expression-index stats.
 Regression: scripts/run_regression.sh --test create_index --timeout 300 --results-dir /tmp/pgrust_regress_create_index_florence. Result: 663/687 queries matched, 24 mismatches, 469 diff lines. Copied diff to /tmp/diffs/create_index.florence-v3.diff and linked it at /tmp/pgrust-diffs-2026-04-30T0340Z/create_index.florence-v3.after.diff.
+CI follow-up: restored non-index relation-to-type pg_depend rows after cargo-test-run (2/2) failed create_type_nested_dependencies_and_named_composite_arrays_work, drop_enum_type_enforces_restrict_and_if_exists, and drop_range_type_enforces_restrict_and_if_exists.
+Validation: scripts/cargo_isolated.sh test --lib --quiet create_type_nested_dependencies_and_named_composite_arrays_work; drop_enum_type_enforces_restrict_and_if_exists; drop_range_type_enforces_restrict_and_if_exists. Also ran scripts/cargo_isolated.sh check.
 
 Remaining:
 Residual create_index diffs are EXPLAIN/path-shape issues: GiST KNN/correlated display, Sort-key parentheses, OR/SAOP BitmapOr/BitmapAnd shape, index-vs-seq-scan choices, Memoize/join choices, row-comparison/index qual display, and bitmap_split_or plan grouping.
