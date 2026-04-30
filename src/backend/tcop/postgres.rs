@@ -10541,6 +10541,9 @@ fn psql_index_column_opclass_options_display(
 
 fn parenthesized_index_expression(expr_sql: &str) -> String {
     let trimmed = expr_sql.trim();
+    if trimmed.to_ascii_lowercase().contains("collate") {
+        return trimmed.to_string();
+    }
     if trimmed.starts_with('(') && trimmed.ends_with(')') {
         trimmed.to_string()
     } else {

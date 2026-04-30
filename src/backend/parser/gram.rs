@@ -1223,6 +1223,7 @@ fn try_parse_alter_table_cluster_on_statement(sql: &str) -> Result<Option<Statem
         index_name: schema_name
             .map(|schema| format!("{schema}.{index_name}"))
             .unwrap_or(index_name),
+        mark_only: true,
     })))
 }
 
@@ -18810,6 +18811,7 @@ fn build_cluster(pair: Pair<'_, Rule>) -> Result<ClusterStatement, ParseError> {
     Ok(ClusterStatement {
         table_name: table_name.clone(),
         index_name: index_name.clone(),
+        mark_only: false,
     })
 }
 

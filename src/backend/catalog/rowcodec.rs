@@ -1174,7 +1174,7 @@ pub(crate) fn pg_attribute_row_from_values(
             .ok_or(CatalogError::Corrupt("unknown attstorage"))?,
         attcompression: AttributeCompression::from_char(attcompression)
             .ok_or(CatalogError::Corrupt("unknown attcompression"))?,
-        attstattarget: expect_int16(&values[11])?,
+        attstattarget: expect_nullable_int16(&values[11])?,
         attinhcount: expect_int16(&values[12])?,
         attislocal: expect_bool(&values[13])?,
         attidentity,
@@ -2128,7 +2128,7 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::InternalChar(row.attalign.as_char() as u8),
         Value::InternalChar(row.attstorage.as_char() as u8),
         Value::InternalChar(row.attcompression.as_char() as u8),
-        Value::Int16(row.attstattarget),
+        nullable_int16_value(row.attstattarget),
         Value::Int16(row.attinhcount),
         Value::Bool(row.attislocal),
         Value::InternalChar(row.attidentity as u8),

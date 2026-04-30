@@ -67,7 +67,7 @@ pub struct PgAttributeRow {
     pub attalign: AttributeAlign,
     pub attstorage: AttributeStorage,
     pub attcompression: AttributeCompression,
-    pub attstattarget: i16,
+    pub attstattarget: Option<i16>,
     pub attinhcount: i16,
     pub attislocal: bool,
     pub attidentity: char,
@@ -99,7 +99,7 @@ pub fn pg_attribute_desc() -> RelationDesc {
                 SqlType::new(SqlTypeKind::InternalChar),
                 false,
             ),
-            column_desc("attstattarget", SqlType::new(SqlTypeKind::Int2), false),
+            column_desc("attstattarget", SqlType::new(SqlTypeKind::Int2), true),
             column_desc("attinhcount", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("attislocal", SqlType::new(SqlTypeKind::Bool), false),
             column_desc(
@@ -331,7 +331,7 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
                     .map(|row| row.typstorage)
                     .unwrap_or(column.storage.attstorage),
                 attcompression: column.storage.attcompression,
-                attstattarget: column.attstattarget,
+                attstattarget: (column.attstattarget >= 0).then_some(column.attstattarget),
                 attinhcount: column.attinhcount,
                 attislocal: column.attislocal,
                 attidentity: column
