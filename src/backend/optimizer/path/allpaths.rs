@@ -334,6 +334,131 @@ fn nullable_outer_join_filter_pushdown_relid(
         .map(|_| relid)
 }
 
+fn expr_is_nonnullable_for_restriction(root: &PlannerInfo, expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(Value::Null) => false,
+        Expr::Const(_) => true,
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_is_nonnullable_for_restriction(root, inner)
+        }
+        Expr::Var(var) => {
+            if var.varlevelsup != 0 {
+                return false;
+            }
+            if var.varattno < 0 {
+                return true;
+            }
+            let relid = rte_slot_varno(var.varno).unwrap_or(var.varno);
+            if super::super::base_rel_is_nullable_by_outer_join(root, relid) {
+                return false;
+            }
+            let Some(index) = attrno_index(var.varattno) else {
+                return false;
+            };
+            root.parse
+                .rtable
+                .get(relid.saturating_sub(1))
+                .and_then(|rte| rte.desc.columns.get(index))
+                .is_some_and(|column| !column.storage.nullable)
+        }
+        _ => false,
+    }
+}
+
+fn simplify_nullability_restriction(root: &PlannerInfo, expr: Expr) -> Expr {
+    match expr {
+        Expr::IsNull(inner) => {
+            if expr_is_nonnullable_for_restriction(root, &inner) {
+                Expr::Const(Value::Bool(false))
+            } else {
+                Expr::IsNull(inner)
+            }
+        }
+        Expr::IsNotNull(inner) => {
+            if expr_is_nonnullable_for_restriction(root, &inner) {
+                Expr::Const(Value::Bool(true))
+            } else {
+                Expr::IsNotNull(inner)
+            }
+        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            let original = Expr::Bool(bool_expr.clone());
+            let simplified = bool_expr
+                .args
+                .iter()
+                .cloned()
+                .map(|arg| simplify_nullability_restriction(root, arg))
+                .collect::<Vec<_>>();
+            if simplified
+                .iter()
+                .any(|arg| matches!(arg, Expr::Const(Value::Bool(true))))
+            {
+                Expr::Const(Value::Bool(true))
+            } else if !simplified.is_empty()
+                && simplified
+                    .iter()
+                    .all(|arg| matches!(arg, Expr::Const(Value::Bool(false))))
+            {
+                Expr::Const(Value::Bool(false))
+            } else {
+                original
+            }
+        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            let mut simplified_args = Vec::new();
+            for arg in bool_expr.args {
+                match simplify_nullability_restriction(root, arg) {
+                    Expr::Const(Value::Bool(false)) => return Expr::Const(Value::Bool(false)),
+                    Expr::Const(Value::Bool(true)) => {}
+                    other => simplified_args.push(other),
+                }
+            }
+            match simplified_args.len() {
+                0 => Expr::Const(Value::Bool(true)),
+                1 => simplified_args.pop().expect("single simplified predicate"),
+                _ => Expr::bool_expr(BoolExprType::And, simplified_args),
+            }
+        }
+        other => other,
+    }
+}
+
+fn restrict_info_with_nullability_simplification(
+    root: &PlannerInfo,
+    restrict: RestrictInfo,
+) -> Option<RestrictInfo> {
+    let clause = simplify_nullability_restriction(root, restrict.clause.clone());
+    if matches!(clause, Expr::Const(Value::Bool(true))) {
+        None
+    } else {
+        Some(joininfo::translated_restrict_info(clause, &restrict))
+    }
+}
+
+fn simplify_base_restrictinfo(root: &mut PlannerInfo) {
+    for relid in 1..root.simple_rel_array.len() {
+        let Some(restricts) = root
+            .simple_rel_array
+            .get_mut(relid)
+            .and_then(Option::as_mut)
+            .map(|rel| std::mem::take(&mut rel.baserestrictinfo))
+        else {
+            continue;
+        };
+        let simplified = restricts
+            .into_iter()
+            .filter_map(|restrict| restrict_info_with_nullability_simplification(root, restrict))
+            .collect::<Vec<_>>();
+        if let Some(rel) = root
+            .simple_rel_array
+            .get_mut(relid)
+            .and_then(Option::as_mut)
+        {
+            rel.baserestrictinfo = simplified;
+        }
+    }
+}
+
 fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
     super::super::and_exprs(ordered_base_restrict_exprs(rel))
 }
@@ -476,6 +601,14 @@ fn is_append_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
 }
 
 fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
+    if rel
+        .baserestrictinfo
+        .iter()
+        .any(|restrict| matches!(restrict.clause, Expr::Const(Value::Bool(false))))
+    {
+        return true;
+    }
+
     let mut equalities = Vec::<(Expr, Value)>::new();
     for clause in rel
         .baserestrictinfo
@@ -529,6 +662,21 @@ fn const_false_relation_path(rtindex: usize, desc: &RelationDesc) -> Path {
             partition_prune: None,
             children: Vec::new(),
         }),
+    }
+}
+
+fn path_is_const_false_filter(path: &Path) -> bool {
+    match path {
+        Path::Filter {
+            predicate: Expr::Const(Value::Bool(false)),
+            ..
+        } => true,
+        Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::SubqueryScan { input, .. } => path_is_const_false_filter(input),
+        _ => false,
     }
 }
 
@@ -3255,11 +3403,13 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
     {
         return;
     }
+    let child_rtindexes = sorted_append_child_rtindexes(root, catalog, rtindex);
     if root
         .simple_rel_array
         .get(rtindex)
         .and_then(Option::as_ref)
         .is_some_and(base_restrictinfo_is_contradictory)
+        && child_rtindexes.is_empty()
     {
         if let Some(rel) = root
             .simple_rel_array
@@ -3275,7 +3425,6 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         }
         return;
     }
-    let child_rtindexes = sorted_append_child_rtindexes(root, catalog, rtindex);
     if let RangeTblEntryKind::Relation {
         rel: heap_rel,
         relation_oid,
@@ -3356,7 +3505,11 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             .iter()
             .filter_map(|child| child.bound.clone())
             .collect::<Vec<_>>();
-        if relkind != 'p' {
+        if relkind != 'p'
+            && !filter
+                .as_ref()
+                .is_some_and(|expr| matches!(expr, Expr::Const(Value::Bool(false))))
+        {
             children.push(normalize_rte_path(
                 rtindex,
                 &rte.desc,
@@ -3447,6 +3600,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             else {
                 continue;
             };
+            if path_is_const_false_filter(&child_path) {
+                continue;
+            }
             let translated_vars = append_translation(root, child_rtindex)
                 .map(|info| info.translated_vars.clone())
                 .unwrap_or_default();
@@ -3481,6 +3637,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         .cloned()
                 });
                 if let Some(path) = ordered_child_path {
+                    if path_is_const_false_filter(&path) {
+                        continue;
+                    }
                     let translated_vars = append_translation(root, child_rtindex)
                         .map(|info| info.translated_vars.clone())
                         .unwrap_or_default();
@@ -3894,6 +4053,8 @@ fn build_join_restrict_clauses(
         clauses.extend(
             flatten_and_conjuncts(&explicit_qual)
                 .into_iter()
+                .map(|clause| simplify_nullability_restriction(root, clause))
+                .filter(|clause| !matches!(clause, Expr::Const(Value::Bool(true))))
                 .map(|clause| joininfo::make_restrict_info_with_pushdown(clause, false)),
         );
     }
@@ -4885,6 +5046,24 @@ fn path_dominates(left: &Path, right: &Path) -> bool {
     {
         return true;
     }
+    if bestpath::preferred_small_full_merge_join(right, left) {
+        return false;
+    }
+    if bestpath::preferred_small_full_merge_join(left, right) {
+        return true;
+    }
+    if bestpath::preferred_small_nested_loop_left_join(right, left) {
+        return false;
+    }
+    if bestpath::preferred_small_nested_loop_left_join(left, right) {
+        return true;
+    }
+    if bestpath::preferred_unqualified_left_join_above_nulltest(right, left) {
+        return false;
+    }
+    if bestpath::preferred_unqualified_left_join_above_nulltest(left, right) {
+        return true;
+    }
     if bestpath::non_nested_join_nearly_as_cheap(right, left) {
         return false;
     }
@@ -5408,6 +5587,7 @@ fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn Cat
 pub(super) fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
     assign_base_restrictinfo(root, catalog);
     expand_inherited_rtentries(root, catalog);
+    simplify_base_restrictinfo(root);
     root.inner_join_clauses = collect_inner_join_clauses(root);
     set_base_rel_pathlists(root, catalog);
     let query_relids = root.all_query_relids();
