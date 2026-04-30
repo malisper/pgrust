@@ -59,6 +59,17 @@ pub fn apply_backend_cache_invalidation(
     }
 
     state.syscache.invalidate(invalidation);
+    if invalidation
+        .touched_catalogs
+        .contains(&BootstrapCatalogKind::PgEventTrigger)
+        || (invalidation.touched_catalogs.is_empty()
+            && invalidation
+                .relation_oids
+                .contains(&BootstrapCatalogKind::PgEventTrigger.relation_oid()))
+    {
+        state.event_trigger_cache = None;
+        state.event_trigger_cache_ctx = None;
+    }
     state.catcache = None;
     state.catcache_ctx = None;
     let touches_shared_catalog = invalidation.touched_catalogs.is_empty()

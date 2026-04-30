@@ -17111,6 +17111,69 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
 }
 
 #[test]
+fn event_trigger_may_fire_uses_event_trigger_cache_without_catcache() {
+    let db = Database::open_ephemeral(16).unwrap();
+    db.backend_cache_states.write().remove(&1);
+
+    assert!(
+        !db.event_trigger_may_fire(1, None, "ddl_command_start", "CREATE TABLE")
+            .unwrap()
+    );
+
+    let states = db.backend_cache_states.read();
+    let state = states.get(&1).unwrap();
+    assert!(state.event_trigger_cache.is_some());
+    assert!(state.catcache.is_none());
+}
+
+#[test]
+fn event_trigger_cache_survives_unrelated_catalog_invalidation() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    assert!(
+        !db.event_trigger_may_fire(1, None, "ddl_command_start", "CREATE TABLE")
+            .unwrap()
+    );
+    let mut invalidation = crate::backend::utils::cache::inval::CatalogInvalidation::default();
+    invalidation
+        .touched_catalogs
+        .insert(BootstrapCatalogKind::PgClass);
+    crate::backend::utils::cache::inval::apply_backend_cache_invalidation(&db, 1, &invalidation);
+
+    let states = db.backend_cache_states.read();
+    let state = states.get(&1).unwrap();
+    assert!(state.event_trigger_cache.is_some());
+    assert!(state.event_trigger_cache_ctx.is_some());
+    drop(states);
+
+    crate::backend::utils::cache::inval::CacheInvalidateRelcache(&db, 1, 999_999);
+    let states = db.backend_cache_states.read();
+    let state = states.get(&1).unwrap();
+    assert!(state.event_trigger_cache.is_some());
+    assert!(state.event_trigger_cache_ctx.is_some());
+}
+
+#[test]
+fn event_trigger_cache_invalidates_on_pg_event_trigger() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    assert!(
+        !db.event_trigger_may_fire(1, None, "ddl_command_start", "CREATE TABLE")
+            .unwrap()
+    );
+    let mut invalidation = crate::backend::utils::cache::inval::CatalogInvalidation::default();
+    invalidation
+        .touched_catalogs
+        .insert(BootstrapCatalogKind::PgEventTrigger);
+    crate::backend::utils::cache::inval::apply_backend_cache_invalidation(&db, 1, &invalidation);
+
+    let states = db.backend_cache_states.read();
+    let state = states.get(&1).unwrap();
+    assert!(state.event_trigger_cache.is_none());
+    assert!(state.event_trigger_cache_ctx.is_none());
+}
+
+#[test]
 fn postgres_named_syscache_wrappers_lookup_and_invalidate() {
     let base = temp_dir("postgres_named_syscache_wrappers");
     let db = Database::open(&base, 16).unwrap();
