@@ -268,6 +268,7 @@ pub trait PlanNode: std::fmt::Debug {
         _lines: &mut Vec<String>,
     ) {
     }
+    fn renumber_append_child_aliases(&mut self, _ordinal: usize) {}
 
     /// Format children for EXPLAIN output. The node itself is formatted by
     /// the caller; this method handles child nodes.
@@ -326,6 +327,7 @@ pub struct MergeAppendState {
     pub(crate) partition_prune: Option<PartitionPrunePlan>,
     pub(crate) subplans_removed: usize,
     pub(crate) items: Vec<OrderByEntry>,
+    pub(crate) sort_key_qualifier: Option<String>,
     pub(crate) column_names: Vec<String>,
     pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,

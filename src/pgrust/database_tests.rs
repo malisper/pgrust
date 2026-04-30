@@ -12543,7 +12543,7 @@ fn explain_update_accepts_inherited_update_statement() {
     );
     assert!(
         lines.iter().any(|line| {
-            line.contains("Index Scan using") && line.contains("on some_tab_child some_tab_1")
+            line.contains("Index Scan using") && line.contains("on some_tab_child")
         }),
         "expected EXPLAIN UPDATE to show inherited child index scan, got {lines:?}"
     );

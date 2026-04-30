@@ -5408,6 +5408,7 @@ fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
         CteBody::Update(update) => {
             CteBody::Update(Box::new(normalize_plpgsql_update(*update, env)))
         }
+        CteBody::Merge(merge) => CteBody::Merge(merge),
         CteBody::RecursiveUnion {
             all,
             anchor,

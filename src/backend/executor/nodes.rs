@@ -520,7 +520,16 @@ fn relation_io_object(ctx: &ExecutorContext, relation_oid: u32) -> &'static str 
 }
 
 fn render_order_by_key(item: &OrderByEntry, column_names: &[String]) -> String {
-    let mut rendered = render_explain_expr_inner(&item.expr, column_names);
+    render_order_by_key_with_qualifier(item, column_names, None)
+}
+
+fn render_order_by_key_with_qualifier(
+    item: &OrderByEntry,
+    column_names: &[String],
+    qualifier: Option<&str>,
+) -> String {
+    let mut rendered =
+        render_explain_expr_inner_with_qualifier(&item.expr, qualifier, column_names);
     if item.descending {
         rendered.push_str(" DESC");
     }
@@ -1239,6 +1248,7 @@ impl PlanNode for AppendState {
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         ensure_append_runtime_pruned(
+            &mut self.children,
             &mut self.active_children,
             &mut self.visible_children,
             &mut self.subplans_removed,
@@ -1382,7 +1392,21 @@ fn append_explain_child_indexes(
         .unwrap_or_else(|| (0..child_count).collect())
 }
 
+fn renumber_relation_alias(relation_name: &str, ordinal: usize) -> String {
+    let Some((relation, alias)) = relation_name.rsplit_once(' ') else {
+        return relation_name.to_string();
+    };
+    let Some((prefix, suffix)) = alias.rsplit_once('_') else {
+        return relation_name.to_string();
+    };
+    if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        return relation_name.to_string();
+    }
+    format!("{relation} {prefix}_{ordinal}")
+}
+
 fn ensure_append_runtime_pruned(
+    children: &mut [PlanState],
     active_children: &mut Option<Vec<usize>>,
     visible_children: &mut Option<Vec<usize>>,
     subplans_removed: &mut usize,
@@ -1412,7 +1436,15 @@ fn ensure_append_runtime_pruned(
             active.push(index);
         }
     }
+    let should_renumber_aliases = *subplans_removed > 0 || startup_removed > 0;
     *subplans_removed += startup_removed;
+    if should_renumber_aliases {
+        for (ordinal, child_index) in startup_visible.iter().enumerate() {
+            if let Some(child) = children.get_mut(*child_index) {
+                child.renumber_append_child_aliases(ordinal + 1);
+            }
+        }
+    }
     *visible_children = Some(startup_visible);
     *active_children = Some(active);
     Ok(())
@@ -1497,7 +1529,8 @@ fn startup_prune_expr_is_evaluable(expr: &Expr) -> bool {
     match expr {
         Expr::Const(_) | Expr::Var(_) => true,
         Expr::Param(param) => param.paramkind == ParamKind::External,
-        Expr::SubPlan(_) | Expr::SubLink(_) => false,
+        Expr::SubPlan(subplan) => subplan.par_param.is_empty() && subplan.args.is_empty(),
+        Expr::SubLink(_) => false,
         Expr::Op(op) => op.args.iter().all(startup_prune_expr_is_evaluable),
         Expr::Bool(bool_expr) => bool_expr.args.iter().all(startup_prune_expr_is_evaluable),
         Expr::Func(func) => func.args.iter().all(startup_prune_expr_is_evaluable),
@@ -1554,6 +1587,7 @@ impl PlanNode for MergeAppendState {
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         ensure_append_runtime_pruned(
+            &mut self.children,
             &mut self.active_children,
             &mut self.visible_children,
             &mut self.subplans_removed,
@@ -1680,19 +1714,25 @@ impl PlanNode for MergeAppendState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
+        let sort_keys = self
+            .items
+            .iter()
+            .map(|item| {
+                render_order_by_key_with_qualifier(
+                    item,
+                    &self.column_names,
+                    self.sort_key_qualifier.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("{prefix}Sort Key: {sort_keys}"));
         if self.subplans_removed > 0 {
             lines.push(format!(
                 "{prefix}Subplans Removed: {}",
                 self.subplans_removed
             ));
         }
-        let sort_keys = self
-            .items
-            .iter()
-            .map(|item| render_order_by_key(item, &self.column_names))
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(format!("{prefix}Sort Key: {sort_keys}"));
     }
 
     fn explain_children(
@@ -2159,6 +2199,9 @@ impl PlanNode for SeqScanState {
     fn node_label(&self) -> String {
         format!("Seq Scan on {}", self.relation_name)
     }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
+    }
     fn explain_details(
         &self,
         indent: usize,
@@ -2170,7 +2213,9 @@ impl PlanNode for SeqScanState {
         if self.disabled {
             lines.push(format!("{prefix}Disabled: true"));
         }
-        if let Some(qual_expr) = &self.qual_expr {
+        if let Some(qual_expr) = &self.qual_expr
+            && !matches!(qual_expr, Expr::Const(Value::Bool(true)))
+        {
             lines.push(format!(
                 "{prefix}Filter: {}",
                 render_explain_expr(qual_expr, &self.column_names)
@@ -2456,6 +2501,9 @@ impl PlanNode for IndexOnlyScanState {
             self.index_name, self.relation_name
         )
     }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
+    }
 
     fn explain_details(
         &self,
@@ -2474,7 +2522,9 @@ impl PlanNode for IndexOnlyScanState {
         {
             lines.push(format!("{prefix}Order By: ({detail})"));
         }
-        if let Some(qual_expr) = &self.qual_expr {
+        if let Some(qual_expr) = &self.qual_expr
+            && !matches!(qual_expr, Expr::Const(Value::Bool(true)))
+        {
             lines.push(format!(
                 "{prefix}Filter: {}",
                 render_explain_expr(qual_expr, &self.column_names)
@@ -2744,6 +2794,9 @@ impl PlanNode for IndexScanState {
             self.index_name, self.relation_name
         )
     }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
+    }
     fn explain_details(
         &self,
         indent: usize,
@@ -2761,7 +2814,9 @@ impl PlanNode for IndexScanState {
         {
             lines.push(format!("{prefix}Order By: ({detail})"));
         }
-        if let Some(qual_expr) = &self.qual_expr {
+        if let Some(qual_expr) = &self.qual_expr
+            && !matches!(qual_expr, Expr::Const(Value::Bool(true)))
+        {
             lines.push(format!(
                 "{prefix}Filter: {}",
                 render_explain_expr(qual_expr, &self.column_names)
@@ -3577,6 +3632,9 @@ impl PlanNode for BitmapHeapScanState {
     fn node_label(&self) -> String {
         format!("Bitmap Heap Scan on {}", self.relation_name)
     }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
+    }
 
     fn explain_details(
         &self,
@@ -3592,7 +3650,9 @@ impl PlanNode for BitmapHeapScanState {
                 render_explain_expr(recheck_qual, &self.column_names)
             ));
         }
-        if let Some(filter_qual) = &self.filter_qual {
+        if let Some(filter_qual) = &self.filter_qual
+            && !matches!(filter_qual, Expr::Const(Value::Bool(true)))
+        {
             let prefix = explain_detail_prefix(indent);
             lines.push(format!(
                 "{prefix}Filter: {}",
@@ -5858,14 +5918,16 @@ fn render_explain_const(value: &Value) -> String {
                 format!("'{rendered}'::record")
             }
         }
-        Value::TsQuery(_) | Value::TsVector(_) => match value.sql_type_hint() {
-            Some(sql_type) => format!(
-                "{}::{}",
-                render_explain_literal(value),
-                render_explain_sql_type_name(sql_type)
-            ),
-            None => render_explain_literal(value),
-        },
+        Value::Range(_) | Value::Multirange(_) | Value::TsQuery(_) | Value::TsVector(_) => {
+            match value.sql_type_hint() {
+                Some(sql_type) => format!(
+                    "{}::{}",
+                    render_explain_literal(value),
+                    render_explain_sql_type_name(sql_type)
+                ),
+                None => render_explain_literal(value),
+            }
+        }
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -6280,6 +6342,9 @@ impl PlanNode for FilterState {
             "Filter".into()
         }
     }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.input.renumber_append_child_aliases(ordinal);
+    }
     fn explain_details(
         &self,
         indent: usize,
@@ -6290,7 +6355,7 @@ impl PlanNode for FilterState {
         let prefix = explain_detail_prefix(indent);
         if filter_state_is_one_time_false_result(self) {
             lines.push(format!("{prefix}One-Time Filter: false"));
-        } else {
+        } else if !matches!(self.predicate, Expr::Const(Value::Bool(true))) {
             lines.push(format!(
                 "{prefix}Filter: {}",
                 render_explain_expr(&self.predicate, self.column_names())
@@ -7913,6 +7978,9 @@ impl PlanNode for ProjectionState {
     }
     fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
         projection_is_explain_passthrough(self).then_some(self.input.as_ref())
+    }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.input.renumber_append_child_aliases(ordinal);
     }
     fn explain_children(
         &self,
