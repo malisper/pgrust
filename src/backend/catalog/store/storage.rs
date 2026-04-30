@@ -18,7 +18,9 @@ use crate::backend::catalog::loader::{
 use crate::backend::catalog::persistence::{
     apply_catalog_row_changes_subset_incremental, sync_catalog_rows_subset,
 };
-use crate::backend::catalog::rowcodec::{pg_aggregate_row_from_values, pg_proc_row_from_values};
+use crate::backend::catalog::rowcodec::{
+    pg_aggregate_row_from_values, pg_event_trigger_row_from_values, pg_proc_row_from_values,
+};
 use crate::backend::catalog::rows::{
     PhysicalCatalogRows, add_builtin_description_rows, physical_catalog_rows_from_catcache,
 };
@@ -27,8 +29,8 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BootstrapCatalogKind, CatalogScope, bootstrap_catalog_kinds, bootstrap_pg_aggregate_rows,
-    system_catalog_indexes, system_catalog_indexes_for_heap,
+    BootstrapCatalogKind, CatalogScope, PgEventTriggerRow, bootstrap_catalog_kinds,
+    bootstrap_pg_aggregate_rows, system_catalog_indexes, system_catalog_indexes_for_heap,
 };
 
 use super::relcache_init::{
@@ -356,6 +358,40 @@ impl CatalogStore {
             rows.statistics,
             rows.types,
         ))
+    }
+
+    pub(crate) fn event_trigger_rows_with_snapshot(
+        &self,
+        pool: &BufferPool<SmgrStorageBackend>,
+        txns: &TransactionManager,
+        snapshot: &Snapshot,
+        client_id: crate::ClientId,
+    ) -> Result<Vec<PgEventTriggerRow>, CatalogError> {
+        match &self.mode {
+            CatalogStoreMode::Durable { base_dir, .. } => {
+                Ok(load_physical_catalog_rows_visible_scoped(
+                    base_dir,
+                    pool,
+                    txns,
+                    snapshot,
+                    client_id,
+                    scope_db_oid(self.scope),
+                    &[BootstrapCatalogKind::PgEventTrigger],
+                )?
+                .event_triggers)
+            }
+            CatalogStoreMode::Ephemeral => load_visible_catalog_kind_in_pool_scoped(
+                pool,
+                txns,
+                snapshot,
+                client_id,
+                BootstrapCatalogKind::PgEventTrigger,
+                scope_db_oid(self.scope),
+            )?
+            .into_iter()
+            .map(pg_event_trigger_row_from_values)
+            .collect::<Result<Vec<_>, _>>(),
+        }
     }
 
     pub fn relation(&self, name: &str) -> Result<Option<RelCacheEntry>, CatalogError> {

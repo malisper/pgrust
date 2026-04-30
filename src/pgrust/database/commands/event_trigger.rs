@@ -7,6 +7,7 @@ use crate::backend::parser::{
     AlterTableTriggerMode, CatalogLookup, CommentOnEventTriggerStatement,
     CreateEventTriggerStatement, DropEventTriggerStatement,
 };
+use crate::backend::utils::cache::evtcache::event_trigger_cache;
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PG_LANGUAGE_SQL_OID, PgEventTriggerRow};
 use crate::pl::plpgsql::{EventTriggerCallContext, execute_user_defined_event_trigger_function};
@@ -70,22 +71,8 @@ impl Database {
         event: &str,
         tag: &str,
     ) -> Result<bool, ExecError> {
-        let tag = tag.to_ascii_uppercase();
-        let catcache = self
-            .backend_catcache(client_id, txn_ctx)
-            .map_err(ExecError::from)?;
-        Ok(catcache
-            .event_trigger_rows()
-            .into_iter()
-            .filter(|row| row.evtevent.eq_ignore_ascii_case(event))
-            .filter(|row| {
-                event_trigger_enabled_for_session(row, self.session_replication_role(client_id))
-            })
-            .any(|row| {
-                row.evttags
-                    .as_ref()
-                    .is_none_or(|tags| tags.iter().any(|candidate| candidate == &tag))
-            }))
+        let cache = event_trigger_cache(self, client_id, txn_ctx).map_err(ExecError::from)?;
+        Ok(cache.may_fire(event, tag, self.session_replication_role(client_id)))
     }
 
     pub(crate) fn table_rewrite_event_trigger_may_fire(
@@ -116,23 +103,19 @@ impl Database {
         let tag = tag.to_ascii_uppercase();
         let txn_ctx = (ctx.snapshot.current_xid != INVALID_TRANSACTION_ID)
             .then_some((ctx.snapshot.current_xid, ctx.next_command_id));
-        let catcache = self
-            .backend_catcache(ctx.client_id, txn_ctx)
-            .map_err(ExecError::from)?;
-        let rows = catcache
-            .event_trigger_rows()
-            .into_iter()
-            .filter(|row| row.evtevent.eq_ignore_ascii_case(event))
-            .filter(|row| event_trigger_enabled_for_session(row, ctx.session_replication_role))
-            .filter(|row| {
-                row.evttags
-                    .as_ref()
-                    .is_none_or(|tags| tags.iter().any(|candidate| candidate == &tag))
-            })
-            .collect::<Vec<_>>();
+        let cache = event_trigger_cache(self, ctx.client_id, txn_ctx).map_err(ExecError::from)?;
+        let rows = cache.matching_rows(event, &tag, ctx.session_replication_role);
         if rows.is_empty() {
             return Ok(());
         }
+        let table_rewrite_relation_name = match table_rewrite {
+            Some((oid, _)) => self
+                .backend_catcache(ctx.client_id, txn_ctx)
+                .map_err(ExecError::from)?
+                .class_by_oid(oid)
+                .map(|row| row.relname.clone()),
+            None => None,
+        };
 
         let call = EventTriggerCallContext {
             event: event.to_ascii_lowercase(),
@@ -140,8 +123,7 @@ impl Database {
             ddl_commands,
             dropped_objects,
             table_rewrite_relation_oid: table_rewrite.map(|(oid, _)| oid),
-            table_rewrite_relation_name: table_rewrite
-                .and_then(|(oid, _)| catcache.class_by_oid(oid).map(|row| row.relname.clone())),
+            table_rewrite_relation_name,
             table_rewrite_reason: table_rewrite.map(|(_, reason)| reason),
         };
         for row in rows {
@@ -695,19 +677,6 @@ fn event_trigger_enabled_char(mode: AlterTableTriggerMode) -> char {
         AlterTableTriggerMode::EnableOrigin => EVENT_TRIGGER_ENABLED_ORIGIN,
         AlterTableTriggerMode::EnableReplica => EVENT_TRIGGER_ENABLED_REPLICA,
         AlterTableTriggerMode::EnableAlways => EVENT_TRIGGER_ENABLED_ALWAYS,
-    }
-}
-
-fn event_trigger_enabled_for_session(
-    row: &PgEventTriggerRow,
-    role: SessionReplicationRole,
-) -> bool {
-    match row.evtenabled {
-        EVENT_TRIGGER_DISABLED => false,
-        EVENT_TRIGGER_ENABLED_REPLICA => role == SessionReplicationRole::Replica,
-        EVENT_TRIGGER_ENABLED_ORIGIN => role != SessionReplicationRole::Replica,
-        EVENT_TRIGGER_ENABLED_ALWAYS => true,
-        _ => true,
     }
 }
 

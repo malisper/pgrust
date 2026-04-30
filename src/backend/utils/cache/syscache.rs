@@ -21,6 +21,7 @@ use crate::backend::catalog::rowcodec::{
 };
 use crate::backend::catalog::store::{CatalogStore, CatalogWriteContext};
 use crate::backend::utils::cache::catcache::CatCache;
+use crate::backend::utils::cache::evtcache::EventTriggerCache;
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::relcache::{
     IndexAmOpEntry, IndexAmProcEntry, IndexRelCacheEntry, RelCacheEntry,
@@ -1095,6 +1096,8 @@ pub struct BackendCacheState {
     pub shared_catcache_ctx: Option<BackendCacheContext>,
     pub catcache: Option<CatCache>,
     pub catcache_ctx: Option<BackendCacheContext>,
+    pub event_trigger_cache: Option<EventTriggerCache>,
+    pub event_trigger_cache_ctx: Option<BackendCacheContext>,
     pub relation_cache: HashMap<u32, RelCacheEntry>,
     pub relation_cache_ctx: Option<BackendCacheContext>,
     pub(crate) syscache: BackendSysCache,
