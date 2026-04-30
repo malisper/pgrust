@@ -9788,8 +9788,8 @@ fn check_merge_privileges(
     input_plan: &PlannedStmt,
     ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
-    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     let excluded_oids = BTreeSet::from([stmt.relation_oid]);
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     check_planned_stmt_relation_privileges_except(input_plan, ctx, &excluded_oids)?;
     Ok(())
 }

@@ -232,6 +232,27 @@ fn acl_grants_all_options(
     })
 }
 
+fn grantable_acl_privilege_chars(
+    acl: &[String],
+    effective_names: &BTreeSet<String>,
+    requested_privileges: &str,
+) -> String {
+    requested_privileges
+        .chars()
+        .filter(|ch| acl_grants_all_options(acl, effective_names, &ch.to_string()))
+        .collect()
+}
+
+fn warn_grant_privileges(object_name: &str, requested_privileges: &str, granted_privileges: &str) {
+    if granted_privileges.is_empty() {
+        push_warning(format!("no privileges were granted for \"{object_name}\""));
+    } else if granted_privileges.chars().count() < requested_privileges.chars().count() {
+        push_warning(format!(
+            "not all privileges were granted for \"{object_name}\""
+        ));
+    }
+}
+
 fn grant_table_acl_entry(
     acl: &mut Vec<String>,
     grantee: &str,
@@ -1154,6 +1175,9 @@ impl Database {
                                 !column.dropped && column.name.eq_ignore_ascii_case(&column_name)
                             })
                         else {
+                            if column_name.eq_ignore_ascii_case("tableoid") {
+                                continue;
+                            }
                             return Err(ExecError::Parse(ParseError::UnknownColumn(
                                 column_name.clone(),
                             )));
@@ -1162,20 +1186,25 @@ impl Database {
                         let acl = column_acls
                             .entry(attnum)
                             .or_insert_with(|| column.attacl.clone().unwrap_or_default());
-                        if !current_user_can_grant_as_owner
-                            && !acl_grants_all_options(
+                        let effective_privilege_chars;
+                        let grant_privilege_chars = if current_user_can_grant_as_owner {
+                            privilege_chars
+                        } else {
+                            effective_privilege_chars = grantable_acl_privilege_chars(
                                 acl,
                                 effective_names.as_ref().expect("effective names"),
                                 privilege_chars,
-                            )
-                        {
-                            return Err(ExecError::DetailedError {
-                                message: format!("must be owner of table {object_name}"),
-                                detail: None,
-                                hint: None,
-                                sqlstate: "42501",
-                            });
-                        }
+                            );
+                            warn_grant_privileges(
+                                &format!("{column_name} of relation {object_name}"),
+                                privilege_chars,
+                                &effective_privilege_chars,
+                            );
+                            if effective_privilege_chars.is_empty() {
+                                continue;
+                            }
+                            effective_privilege_chars.as_str()
+                        };
                         for grantee_name in &stmt.grantee_names {
                             let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
                                 String::new()
@@ -1194,7 +1223,7 @@ impl Database {
                                 acl,
                                 &grantee_acl_name,
                                 &grantor_name,
-                                privilege_chars,
+                                grant_privilege_chars,
                                 TABLE_ALL_PRIVILEGE_CHARS,
                                 stmt.with_grant_option,
                             );
@@ -1238,20 +1267,21 @@ impl Database {
                         .into_iter()
                         .collect()
                 });
-            if !current_user_can_grant_as_owner
-                && !acl_grants_all_options(
+            let effective_privilege_chars;
+            let grant_privilege_chars = if current_user_can_grant_as_owner {
+                privilege_chars
+            } else {
+                effective_privilege_chars = grantable_acl_privilege_chars(
                     &acl,
                     effective_names.as_ref().expect("effective names"),
                     privilege_chars,
-                )
-            {
-                return Err(ExecError::DetailedError {
-                    message: format!("must be owner of table {object_name}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42501",
-                });
-            }
+                );
+                warn_grant_privileges(object_name, privilege_chars, &effective_privilege_chars);
+                if effective_privilege_chars.is_empty() {
+                    continue;
+                }
+                effective_privilege_chars.as_str()
+            };
             for grantee_name in &stmt.grantee_names {
                 let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
                     String::new()
@@ -1270,7 +1300,7 @@ impl Database {
                     &mut acl,
                     &grantee_acl_name,
                     &grantor_name,
-                    privilege_chars,
+                    grant_privilege_chars,
                     allowed_privilege_chars,
                     stmt.with_grant_option,
                 );

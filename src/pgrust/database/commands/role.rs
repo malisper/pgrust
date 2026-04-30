@@ -6,7 +6,7 @@ use crate::backend::commands::rolecmds::{
 };
 use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
-    DropOwnedStatement, DropRoleStatement, ReassignOwnedStatement,
+    DropOwnedStatement, DropRoleStatement, ReassignOwnedStatement, RoleOption,
 };
 use crate::include::catalog::{DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_POLICY_RELATION_OID};
 use std::collections::{BTreeMap, BTreeSet};
@@ -332,6 +332,7 @@ impl Database {
                         &auth_catalog,
                         &existing,
                         &spec.attrs,
+                        alter_role_changes_password(stmt),
                     ));
                 }
                 self.shared_catalog
@@ -1299,6 +1300,7 @@ fn alter_role_permission_error(
     catalog: &crate::pgrust::auth::AuthCatalog,
     existing: &crate::include::catalog::PgAuthIdRow,
     attrs: &crate::backend::catalog::roles::RoleAttributes,
+    changes_password: bool,
 ) -> ExecError {
     let detail = catalog
         .role_by_oid(auth.current_user_oid())
@@ -1311,6 +1313,8 @@ fn alter_role_permission_error(
                 Some("Only roles with the BYPASSRLS attribute may change the BYPASSRLS attribute.".to_string())
             } else if attrs.rolcreatedb != existing.rolcreatedb && !current.rolcreatedb {
                 Some("Only roles with the CREATEDB attribute may change the CREATEDB attribute.".to_string())
+            } else if changes_password && auth.current_user_oid() != existing.oid {
+                Some("To change another role's password, the current user must have the CREATEROLE attribute and the ADMIN option on the role.".to_string())
             } else {
                 None
             }
@@ -1321,6 +1325,18 @@ fn alter_role_permission_error(
         detail,
         hint: None,
         sqlstate: "42501",
+    }
+}
+
+fn alter_role_changes_password(stmt: &AlterRoleStatement) -> bool {
+    match &stmt.action {
+        AlterRoleAction::Options(options) => options.iter().any(|option| {
+            matches!(
+                option,
+                RoleOption::Password(_) | RoleOption::EncryptedPassword(_)
+            )
+        }),
+        AlterRoleAction::Rename { .. } => false,
     }
 }
 

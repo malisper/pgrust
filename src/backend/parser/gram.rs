@@ -8000,6 +8000,9 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant create on database ") {
         return Ok(Statement::GrantObject(build_grant_database_create(sql)?));
     }
+    if let Some(stmt) = try_build_grant_schema_acl_statement(sql)? {
+        return Ok(Statement::GrantObject(stmt));
+    }
     if lowered.starts_with("grant all on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_all(sql)?));
     }
@@ -8043,6 +8046,9 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if is_function_execute_grant(&lowered, "routine") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
     }
+    if let Some(kind) = invalid_routine_usage_object(&lowered, "grant") {
+        return Err(invalid_routine_usage_privilege(kind));
+    }
     if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
         return Ok(Statement::GrantObject(stmt));
     }
@@ -8055,6 +8061,9 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     let lowered = sql.to_ascii_lowercase();
     if lowered.starts_with("revoke create on database ") {
         return Ok(Statement::RevokeObject(build_revoke_database_create(sql)?));
+    }
+    if let Some(stmt) = try_build_revoke_schema_acl_statement(sql)? {
+        return Ok(Statement::RevokeObject(stmt));
     }
     if lowered.starts_with("revoke all on schema ") {
         return Ok(Statement::RevokeObject(build_revoke_schema_all(sql)?));
@@ -8100,6 +8109,9 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if is_function_execute_revoke(&lowered, "routine") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
+    }
+    if let Some(kind) = invalid_routine_usage_object(&lowered, "revoke") {
+        return Err(invalid_routine_usage_privilege(kind));
     }
     if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
         return Ok(Statement::RevokeObject(stmt));
@@ -8158,6 +8170,91 @@ fn try_build_revoke_table_acl_statement(
         grantee_names,
         cascade: cascade || grantee_cascade,
     }))
+}
+
+fn try_build_grant_schema_acl_statement(
+    sql: &str,
+) -> Result<Option<GrantObjectStatement>, ParseError> {
+    let rest = sql
+        .get("grant ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Ok(None);
+    };
+    let after_on = after_on.ok_or(ParseError::UnexpectedEof)?.trim_start();
+    if !keyword_at_start(after_on, "schema") {
+        return Ok(None);
+    }
+    let privilege = parse_schema_privilege_spec(privileges)?;
+    let after_schema = consume_keyword(after_on, "schema").trim_start();
+    let (object_names, rest) = split_once_keyword(after_schema, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(Some(GrantObjectStatement {
+        privilege,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    }))
+}
+
+fn try_build_revoke_schema_acl_statement(
+    sql: &str,
+) -> Result<Option<RevokeObjectStatement>, ParseError> {
+    let rest = sql
+        .get("revoke ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (rest, cascade) = split_optional_cascade_restrict_clause(rest)?;
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Ok(None);
+    };
+    let after_on = after_on.ok_or(ParseError::UnexpectedEof)?.trim_start();
+    if !keyword_at_start(after_on, "schema") {
+        return Ok(None);
+    }
+    let privilege = parse_schema_privilege_spec(privileges)?;
+    let after_schema = consume_keyword(after_on, "schema").trim_start();
+    let (object_names, rest) = split_once_keyword(after_schema, "from")?;
+    let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(Some(RevokeObjectStatement {
+        privilege,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade: cascade || grantee_cascade,
+    }))
+}
+
+fn parse_schema_privilege_spec(input: &str) -> Result<GrantObjectPrivilege, ParseError> {
+    let mut chars = String::new();
+    for item in split_comma_separated_sql(input)? {
+        match item.trim().to_ascii_lowercase().as_str() {
+            "all" | "all privileges" => chars.push_str("UC"),
+            "usage" => chars.push('U'),
+            "create" => chars.push('C'),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "schema privilege",
+                    actual: item.trim().into(),
+                });
+            }
+        }
+    }
+    match canonicalize_schema_privilege_chars(&chars).as_str() {
+        "UC" => Ok(GrantObjectPrivilege::AllPrivilegesOnSchema),
+        "U" => Ok(GrantObjectPrivilege::UsageOnSchema),
+        "C" => Ok(GrantObjectPrivilege::CreateOnSchema),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "schema privilege",
+            actual: input.into(),
+        }),
+    }
+}
+
+fn canonicalize_schema_privilege_chars(chars: &str) -> String {
+    "UC".chars().filter(|ch| chars.contains(*ch)).collect()
 }
 
 fn strip_optional_table_keyword(input: &str) -> &str {
@@ -8560,7 +8657,7 @@ fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, Parse
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
         columns: Vec::new(),
-        object_names: vec![object_name.trim().to_ascii_lowercase()],
+        object_names: parse_routine_signature_list(object_name)?,
         grantee_names,
         with_grant_option,
     })
@@ -8589,9 +8686,18 @@ fn build_grant_routine_execute_with_object(
     Ok(GrantObjectStatement {
         privilege,
         columns: Vec::new(),
-        object_names: vec![object_name.trim().to_ascii_lowercase()],
+        object_names: parse_routine_signature_list(object_name)?,
         grantee_names,
         with_grant_option,
+    })
+}
+
+fn parse_routine_signature_list(input: &str) -> Result<Vec<String>, ParseError> {
+    split_comma_separated_sql(input).map(|items| {
+        items
+            .into_iter()
+            .map(|item| item.trim().to_ascii_lowercase())
+            .collect()
     })
 }
 
@@ -8633,6 +8739,25 @@ fn function_execute_prefix_len(
         }
     }
     None
+}
+
+fn invalid_routine_usage_object<'a>(lowered: &'a str, command: &'static str) -> Option<&'a str> {
+    for object in ["function", "procedure", "routine"] {
+        let prefix = format!("{command} usage on {object} ");
+        if lowered.starts_with(&prefix) {
+            return Some(object);
+        }
+    }
+    None
+}
+
+fn invalid_routine_usage_privilege(kind: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("invalid privilege type USAGE for {kind}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42809",
+    }
 }
 
 fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
@@ -8842,7 +8967,7 @@ fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, Par
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
         columns: Vec::new(),
-        object_names: vec![object_name.trim().to_ascii_lowercase()],
+        object_names: parse_routine_signature_list(object_name)?,
         grantee_names,
         cascade,
     })
@@ -8871,7 +8996,7 @@ fn build_revoke_routine_execute_with_object(
     Ok(RevokeObjectStatement {
         privilege,
         columns: Vec::new(),
-        object_names: vec![object_name.trim().to_ascii_lowercase()],
+        object_names: parse_routine_signature_list(object_name)?,
         grantee_names,
         cascade,
     })
@@ -9030,11 +9155,9 @@ fn strip_keyword_prefix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
 }
 
 fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool), ParseError> {
-    // :HACK: pgrust does not yet model object-GRANT grantor selection, but
-    // PostgreSQL accepts GRANTED BY after the grantee list. Strip it so the
-    // clause does not get mistaken for part of the grantee role name.
-    let (input, _granted_by_clause) =
+    let (input, granted_by_clause) =
         split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
+    validate_current_object_grantor(granted_by_clause)?;
     let (grantees, suffix) = split_optional_keyword(input, "with")
         .map(|(grantees, suffix)| (grantees, suffix.unwrap_or_default()))
         .unwrap_or((input.trim(), ""));
@@ -9055,11 +9178,25 @@ fn parse_revokee_list_with_optional_cascade(
     input: &str,
 ) -> Result<(Vec<String>, bool), ParseError> {
     let (input, cascade) = split_optional_cascade_restrict_clause(input)?;
-    // :HACK: see parse_grantees_with_optional_grant; object REVOKE grantor
-    // selection is not represented yet, so only keep the revokee list.
-    let (input, _granted_by_clause) =
+    let (input, granted_by_clause) =
         split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
+    validate_current_object_grantor(granted_by_clause)?;
     Ok((parse_grantee_identifier_list(input)?, cascade))
+}
+
+fn validate_current_object_grantor(granted_by_clause: Option<&str>) -> Result<(), ParseError> {
+    let Some(granted_by_clause) = granted_by_clause else {
+        return Ok(());
+    };
+    match parse_role_grantor_spec(granted_by_clause)? {
+        RoleGrantorSpec::CurrentUser | RoleGrantorSpec::CurrentRole => Ok(()),
+        RoleGrantorSpec::RoleName(_) => Err(ParseError::DetailedError {
+            message: "grantor must be current user".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42501",
+        }),
+    }
 }
 
 fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
