@@ -4074,6 +4074,16 @@ fn reject_unsupported_relation_predicate_expr(
         Expr::Var(var) if var.varlevelsup > 0 => Err(ParseError::FeatureNotSupported(
             "outer references in CHECK constraints".into(),
         )),
+        Expr::GroupingKey(grouping_key) => reject_unsupported_relation_predicate_expr(
+            &grouping_key.expr,
+            allow_non_tableoid_system_columns,
+        ),
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                reject_unsupported_relation_predicate_expr(arg, allow_non_tableoid_system_columns)?;
+            }
+            Ok(())
+        }
         Expr::Var(var)
             if !allow_non_tableoid_system_columns
                 && var.varattno < 0

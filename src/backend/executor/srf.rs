@@ -289,6 +289,8 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
                     .as_ref()
                     .is_some_and(expr_uses_outer_columns)
         }
+        Expr::GroupingKey(grouping_key) => expr_uses_outer_columns(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_uses_outer_columns),
         Expr::WindowFunc(window_func) => {
             window_func.args.iter().any(expr_uses_outer_columns)
                 || match &window_func.kind {
@@ -2183,6 +2185,12 @@ fn eval_generate_series_values(
     let start_val = eval_expr(start, slot, ctx)?;
     let stop_val = eval_expr(stop, slot, ctx)?;
     let step_val = eval_expr(step, slot, ctx)?;
+    if matches!(start_val, Value::Null)
+        || matches!(stop_val, Value::Null)
+        || matches!(step_val, Value::Null)
+    {
+        return Ok(Vec::new());
+    }
 
     if matches!(output_kind, SqlTypeKind::Timestamp) {
         return single_column_slots_to_values(eval_timestamp_generate_series(
@@ -2464,6 +2472,9 @@ fn eval_timestamptz_generate_series(
     }
     let zone_value = if let Some(timezone) = timezone {
         let value = eval_expr(timezone, slot, ctx)?;
+        if matches!(value, Value::Null) {
+            return Ok(Vec::new());
+        }
         Some(
             value
                 .as_text()

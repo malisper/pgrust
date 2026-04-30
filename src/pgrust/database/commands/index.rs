@@ -249,6 +249,10 @@ fn ensure_index_expression_immutable(
 ) -> Result<(), ExecError> {
     match expr {
         Expr::Var(_) | Expr::Const(_) | Expr::Param(_) | Expr::CaseTest(_) => Ok(()),
+        Expr::GroupingKey(grouping_key) => {
+            ensure_index_expression_immutable(&grouping_key.expr, catalog)
+        }
+        Expr::GroupingFunc(_) => Err(index_expression_immutable_error()),
         Expr::Aggref(_) | Expr::WindowFunc(_) | Expr::SubLink(_) | Expr::SubPlan(_) => {
             Err(index_expression_immutable_error())
         }
@@ -2306,6 +2310,7 @@ impl Database {
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
+                active_grouping_refs: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,
@@ -2897,6 +2902,7 @@ impl Database {
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
+            active_grouping_refs: Vec::new(),
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: false,

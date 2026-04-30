@@ -61,15 +61,8 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .into_iter()
             .map(|expr| simplify_expr(expr, None))
             .collect::<Result<Vec<_>, _>>()?,
-        grouping_sets: query
-            .grouping_sets
-            .into_iter()
-            .map(|set| {
-                set.into_iter()
-                    .map(|expr| simplify_expr(expr, None))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        group_by_refs: query.group_by_refs,
+        grouping_sets: query.grouping_sets,
         accumulators: query
             .accumulators
             .into_iter()
@@ -673,6 +666,22 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
             .map(Expr::Const)
             .unwrap_or(Expr::CaseTest(case_test))),
         Expr::Aggref(aggref) => Ok(Expr::Aggref(Box::new(simplify_aggref(*aggref)?))),
+        Expr::GroupingKey(grouping_key) => Ok(Expr::GroupingKey(Box::new(
+            crate::include::nodes::primnodes::GroupingKeyExpr {
+                expr: Box::new(simplify_expr(*grouping_key.expr, case_test_value)?),
+                ref_id: grouping_key.ref_id,
+            },
+        ))),
+        Expr::GroupingFunc(grouping_func) => Ok(Expr::GroupingFunc(Box::new(
+            crate::include::nodes::primnodes::GroupingFuncExpr {
+                args: grouping_func
+                    .args
+                    .into_iter()
+                    .map(|arg| simplify_expr(arg, case_test_value))
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..*grouping_func
+            },
+        ))),
         Expr::WindowFunc(window_func) => Ok(Expr::WindowFunc(Box::new(simplify_window_func_expr(
             *window_func,
         )?))),

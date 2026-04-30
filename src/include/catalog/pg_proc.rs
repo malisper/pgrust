@@ -13784,6 +13784,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_viewdef_name", BuiltinScalarFunction::PgGetViewDef),
+        (
+            "pg_get_viewdef_name_ext",
+            BuiltinScalarFunction::PgGetViewDef,
+        ),
+        ("pg_get_viewdef_ext", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_viewdef_wrap", BuiltinScalarFunction::PgGetViewDef),
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         (

@@ -579,6 +579,14 @@ fn collect_expr_rule_dependencies(
 ) {
     match expr {
         Expr::Var(var) => collect_var_rule_dependency(var, query, catalog, deps),
+        Expr::GroupingKey(grouping_key) => {
+            collect_expr_rule_dependencies(&grouping_key.expr, query, catalog, deps);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_expr_rule_dependencies(arg, query, catalog, deps);
+            }
+        }
         Expr::Aggref(aggref) => {
             if aggref.aggfnoid != 0 {
                 deps.proc_oids.push(aggref.aggfnoid);
@@ -5826,6 +5834,7 @@ impl Database {
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
+            active_grouping_refs: Vec::new(),
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: false,
@@ -6023,6 +6032,7 @@ impl Database {
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
+            active_grouping_refs: Vec::new(),
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: true,

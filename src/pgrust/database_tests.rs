@@ -222,6 +222,7 @@ fn analyze_executor_context(
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
+        active_grouping_refs: Vec::new(),
         subplans: Vec::new(),
         pending_async_notifications: Vec::new(),
         catalog_effects: Vec::new(),

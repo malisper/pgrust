@@ -1289,6 +1289,11 @@ fn partition_key_pseudotype_name(key_type: SqlType, raw_expr: &SqlExpr) -> Optio
 
 fn partition_expr_is_mutable(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
     match expr {
+        Expr::GroupingKey(grouping_key) => partition_expr_is_mutable(&grouping_key.expr, catalog),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|expr| partition_expr_is_mutable(expr, catalog)),
         Expr::Func(func) => partition_func_is_mutable(func, catalog),
         Expr::SqlJsonQueryFunction(func) => func
             .child_exprs()
@@ -1418,6 +1423,8 @@ fn partition_func_is_mutable(func: &FuncExpr, catalog: &dyn CatalogLookup) -> bo
 fn expr_contains_var(expr: &Expr) -> bool {
     match expr {
         Expr::Var(_) => true,
+        Expr::GroupingKey(grouping_key) => expr_contains_var(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_contains_var),
         Expr::Func(func) => func.args.iter().any(expr_contains_var),
         Expr::SqlJsonQueryFunction(func) => func.child_exprs().into_iter().any(expr_contains_var),
         Expr::Op(op) => op.args.iter().any(expr_contains_var),

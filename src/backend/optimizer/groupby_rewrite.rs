@@ -28,8 +28,16 @@ pub(super) fn build_aggregate_layout(
     catalog: &dyn CatalogLookup,
 ) -> AggregateLayout {
     let original_group_by = query.group_by.clone();
-    let reduced_group_by = if original_group_by.len() < 2 || query_has_outer_joins(query) {
-        original_group_by
+    let original_group_by_refs = if query.group_by_refs.len() == original_group_by.len() {
+        query.group_by_refs.clone()
+    } else {
+        (1..=original_group_by.len()).collect()
+    };
+    let reduced_group_by = if original_group_by.len() < 2
+        || !query.grouping_sets.is_empty()
+        || query_has_outer_joins(query)
+    {
+        original_group_by.clone()
     } else {
         let per_relation_reduced = remove_redundant_relation_group_keys(query, catalog);
         collapse_duplicate_group_keys(query, per_relation_reduced)
@@ -37,11 +45,42 @@ pub(super) fn build_aggregate_layout(
 
     let mut passthrough_exprs = collect_passthrough_exprs(query, &reduced_group_by);
     collect_aggregate_passthrough_exprs(query, &reduced_group_by, &mut passthrough_exprs);
+    let group_by_refs = refs_for_reduced_group_by(
+        &original_group_by,
+        &original_group_by_refs,
+        &reduced_group_by,
+    );
 
     AggregateLayout {
         group_by: reduced_group_by,
+        group_by_refs,
         passthrough_exprs,
     }
+}
+
+fn refs_for_reduced_group_by(
+    original_group_by: &[Expr],
+    original_group_by_refs: &[usize],
+    reduced_group_by: &[Expr],
+) -> Vec<usize> {
+    let mut used = Vec::new();
+    reduced_group_by
+        .iter()
+        .enumerate()
+        .map(|(reduced_index, expr)| {
+            let original_index = original_group_by
+                .iter()
+                .enumerate()
+                .find(|(index, original)| *original == expr && !used.contains(index))
+                .map(|(index, _)| index)
+                .unwrap_or(reduced_index);
+            used.push(original_index);
+            original_group_by_refs
+                .get(original_index)
+                .copied()
+                .unwrap_or(reduced_index + 1)
+        })
+        .collect()
 }
 
 fn collect_passthrough_exprs(query: &Query, reduced_group_by: &[Expr]) -> Vec<Expr> {
@@ -115,6 +154,14 @@ fn collect_passthrough_expr(expr: &Expr, group_by: &[Expr], passthrough_exprs: &
             push_passthrough_expr(passthrough_exprs, expr.clone());
         }
         Expr::Aggref(_) => {}
+        Expr::GroupingKey(grouping_key) => {
+            collect_passthrough_expr(&grouping_key.expr, group_by, passthrough_exprs);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_passthrough_expr(arg, group_by, passthrough_exprs);
+            }
+        }
         Expr::WindowFunc(window_func) => {
             collect_window_func_passthrough_exprs(window_func, group_by, passthrough_exprs);
         }
@@ -326,6 +373,11 @@ fn expr_references_group_output(expr: &Expr, target: &Expr) -> bool {
         // Aggregate inputs are evaluated below the aggregate node, so they do not
         // need extra passthrough slots in the grouped output.
         Expr::Aggref(_) => false,
+        Expr::GroupingKey(grouping_key) => expr_references_group_output(&grouping_key.expr, target),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|arg| expr_references_group_output(arg, target)),
         Expr::Var(_)
         | Expr::Param(_)
         | Expr::Const(_)

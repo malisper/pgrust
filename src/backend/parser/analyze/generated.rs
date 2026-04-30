@@ -170,6 +170,12 @@ fn validate_generated_expr_inner(
             }
             Ok(())
         }
+        Expr::GroupingKey(grouping_key) => {
+            validate_generated_expr_inner(&grouping_key.expr, desc, column_index, catalog)
+        }
+        Expr::GroupingFunc(_) => Err(generation_error(
+            "grouping operations are not allowed in column generation expressions",
+        )),
         Expr::Aggref(_) => Err(generation_error(
             "aggregate functions are not allowed in column generation expressions",
         )),
@@ -331,6 +337,13 @@ fn function_oid_is_user_defined(proc_oid: u32, catalog: &dyn CatalogLookup) -> b
 
 fn expr_uses_user_defined_function(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
     match expr {
+        Expr::GroupingKey(grouping_key) => {
+            expr_uses_user_defined_function(&grouping_key.expr, catalog)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|expr| expr_uses_user_defined_function(expr, catalog)),
         Expr::Func(func) => {
             matches!(func.implementation, ScalarFunctionImpl::UserDefined { .. })
                 || function_oid_is_user_defined(func.funcid, catalog)
@@ -478,6 +491,13 @@ fn expr_uses_user_defined_function(expr: &Expr, catalog: &dyn CatalogLookup) -> 
 fn expr_references_column_inner(expr: &Expr, column_index: usize) -> bool {
     match expr {
         Expr::Var(var) => attrno_index(var.varattno) == Some(column_index),
+        Expr::GroupingKey(grouping_key) => {
+            expr_references_column_inner(&grouping_key.expr, column_index)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|expr| expr_references_column_inner(expr, column_index)),
         Expr::Op(op) => op
             .args
             .iter()

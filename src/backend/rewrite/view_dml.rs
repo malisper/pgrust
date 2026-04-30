@@ -488,6 +488,8 @@ fn analyze_simple_view_query(
 fn expr_contains_sublink(expr: &Expr) -> bool {
     match expr {
         Expr::SubLink(_) | Expr::SubPlan(_) => true,
+        Expr::GroupingKey(grouping_key) => expr_contains_sublink(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_contains_sublink),
         Expr::Op(op) => op.args.iter().any(expr_contains_sublink),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_sublink),
         Expr::Func(func) => func.args.iter().any(expr_contains_sublink),

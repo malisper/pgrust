@@ -16246,8 +16246,28 @@ fn parse_group_by_and_having() {
     let stmt = parse_select("select name, count(*) from people group by name having count(*) > 1")
         .unwrap();
     assert_eq!(stmt.group_by.len(), 1);
-    assert!(matches!(stmt.group_by[0], SqlExpr::Column(ref name) if name == "name"));
+    assert!(
+        matches!(stmt.group_by[0], GroupByItem::Expr(SqlExpr::Column(ref name)) if name == "name")
+    );
     assert!(stmt.having.is_some());
+}
+
+#[test]
+fn parse_rollup_group_by_items() {
+    let stmt = parse_select("select a, b from t group by rollup(a, b)").unwrap();
+    assert_eq!(stmt.group_by.len(), 1);
+    let GroupByItem::Rollup(items) = &stmt.group_by[0] else {
+        panic!("expected raw ROLLUP grouping item");
+    };
+    assert_eq!(items.len(), 2);
+    assert!(matches!(
+        items[0],
+        GroupByItem::Expr(SqlExpr::Column(ref name)) if name == "a"
+    ));
+    assert!(matches!(
+        items[1],
+        GroupByItem::Expr(SqlExpr::Column(ref name)) if name == "b"
+    ));
 }
 
 #[test]
@@ -16565,6 +16585,95 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             vartype: SqlType::new(SqlTypeKind::Text),
         })
     );
+}
+
+#[test]
+fn analyze_rollup_expands_intermediate_grouping_set() {
+    let stmt = parse_select(
+        "select a, b, sum(v) from (values (1, 1, 10)) as t(a, b, v) group by rollup(a, b)",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert_eq!(query.group_by.len(), 2);
+    assert_eq!(query.grouping_sets.len(), 3);
+    assert_eq!(query.grouping_sets[0].len(), 2);
+    assert_eq!(query.grouping_sets[1].len(), 1);
+    assert_eq!(query.grouping_sets[2].len(), 0);
+}
+
+#[test]
+fn planner_threads_rollup_grouping_sets_to_aggregate() {
+    let stmt = parse_select(
+        "select a, b, sum(v) from (values (1, 1, 10)) as t(a, b, v) group by rollup(a, b)",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    let aggregate_shapes = aggregate_grouping_set_shapes(&plan);
+    let grouping_sets = aggregate_grouping_sets(&plan)
+        .unwrap_or_else(|| panic!("aggregate grouping set shapes: {aggregate_shapes:?}"));
+    assert_eq!(grouping_sets.len(), 3);
+    assert_eq!(grouping_sets[0].len(), 2);
+    assert_eq!(grouping_sets[1].len(), 1);
+    assert_eq!(grouping_sets[2].len(), 0, "{aggregate_shapes:?}");
+}
+
+fn aggregate_grouping_sets(plan: &Plan) -> Option<&Vec<Vec<usize>>> {
+    match plan {
+        Plan::Aggregate { grouping_sets, .. } if !grouping_sets.is_empty() => Some(grouping_sets),
+        Plan::Projection { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Unique { input, .. } => aggregate_grouping_sets(input),
+        Plan::Append { children, .. } => children.iter().find_map(aggregate_grouping_sets),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            aggregate_grouping_sets(left).or_else(|| aggregate_grouping_sets(right))
+        }
+        _ => None,
+    }
+}
+
+fn aggregate_grouping_set_shapes(plan: &Plan) -> Vec<Vec<usize>> {
+    let mut shapes = Vec::new();
+    collect_aggregate_grouping_set_shapes(plan, &mut shapes);
+    shapes
+}
+
+fn collect_aggregate_grouping_set_shapes(plan: &Plan, shapes: &mut Vec<Vec<usize>>) {
+    match plan {
+        Plan::Aggregate { grouping_sets, .. } => {
+            shapes.push(grouping_sets.iter().map(Vec::len).collect());
+        }
+        Plan::Projection { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Unique { input, .. } => collect_aggregate_grouping_set_shapes(input, shapes),
+        Plan::Append { children, .. } => {
+            for child in children {
+                collect_aggregate_grouping_set_shapes(child, shapes);
+            }
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            collect_aggregate_grouping_set_shapes(left, shapes);
+            collect_aggregate_grouping_set_shapes(right, shapes);
+        }
+        _ => {}
+    }
 }
 
 #[test]

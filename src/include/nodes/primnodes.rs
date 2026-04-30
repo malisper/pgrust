@@ -2466,6 +2466,7 @@ pub enum ProjectSetTarget {
         call: SetReturningCall,
         sql_type: SqlType,
         column_index: usize,
+        ressortgroupref: usize,
     },
 }
 
@@ -2493,6 +2494,19 @@ pub struct Aggref {
     pub aggfilter: Option<Expr>,
     pub agglevelsup: usize,
     pub aggno: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupingKeyExpr {
+    pub expr: Box<Expr>,
+    pub ref_id: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupingFuncExpr {
+    pub args: Vec<Expr>,
+    pub refs: Vec<usize>,
+    pub agglevelsup: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2827,6 +2841,8 @@ pub enum Expr {
     Param(Param),
     Const(Value),
     Aggref(Box<Aggref>),
+    GroupingKey(Box<GroupingKeyExpr>),
+    GroupingFunc(Box<GroupingFuncExpr>),
     WindowFunc(Box<WindowFuncExpr>),
     Op(Box<OpExpr>),
     Bool(Box<BoolExpr>),
@@ -3212,6 +3228,8 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::Param(param) => Some(param.paramtype),
         Expr::Const(value) => value_sql_type_hint(value),
         Expr::Aggref(aggref) => Some(aggref.aggtype),
+        Expr::GroupingKey(grouping_key) => expr_sql_type_hint(&grouping_key.expr),
+        Expr::GroupingFunc(_) => Some(SqlType::new(SqlTypeKind::Int4)),
         Expr::WindowFunc(window_func) => Some(window_func.result_type),
         Expr::Cast(_, ty) => Some(*ty),
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
@@ -3420,6 +3438,10 @@ pub fn expr_contains_set_returning(expr: &Expr) -> bool {
                     .aggfilter
                     .as_ref()
                     .is_some_and(expr_contains_set_returning)
+        }
+        Expr::GroupingKey(grouping_key) => expr_contains_set_returning(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => {
+            grouping_func.args.iter().any(expr_contains_set_returning)
         }
         Expr::WindowFunc(window_func) => window_func.args.iter().any(expr_contains_set_returning),
         Expr::Op(op) => op.args.iter().any(expr_contains_set_returning),
