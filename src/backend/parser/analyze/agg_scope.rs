@@ -42,6 +42,8 @@ pub(crate) struct VisibleAggregateScope {
     pub(super) input_scope: BoundScope,
     pub(super) grouped_outer: Option<GroupedOuterScope>,
     pub(super) aggs: Vec<CollectedAggregate>,
+    pub(super) group_by_exprs: Vec<SqlExpr>,
+    pub(super) group_key_exprs: Vec<Expr>,
     pub(super) levelsup: usize,
 }
 
@@ -228,14 +230,18 @@ pub(super) fn build_local_aggregate_scope(
     input_scope: &BoundScope,
     grouped_outer: Option<&GroupedOuterScope>,
     aggs: &[CollectedAggregate],
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
 ) -> Option<VisibleAggregateScope> {
-    if aggs.is_empty() {
+    if aggs.is_empty() && group_by_exprs.is_empty() {
         None
     } else {
         Some(VisibleAggregateScope {
             input_scope: input_scope.clone(),
             grouped_outer: grouped_outer.cloned(),
             aggs: aggs.to_vec(),
+            group_by_exprs: group_by_exprs.to_vec(),
+            group_key_exprs: group_key_exprs.to_vec(),
             levelsup: 1,
         })
     }
@@ -613,17 +619,17 @@ fn analyze_select_usage_with_outer(
             expanded_views,
         )?);
     }
-    for group_expr in &stmt.group_by {
-        info.merge(analyze_expr_internal(
-            group_expr,
-            AggregateClauseKind::GroupBy,
+    for group_item in &stmt.group_by {
+        analyze_group_by_item_aggregates(
+            group_item,
+            &mut info,
             &scope,
             catalog,
             outer_scopes,
             grouped_outer.as_ref(),
             &visible_ctes,
             expanded_views,
-        )?);
+        )?;
     }
     if let Some(having) = &stmt.having {
         info.merge(analyze_expr_internal(
@@ -651,6 +657,62 @@ fn analyze_select_usage_with_outer(
     }
 
     Ok(info)
+}
+
+fn analyze_group_by_item_aggregates(
+    item: &GroupByItem,
+    info: &mut AggregateExprInfo,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    visible_ctes: &[BoundCte],
+    expanded_views: &[u32],
+) -> Result<(), ParseError> {
+    match item {
+        GroupByItem::Expr(expr) => {
+            info.merge(analyze_expr_internal(
+                expr,
+                AggregateClauseKind::GroupBy,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                visible_ctes,
+                expanded_views,
+            )?);
+        }
+        GroupByItem::List(exprs) => {
+            for expr in exprs {
+                info.merge(analyze_expr_internal(
+                    expr,
+                    AggregateClauseKind::GroupBy,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    visible_ctes,
+                    expanded_views,
+                )?);
+            }
+        }
+        GroupByItem::Empty => {}
+        GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => {
+            for item in items {
+                analyze_group_by_item_aggregates(
+                    item,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    visible_ctes,
+                    expanded_views,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn analyze_expr_internal(
@@ -737,6 +799,9 @@ fn analyze_expr_internal(
             over,
             ..
         } => {
+            if name.eq_ignore_ascii_case("grouping") {
+                return Ok(info);
+            }
             let is_aggregate = over.is_none()
                 && aggregate_call_matches_catalog(catalog, name, args, within_group.as_deref());
             let aggregate_grouped_outer = if is_aggregate { None } else { grouped_outer };

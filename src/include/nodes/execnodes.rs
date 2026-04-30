@@ -809,6 +809,7 @@ pub struct AggregateState {
     pub(crate) phase: AggregatePhase,
     pub(crate) disabled: bool,
     pub(crate) group_by: Vec<Expr>,
+    pub(crate) grouping_sets: Vec<Vec<Expr>>,
     pub(crate) passthrough_exprs: Vec<Expr>,
     pub(crate) accumulators: Vec<AggAccum>,
     pub(crate) having: Option<Expr>,

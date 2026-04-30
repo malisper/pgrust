@@ -389,6 +389,7 @@ pub enum Plan {
         disabled: bool,
         input: Box<Plan>,
         group_by: Vec<Expr>,
+        grouping_sets: Vec<Vec<Expr>>,
         passthrough_exprs: Vec<Expr>,
         accumulators: Vec<AggAccum>,
         semantic_accumulators: Option<Vec<AggAccum>>,

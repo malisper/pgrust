@@ -2723,6 +2723,7 @@ fn build_set_operation_path(
                         pathkeys: Vec::new(),
                         input: Box::new(append),
                         group_by: set_op_output_exprs(source_id, &output_columns),
+                        grouping_sets: Vec::new(),
                         passthrough_exprs: Vec::new(),
                         accumulators: Vec::new(),
                         having: None,

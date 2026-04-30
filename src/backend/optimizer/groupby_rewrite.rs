@@ -28,7 +28,10 @@ pub(super) fn build_aggregate_layout(
     catalog: &dyn CatalogLookup,
 ) -> AggregateLayout {
     let original_group_by = query.group_by.clone();
-    let reduced_group_by = if original_group_by.len() < 2 || query_has_outer_joins(query) {
+    let reduced_group_by = if original_group_by.len() < 2
+        || !query.grouping_sets.is_empty()
+        || query_has_outer_joins(query)
+    {
         original_group_by
     } else {
         let per_relation_reduced = remove_redundant_relation_group_keys(query, catalog);

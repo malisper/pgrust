@@ -1848,6 +1848,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             disabled,
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             semantic_accumulators,
@@ -1863,6 +1864,14 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             group_by: group_by
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            grouping_sets: grouping_sets
+                .into_iter()
+                .map(|set| {
+                    set.into_iter()
+                        .map(|expr| rebase_expr_subplan_ids(expr, base))
+                        .collect()
+                })
                 .collect(),
             passthrough_exprs: passthrough_exprs
                 .into_iter()
@@ -2392,6 +2401,7 @@ pub(super) fn finalize_plan_subqueries(
             disabled,
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             semantic_accumulators,
@@ -2407,6 +2417,14 @@ pub(super) fn finalize_plan_subqueries(
             group_by: group_by
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            grouping_sets: grouping_sets
+                .into_iter()
+                .map(|set| {
+                    set.into_iter()
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                        .collect()
+                })
                 .collect(),
             passthrough_exprs: passthrough_exprs
                 .into_iter()

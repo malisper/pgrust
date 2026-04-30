@@ -1513,6 +1513,7 @@ fn dummy_empty_group_aggregate_display_plan(plan: &Plan) -> Option<Plan> {
             display_items,
         }),
         group_by: group_by[keep_from..].to_vec(),
+        grouping_sets: Vec::new(),
         passthrough_exprs: passthrough_exprs.clone(),
         accumulators: accumulators.clone(),
         semantic_accumulators: semantic_accumulators.clone(),

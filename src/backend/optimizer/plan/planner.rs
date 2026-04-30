@@ -23,6 +23,7 @@ use crate::include::nodes::primnodes::{
 use super::super::bestpath;
 use super::super::create_plan_with_param_base;
 use super::super::groupby_rewrite;
+use super::super::grouping_sets::{extract_rollup_sets, reorder_grouping_sets};
 use super::super::has_grouping;
 use super::super::inherit::translate_append_rel_expr;
 use super::super::path::{
@@ -193,6 +194,7 @@ fn aggregate_path_with_semantics(
     slot_id: usize,
     input: Path,
     group_by: Vec<Expr>,
+    grouping_sets: Vec<Vec<Expr>>,
     passthrough_exprs: Vec<Expr>,
     accumulators: Vec<AggAccum>,
     semantic_accumulators: Option<Vec<AggAccum>>,
@@ -214,6 +216,7 @@ fn aggregate_path_with_semantics(
             pathkeys,
             input: Box::new(input),
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             having,
@@ -247,6 +250,7 @@ fn aggregate_path(
         slot_id,
         input,
         group_by,
+        Vec::new(),
         passthrough_exprs,
         accumulators,
         None,
@@ -256,6 +260,71 @@ fn aggregate_path(
         catalog,
         config,
     )
+}
+
+fn plan_grouping_sets(root: &PlannerInfo, group_by: &[Expr]) -> Vec<Vec<Expr>> {
+    if root.parse.grouping_sets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut grouping_set_refs = root
+        .parse
+        .grouping_sets
+        .iter()
+        .map(|set| grouping_set_refs(root, group_by, set))
+        .collect::<Vec<_>>();
+    grouping_set_refs.sort_by_key(Vec::len);
+
+    let sort_refs = root
+        .parse
+        .sort_clause
+        .iter()
+        .filter_map(|clause| grouping_expr_ref(root, group_by, &clause.expr, &mut Vec::new()))
+        .collect::<Vec<_>>();
+
+    extract_rollup_sets(&grouping_set_refs)
+        .into_iter()
+        .flat_map(|chain| reorder_grouping_sets(&chain, &sort_refs))
+        .map(|data| {
+            data.set
+                .into_iter()
+                .filter_map(|ref_id| group_by.get(ref_id - 1).cloned())
+                .collect()
+        })
+        .collect()
+}
+
+fn grouping_set_refs(root: &PlannerInfo, group_by: &[Expr], set: &[Expr]) -> Vec<usize> {
+    let mut used = Vec::new();
+    set.iter()
+        .filter_map(|expr| grouping_expr_ref(root, group_by, expr, &mut used))
+        .collect()
+}
+
+fn grouping_expr_ref(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    expr: &Expr,
+    used: &mut Vec<usize>,
+) -> Option<usize> {
+    let candidates = [
+        expr.clone(),
+        expand_join_rte_vars(root, expr.clone()),
+        flatten_join_alias_vars(root, expr.clone()),
+        expand_join_rte_vars(root, flatten_join_alias_vars(root, expr.clone())),
+    ];
+
+    candidates.iter().find_map(|candidate| {
+        group_by
+            .iter()
+            .enumerate()
+            .find(|(index, group_expr)| !used.contains(&(*index + 1)) && *group_expr == candidate)
+            .map(|(index, _)| {
+                let ref_id = index + 1;
+                used.push(ref_id);
+                ref_id
+            })
+    })
 }
 
 fn aggregate_strategy_for_input(
@@ -582,6 +651,7 @@ fn prefer_partitionwise_aggregate_path_cost(path: Path, existing_paths: &[Path])
             pathkeys,
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             having,
@@ -602,6 +672,7 @@ fn prefer_partitionwise_aggregate_path_cost(path: Path, existing_paths: &[Path])
             pathkeys,
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             having,
@@ -1452,6 +1523,7 @@ fn partial_partitionwise_aggregate_path(
         next_synthetic_slot_id(),
         final_input,
         group_by.to_vec(),
+        Vec::new(),
         passthrough_exprs.to_vec(),
         final_accumulators,
         Some(accumulators.to_vec()),
@@ -1523,6 +1595,7 @@ fn make_aggregate_rel(
             .having_qual
             .clone()
             .map(|expr| expand_join_rte_vars(root, expr));
+        let grouping_sets = plan_grouping_sets(root, &group_by);
         let output_columns =
             build_aggregate_output_columns(&group_by, &passthrough_exprs, &accumulators);
         if let Some(empty_input) = empty_preserved_outer_join_aggregate_input(
@@ -1536,15 +1609,37 @@ fn make_aggregate_rel(
         }
         let partitionwise_input = path.clone();
         if !root.parse.grouping_sets.is_empty() {
-            rel.add_path(aggregate_path(
-                AggregateStrategy::Mixed,
-                AggregatePhase::Complete,
-                Vec::new(),
-                slot_id,
+            let strategy = if !root.config.enable_hashagg
+                || accumulators_require_sorted_grouping(&accumulators)
+            {
+                AggregateStrategy::Sorted
+            } else {
+                AggregateStrategy::Mixed
+            };
+            let pathkeys = if strategy == AggregateStrategy::Sorted {
+                group_pathkeys(root, &group_by)
+            } else {
+                Vec::new()
+            };
+            let input = prepare_aggregate_input_for_strategy(
+                root,
+                strategy,
                 path,
+                &group_by,
+                &accumulators,
+                catalog,
+            );
+            rel.add_path(aggregate_path_with_semantics(
+                strategy,
+                AggregatePhase::Complete,
+                pathkeys,
+                slot_id,
+                input,
                 group_by.clone(),
+                grouping_sets,
                 passthrough_exprs.clone(),
                 accumulators.clone(),
+                None,
                 having.clone(),
                 output_columns.clone(),
                 root.grouped_target.clone(),

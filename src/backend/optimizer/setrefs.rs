@@ -4164,6 +4164,7 @@ fn collect_plan_external_exec_paramids(
         Plan::Aggregate {
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             having,
@@ -4172,6 +4173,10 @@ fn collect_plan_external_exec_paramids(
             collect_plan_external_exec_paramids(input, bound, out);
             group_by
                 .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            grouping_sets
+                .iter()
+                .flatten()
                 .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             passthrough_exprs
                 .iter()
@@ -4670,6 +4675,7 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
         Plan::Aggregate {
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             having,
@@ -4677,6 +4683,9 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
         } => {
             group_by.iter().for_each(|expr| {
                 validate_executable_expr(expr, "Aggregate", "group_by", allowed_exec_params)
+            });
+            grouping_sets.iter().flatten().for_each(|expr| {
+                validate_executable_expr(expr, "Aggregate", "grouping_sets", allowed_exec_params)
             });
             passthrough_exprs.iter().for_each(|expr| {
                 validate_executable_expr(
@@ -7157,6 +7166,7 @@ fn set_aggregate_references(
     disabled: bool,
     input: Box<Path>,
     group_by: Vec<Expr>,
+    grouping_sets: Vec<Vec<Expr>>,
     passthrough_exprs: Vec<Expr>,
     accumulators: Vec<AggAccum>,
     semantic_accumulators: Option<Vec<AggAccum>>,
@@ -7201,6 +7211,24 @@ fn set_aggregate_references(
                     tlist: &input_tlist,
                 },
             )
+        })
+        .collect();
+    let grouping_sets = grouping_sets
+        .into_iter()
+        .map(|set| {
+            set.into_iter()
+                .map(|expr| fix_upper_expr_for_input(root, expr, &input, &input_tlist))
+                .map(|expr| {
+                    lower_expr(
+                        ctx,
+                        expr,
+                        LowerMode::Input {
+                            path: Some(&input),
+                            tlist: &input_tlist,
+                        },
+                    )
+                })
+                .collect()
         })
         .collect();
     let passthrough_exprs = passthrough_exprs
@@ -7254,6 +7282,7 @@ fn set_aggregate_references(
         disabled,
         input: Box::new(set_plan_refs(ctx, *input)),
         group_by,
+        grouping_sets,
         passthrough_exprs,
         accumulators,
         semantic_accumulators,
@@ -7957,6 +7986,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             disabled,
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             semantic_accumulators,
@@ -7972,6 +8002,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             disabled,
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             semantic_accumulators,

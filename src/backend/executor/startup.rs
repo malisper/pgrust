@@ -394,6 +394,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Aggregate {
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             having,
@@ -401,6 +402,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         } => {
             plan_uses_outer_columns(input)
                 || group_by.iter().any(expr_uses_outer_columns)
+                || grouping_sets.iter().flatten().any(expr_uses_outer_columns)
                 || passthrough_exprs.iter().any(expr_uses_outer_columns)
                 || accumulators.iter().any(agg_accum_uses_outer_columns)
                 || having.as_ref().is_some_and(expr_uses_outer_columns)
@@ -1354,6 +1356,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             disabled,
             input,
             group_by,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             semantic_accumulators: _,
@@ -1369,6 +1372,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 phase,
                 disabled,
                 group_by,
+                grouping_sets,
                 passthrough_exprs,
                 accumulators,
                 having,

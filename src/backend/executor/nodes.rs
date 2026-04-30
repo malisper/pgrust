@@ -8160,6 +8160,7 @@ fn aggregate_uses_plain_fast_path(state: &AggregateState) -> bool {
         && state.phase == AggregatePhase::Complete
         && !state.disabled
         && state.group_by.is_empty()
+        && state.grouping_sets.is_empty()
         && state.passthrough_exprs.is_empty()
         && state.having.is_none()
         && state.accumulators.iter().all(|accum| {
@@ -8460,6 +8461,34 @@ fn finish_ordered_aggregate_inputs(
     Ok(())
 }
 
+fn grouping_set_key_values(
+    full_key_values: &[Value],
+    group_by: &[Expr],
+    grouping_set: &[Expr],
+) -> Vec<Value> {
+    let mut used_grouping_set_positions = Vec::new();
+    group_by
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| {
+            if let Some(set_index) =
+                grouping_set
+                    .iter()
+                    .enumerate()
+                    .find_map(|(set_index, set_expr)| {
+                        (set_expr == expr && !used_grouping_set_positions.contains(&set_index))
+                            .then_some(set_index)
+                    })
+            {
+                used_grouping_set_positions.push(set_index);
+                full_key_values.get(index).cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        })
+        .collect()
+}
+
 impl PlanNode for AggregateState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -8500,15 +8529,17 @@ impl PlanNode for AggregateState {
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut rows[idx].slot));
             }
-            let mut groups: Vec<AggGroup> = Vec::new();
-            let mut mixed_group = (self.strategy == AggregateStrategy::Mixed).then(|| {
-                new_aggregate_group(
-                    vec![Value::Null; self.group_by.len()],
-                    Vec::new(),
-                    &runtimes,
-                    &self.accumulators,
-                )
-            });
+            let mut groups: Vec<(usize, AggGroup)> = Vec::new();
+            let mut mixed_group = (self.grouping_sets.is_empty()
+                && self.strategy == AggregateStrategy::Mixed)
+                .then(|| {
+                    new_aggregate_group(
+                        vec![Value::Null; self.group_by.len()],
+                        Vec::new(),
+                        &runtimes,
+                        &self.accumulators,
+                    )
+                });
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
                 ctx.check_for_interrupts()?;
@@ -8521,38 +8552,58 @@ impl PlanNode for AggregateState {
                     self.key_buffer.push(eval_expr(expr, slot, ctx)?);
                 }
 
-                let group_idx = if let Some(index) = groups
-                    .iter()
-                    .position(|g| aggregate_key_values_equal(&g.key_values, &self.key_buffer))
-                {
-                    index
+                let active_grouping_sets = if self.grouping_sets.is_empty() {
+                    vec![(0, self.group_by.clone())]
                 } else {
-                    let passthrough_values = self
-                        .passthrough_exprs
+                    self.grouping_sets
                         .iter()
-                        .map(|expr| eval_expr(expr, slot, ctx))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    groups.push(new_aggregate_group(
-                        self.key_buffer.clone(),
-                        passthrough_values,
-                        &runtimes,
-                        &self.accumulators,
-                    ));
-                    groups.len() - 1
+                        .cloned()
+                        .enumerate()
+                        .collect::<Vec<_>>()
                 };
 
-                let group = &mut groups[group_idx];
-                advance_aggregate_group(
-                    group,
-                    &self.accumulators,
-                    &runtimes,
-                    self.phase,
-                    self.group_by.len(),
-                    self.passthrough_exprs.len(),
-                    &outer_values,
-                    slot,
-                    ctx,
-                )?;
+                for (grouping_set_index, grouping_set) in active_grouping_sets {
+                    let key_values = if self.grouping_sets.is_empty() {
+                        self.key_buffer.clone()
+                    } else {
+                        grouping_set_key_values(&self.key_buffer, &self.group_by, &grouping_set)
+                    };
+                    let group_idx = if let Some(index) =
+                        groups.iter().position(|(set_index, group)| {
+                            *set_index == grouping_set_index && group.key_values == key_values
+                        }) {
+                        index
+                    } else {
+                        let passthrough_values = self
+                            .passthrough_exprs
+                            .iter()
+                            .map(|expr| eval_expr(expr, slot, ctx))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        groups.push((
+                            grouping_set_index,
+                            new_aggregate_group(
+                                key_values,
+                                passthrough_values,
+                                &runtimes,
+                                &self.accumulators,
+                            ),
+                        ));
+                        groups.len() - 1
+                    };
+
+                    let group = &mut groups[group_idx].1;
+                    advance_aggregate_group(
+                        group,
+                        &self.accumulators,
+                        &runtimes,
+                        self.phase,
+                        self.group_by.len(),
+                        self.passthrough_exprs.len(),
+                        &outer_values,
+                        slot,
+                        ctx,
+                    )?;
+                }
                 if let Some(group) = mixed_group.as_mut() {
                     advance_aggregate_group(
                         group,
@@ -8568,16 +8619,30 @@ impl PlanNode for AggregateState {
                 }
             }
 
-            if groups.is_empty() && self.group_by.is_empty() {
-                groups.push(new_aggregate_group(
-                    Vec::new(),
-                    Vec::new(),
-                    &runtimes,
-                    &self.accumulators,
-                ));
+            if groups.is_empty() {
+                if self.grouping_sets.is_empty() && self.group_by.is_empty() {
+                    groups.push((
+                        0,
+                        new_aggregate_group(Vec::new(), Vec::new(), &runtimes, &self.accumulators),
+                    ));
+                } else {
+                    for (index, grouping_set) in self.grouping_sets.iter().enumerate() {
+                        if grouping_set.is_empty() {
+                            groups.push((
+                                index,
+                                new_aggregate_group(
+                                    vec![Value::Null; self.group_by.len()],
+                                    Vec::new(),
+                                    &runtimes,
+                                    &self.accumulators,
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
 
-            for group in &mut groups {
+            for (_, group) in &mut groups {
                 finish_ordered_aggregate_inputs(
                     group,
                     &self.accumulators,
@@ -8597,7 +8662,11 @@ impl PlanNode for AggregateState {
             }
 
             let mut result_rows = Vec::new();
-            for group in groups.iter().chain(mixed_group.iter()) {
+            for group in groups
+                .iter()
+                .map(|(_, group)| group)
+                .chain(mixed_group.iter())
+            {
                 ctx.check_for_interrupts()?;
                 let mut row_values = group.key_values.clone();
                 row_values.extend(group.passthrough_values.iter().cloned());
@@ -8650,6 +8719,9 @@ impl PlanNode for AggregateState {
                 ));
             }
 
+            if self.strategy == AggregateStrategy::Sorted && !self.grouping_sets.is_empty() {
+                sort_grouping_set_result_rows(&mut result_rows, self.group_by.len())?;
+            }
             self.result_rows = Some(result_rows);
         }
 
@@ -8687,7 +8759,10 @@ impl PlanNode for AggregateState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        if self.accumulators.is_empty() && self.strategy == AggregateStrategy::Sorted {
+        if self.accumulators.is_empty()
+            && self.strategy == AggregateStrategy::Sorted
+            && self.grouping_sets.is_empty()
+        {
             return "Group".into();
         }
         let base = match self.strategy {
@@ -8713,16 +8788,26 @@ impl PlanNode for AggregateState {
         if self.disabled {
             lines.push(format!("{prefix}Disabled: true"));
         }
-        if !self.group_by.is_empty() {
-            let mut group_items = Vec::new();
-            for expr in &self.group_by {
-                let rendered =
-                    render_aggregate_group_key_expr(expr, self.input.column_names(), self.disabled);
-                if !group_items.contains(&rendered) {
-                    group_items.push(rendered);
+        if !self.grouping_sets.is_empty() {
+            for set in &self.grouping_sets {
+                if set.is_empty() {
+                    lines.push(format!("{prefix}Group Key: ()"));
+                    continue;
+                }
+                let group_key =
+                    render_aggregate_group_key_list(set, self.input.column_names(), self.disabled);
+                if self.strategy == AggregateStrategy::Mixed {
+                    lines.push(format!("{prefix}Hash Key: {group_key}"));
+                } else {
+                    lines.push(format!("{prefix}Group Key: {group_key}"));
                 }
             }
-            let group_key = group_items.join(", ");
+        } else if !self.group_by.is_empty() {
+            let group_key = render_aggregate_group_key_list(
+                &self.group_by,
+                self.input.column_names(),
+                self.disabled,
+            );
             if self.strategy == AggregateStrategy::Mixed {
                 lines.push(format!("{prefix}Hash Key: {group_key}"));
                 lines.push(format!("{prefix}Group Key: ()"));
@@ -8755,6 +8840,21 @@ impl PlanNode for AggregateState {
             lines,
         );
     }
+}
+
+fn render_aggregate_group_key_list(
+    exprs: &[Expr],
+    input_names: &[String],
+    force_xid_const: bool,
+) -> String {
+    let mut group_items = Vec::new();
+    for expr in exprs {
+        let rendered = render_aggregate_group_key_expr(expr, input_names, force_xid_const);
+        if !group_items.contains(&rendered) {
+            group_items.push(rendered);
+        }
+    }
+    group_items.join(", ")
 }
 
 fn render_aggregate_group_key_expr(
@@ -8793,6 +8893,35 @@ fn render_xid_group_key_expr(expr: &Expr) -> Option<String> {
             render_xid_group_key_expr(inner)
         }
         _ => None,
+    }
+}
+
+fn sort_grouping_set_result_rows(
+    rows: &mut [MaterializedRow],
+    group_key_count: usize,
+) -> Result<(), ExecError> {
+    let mut sort_error = None;
+    pg_sql_sort_by(rows, |left, right| {
+        for index in 0..group_key_count {
+            let left_value = left.slot.tts_values.get(index).unwrap_or(&Value::Null);
+            let right_value = right.slot.tts_values.get(index).unwrap_or(&Value::Null);
+            match compare_order_values(left_value, right_value, None, Some(false), false) {
+                Ok(std::cmp::Ordering::Equal) => {}
+                Ok(ordering) => return ordering,
+                Err(err) => {
+                    if sort_error.is_none() {
+                        sort_error = Some(err);
+                    }
+                    return std::cmp::Ordering::Equal;
+                }
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    if let Some(err) = sort_error {
+        Err(err)
+    } else {
+        Ok(())
     }
 }
 

@@ -1613,6 +1613,7 @@ fn materialize_view_rows(
         targets: visible_columns,
         where_clause: None,
         group_by: Vec::new(),
+        group_by_distinct: false,
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),

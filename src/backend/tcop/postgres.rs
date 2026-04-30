@@ -10757,7 +10757,10 @@ fn raw_select_contains_pg_notify(select_stmt: &crate::backend::parser::SelectSta
             .where_clause
             .as_ref()
             .is_some_and(raw_expr_contains_pg_notify)
-        || select_stmt.group_by.iter().any(raw_expr_contains_pg_notify)
+        || select_stmt
+            .group_by
+            .iter()
+            .any(raw_group_by_item_contains_pg_notify)
         || select_stmt
             .having
             .as_ref()
@@ -10966,6 +10969,21 @@ fn raw_set_operation_contains_pg_notify(
         .inputs
         .iter()
         .any(raw_select_contains_pg_notify)
+}
+
+fn raw_group_by_item_contains_pg_notify(item: &crate::backend::parser::GroupByItem) -> bool {
+    match item {
+        crate::backend::parser::GroupByItem::Expr(expr) => raw_expr_contains_pg_notify(expr),
+        crate::backend::parser::GroupByItem::List(exprs) => {
+            exprs.iter().any(raw_expr_contains_pg_notify)
+        }
+        crate::backend::parser::GroupByItem::Empty => false,
+        crate::backend::parser::GroupByItem::Rollup(items)
+        | crate::backend::parser::GroupByItem::Cube(items)
+        | crate::backend::parser::GroupByItem::Sets(items) => {
+            items.iter().any(raw_group_by_item_contains_pg_notify)
+        }
+    }
 }
 
 fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem) -> bool {

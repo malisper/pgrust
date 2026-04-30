@@ -16819,6 +16819,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         }],
         where_clause: None,
         group_by: Vec::new(),
+        group_by_distinct: false,
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
@@ -18295,6 +18296,7 @@ fn build_simple_select_statement(
     let mut from = None;
     let mut where_clause = None;
     let mut group_by = Vec::new();
+    let mut group_by_distinct = false;
     let mut having = None;
     let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
@@ -18323,7 +18325,11 @@ fn build_simple_select_statement(
                         Rule::select_list => targets = Some(build_select_list(inner)?),
                         Rule::from_item => from = Some(build_from_item(inner)?),
                         Rule::expr => where_clause = Some(build_expr(inner)?),
-                        Rule::group_by_clause => group_by = build_group_by_clause(inner)?,
+                        Rule::group_by_clause => {
+                            let (distinct, items) = build_group_by_clause(inner)?;
+                            group_by_distinct = distinct;
+                            group_by = items;
+                        }
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
                         Rule::window_clause => window_clauses = build_window_clause(inner)?,
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
@@ -18341,7 +18347,11 @@ fn build_simple_select_statement(
             Rule::select_list => targets = Some(build_select_list(part)?),
             Rule::from_item => from = Some(build_from_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
-            Rule::group_by_clause => group_by = build_group_by_clause(part)?,
+            Rule::group_by_clause => {
+                let (distinct, items) = build_group_by_clause(part)?;
+                group_by_distinct = distinct;
+                group_by = items;
+            }
             Rule::having_clause => having = Some(build_having_clause(part)?),
             Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
@@ -18364,6 +18374,7 @@ fn build_simple_select_statement(
         targets: targets.unwrap_or_default(),
         where_clause,
         group_by,
+        group_by_distinct,
         having,
         window_clauses,
         order_by,
@@ -18544,6 +18555,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         targets: Vec::new(),
         where_clause: None,
         group_by: Vec::new(),
+        group_by_distinct: false,
         having: None,
         window_clauses,
         order_by,
@@ -18607,6 +18619,7 @@ fn select_statement_for_set_operation(
         targets: Vec::new(),
         where_clause: None,
         group_by: Vec::new(),
+        group_by_distinct: false,
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
@@ -18665,6 +18678,7 @@ pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         }],
         where_clause: None,
         group_by: Vec::new(),
+        group_by_distinct: false,
         having: None,
         window_clauses: Vec::new(),
         order_by: stmt.order_by,
@@ -18771,11 +18785,74 @@ fn contains_union_all(sql: &str) -> bool {
     false
 }
 
-fn build_group_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
-    pair.into_inner()
-        .filter(|part| part.as_rule() == Rule::expr)
-        .map(build_expr)
-        .collect()
+fn build_group_by_clause(pair: Pair<'_, Rule>) -> Result<(bool, Vec<GroupByItem>), ParseError> {
+    let mut distinct = false;
+    let mut items = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::group_by_quantifier => {
+                distinct = part.as_str().eq_ignore_ascii_case("distinct");
+            }
+            Rule::group_by_item => items.push(build_group_by_item(part)?),
+            _ => {}
+        }
+    }
+    Ok((distinct, items))
+}
+
+fn build_group_by_item(pair: Pair<'_, Rule>) -> Result<GroupByItem, ParseError> {
+    let raw = pair.as_str().to_string();
+    match pair.as_rule() {
+        Rule::group_by_item | Rule::grouping_set_item => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_group_by_item(inner)
+        }
+        Rule::expr => Ok(GroupByItem::Expr(build_expr(pair)?)),
+        Rule::empty_grouping_set => Ok(GroupByItem::Empty),
+        Rule::parenthesized_grouping_set => {
+            let exprs: Vec<SqlExpr> = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::grouping_set_expr_list)
+                .map(|list| {
+                    list.into_inner()
+                        .filter(|part| part.as_rule() == Rule::expr)
+                        .map(build_expr)
+                        .collect()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if exprs.is_empty() {
+                Ok(GroupByItem::Empty)
+            } else {
+                Ok(GroupByItem::List(exprs))
+            }
+        }
+        Rule::rollup_grouping_set => build_grouping_set_call(pair, GroupByItem::Rollup),
+        Rule::cube_grouping_set => build_grouping_set_call(pair, GroupByItem::Cube),
+        Rule::grouping_sets_grouping_set => build_grouping_set_call(pair, GroupByItem::Sets),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "GROUP BY item",
+            actual: raw,
+        }),
+    }
+}
+
+fn build_grouping_set_call(
+    pair: Pair<'_, Rule>,
+    make: impl FnOnce(Vec<GroupByItem>) -> GroupByItem,
+) -> Result<GroupByItem, ParseError> {
+    let items = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::grouping_set_list)
+        .map(|list| {
+            list.into_inner()
+                .filter(|part| part.as_rule() == Rule::grouping_set_item)
+                .map(build_group_by_item)
+                .collect()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(make(items))
 }
 
 fn build_having_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
@@ -20569,6 +20646,10 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
                 query = Some(build_select(part)?);
+            }
+            Rule::values_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(wrap_values_as_select(build_values_statement(part)?));
             }
             Rule::view_check_option_clause => {
                 let raw = part.as_str().trim();

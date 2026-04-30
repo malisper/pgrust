@@ -1608,7 +1608,8 @@ pub struct SelectStatement {
     pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
-    pub group_by: Vec<SqlExpr>,
+    pub group_by: Vec<GroupByItem>,
+    pub group_by_distinct: bool,
     pub having: Option<SqlExpr>,
     pub window_clauses: Vec<RawWindowClause>,
     pub order_by: Vec<OrderByItem>,
@@ -1617,6 +1618,16 @@ pub struct SelectStatement {
     pub locking_clause: Option<SelectLockingClause>,
     pub locking_targets: Vec<String>,
     pub set_operation: Option<Box<SetOperationStatement>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupByItem {
+    Expr(SqlExpr),
+    Empty,
+    List(Vec<SqlExpr>),
+    Rollup(Vec<GroupByItem>),
+    Cube(Vec<GroupByItem>),
+    Sets(Vec<GroupByItem>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

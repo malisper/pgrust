@@ -5,7 +5,7 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::CONSTRAINT_PRIMARY;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use crate::include::nodes::primnodes::{
-    AttrNumber, OpExprKind, WindowFuncKind, set_returning_call_exprs,
+    AttrNumber, CaseExpr, CaseWhen, OpExprKind, WindowFuncKind, set_returning_call_exprs,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -1219,6 +1219,133 @@ fn grouped_key_expr(group_key_exprs: &[Expr], index: usize) -> Expr {
     })
 }
 
+fn bind_grouping_func_call(
+    args: &[SqlFunctionArg],
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    if args.is_empty() || args.len() > 31 || args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "GROUPING arguments",
+            actual: format!("GROUPING with {} arguments", args.len()),
+        });
+    }
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let mut result = Expr::Const(Value::Int32(0));
+    for (index, arg) in args.iter().enumerate() {
+        let key_expr = if let Some(group_index) = group_by_exprs
+            .iter()
+            .position(|group_expr| group_expr == &arg.value)
+        {
+            grouped_key_expr(group_key_exprs, group_index)
+        } else {
+            let bound = bind_grouped_plain_expr(
+                &arg.value,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )?;
+            let Some(group_index) = group_key_exprs
+                .iter()
+                .position(|group_key| group_key == &bound)
+            else {
+                return Err(ParseError::DetailedError {
+                    message: "arguments to GROUPING must be grouping expressions of the associated query level".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42803",
+                });
+            };
+            grouped_key_expr(group_key_exprs, group_index)
+        };
+        let bit = 1i32 << (args.len() - index - 1);
+        let bit_expr = Expr::Case(Box::new(CaseExpr {
+            casetype: int4,
+            arg: None,
+            args: vec![CaseWhen {
+                expr: Expr::IsNull(Box::new(key_expr)),
+                result: Expr::Const(Value::Int32(bit)),
+            }],
+            defresult: Box::new(Expr::Const(Value::Int32(0))),
+        }));
+        result = Expr::op(OpExprKind::Add, int4, vec![result, bit_expr]);
+    }
+    Ok(result)
+}
+
+pub(super) fn bind_visible_grouping_func_call(
+    args: &[SqlFunctionArg],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Option<Expr>, ParseError> {
+    let Some(visible_scope) = current_visible_aggregate_scope() else {
+        return Ok(None);
+    };
+    if visible_scope.group_key_exprs.is_empty() {
+        return Ok(None);
+    }
+    if args.is_empty() || args.len() > 31 || args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "GROUPING arguments",
+            actual: format!("GROUPING with {} arguments", args.len()),
+        });
+    }
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let raised_group_keys = visible_scope
+        .group_key_exprs
+        .iter()
+        .cloned()
+        .map(|expr| raise_expr_varlevels(expr, visible_scope.levelsup))
+        .collect::<Vec<_>>();
+    let mut result = Expr::Const(Value::Int32(0));
+    for (index, arg) in args.iter().enumerate() {
+        let bound = bind_expr_with_outer_and_ctes(
+            &arg.value,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        let Some(key_expr) = raised_group_keys
+            .iter()
+            .find(|group_key| *group_key == &bound)
+            .cloned()
+        else {
+            return Err(ParseError::DetailedError {
+                message:
+                    "arguments to GROUPING must be grouping expressions of the associated query level"
+                        .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42803",
+            });
+        };
+        let bit = 1i32 << (args.len() - index - 1);
+        let bit_expr = Expr::Case(Box::new(CaseExpr {
+            casetype: int4,
+            arg: None,
+            args: vec![CaseWhen {
+                expr: Expr::IsNull(Box::new(key_expr)),
+                result: Expr::Const(Value::Int32(bit)),
+            }],
+            defresult: Box::new(Expr::Const(Value::Int32(0))),
+        }));
+        result = Expr::op(OpExprKind::Add, int4, vec![result, bit_expr]);
+    }
+    Ok(Some(result))
+}
+
 pub(super) fn bind_agg_output_expr(
     expr: &SqlExpr,
     group_by_exprs: &[SqlExpr],
@@ -1535,6 +1662,31 @@ pub(super) fn bind_agg_output_expr_in_clause(
             null_treatment,
             over,
         } => {
+            if name.eq_ignore_ascii_case("grouping") {
+                if !order_by.is_empty()
+                    || within_group.is_some()
+                    || *distinct
+                    || *func_variadic
+                    || filter.is_some()
+                    || null_treatment.is_some()
+                    || over.is_some()
+                    || args.is_star()
+                {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "GROUPING arguments",
+                        actual: name.clone(),
+                    });
+                }
+                return bind_grouping_func_call(
+                    args.args(),
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                );
+            }
             let (direct_args, aggregate_args, aggregate_order_by) =
                 normalize_aggregate_call(args, order_by, within_group.as_deref());
             if over.is_none()

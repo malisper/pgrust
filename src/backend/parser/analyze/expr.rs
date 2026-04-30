@@ -5160,6 +5160,32 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
             }
+            if name.eq_ignore_ascii_case("grouping") {
+                if !order_by.is_empty()
+                    || within_group.is_some()
+                    || *distinct
+                    || *func_variadic
+                    || filter.is_some()
+                    || null_treatment.is_some()
+                    || over.is_some()
+                    || args.is_star()
+                {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "GROUPING arguments",
+                        actual: name.clone(),
+                    });
+                }
+                if let Some(grouping_expr) = bind_visible_grouping_func_call(
+                    args_list,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )? {
+                    return Ok(grouping_expr);
+                }
+            }
             let (direct_args, aggregate_args, aggregate_order_by) =
                 normalize_aggregate_call(args, order_by, within_group.as_deref());
             if over.is_none()

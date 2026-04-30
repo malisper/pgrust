@@ -3036,61 +3036,261 @@ fn group_by_target_alias_expr(
     matches.next().is_none().then(|| first.expr.clone())
 }
 
-fn normalize_group_by_exprs(
-    stmt: &SelectStatement,
-    input_scope: &BoundScope,
-) -> Result<Vec<SqlExpr>, ParseError> {
-    stmt.group_by
-        .iter()
-        .map(|expr| {
-            group_by_target_ordinal_expr(expr, &stmt.targets, input_scope).map(|resolved| {
-                resolved
-                    .or_else(|| group_by_target_alias_expr(expr, &stmt.targets, input_scope))
-                    .unwrap_or_else(|| expr.clone())
-            })
-        })
-        .collect()
+#[derive(Debug, Clone, Default)]
+struct ExpandedGroupBy {
+    group_by: Vec<SqlExpr>,
+    grouping_sets: Vec<Vec<SqlExpr>>,
+    has_explicit_grouping_sets: bool,
 }
 
-fn take_single_rollup_grouping_set(group_by_exprs: &mut Vec<SqlExpr>) -> bool {
-    let [
-        SqlExpr::FuncCall {
-            name,
-            args,
-            order_by,
-            within_group,
-            distinct,
-            func_variadic,
-            filter,
-            null_treatment,
-            over,
-        },
-    ] = group_by_exprs.as_mut_slice()
-    else {
-        return false;
-    };
-    if !name.eq_ignore_ascii_case("rollup")
-        || !order_by.is_empty()
-        || within_group.is_some()
-        || *distinct
-        || *func_variadic
-        || filter.is_some()
-        || null_treatment.is_some()
-        || over.is_some()
-    {
-        return false;
+fn normalize_group_by_expr(
+    expr: &SqlExpr,
+    stmt: &SelectStatement,
+    input_scope: &BoundScope,
+) -> Result<SqlExpr, ParseError> {
+    group_by_target_ordinal_expr(expr, &stmt.targets, input_scope).map(|resolved| {
+        resolved
+            .or_else(|| group_by_target_alias_expr(expr, &stmt.targets, input_scope))
+            .unwrap_or_else(|| expr.clone())
+    })
+}
+
+fn normalize_group_by_item(
+    item: &GroupByItem,
+    stmt: &SelectStatement,
+    input_scope: &BoundScope,
+) -> Result<GroupByItem, ParseError> {
+    Ok(match item {
+        GroupByItem::Expr(expr) => {
+            GroupByItem::Expr(normalize_group_by_expr(expr, stmt, input_scope)?)
+        }
+        GroupByItem::Empty => GroupByItem::Empty,
+        GroupByItem::List(exprs) => GroupByItem::List(
+            exprs
+                .iter()
+                .map(|expr| normalize_group_by_expr(expr, stmt, input_scope))
+                .collect::<Result<_, _>>()?,
+        ),
+        GroupByItem::Rollup(items) => GroupByItem::Rollup(
+            items
+                .iter()
+                .map(|item| normalize_group_by_item(item, stmt, input_scope))
+                .collect::<Result<_, _>>()?,
+        ),
+        GroupByItem::Cube(items) => GroupByItem::Cube(
+            items
+                .iter()
+                .map(|item| normalize_group_by_item(item, stmt, input_scope))
+                .collect::<Result<_, _>>()?,
+        ),
+        GroupByItem::Sets(items) => GroupByItem::Sets(
+            items
+                .iter()
+                .map(|item| normalize_group_by_item(item, stmt, input_scope))
+                .collect::<Result<_, _>>()?,
+        ),
+    })
+}
+
+fn expand_group_by_items(
+    stmt: &SelectStatement,
+    input_scope: &BoundScope,
+) -> Result<ExpandedGroupBy, ParseError> {
+    if stmt.group_by.is_empty() {
+        return Ok(ExpandedGroupBy::default());
     }
-    let crate::include::nodes::parsenodes::SqlCallArgs::Args(call_args) = args else {
-        return false;
-    };
-    let [arg] = call_args.as_slice() else {
-        return false;
-    };
-    if arg.name.is_some() {
-        return false;
+
+    let normalized = stmt
+        .group_by
+        .iter()
+        .map(|item| normalize_group_by_item(item, stmt, input_scope))
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_explicit_grouping_sets = normalized
+        .iter()
+        .any(group_by_item_has_explicit_grouping_sets);
+    let mut grouping_sets = vec![Vec::new()];
+    for item in &normalized {
+        grouping_sets = concat_grouping_sets(grouping_sets, expand_group_by_item(item));
     }
-    *group_by_exprs = vec![arg.value.clone()];
-    true
+    if stmt.group_by_distinct {
+        dedupe_grouping_sets(&mut grouping_sets);
+    }
+
+    let mut group_by = Vec::new();
+    for set in &grouping_sets {
+        let mut set_prefix = Vec::new();
+        for expr in set {
+            set_prefix.push(expr.clone());
+            let needed_occurrences = expr_occurrence_count(&set_prefix, expr);
+            let existing_occurrences = expr_occurrence_count(&group_by, expr);
+            if existing_occurrences < needed_occurrences {
+                group_by.push(expr.clone());
+            }
+        }
+    }
+
+    Ok(ExpandedGroupBy {
+        group_by,
+        grouping_sets: has_explicit_grouping_sets
+            .then_some(grouping_sets)
+            .unwrap_or_default(),
+        has_explicit_grouping_sets,
+    })
+}
+
+fn group_by_item_has_explicit_grouping_sets(item: &GroupByItem) -> bool {
+    match item {
+        GroupByItem::Expr(_) => false,
+        GroupByItem::Empty | GroupByItem::List(_) => true,
+        GroupByItem::Rollup(_) | GroupByItem::Cube(_) | GroupByItem::Sets(_) => true,
+    }
+}
+
+fn expand_group_by_item(item: &GroupByItem) -> Vec<Vec<SqlExpr>> {
+    match item {
+        GroupByItem::Expr(expr) => vec![vec![expr.clone()]],
+        GroupByItem::Empty => vec![Vec::new()],
+        GroupByItem::List(exprs) => vec![exprs.clone()],
+        GroupByItem::Rollup(items) => expand_rollup_grouping_sets(items),
+        GroupByItem::Cube(items) => expand_cube_grouping_sets(items),
+        GroupByItem::Sets(items) => items.iter().flat_map(expand_group_by_item).collect(),
+    }
+}
+
+fn grouping_item_exprs(item: &GroupByItem) -> Vec<SqlExpr> {
+    let mut exprs = Vec::new();
+    for set in expand_group_by_item(item) {
+        for expr in set {
+            if !exprs.contains(&expr) {
+                exprs.push(expr);
+            }
+        }
+    }
+    exprs
+}
+
+fn expand_rollup_grouping_sets(items: &[GroupByItem]) -> Vec<Vec<SqlExpr>> {
+    let item_exprs = items.iter().map(grouping_item_exprs).collect::<Vec<_>>();
+    let mut sets = Vec::with_capacity(item_exprs.len() + 1);
+    for len in (0..=item_exprs.len()).rev() {
+        let mut set = Vec::new();
+        for exprs in item_exprs.iter().take(len) {
+            append_grouping_set_exprs(&mut set, exprs);
+        }
+        sets.push(set);
+    }
+    sets
+}
+
+fn expand_cube_grouping_sets(items: &[GroupByItem]) -> Vec<Vec<SqlExpr>> {
+    let item_exprs = items.iter().map(grouping_item_exprs).collect::<Vec<_>>();
+    let Some(count) = 1usize.checked_shl(item_exprs.len() as u32) else {
+        return vec![item_exprs.into_iter().flatten().collect()];
+    };
+    let mut sets = Vec::with_capacity(count);
+    for mask in (0..count).rev() {
+        let mut set = Vec::new();
+        for (index, exprs) in item_exprs.iter().enumerate() {
+            let bit = 1usize << (item_exprs.len() - index - 1);
+            if mask & bit != 0 {
+                append_grouping_set_exprs(&mut set, exprs);
+            }
+        }
+        sets.push(set);
+    }
+    sets
+}
+
+fn concat_grouping_sets(left: Vec<Vec<SqlExpr>>, right: Vec<Vec<SqlExpr>>) -> Vec<Vec<SqlExpr>> {
+    let mut result = Vec::new();
+    for left_set in &left {
+        for right_set in &right {
+            let mut set = left_set.clone();
+            set.extend(right_set.iter().cloned());
+            result.push(set);
+        }
+    }
+    result
+}
+
+fn expr_occurrence_count(exprs: &[SqlExpr], needle: &SqlExpr) -> usize {
+    exprs.iter().filter(|expr| *expr == needle).count()
+}
+
+fn dedupe_grouping_sets(grouping_sets: &mut Vec<Vec<SqlExpr>>) {
+    let mut deduped = Vec::new();
+    for set in grouping_sets.drain(..) {
+        if !deduped.contains(&set) {
+            deduped.push(set);
+        }
+    }
+    *grouping_sets = deduped;
+}
+
+fn take_group_by_expr_match(
+    expr: &SqlExpr,
+    group_by_exprs: &[SqlExpr],
+    used_group_by_indexes: &mut Vec<usize>,
+) -> Option<usize> {
+    let index = group_by_exprs
+        .iter()
+        .enumerate()
+        .find(|(index, group_expr)| group_expr == &expr && !used_group_by_indexes.contains(index))
+        .map(|(index, _)| index)?;
+    used_group_by_indexes.push(index);
+    Some(index)
+}
+
+fn append_grouping_set_exprs(set: &mut Vec<SqlExpr>, exprs: &[SqlExpr]) {
+    for expr in exprs {
+        if !set.contains(expr) {
+            set.push(expr.clone());
+        }
+    }
+}
+
+fn bind_grouping_sets(
+    grouping_sets: &[Vec<SqlExpr>],
+    group_keys: &[Expr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    visible_ctes: &[BoundCte],
+) -> Result<Vec<Vec<Expr>>, ParseError> {
+    grouping_sets
+        .iter()
+        .map(|set| {
+            let mut bound_set = Vec::new();
+            let mut used_group_key_indexes = Vec::new();
+            for expr in set {
+                let bound = bind_expr_with_outer_and_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    visible_ctes,
+                )?;
+                let Some((group_index, group_key)) =
+                    group_keys
+                        .iter()
+                        .enumerate()
+                        .find(|(group_index, group_key)| {
+                            **group_key == bound && !used_group_key_indexes.contains(group_index)
+                        })
+                else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "grouping set expression in GROUP BY",
+                        actual: sql_expr_name(expr),
+                    });
+                };
+                used_group_key_indexes.push(group_index);
+                bound_set.push(group_key.clone());
+            }
+            Ok(bound_set)
+        })
+        .collect()
 }
 
 fn expand_group_by_with_primary_key_dependencies(
@@ -3938,6 +4138,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             }],
             where_clause: None,
             group_by: Vec::new(),
+            group_by_distinct: false,
             having: None,
             window_clauses: Vec::new(),
             order_by: values.order_by.clone(),
@@ -3965,6 +4166,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             targets: Vec::new(),
             where_clause: None,
             group_by: Vec::new(),
+            group_by_distinct: false,
             having: None,
             window_clauses: Vec::new(),
             order_by: Vec::new(),
@@ -4389,8 +4591,8 @@ impl<'a> RecursiveReferenceChecker<'a> {
         if let Some(where_clause) = &stmt.where_clause {
             self.visit_expr(where_clause, context)?;
         }
-        for expr in &stmt.group_by {
-            self.visit_expr(expr, context)?;
+        for item in &stmt.group_by {
+            self.visit_group_by_item(item, context)?;
         }
         if let Some(having) = &stmt.having {
             self.visit_expr(having, context)?;
@@ -4400,6 +4602,28 @@ impl<'a> RecursiveReferenceChecker<'a> {
         }
         if let Some(set_operation) = &stmt.set_operation {
             self.visit_set_operation(set_operation, context)?;
+        }
+        Ok(())
+    }
+
+    fn visit_group_by_item(
+        &mut self,
+        item: &GroupByItem,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        match item {
+            GroupByItem::Expr(expr) => self.visit_expr(expr, context)?,
+            GroupByItem::List(exprs) => {
+                for expr in exprs {
+                    self.visit_expr(expr, context)?;
+                }
+            }
+            GroupByItem::Empty => {}
+            GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => {
+                for item in items {
+                    self.visit_group_by_item(item, context)?;
+                }
+            }
         }
         Ok(())
     }
@@ -4847,7 +5071,7 @@ fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -
         || stmt
             .group_by
             .iter()
-            .any(|expr| sql_expr_references_table(expr, table_name))
+            .any(|item| group_by_item_references_table(item, table_name))
         || stmt
             .having
             .as_ref()
@@ -5008,6 +5232,19 @@ fn xml_table_column_references_table(column: &XmlTableColumn, table_name: &str) 
                     .is_some_and(|expr| sql_expr_references_table(expr, table_name))
         }
         XmlTableColumn::Ordinality { .. } => false,
+    }
+}
+
+fn group_by_item_references_table(item: &GroupByItem, table_name: &str) -> bool {
+    match item {
+        GroupByItem::Expr(expr) => sql_expr_references_table(expr, table_name),
+        GroupByItem::List(exprs) => exprs
+            .iter()
+            .any(|expr| sql_expr_references_table(expr, table_name)),
+        GroupByItem::Empty => false,
+        GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => items
+            .iter()
+            .any(|item| group_by_item_references_table(item, table_name)),
     }
 }
 
@@ -5703,18 +5940,25 @@ fn bind_select_query_with_outer(
             && target_aggs.is_empty()
             && stmt.having.is_none()
             && (stmt.limit.is_some() || stmt.offset.is_some());
-        let mut effective_group_by = if lower_distinct_to_grouping {
-            stmt.targets
-                .iter()
-                .map(|target| target.expr.clone())
-                .collect::<Vec<_>>()
+        let expanded_group_by = if lower_distinct_to_grouping {
+            ExpandedGroupBy {
+                group_by: stmt
+                    .targets
+                    .iter()
+                    .map(|target| target.expr.clone())
+                    .collect::<Vec<_>>(),
+                grouping_sets: Vec::new(),
+                has_explicit_grouping_sets: false,
+            }
         } else {
-            normalize_group_by_exprs(stmt, &scope)?
+            expand_group_by_items(stmt, &scope)?
         };
-        let has_single_rollup_grouping_set =
-            take_single_rollup_grouping_set(&mut effective_group_by);
-        let mut constraint_deps =
-            expand_group_by_with_primary_key_dependencies(&mut effective_group_by, &scope, catalog);
+        let mut effective_group_by = expanded_group_by.group_by.clone();
+        let mut constraint_deps = if expanded_group_by.has_explicit_grouping_sets {
+            Vec::new()
+        } else {
+            expand_group_by_with_primary_key_dependencies(&mut effective_group_by, &scope, catalog)
+        };
 
         for group_expr in &effective_group_by {
             analyze_expr_aggregates_in_clause(
@@ -5768,8 +6012,10 @@ fn bind_select_query_with_outer(
             ));
         }
 
-        let needs_agg =
-            !effective_group_by.is_empty() || !target_aggs.is_empty() || stmt.having.is_some();
+        let needs_agg = !effective_group_by.is_empty()
+            || expanded_group_by.has_explicit_grouping_sets
+            || !target_aggs.is_empty()
+            || stmt.having.is_some();
 
         let can_skip_scan_for_degenerate_having = needs_agg
             && effective_group_by.is_empty()
@@ -5807,7 +6053,13 @@ fn bind_select_query_with_outer(
             }
         }
         let aggs = dedupe_local_aggregate_list(&aggs, &scope, catalog, outer_scopes, &visible_ctes);
-        let local_agg_scope = build_local_aggregate_scope(&scope, grouped_outer.as_ref(), &aggs);
+        let local_agg_scope = build_local_aggregate_scope(
+            &scope,
+            grouped_outer.as_ref(),
+            &aggs,
+            &effective_group_by,
+            &[],
+        );
 
         with_local_aggregate_scope(local_agg_scope, || {
             if needs_agg {
@@ -5824,15 +6076,31 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Result<_, _>>()?;
-                let grouping_sets = if has_single_rollup_grouping_set {
-                    vec![group_keys.clone(), Vec::new()]
+                let grouping_sets = if expanded_group_by.has_explicit_grouping_sets {
+                    bind_grouping_sets(
+                        &expanded_group_by.grouping_sets,
+                        &group_keys,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.as_ref(),
+                        &visible_ctes,
+                    )?
                 } else {
                     Vec::new()
                 };
                 let rewritten_group_keys = group_keys.clone();
+                let local_agg_scope = build_local_aggregate_scope(
+                    &scope,
+                    grouped_outer.as_ref(),
+                    &aggs,
+                    &effective_group_by,
+                    &group_keys,
+                );
 
-                return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
-                    let accumulators: Vec<AggAccum> = aggs
+                return with_local_aggregate_scope(local_agg_scope, || {
+                    with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
+                        let accumulators: Vec<AggAccum> = aggs
                         .iter()
                         .map(|agg| {
                             let hypothetical =
@@ -6120,179 +6388,197 @@ fn bind_select_query_with_outer(
                         })
                         .collect::<Result<_, _>>()?;
 
-                    let n_keys = group_keys.len();
-                    let mut output_columns: Vec<QueryColumn> = Vec::new();
-                    for gk in &effective_group_by {
-                        output_columns.push(QueryColumn {
-                            name: sql_expr_name(gk),
-                            sql_type: infer_sql_expr_type_with_ctes(
-                                gk,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            ),
-                            wire_type_oid: None,
-                        });
-                    }
-                    for agg in &aggs {
-                        let hypothetical = resolve_builtin_hypothetical_aggregate(&agg.name)
-                            .is_some()
-                            && !agg.direct_args.is_empty();
-                        let ordered_set = resolve_builtin_ordered_set_aggregate(&agg.name)
-                            .is_some()
-                            && !agg.direct_args.is_empty();
-                        let arg_values: Vec<SqlExpr> = agg
-                            .args
-                            .args()
-                            .iter()
-                            .map(|arg| arg.value.clone())
-                            .collect();
-                        let arg_types = arg_values
-                            .iter()
-                            .map(|expr| {
-                                infer_sql_expr_type_with_ctes(
-                                    expr,
+                        let n_keys = group_keys.len();
+                        let mut output_columns: Vec<QueryColumn> = Vec::new();
+                        for gk in &effective_group_by {
+                            output_columns.push(QueryColumn {
+                                name: sql_expr_name(gk),
+                                sql_type: infer_sql_expr_type_with_ctes(
+                                    gk,
                                     &scope,
                                     catalog,
                                     outer_scopes,
                                     grouped_outer.as_ref(),
                                     &visible_ctes,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let result_type = if hypothetical {
-                            resolve_hypothetical_aggregate_call(&agg.name)
-                                .map(|resolved| resolved.result_type)
-                                .ok_or_else(|| ParseError::UnexpectedToken {
-                                    expected: "supported aggregate",
-                                    actual: agg.name.clone(),
-                                })?
-                        } else if ordered_set {
-                            resolve_ordered_set_aggregate_call(&agg.name, &arg_types)
-                                .map(|resolved| resolved.result_type)
-                                .ok_or_else(|| ParseError::UnexpectedToken {
-                                    expected: "supported aggregate",
-                                    actual: agg.name.clone(),
-                                })?
-                        } else {
-                            resolve_aggregate_call(
-                                catalog,
-                                &agg.name,
-                                &arg_types,
-                                agg.func_variadic,
-                            )
-                            .map(|resolved| resolved.result_type)
-                            .ok_or_else(|| {
-                                ParseError::UnexpectedToken {
-                                    expected: "supported aggregate",
-                                    actual: agg.name.clone(),
-                                }
-                            })?
-                        };
-                        output_columns.push(QueryColumn {
-                            name: agg.name.clone(),
-                            sql_type: result_type,
-                            wire_type_oid: None,
-                        });
-                    }
-
-                    let (
-                        (having, target_list, sort_clause, distinct_on, has_target_srfs),
-                        mut functional_constraint_deps,
-                    ) = with_functional_grouping_constraint_tracking(|| {
-                        let having = stmt
-                            .having
-                            .as_ref()
-                            .map(|e| {
-                                bind_agg_output_expr_in_clause(
-                                    e,
-                                    UngroupedColumnClause::Having,
-                                    &effective_group_by,
-                                    &group_keys,
-                                    &scope,
+                                ),
+                                wire_type_oid: None,
+                            });
+                        }
+                        for agg in &aggs {
+                            let hypothetical = resolve_builtin_hypothetical_aggregate(&agg.name)
+                                .is_some()
+                                && !agg.direct_args.is_empty();
+                            let ordered_set = resolve_builtin_ordered_set_aggregate(&agg.name)
+                                .is_some()
+                                && !agg.direct_args.is_empty();
+                            let arg_values: Vec<SqlExpr> = agg
+                                .args
+                                .args()
+                                .iter()
+                                .map(|arg| arg.value.clone())
+                                .collect();
+                            let arg_types = arg_values
+                                .iter()
+                                .map(|expr| {
+                                    infer_sql_expr_type_with_ctes(
+                                        expr,
+                                        &scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer.as_ref(),
+                                        &visible_ctes,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let result_type = if hypothetical {
+                                resolve_hypothetical_aggregate_call(&agg.name)
+                                    .map(|resolved| resolved.result_type)
+                                    .ok_or_else(|| ParseError::UnexpectedToken {
+                                        expected: "supported aggregate",
+                                        actual: agg.name.clone(),
+                                    })?
+                            } else if ordered_set {
+                                resolve_ordered_set_aggregate_call(&agg.name, &arg_types)
+                                    .map(|resolved| resolved.result_type)
+                                    .ok_or_else(|| ParseError::UnexpectedToken {
+                                        expected: "supported aggregate",
+                                        actual: agg.name.clone(),
+                                    })?
+                            } else {
+                                resolve_aggregate_call(
                                     catalog,
-                                    outer_scopes,
-                                    grouped_outer.as_ref(),
-                                    &aggs,
-                                    n_keys,
+                                    &agg.name,
+                                    &arg_types,
+                                    agg.func_variadic,
                                 )
-                            })
-                            .transpose()?;
-                        if having.as_ref().is_some_and(expr_contains_set_returning) {
-                            return Err(ParseError::FeatureNotSupported(
-                                "set-returning functions are not allowed in HAVING".into(),
-                            ));
+                                .map(|resolved| resolved.result_type)
+                                .ok_or_else(|| {
+                                    ParseError::UnexpectedToken {
+                                        expected: "supported aggregate",
+                                        actual: agg.name.clone(),
+                                    }
+                                })?
+                            };
+                            output_columns.push(QueryColumn {
+                                name: agg.name.clone(),
+                                sql_type: result_type,
+                                wire_type_oid: None,
+                            });
                         }
 
-                        let targets: Vec<TargetEntry> = with_window_binding(
-                            window_state.clone(),
-                            true,
-                            || {
-                                if stmt.targets.len() == 1
-                                    && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
-                                {
-                                    let mut targets = Vec::with_capacity(output_columns.len());
-                                    for (i, name) in output_columns.iter().enumerate().take(n_keys)
+                        let (
+                            (having, target_list, sort_clause, distinct_on, has_target_srfs),
+                            mut functional_constraint_deps,
+                        ) = with_functional_grouping_constraint_tracking(|| {
+                            let having = stmt
+                                .having
+                                .as_ref()
+                                .map(|e| {
+                                    bind_agg_output_expr_in_clause(
+                                        e,
+                                        UngroupedColumnClause::Having,
+                                        &effective_group_by,
+                                        &group_keys,
+                                        &scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer.as_ref(),
+                                        &aggs,
+                                        n_keys,
+                                    )
+                                })
+                                .transpose()?;
+                            if having.as_ref().is_some_and(expr_contains_set_returning) {
+                                return Err(ParseError::FeatureNotSupported(
+                                    "set-returning functions are not allowed in HAVING".into(),
+                                ));
+                            }
+
+                            let targets: Vec<TargetEntry> = with_window_binding(
+                                window_state.clone(),
+                                true,
+                                || {
+                                    if stmt.targets.len() == 1
+                                        && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
                                     {
-                                        targets.push(
-                                            TargetEntry::new(
-                                                name.name.clone(),
-                                                group_keys.get(i).cloned().unwrap_or_else(|| {
-                                                    panic!(
-                                                        "aggregate SELECT * missing grouped key expr for target position {}",
-                                                        i + 1
-                                                    )
-                                                }),
-                                                name.sql_type,
-                                                i + 1,
-                                            )
-                                            .with_input_resno(i + 1),
-                                        );
-                                    }
-                                    for (i, accum) in accumulators.iter().enumerate() {
-                                        let target_index = n_keys + i;
-                                        let name = output_columns
-                                            .get(target_index)
-                                            .expect("aggregate output column")
-                                            .name
-                                            .clone();
-                                        targets.push(TargetEntry::new(
-                                            name,
-                                            Expr::aggref(
-                                                accum.aggfnoid,
+                                        let mut targets = Vec::with_capacity(output_columns.len());
+                                        for (i, name) in
+                                            output_columns.iter().enumerate().take(n_keys)
+                                        {
+                                            targets.push(
+                                                TargetEntry::new(
+                                                    name.name.clone(),
+                                                    group_keys.get(i).cloned().unwrap_or_else(
+                                                        || {
+                                                            panic!(
+                                                                "aggregate SELECT * missing grouped key expr for target position {}",
+                                                                i + 1
+                                                            )
+                                                        },
+                                                    ),
+                                                    name.sql_type,
+                                                    i + 1,
+                                                )
+                                                .with_input_resno(i + 1),
+                                            );
+                                        }
+                                        for (i, accum) in accumulators.iter().enumerate() {
+                                            let target_index = n_keys + i;
+                                            let name = output_columns
+                                                .get(target_index)
+                                                .expect("aggregate output column")
+                                                .name
+                                                .clone();
+                                            targets.push(TargetEntry::new(
+                                                name,
+                                                Expr::aggref(
+                                                    accum.aggfnoid,
+                                                    accum.sql_type,
+                                                    accum.agg_variadic,
+                                                    accum.distinct,
+                                                    accum.direct_args.clone(),
+                                                    accum.args.clone(),
+                                                    accum.order_by.clone(),
+                                                    accum.filter.clone(),
+                                                    i,
+                                                ),
                                                 accum.sql_type,
-                                                accum.agg_variadic,
-                                                accum.distinct,
-                                                accum.direct_args.clone(),
-                                                accum.args.clone(),
-                                                accum.order_by.clone(),
-                                                accum.filter.clone(),
-                                                i,
-                                            ),
-                                            accum.sql_type,
-                                            target_index + 1,
-                                        ));
-                                    }
-                                    Ok(targets)
-                                } else {
-                                    stmt.targets
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(index, item)| {
-                                            let expr = bind_agg_output_expr_in_clause(
-                                                &item.expr,
-                                                UngroupedColumnClause::SelectTarget,
-                                                &effective_group_by,
-                                                &group_keys,
-                                                &scope,
-                                                catalog,
-                                                outer_scopes,
-                                                grouped_outer.as_ref(),
-                                                &aggs,
-                                                n_keys,
-                                            )?;
+                                                target_index + 1,
+                                            ));
+                                        }
+                                        Ok(targets)
+                                    } else {
+                                        let mut targets = Vec::new();
+                                        let mut used_group_by_targets = Vec::new();
+                                        for (index, item) in stmt.targets.iter().enumerate() {
+                                            let expr = if let Some(group_index) =
+                                                take_group_by_expr_match(
+                                                    &item.expr,
+                                                    &effective_group_by,
+                                                    &mut used_group_by_targets,
+                                                ) {
+                                                group_keys.get(group_index).cloned().unwrap_or_else(
+                                                    || {
+                                                        panic!(
+                                                            "aggregate output missing grouped key expr for target position {}",
+                                                            group_index + 1
+                                                        )
+                                                    },
+                                                )
+                                            } else {
+                                                bind_agg_output_expr_in_clause(
+                                                    &item.expr,
+                                                    UngroupedColumnClause::SelectTarget,
+                                                    &effective_group_by,
+                                                    &group_keys,
+                                                    &scope,
+                                                    catalog,
+                                                    outer_scopes,
+                                                    grouped_outer.as_ref(),
+                                                    &aggs,
+                                                    n_keys,
+                                                )?
+                                            };
                                             let sql_type = expr_sql_type_hint(&expr)
                                                 .unwrap_or_else(|| {
                                                     infer_sql_expr_type_with_ctes(
@@ -6304,26 +6590,54 @@ fn bind_select_query_with_outer(
                                                         &visible_ctes,
                                                     )
                                                 });
-                                            Ok(TargetEntry::new(
+                                            targets.push(TargetEntry::new(
                                                 item.output_name.clone(),
                                                 expr,
                                                 sql_type,
                                                 index + 1,
-                                            ))
-                                        })
-                                        .collect::<Result<_, _>>()
-                                }
-                            },
-                        )?;
+                                            ));
+                                        }
+                                        Ok(targets)
+                                    }
+                                },
+                            )?;
 
-                        let sort_inputs = with_window_binding(window_state.clone(), true, || {
-                            if stmt.order_by.is_empty() {
-                                Ok(Vec::new())
-                            } else {
-                                bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
+                            let sort_inputs =
+                                with_window_binding(window_state.clone(), true, || {
+                                    if stmt.order_by.is_empty() {
+                                        Ok(Vec::new())
+                                    } else {
+                                        bind_order_by_items(
+                                            &stmt.order_by,
+                                            &targets,
+                                            catalog,
+                                            |expr| {
+                                                bind_agg_output_expr_in_clause(
+                                                    expr,
+                                                    UngroupedColumnClause::OrderBy,
+                                                    &effective_group_by,
+                                                    &group_keys,
+                                                    &scope,
+                                                    catalog,
+                                                    outer_scopes,
+                                                    grouped_outer.as_ref(),
+                                                    &aggs,
+                                                    n_keys,
+                                                )
+                                            },
+                                        )
+                                    }
+                                })?;
+                            let sort_clause = build_sort_clause(sort_inputs, &targets);
+                            let distinct_on = build_distinct_on_clause(
+                                &stmt.distinct_on,
+                                &sort_clause,
+                                &targets,
+                                catalog,
+                                |expr| {
                                     bind_agg_output_expr_in_clause(
                                         expr,
-                                        UngroupedColumnClause::OrderBy,
+                                        UngroupedColumnClause::SelectTarget,
                                         &effective_group_by,
                                         &group_keys,
                                         &scope,
@@ -6333,89 +6647,68 @@ fn bind_select_query_with_outer(
                                         &aggs,
                                         n_keys,
                                     )
-                                })
+                                },
+                            )?;
+                            let target_list = normalize_target_list(targets);
+                            let has_target_srfs =
+                                target_or_sort_clause_contains_srf(&target_list, &sort_clause);
+                            if stmt.distinct
+                                && !stmt.distinct_on.is_empty()
+                                && target_list
+                                    .iter()
+                                    .any(|target| expr_contains_set_returning(&target.expr))
+                            {
+                                return Err(ParseError::FeatureNotSupportedMessage(
+                                    "SELECT DISTINCT ON with set-returning functions is not supported"
+                                        .into(),
+                                ));
                             }
+
+                            Ok((
+                                having,
+                                target_list,
+                                sort_clause,
+                                distinct_on,
+                                has_target_srfs,
+                            ))
                         })?;
-                        let sort_clause = build_sort_clause(sort_inputs, &targets);
-                        let distinct_on = build_distinct_on_clause(
-                            &stmt.distinct_on,
-                            &sort_clause,
-                            &targets,
-                            catalog,
-                            |expr| {
-                                bind_agg_output_expr_in_clause(
-                                    expr,
-                                    UngroupedColumnClause::SelectTarget,
-                                    &effective_group_by,
-                                    &group_keys,
-                                    &scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer.as_ref(),
-                                    &aggs,
-                                    n_keys,
-                                )
-                            },
-                        )?;
-                        let target_list = normalize_target_list(targets);
-                        let has_target_srfs =
-                            target_or_sort_clause_contains_srf(&target_list, &sort_clause);
-                        if stmt.distinct
-                            && !stmt.distinct_on.is_empty()
-                            && target_list
-                                .iter()
-                                .any(|target| expr_contains_set_returning(&target.expr))
-                        {
-                            return Err(ParseError::FeatureNotSupportedMessage(
-                                "SELECT DISTINCT ON with set-returning functions is not supported"
-                                    .into(),
-                            ));
-                        }
+                        constraint_deps.append(&mut functional_constraint_deps);
+                        constraint_deps.sort_unstable();
+                        constraint_deps.dedup();
+                        let window_clauses = take_window_clauses(&window_state);
 
-                        Ok((
-                            having,
+                        let query = Query {
+                            command_type: crate::include::executor::execdesc::CommandType::Select,
+                            depends_on_row_security: false,
+                            rtable: base.rtable,
+                            jointree: base.jointree,
                             target_list,
+                            distinct: false,
+                            distinct_on: Vec::new(),
+                            where_qual,
+                            group_by: rewritten_group_keys,
+                            grouping_sets,
+                            accumulators,
+                            window_clauses,
+                            having_qual: having,
                             sort_clause,
-                            distinct_on,
+                            constraint_deps,
+                            limit_count: stmt.limit,
+                            limit_offset: stmt.offset,
+                            locking_clause: stmt.locking_clause,
+                            locking_targets: stmt.locking_targets.clone(),
+                            row_marks: Vec::new(),
                             has_target_srfs,
-                        ))
-                    })?;
-                    constraint_deps.append(&mut functional_constraint_deps);
-                    constraint_deps.sort_unstable();
-                    constraint_deps.dedup();
-                    let window_clauses = take_window_clauses(&window_state);
-
-                    let query = Query {
-                        command_type: crate::include::executor::execdesc::CommandType::Select,
-                        depends_on_row_security: false,
-                        rtable: base.rtable,
-                        jointree: base.jointree,
-                        target_list,
-                        distinct: false,
-                        distinct_on: Vec::new(),
-                        where_qual,
-                        group_by: rewritten_group_keys,
-                        grouping_sets,
-                        accumulators,
-                        window_clauses,
-                        having_qual: having,
-                        sort_clause,
-                        constraint_deps,
-                        limit_count: stmt.limit,
-                        limit_offset: stmt.offset,
-                        locking_clause: stmt.locking_clause,
-                        locking_targets: stmt.locking_targets.clone(),
-                        row_marks: Vec::new(),
-                        has_target_srfs,
-                        recursive_union: None,
-                        set_operation: None,
-                    };
-                    let query = apply_select_distinct(
-                        query,
-                        stmt.distinct && !lower_distinct_to_grouping,
-                        distinct_on,
-                    );
-                    Ok((query, scope))
+                            recursive_union: None,
+                            set_operation: None,
+                        };
+                        let query = apply_select_distinct(
+                            query,
+                            stmt.distinct && !lower_distinct_to_grouping,
+                            distinct_on,
+                        );
+                        Ok((query, scope))
+                    })
                 });
             } else {
                 let bound_targets = with_window_binding(window_state.clone(), true, || {

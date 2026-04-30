@@ -656,6 +656,7 @@ pub enum Path {
         pathkeys: Vec<PathKey>,
         input: Box<Path>,
         group_by: Vec<Expr>,
+        grouping_sets: Vec<Vec<Expr>>,
         passthrough_exprs: Vec<Expr>,
         accumulators: Vec<AggAccum>,
         having: Option<Expr>,

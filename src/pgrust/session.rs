@@ -37,8 +37,8 @@ use crate::backend::parser::{
     CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
     CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
     CreateTableAsQuery, CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode,
-    DiscardTarget, ExecuteStatement, FromItem, InsertSource, InsertStatement, OrderByItem,
-    ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
+    DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource, InsertStatement,
+    OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
     PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
     SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement,
     TransactionOptions, UpdateStatement, ValuesStatement, bind_delete, bind_insert,
@@ -8905,7 +8905,8 @@ impl Session {
                 .as_ref()
                 .map(|expr| Self::substitute_sql_expr(expr, subst))
                 .transpose()?,
-            group_by: Self::substitute_exprs(&select.group_by, subst)?,
+            group_by: Self::substitute_group_by_items(&select.group_by, subst)?,
+            group_by_distinct: select.group_by_distinct,
             having: select
                 .having
                 .as_ref()
@@ -9344,6 +9345,36 @@ impl Session {
             .iter()
             .map(|expr| Self::substitute_sql_expr(expr, subst))
             .collect()
+    }
+
+    fn substitute_group_by_items(
+        items: &[GroupByItem],
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<Vec<GroupByItem>, ExecError> {
+        items
+            .iter()
+            .map(|item| Self::substitute_group_by_item(item, subst))
+            .collect()
+    }
+
+    fn substitute_group_by_item(
+        item: &GroupByItem,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<GroupByItem, ExecError> {
+        Ok(match item {
+            GroupByItem::Expr(expr) => GroupByItem::Expr(Self::substitute_sql_expr(expr, subst)?),
+            GroupByItem::Empty => GroupByItem::Empty,
+            GroupByItem::List(exprs) => GroupByItem::List(Self::substitute_exprs(exprs, subst)?),
+            GroupByItem::Rollup(items) => {
+                GroupByItem::Rollup(Self::substitute_group_by_items(items, subst)?)
+            }
+            GroupByItem::Cube(items) => {
+                GroupByItem::Cube(Self::substitute_group_by_items(items, subst)?)
+            }
+            GroupByItem::Sets(items) => {
+                GroupByItem::Sets(Self::substitute_group_by_items(items, subst)?)
+            }
+        })
     }
 
     fn substitute_param_ref(

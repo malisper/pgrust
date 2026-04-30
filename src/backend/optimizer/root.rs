@@ -1096,8 +1096,10 @@ impl PlannerInfo {
 }
 
 fn rewrite_minmax_aggregate_query(query: Query) -> Query {
+    let scalar_empty_grouping_set =
+        query.grouping_sets.len() == 1 && query.grouping_sets[0].is_empty();
     if !query.group_by.is_empty()
-        || !query.grouping_sets.is_empty()
+        || (!query.grouping_sets.is_empty() && !scalar_empty_grouping_set)
         || query.having_qual.is_some()
         || !query.window_clauses.is_empty()
         || query.has_target_srfs

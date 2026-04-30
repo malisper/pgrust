@@ -11,8 +11,8 @@ use crate::backend::parser::{
     AliasColumnSpec, ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection,
     BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundScope, BoundUpdateStatement,
     CatalogLookup, CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement,
-    CteBody, DeleteStatement, FromItem, InsertSource, InsertStatement, OnConflictAction,
-    OnConflictClause, OnConflictTarget, OrderByItem, ParseError, RawWindowFrame,
+    CteBody, DeleteStatement, FromItem, GroupByItem, InsertSource, InsertStatement,
+    OnConflictAction, OnConflictClause, OnConflictTarget, OrderByItem, ParseError, RawWindowFrame,
     RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn,
     SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement, TablePersistence,
     UpdateStatement, ValuesStatement, XmlTableColumn, bind_delete_with_outer_scopes,
@@ -2289,14 +2289,31 @@ fn collect_select_column_refs(stmt: &SelectStatement, refs: &mut Vec<String>) {
     if let Some(expr) = &stmt.where_clause {
         collect_expr_column_refs(expr, refs);
     }
-    for expr in &stmt.group_by {
-        collect_expr_column_refs(expr, refs);
+    for item in &stmt.group_by {
+        collect_group_by_item_column_refs(item, refs);
     }
     if let Some(expr) = &stmt.having {
         collect_expr_column_refs(expr, refs);
     }
     for item in &stmt.order_by {
         collect_expr_column_refs(&item.expr, refs);
+    }
+}
+
+fn collect_group_by_item_column_refs(item: &GroupByItem, refs: &mut Vec<String>) {
+    match item {
+        GroupByItem::Expr(expr) => collect_expr_column_refs(expr, refs),
+        GroupByItem::List(exprs) => {
+            for expr in exprs {
+                collect_expr_column_refs(expr, refs);
+            }
+        }
+        GroupByItem::Empty => {}
+        GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => {
+            for item in items {
+                collect_group_by_item_column_refs(item, refs);
+            }
+        }
     }
 }
 
@@ -5374,7 +5391,7 @@ fn normalize_plpgsql_select(mut stmt: SelectStatement, env: &CompileEnv) -> Sele
     stmt.group_by = stmt
         .group_by
         .into_iter()
-        .map(|expr| normalize_plpgsql_expr(expr, env))
+        .map(|item| normalize_plpgsql_group_by_item(item, env))
         .collect();
     stmt.having = stmt.having.map(|expr| normalize_plpgsql_expr(expr, env));
     stmt.order_by = stmt
@@ -5394,6 +5411,37 @@ fn normalize_plpgsql_select(mut stmt: SelectStatement, env: &CompileEnv) -> Sele
             .collect();
     }
     stmt
+}
+
+fn normalize_plpgsql_group_by_item(item: GroupByItem, env: &CompileEnv) -> GroupByItem {
+    match item {
+        GroupByItem::Expr(expr) => GroupByItem::Expr(normalize_plpgsql_expr(expr, env)),
+        GroupByItem::Empty => GroupByItem::Empty,
+        GroupByItem::List(exprs) => GroupByItem::List(
+            exprs
+                .into_iter()
+                .map(|expr| normalize_plpgsql_expr(expr, env))
+                .collect(),
+        ),
+        GroupByItem::Rollup(items) => GroupByItem::Rollup(
+            items
+                .into_iter()
+                .map(|item| normalize_plpgsql_group_by_item(item, env))
+                .collect(),
+        ),
+        GroupByItem::Cube(items) => GroupByItem::Cube(
+            items
+                .into_iter()
+                .map(|item| normalize_plpgsql_group_by_item(item, env))
+                .collect(),
+        ),
+        GroupByItem::Sets(items) => GroupByItem::Sets(
+            items
+                .into_iter()
+                .map(|item| normalize_plpgsql_group_by_item(item, env))
+                .collect(),
+        ),
+    }
 }
 
 fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
