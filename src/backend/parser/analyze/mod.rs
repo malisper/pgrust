@@ -5109,6 +5109,7 @@ fn direct_recursive_cte_ref_qualifier(item: &FromItem, cte_name: &str) -> Option
         FromItem::Join { left, right, .. } => direct_recursive_cte_ref_qualifier(left, cte_name)
             .or_else(|| direct_recursive_cte_ref_qualifier(right, cte_name)),
         FromItem::Values { .. }
+        | FromItem::Expression { .. }
         | FromItem::Table { .. }
         | FromItem::FunctionCall { .. }
         | FromItem::RowsFrom { .. }
@@ -5538,6 +5539,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            FromItem::Expression { expr, .. } => self.visit_expr(expr, context),
             FromItem::FunctionCall { args, .. } => {
                 for arg in args {
                     self.visit_expr(&arg.value, context)?;
@@ -6300,9 +6302,10 @@ fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
         }
         FromItem::JsonTable(table) => json_table_expr_references_table(table, table_name),
         FromItem::XmlTable(table) => xml_table_expr_references_table(table, table_name),
-        FromItem::Values { .. } | FromItem::FunctionCall { .. } | FromItem::RowsFrom { .. } => {
-            false
-        }
+        FromItem::Values { .. }
+        | FromItem::Expression { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. } => false,
     }
 }
 

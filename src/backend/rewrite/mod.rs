@@ -813,7 +813,7 @@ fn rewrite_rte(
                         ),
                         detail: None,
                         hint: None,
-                        sqlstate: "42501",
+                        sqlstate: "55000",
                     });
                 }
             }
@@ -1149,6 +1149,7 @@ fn rewrite_set_returning_call(
                             RowsFromSource::Project {
                                 output_exprs,
                                 output_columns,
+                                display_sql,
                             } => RowsFromSource::Project {
                                 output_exprs: output_exprs
                                     .into_iter()
@@ -1162,6 +1163,7 @@ fn rewrite_set_returning_call(
                                     })
                                     .collect::<Result<Vec<_>, ParseError>>()?,
                                 output_columns,
+                                display_sql,
                             },
                         },
                         column_definitions: item.column_definitions,

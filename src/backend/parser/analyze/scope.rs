@@ -270,6 +270,60 @@ pub(super) fn bind_values_rows(
     ))
 }
 
+fn bind_scalar_expression_from_item_with_ctes(
+    expr: &SqlExpr,
+    display_sql: Option<&str>,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    let call_scope = empty_scope();
+    let bound = bind_expr_with_outer_and_ctes(
+        expr,
+        &call_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let sql_type = expr_sql_type_hint(&bound).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let column_name = scalar_expression_rte_column_name(expr);
+    let output_columns = vec![QueryColumn {
+        name: column_name.clone(),
+        sql_type,
+        wire_type_oid: None,
+    }];
+    let plan = AnalyzedFrom::project_function(
+        vec![bound],
+        output_columns,
+        display_sql.map(str::to_string),
+        Some(column_name.clone()),
+    );
+    let scope = scope_with_output_exprs(
+        scope_for_relation(Some(&column_name), &plan.desc()),
+        &plan.output_exprs,
+    );
+    Ok((plan, scope))
+}
+
+fn scalar_expression_rte_column_name(expr: &SqlExpr) -> String {
+    match expr {
+        SqlExpr::CurrentDate => "current_date",
+        SqlExpr::CurrentCatalog => "current_catalog",
+        SqlExpr::CurrentSchema => "current_schema",
+        SqlExpr::CurrentUser => "current_user",
+        SqlExpr::SessionUser => "session_user",
+        SqlExpr::CurrentRole => "current_role",
+        SqlExpr::CurrentTime { .. } => "current_time",
+        SqlExpr::CurrentTimestamp { .. } => "current_timestamp",
+        SqlExpr::LocalTime { .. } => "localtime",
+        SqlExpr::LocalTimestamp { .. } => "localtimestamp",
+        _ => "?column?",
+    }
+    .to_string()
+}
+
 #[derive(Debug, Clone)]
 enum ValuesCell<'a> {
     Raw(&'a SqlExpr),
@@ -759,6 +813,7 @@ fn relation_name_matches(visible_relation: &str, requested_relation: &str) -> bo
 fn from_item_is_lateral(item: &FromItem) -> bool {
     match item {
         FromItem::Lateral(_) => true,
+        FromItem::Expression { .. } => true,
         FromItem::FunctionCall { .. } => true,
         FromItem::RowsFrom { .. } => true,
         FromItem::JsonTable(_) => true,
@@ -959,6 +1014,14 @@ pub(super) fn bind_from_item_with_ctes(
         FromItem::Values { rows } => {
             bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer, ctes)
         }
+        FromItem::Expression { expr, display_sql } => bind_scalar_expression_from_item_with_ctes(
+            expr,
+            display_sql.as_deref(),
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
         FromItem::FunctionCall {
             name,
             args,
@@ -1256,7 +1319,14 @@ pub(super) fn bind_from_item_with_ctes(
                         ctes,
                         expanded_views,
                     )?;
-                    (plan, scope, false)
+                    let scalar_expression_source = match source.as_ref() {
+                        FromItem::Expression { .. } => true,
+                        FromItem::Lateral(inner) => {
+                            matches!(inner.as_ref(), FromItem::Expression { .. })
+                        }
+                        _ => false,
+                    };
+                    (plan, scope, scalar_expression_source)
                 };
             if *preserve_source_names
                 && column_aliases.is_empty()
@@ -1423,6 +1493,7 @@ fn bind_rows_from_item_with_ctes(
                         .map(|target| target.expr.clone())
                         .collect(),
                     output_columns: plan.output_columns.clone(),
+                    display_sql: None,
                 },
                 _ => {
                     return Err(ParseError::UnexpectedToken {
@@ -3802,7 +3873,12 @@ fn bind_function_from_item_with_ctes(
                             output_columns.len(),
                         ));
                     }
-                    let plan = AnalyzedFrom::result().with_projection(targets);
+                    let plan = AnalyzedFrom::project_function(
+                        targets.iter().map(|target| target.expr.clone()).collect(),
+                        output_columns.clone(),
+                        None,
+                        Some(other.to_string()),
+                    );
                     let desc = RelationDesc {
                         columns: output_columns
                             .iter()
@@ -3815,26 +3891,28 @@ fn bind_function_from_item_with_ctes(
                     );
                     return Ok((plan, scope, false));
                 }
-                let mut plan = AnalyzedFrom::result().with_projection(vec![TargetEntry::new(
-                    other.to_string(),
-                    typed.expr,
-                    typed.sql_type,
-                    1,
-                )]);
+                let mut output_columns = vec![QueryColumn {
+                    name: other.to_string(),
+                    sql_type: typed.sql_type,
+                    wire_type_oid: None,
+                }];
+                let mut output_exprs = vec![typed.expr];
                 let alias_single_function_output = true;
                 if with_ordinality {
-                    let base_expr = plan.output_exprs[0].clone();
                     let ordinality_type = SqlType::new(SqlTypeKind::Int8);
-                    plan = plan.with_projection(vec![
-                        TargetEntry::new(other.to_string(), base_expr, typed.sql_type, 1),
-                        TargetEntry::new(
-                            "ordinality",
-                            Expr::Const(Value::Int64(1)),
-                            ordinality_type,
-                            2,
-                        ),
-                    ]);
+                    output_columns.push(QueryColumn {
+                        name: "ordinality".into(),
+                        sql_type: ordinality_type,
+                        wire_type_oid: None,
+                    });
+                    output_exprs.push(Expr::Const(Value::Int64(1)));
                 }
+                let plan = AnalyzedFrom::project_function(
+                    output_exprs,
+                    output_columns,
+                    None,
+                    Some(other.to_string()),
+                );
                 let desc = plan.desc();
                 let scope = scope_with_output_exprs(
                     scope_for_relation(Some(other), &desc),

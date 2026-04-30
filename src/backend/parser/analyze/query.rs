@@ -6,9 +6,10 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
-    RelationPrivilegeMask, RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr,
-    SubLink, SubPlan, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
-    WindowSpec, attrno_index, is_special_varno, is_system_attr, user_attrno,
+    RelationPrivilegeMask, RelationPrivilegeRequirement, RowsFromItem, RowsFromSource,
+    ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan, WindowClause, WindowFrame,
+    WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, attrno_index, is_special_varno,
+    is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -190,6 +191,33 @@ impl AnalyzedFrom {
             output_exprs: rte_output_exprs(1, &output_columns),
             output_columns,
         }
+    }
+
+    pub(super) fn project_function(
+        output_exprs: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+        display_sql: Option<String>,
+        alias: Option<String>,
+    ) -> Self {
+        let mut plan = Self::function(SetReturningCall::RowsFrom {
+            items: vec![RowsFromItem {
+                source: RowsFromSource::Project {
+                    output_exprs,
+                    output_columns: output_columns.clone(),
+                    display_sql,
+                },
+                column_definitions: false,
+            }],
+            output_columns: output_columns.clone(),
+            with_ordinality: false,
+        });
+        if let Some(alias) = alias
+            && let Some(rte) = plan.rtable.last_mut()
+        {
+            rte.alias = Some(alias.clone());
+            rte.eref.aliasname = alias;
+        }
+        plan
     }
 
     pub(super) fn worktable(worktable_id: usize, output_columns: Vec<QueryColumn>) -> Self {

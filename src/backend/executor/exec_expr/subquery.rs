@@ -671,6 +671,11 @@ fn quantified_subquery_right_value(
     values: Vec<Value>,
 ) -> Result<Value, ExecError> {
     if let Value::Record(record) = left_value {
+        if values.len() == 1
+            && let Some(Value::Record(_)) = values.first()
+        {
+            return Ok(values.into_iter().next().unwrap_or(Value::Null));
+        }
         if values.len() != record.fields.len() {
             return Err(ExecError::CardinalityViolation {
                 message: "subquery row width does not match left row expression".into(),

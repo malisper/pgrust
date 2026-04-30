@@ -273,12 +273,14 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
                             RowsFromSource::Project {
                                 output_exprs,
                                 output_columns,
+                                display_sql,
                             } => RowsFromSource::Project {
                                 output_exprs: output_exprs
                                     .into_iter()
                                     .map(|expr| simplify_expr(expr, None))
                                     .collect::<Result<Vec<_>, ParseError>>()?,
                                 output_columns,
+                                display_sql,
                             },
                         },
                         column_definitions: item.column_definitions,

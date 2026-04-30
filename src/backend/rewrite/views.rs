@@ -24,9 +24,9 @@ use crate::include::nodes::primnodes::{
     ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SqlJsonQueryFunction,
     SqlJsonQueryFunctionKind, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
     SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
-    SqlXmlTableColumnKind, SubLink, SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause,
-    WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
-    set_returning_call_exprs, user_attrno,
+    SqlXmlTableColumnKind, SubLink, SubLinkType, SubPlan, TABLE_OID_ATTR_NO, TargetEntry, Var,
+    WindowClause, WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index,
+    expr_sql_type_hint, set_returning_call_exprs, user_attrno,
 };
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
@@ -1330,14 +1330,20 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
                     _ => None,
                 })
                 .unwrap_or_default();
-            let constraint = if *kind == JoinType::Cross {
+            let effective_kind =
+                if *kind == JoinType::Inner && using_cols.is_empty() && join_qual_is_true(quals) {
+                    JoinType::Cross
+                } else {
+                    *kind
+                };
+            let constraint = if effective_kind == JoinType::Cross {
                 String::new()
             } else if using_cols.is_empty() {
                 format!(" ON (({}))", render_join_qual_expr(quals, ctx))
             } else {
                 format!(" USING ({})", using_cols.join(", "))
             };
-            let join_type = render_join_type(*kind);
+            let join_type = render_join_type(effective_kind);
             let join_keyword = if join_type.is_empty() {
                 "JOIN".to_string()
             } else {
@@ -1797,6 +1803,12 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
     } = call
     {
         if items.len() == 1
+            && !*with_ordinality
+            && let RowsFromSource::Project { .. } = &items[0].source
+        {
+            return render_rows_from_item(&items[0], ctx);
+        }
+        if items.len() == 1
             && let RowsFromSource::Function(function_call @ SetReturningCall::Unnest { .. }) =
                 &items[0].source
             && !items[0].column_definitions
@@ -2038,8 +2050,16 @@ fn render_rows_from_item(item: &RowsFromItem, ctx: &ViewDeparseContext<'_>) -> S
                 .unwrap_or_else(|| render_set_returning_call(call, ctx)),
             _ => render_set_returning_call(call, ctx),
         },
-        RowsFromSource::Project { output_exprs, .. } => {
-            render_rows_from_project_item(output_exprs, ctx)
+        RowsFromSource::Project {
+            output_exprs,
+            display_sql,
+            ..
+        } => {
+            if let Some(display_sql) = display_sql {
+                display_sql.clone()
+            } else {
+                render_rows_from_project_item(output_exprs, ctx)
+            }
         }
     };
     if item.column_definitions {
@@ -2542,7 +2562,14 @@ fn render_sort_group_clause(
     sort: &crate::include::nodes::primnodes::SortGroupClause,
     ctx: &ViewDeparseContext<'_>,
 ) -> String {
-    let mut rendered = render_expr(&sort.expr, ctx);
+    let mut rendered = if let Expr::Var(var) = &sort.expr
+        && order_by_var_needs_qualification(var, ctx)
+    {
+        qualified_var_name(var, ctx.query, ctx.catalog)
+            .unwrap_or_else(|| render_expr(&sort.expr, ctx))
+    } else {
+        render_expr(&sort.expr, ctx)
+    };
     if sort.descending {
         rendered.push_str(" DESC");
     }
@@ -2552,6 +2579,38 @@ fn render_sort_group_clause(
         None => {}
     }
     rendered
+}
+
+fn order_by_var_needs_qualification(var: &Var, ctx: &ViewDeparseContext<'_>) -> bool {
+    let Some(column_index) = attrno_index(var.varattno) else {
+        return false;
+    };
+    let Some(rte) = ctx.query.rtable.get(var.varno.saturating_sub(1)) else {
+        return false;
+    };
+    let Some(input_name) = rte
+        .desc
+        .columns
+        .get(column_index)
+        .map(|column| &column.name)
+    else {
+        return false;
+    };
+    ctx.query.target_list.iter().any(|target| {
+        !target.resjunk
+            && target.name.eq_ignore_ascii_case(input_name)
+            && !matches!(
+                &target.expr,
+                Expr::Var(target_var)
+                    if target_var.varno == var.varno
+                        && target_var.varattno == var.varattno
+                        && target_var.varlevelsup == var.varlevelsup
+            )
+    })
+}
+
+fn join_qual_is_true(expr: &Expr) -> bool {
+    matches!(expr, Expr::Const(Value::Bool(true)))
 }
 
 fn render_set_operator(op: SetOperator) -> &'static str {
@@ -2619,7 +2678,13 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                 .collect::<Vec<_>>()
                 .join(" OR "),
         },
-        Expr::Case(case_expr) => render_case_expr(case_expr, ctx),
+        Expr::Param(param) => format!("${}", param.paramid),
+        Expr::Case(case_expr) => render_whole_row_case_expr(case_expr, ctx)
+            .unwrap_or_else(|| render_case_expr(case_expr, ctx)),
+        Expr::CaseTest(case_test) => format!(
+            "NULL::{}",
+            render_sql_type_with_catalog(case_test.type_id, ctx.catalog)
+        ),
         Expr::Op(op) => render_op(op, ctx),
         Expr::Like {
             expr,
@@ -2648,7 +2713,9 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
         Expr::Func(func) => render_function(func, ctx),
         Expr::Xml(xml) => render_xml_expr(xml, ctx),
         Expr::SqlJsonQueryFunction(func) => render_sql_json_query_function(func, ctx),
+        Expr::SetReturning(srf) => render_set_returning_call(&srf.call, ctx),
         Expr::WindowFunc(window_func) => render_window_function(window_func, ctx),
+        Expr::SubPlan(subplan) => render_subplan(subplan, ctx),
         Expr::IsNull(inner) => format!("{} IS NULL", render_wrapped_expr(inner, ctx)),
         Expr::IsNotNull(inner) => {
             format!("{} IS NOT NULL", render_wrapped_expr(inner, ctx))
@@ -2747,7 +2814,7 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
         Expr::LocalTimestamp { precision } => {
             render_current_with_precision("LOCALTIMESTAMP", *precision)
         }
-        _ => format!("{expr:?}"),
+        Expr::Random => "random()".into(),
     }
 }
 
@@ -2792,6 +2859,40 @@ fn render_case_expr(case_expr: &CaseExpr, ctx: &ViewDeparseContext<'_>) -> Strin
     parts.push(format!("ELSE {}", render_expr(&case_expr.defresult, ctx)));
     parts.push("END".to_string());
     parts.join(" ")
+}
+
+fn render_whole_row_case_expr(
+    case_expr: &CaseExpr,
+    ctx: &ViewDeparseContext<'_>,
+) -> Option<String> {
+    let [arm] = case_expr.args.as_slice() else {
+        return None;
+    };
+    if !matches!(arm.result, Expr::Const(Value::Null)) {
+        return None;
+    }
+    let Expr::Row { descriptor, fields } = case_expr.defresult.as_ref() else {
+        return None;
+    };
+    if descriptor.sql_type() != case_expr.casetype {
+        return None;
+    }
+    let mut vars = fields.iter().map(|(_, expr)| match expr {
+        Expr::Var(var) => Some(var),
+        _ => None,
+    });
+    let first = vars.next()??;
+    if vars.any(|var| {
+        var.is_none_or(|var| var.varno != first.varno || var.varlevelsup != first.varlevelsup)
+    }) {
+        return None;
+    }
+    let scope = ctx.scope_for_var(first)?;
+    let qualifier = rte_qualifier(&scope, first.varno)?;
+    Some(format!(
+        "{qualifier}.*::{}",
+        render_sql_type_with_catalog(descriptor.sql_type(), ctx.catalog)
+    ))
 }
 
 fn strip_view_join_implicit_casts(rendered: &str) -> String {
@@ -2912,6 +3013,34 @@ fn render_sublink(sublink: &SubLink, ctx: &ViewDeparseContext<'_>) -> String {
                 render_wrapped_expr(testexpr, ctx),
                 render_subquery_op(op)
             )
+        }
+    }
+}
+
+fn render_subplan(subplan: &SubPlan, ctx: &ViewDeparseContext<'_>) -> String {
+    let testexpr = subplan
+        .testexpr
+        .as_deref()
+        .map(|expr| render_wrapped_expr(expr, ctx));
+    match subplan.sublink_type {
+        SubLinkType::ExistsSubLink => "(EXISTS (SELECT 1))".into(),
+        SubLinkType::ExprSubLink => "(SELECT $subplan)".into(),
+        SubLinkType::ArraySubLink => "ARRAY(SELECT $subplan)".into(),
+        SubLinkType::AnySubLink(op) => {
+            let left = testexpr.unwrap_or_else(|| "$subplan".into());
+            if op == SubqueryComparisonOp::Eq {
+                format!("({left} IN (SELECT $subplan))")
+            } else {
+                format!("({left} {} ANY (SELECT $subplan))", render_subquery_op(op))
+            }
+        }
+        SubLinkType::AllSubLink(op) => {
+            let left = testexpr.unwrap_or_else(|| "$subplan".into());
+            format!("({left} {} ALL (SELECT $subplan))", render_subquery_op(op))
+        }
+        SubLinkType::RowCompareSubLink(op) => {
+            let left = testexpr.unwrap_or_else(|| "$subplan".into());
+            format!("({left} {} (SELECT $subplan))", render_subquery_op(op))
         }
     }
 }
@@ -3571,7 +3700,7 @@ fn render_op(op: &OpExpr, ctx: &ViewDeparseContext<'_>) -> String {
             render_binary_operator(op_kind),
             render_wrapped_expr(right, ctx)
         ),
-        _ => format!("{op:?}"),
+        _ => "NULL".into(),
     }
 }
 
@@ -3776,6 +3905,7 @@ fn render_literal(value: &Value) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
         Value::Text(_) | Value::TextRef(_, _) => {
             format!(
                 "'{}'",
@@ -3795,7 +3925,61 @@ fn render_literal(value: &Value) -> String {
                 render_view_interval_text(*interval).replace('\'', "''")
             )
         }
-        other => format!("{other:?}"),
+        Value::Array(values) => format!(
+            "ARRAY[{}]",
+            values
+                .iter()
+                .map(render_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::PgArray(array) => format!(
+            "ARRAY[{}]",
+            array
+                .elements
+                .iter()
+                .map(render_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Record(record) => format!(
+            "ROW({})",
+            record
+                .fields
+                .iter()
+                .map(render_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_)
+        | Value::Bit(_)
+        | Value::Bytea(_)
+        | Value::Uuid(_)
+        | Value::Inet(_)
+        | Value::Cidr(_)
+        | Value::MacAddr(_)
+        | Value::MacAddr8(_)
+        | Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_)
+        | Value::Range(_)
+        | Value::Multirange(_)
+        | Value::TsVector(_)
+        | Value::TsQuery(_)
+        | Value::PgLsn(_)
+        | Value::Tid(_)
+        | Value::EnumOid(_)
+        | Value::InternalChar(_)
+        | Value::Money(_)
+        | Value::Xid8(_) => "NULL".into(),
     }
 }
 

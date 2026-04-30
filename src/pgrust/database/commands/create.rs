@@ -3371,6 +3371,7 @@ fn from_item_requires_original_view_sql(item: &FromItem) -> bool {
         }
         FromItem::Table { .. }
         | FromItem::Values { .. }
+        | FromItem::Expression { .. }
         | FromItem::JsonTable(_)
         | FromItem::XmlTable(_) => false,
     }

@@ -1550,6 +1550,7 @@ pub enum RowsFromSource {
     Project {
         output_exprs: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
+        display_sql: Option<String>,
     },
 }
 
@@ -1748,12 +1749,14 @@ impl SetReturningCall {
                             RowsFromSource::Project {
                                 output_exprs,
                                 output_columns,
+                                display_sql,
                             } => RowsFromSource::Project {
                                 output_exprs: output_exprs
                                     .into_iter()
                                     .map(|expr| map(expr))
                                     .collect(),
                                 output_columns,
+                                display_sql,
                             },
                         },
                         column_definitions: item.column_definitions,
@@ -2003,12 +2006,14 @@ impl SetReturningCall {
                                 RowsFromSource::Project {
                                     output_exprs,
                                     output_columns,
+                                    display_sql,
                                 } => RowsFromSource::Project {
                                     output_exprs: output_exprs
                                         .into_iter()
                                         .map(|expr| map(expr))
                                         .collect::<Result<Vec<_>, E>>()?,
                                     output_columns,
+                                    display_sql,
                                 },
                             },
                             column_definitions: item.column_definitions,

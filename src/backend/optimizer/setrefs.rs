@@ -2841,12 +2841,14 @@ fn lower_set_returning_call(
                         RowsFromSource::Project {
                             output_exprs,
                             output_columns,
+                            display_sql,
                         } => RowsFromSource::Project {
                             output_exprs: output_exprs
                                 .into_iter()
                                 .map(|expr| lower_expr(ctx, expr, mode))
                                 .collect(),
                             output_columns,
+                            display_sql,
                         },
                     },
                     column_definitions: item.column_definitions,
@@ -3116,12 +3118,14 @@ fn fix_set_returning_call_upper_exprs(
                         RowsFromSource::Project {
                             output_exprs,
                             output_columns,
+                            display_sql,
                         } => RowsFromSource::Project {
                             output_exprs: output_exprs
                                 .into_iter()
                                 .map(|expr| fix_upper_expr_for_input(root, expr, path, input_tlist))
                                 .collect(),
                             output_columns,
+                            display_sql,
                         },
                     },
                     column_definitions: item.column_definitions,

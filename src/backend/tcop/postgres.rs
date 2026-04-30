@@ -349,6 +349,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         return None;
     }
     if let ExecError::Parse(parse_error) = e
+        && matches!(
+            parse_error.unpositioned(),
+            crate::backend::parser::ParseError::TempTableInNonTempSchema(_)
+        )
+    {
+        return None;
+    }
+    if let ExecError::Parse(parse_error) = e
         && let Some(position) = parse_error.position()
     {
         return Some(position);
@@ -12190,6 +12198,9 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
         crate::backend::parser::FromItem::Table { .. } => false,
         crate::backend::parser::FromItem::Values { rows } => {
             rows.iter().flatten().any(raw_expr_contains_pg_notify)
+        }
+        crate::backend::parser::FromItem::Expression { expr, .. } => {
+            raw_expr_contains_pg_notify(expr)
         }
         crate::backend::parser::FromItem::FunctionCall { args, .. } => args
             .iter()

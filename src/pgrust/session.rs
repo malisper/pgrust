@@ -1680,6 +1680,7 @@ fn collect_from_item_relation_names(item: &FromItem, out: &mut Vec<String>) {
             collect_from_item_relation_names(right, out);
         }
         FromItem::Values { .. }
+        | FromItem::Expression { .. }
         | FromItem::FunctionCall { .. }
         | FromItem::RowsFrom { .. }
         | FromItem::JsonTable(_)
@@ -4716,6 +4717,171 @@ impl Session {
         }
     }
 
+    fn restrict_nonsystem_view_enabled(&self) -> bool {
+        self.gucs
+            .get("restrict_nonsystem_relation_kind")
+            .map(|value| {
+                value
+                    .split(',')
+                    .any(|part| part.trim().trim_matches('\'').eq_ignore_ascii_case("view"))
+            })
+            .unwrap_or(false)
+    }
+
+    fn reject_restricted_view_access(
+        name: &str,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<(), ExecError> {
+        let Some(relation) = catalog.lookup_any_relation(name) else {
+            return Ok(());
+        };
+        if relation.relkind == 'v' && relation.namespace_oid != PG_CATALOG_NAMESPACE_OID {
+            let relname = catalog
+                .class_row_by_oid(relation.relation_oid)
+                .map(|row| row.relname)
+                .unwrap_or_else(|| {
+                    name.rsplit_once('.')
+                        .map(|(_, relname)| relname)
+                        .unwrap_or(name)
+                        .trim_matches('"')
+                        .to_string()
+                });
+            return Err(ExecError::DetailedError {
+                message: format!("access to non-system view \"{relname}\" is restricted"),
+                detail: None,
+                hint: None,
+                sqlstate: "55000",
+            });
+        }
+        Ok(())
+    }
+
+    fn relation_name_is_visible_cte(name: &str, visible_ctes: &[String]) -> bool {
+        let relname = name
+            .rsplit_once('.')
+            .map(|(_, relname)| relname)
+            .unwrap_or(name)
+            .trim_matches('"')
+            .to_ascii_lowercase();
+        visible_ctes.iter().any(|cte| cte == &relname)
+    }
+
+    fn reject_restricted_views_in_statement(
+        &self,
+        stmt: &Statement,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<(), ExecError> {
+        if !self.restrict_nonsystem_view_enabled() {
+            return Ok(());
+        }
+        match stmt {
+            Statement::Select(select) => {
+                Self::reject_restricted_views_in_select(select, catalog, &mut Vec::new())
+            }
+            Statement::Explain(explain) => match explain.statement.as_ref() {
+                Statement::Select(select) => {
+                    Self::reject_restricted_views_in_select(select, catalog, &mut Vec::new())
+                }
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    }
+
+    fn reject_restricted_views_in_select(
+        select: &SelectStatement,
+        catalog: &dyn CatalogLookup,
+        visible_ctes: &mut Vec<String>,
+    ) -> Result<(), ExecError> {
+        let outer_cte_count = visible_ctes.len();
+        for cte in &select.with {
+            match &cte.body {
+                CteBody::Select(body) => {
+                    Self::reject_restricted_views_in_select(body, catalog, visible_ctes)?;
+                }
+                CteBody::Insert(insert) => {
+                    if let InsertSource::Select(body) = &insert.source {
+                        Self::reject_restricted_views_in_select(body, catalog, visible_ctes)?;
+                    }
+                }
+                CteBody::Update(update) => {
+                    if let Some(from) = &update.from {
+                        Self::reject_restricted_views_in_from_item(from, catalog, visible_ctes)?;
+                    }
+                }
+                CteBody::Delete(delete) => {
+                    if let Some(using) = &delete.using {
+                        Self::reject_restricted_views_in_from_item(using, catalog, visible_ctes)?;
+                    }
+                }
+                CteBody::Merge(merge) => {
+                    Self::reject_restricted_views_in_from_item(
+                        &merge.source,
+                        catalog,
+                        visible_ctes,
+                    )?;
+                }
+                CteBody::RecursiveUnion {
+                    anchor, recursive, ..
+                } => {
+                    if let CteBody::Select(anchor_select) = anchor.as_ref() {
+                        Self::reject_restricted_views_in_select(
+                            anchor_select,
+                            catalog,
+                            visible_ctes,
+                        )?;
+                    }
+                    Self::reject_restricted_views_in_select(recursive, catalog, visible_ctes)?;
+                }
+                CteBody::Values(_) => {}
+            }
+            visible_ctes.push(cte.name.to_ascii_lowercase());
+        }
+        if let Some(from) = &select.from {
+            Self::reject_restricted_views_in_from_item(from, catalog, visible_ctes)?;
+        }
+        if let Some(set_op) = &select.set_operation {
+            for input in &set_op.inputs {
+                Self::reject_restricted_views_in_select(input, catalog, visible_ctes)?;
+            }
+        }
+        visible_ctes.truncate(outer_cte_count);
+        Ok(())
+    }
+
+    fn reject_restricted_views_in_from_item(
+        item: &FromItem,
+        catalog: &dyn CatalogLookup,
+        visible_ctes: &[String],
+    ) -> Result<(), ExecError> {
+        match item {
+            FromItem::Table { name, .. }
+                if !Self::relation_name_is_visible_cte(name, visible_ctes) =>
+            {
+                Self::reject_restricted_view_access(name, catalog)
+            }
+            FromItem::Table { .. } => Ok(()),
+            FromItem::DerivedTable(select) => {
+                Self::reject_restricted_views_in_select(select, catalog, &mut visible_ctes.to_vec())
+            }
+            FromItem::Join { left, right, .. } => {
+                Self::reject_restricted_views_in_from_item(left, catalog, visible_ctes)?;
+                Self::reject_restricted_views_in_from_item(right, catalog, visible_ctes)
+            }
+            FromItem::Alias { source, .. }
+            | FromItem::Lateral(source)
+            | FromItem::TableSample { source, .. } => {
+                Self::reject_restricted_views_in_from_item(source, catalog, visible_ctes)
+            }
+            FromItem::Values { .. }
+            | FromItem::Expression { .. }
+            | FromItem::FunctionCall { .. }
+            | FromItem::RowsFrom { .. }
+            | FromItem::JsonTable(_)
+            | FromItem::XmlTable(_) => Ok(()),
+        }
+    }
+
     fn reindex_non_relation_transaction_command(
         stmt: &crate::backend::parser::ReindexIndexStatement,
     ) -> Option<&'static str> {
@@ -6812,6 +6978,13 @@ impl Session {
             }
             stmt = self.resolve_prepared_explain_statement(db, stmt)?;
             self.check_read_only_statement_allowed(db, &stmt)?;
+            let search_path = self.configured_search_path();
+            let txn_ctx = self
+                .active_txn
+                .as_ref()
+                .and_then(|txn| txn.xid.map(|xid| (xid, txn.next_command_id)));
+            let catalog = db.lazy_catalog_lookup(self.client_id, txn_ctx, search_path.as_deref());
+            self.reject_restricted_views_in_statement(&stmt, &catalog)?;
             if matches!(
                 stmt,
                 Statement::DeclareCursor(_)
@@ -6853,6 +7026,11 @@ impl Session {
             }
         }
         self.check_read_only_statement_allowed(db, &stmt)?;
+        {
+            let search_path = self.configured_search_path();
+            let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
+            self.reject_restricted_views_in_statement(&stmt, &catalog)?;
+        }
         if self.active_txn.is_none()
             && !matches!(stmt, Statement::ReindexIndex(_))
             && let Some(tag) = Self::event_trigger_command_tag(&stmt)
@@ -10692,6 +10870,10 @@ impl Session {
                     .map(|row| Self::substitute_exprs(row, subst))
                     .collect::<Result<Vec<_>, _>>()?,
             },
+            FromItem::Expression { expr, display_sql } => FromItem::Expression {
+                expr: Self::substitute_sql_expr(expr, subst)?,
+                display_sql: display_sql.clone(),
+            },
             FromItem::FunctionCall {
                 name,
                 args,
@@ -12218,6 +12400,10 @@ impl Session {
                 .unwrap_or(INVALID_TRANSACTION_ID)
         };
         let client_id = self.client_id;
+        {
+            let catalog = self.catalog_lookup_for_command(db, xid, cid);
+            self.reject_restricted_views_in_statement(&stmt, &catalog)?;
+        }
 
         let event_trigger_tag = Self::event_trigger_command_tag(&stmt).map(str::to_string);
         let (event_trigger_end_commands, event_trigger_dropped_objects) =

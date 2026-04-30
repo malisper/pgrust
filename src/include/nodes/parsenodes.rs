@@ -1790,6 +1790,10 @@ pub enum FromItem {
     Values {
         rows: Vec<Vec<SqlExpr>>,
     },
+    Expression {
+        expr: SqlExpr,
+        display_sql: Option<String>,
+    },
     FunctionCall {
         name: String,
         args: Vec<SqlFunctionArg>,

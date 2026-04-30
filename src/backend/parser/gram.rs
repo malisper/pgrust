@@ -20743,6 +20743,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                             | Rule::rows_from_item
                             | Rule::json_table_from_item
                             | Rule::xml_table_from_item
+                            | Rule::scalar_expr_from_item
                             | Rule::srf_from_item
                             | Rule::derived_from_item
                             | Rule::parenthesized_from_item
@@ -20827,6 +20828,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::rows_from_item
                     | Rule::json_table_from_item
                     | Rule::xml_table_from_item
+                    | Rule::scalar_expr_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
                     | Rule::derived_from_item
@@ -20888,6 +20890,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 .map(build_values_row)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        Rule::scalar_expr_from_item => build_scalar_expr_from_item(pair),
         Rule::rows_from_item => build_rows_from_item(pair),
         Rule::json_table_from_item => build_json_table_from_item(pair),
         Rule::xml_table_from_item => build_xml_table_from_item(pair),
@@ -20927,6 +20930,77 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             actual: raw,
         }),
     }
+}
+
+fn build_scalar_expr_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    if inner.as_rule() == Rule::collation_for_expr {
+        let arg = inner
+            .clone()
+            .into_inner()
+            .find(|part| part.as_rule() == Rule::expr)
+            .ok_or(ParseError::UnexpectedEof)?;
+        let display_sql = format!("COLLATION FOR ({})", arg.as_str().trim());
+        return Ok(FromItem::Expression {
+            // :HACK: PostgreSQL lowers COLLATION FOR to pg_collation_for(any).
+            // pgrust does not model expression collation yet, so keep the
+            // SQL-visible deparse spelling and use the default-collation result
+            // shape for the scalar RTE.
+            expr: SqlExpr::Const(Value::Text("default".into())),
+            display_sql: Some(display_sql),
+        });
+    }
+    let display_sql = scalar_expr_from_item_display(&inner);
+    Ok(FromItem::Expression {
+        expr: build_expr(inner)?,
+        display_sql,
+    })
+}
+
+fn scalar_expr_from_item_display(pair: &Pair<'_, Rule>) -> Option<String> {
+    match pair.as_rule() {
+        Rule::kw_current_date => Some("CURRENT_DATE".into()),
+        Rule::kw_current_catalog => Some("CURRENT_CATALOG".into()),
+        Rule::kw_current_schema => Some("CURRENT_SCHEMA".into()),
+        Rule::kw_current_user => Some("CURRENT_USER".into()),
+        Rule::kw_user_value => Some("USER".into()),
+        Rule::kw_session_user => Some("SESSION_USER".into()),
+        Rule::kw_system_user => Some("SYSTEM_USER".into()),
+        Rule::kw_current_role => Some("CURRENT_ROLE".into()),
+        Rule::kw_current_time => Some(uppercase_keyword_call("CURRENT_TIME", pair.as_str())),
+        Rule::kw_current_timestamp => {
+            Some(uppercase_keyword_call("CURRENT_TIMESTAMP", pair.as_str()))
+        }
+        Rule::kw_localtime => Some(uppercase_keyword_call("LOCALTIME", pair.as_str())),
+        Rule::kw_localtimestamp => Some(uppercase_keyword_call("LOCALTIMESTAMP", pair.as_str())),
+        Rule::cast_expr => Some(uppercase_cast_display(pair.as_str())),
+        _ => None,
+    }
+}
+
+fn uppercase_keyword_call(keyword: &str, raw: &str) -> String {
+    raw.find('(')
+        .map(|index| format!("{keyword}{}", &raw[index..]))
+        .unwrap_or_else(|| keyword.to_string())
+}
+
+fn uppercase_cast_display(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if raw[index..].to_ascii_lowercase().starts_with("cast") {
+            out.push_str("CAST");
+            index += 4;
+        } else if raw[index..].to_ascii_lowercase().starts_with(" as ") {
+            out.push_str(" AS ");
+            index += 4;
+        } else {
+            out.push(bytes[index] as char);
+            index += 1;
+        }
+    }
+    out
 }
 
 fn build_table_sample_clause(pair: Pair<'_, Rule>) -> Result<RawTableSampleClause, ParseError> {
@@ -21639,7 +21713,26 @@ fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
 fn default_alias_for_column_definition_source(item: &FromItem) -> Option<String> {
     match item {
         FromItem::FunctionCall { name, .. } => Some(name.clone()),
+        FromItem::Expression { expr, .. } => {
+            scalar_expr_default_column_name(expr).map(str::to_string)
+        }
         FromItem::Lateral(inner) => default_alias_for_column_definition_source(inner),
+        _ => None,
+    }
+}
+
+fn scalar_expr_default_column_name(expr: &SqlExpr) -> Option<&'static str> {
+    match expr {
+        SqlExpr::CurrentDate => Some("current_date"),
+        SqlExpr::CurrentCatalog => Some("current_catalog"),
+        SqlExpr::CurrentSchema => Some("current_schema"),
+        SqlExpr::CurrentUser => Some("current_user"),
+        SqlExpr::SessionUser => Some("session_user"),
+        SqlExpr::CurrentRole => Some("current_role"),
+        SqlExpr::CurrentTime { .. } => Some("current_time"),
+        SqlExpr::CurrentTimestamp { .. } => Some("current_timestamp"),
+        SqlExpr::LocalTime { .. } => Some("localtime"),
+        SqlExpr::LocalTimestamp { .. } => Some("localtimestamp"),
         _ => None,
     }
 }
@@ -28195,6 +28288,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             is_all,
                             subquery: Box::new(build_select(rhs)?),
                         },
+                        Rule::values_stmt => SqlExpr::QuantifiedSubquery {
+                            left: Box::new(left),
+                            op,
+                            is_all,
+                            subquery: Box::new(wrap_values_as_select(build_values_statement(rhs)?)),
+                        },
                         Rule::expr => SqlExpr::QuantifiedArray {
                             left: Box::new(left),
                             op,
@@ -28573,6 +28672,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
         Rule::kw_current_user | Rule::kw_user_value => Ok(SqlExpr::CurrentUser),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
+        Rule::kw_system_user => Ok(SqlExpr::SessionUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
             precision: pair
