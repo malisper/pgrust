@@ -9,7 +9,7 @@ use crate::backend::executor::{
     render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
     set_returning_call_label,
 };
-use crate::backend::parser::{CatalogLookup, SqlTypeKind};
+use crate::backend::parser::CatalogLookup;
 use crate::include::catalog::{
     PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PUBLIC_NAMESPACE_OID,
     builtin_aggregate_function_for_proc_oid,
@@ -1818,6 +1818,18 @@ fn relation_name_mentions(relation_name: &str, needle: &str) -> bool {
         .is_some_and(|name| name.ends_with(needle))
 }
 
+fn nonverbose_filter_input_column_names(input: &Plan, _ctx: &VerboseExplainContext) -> Vec<String> {
+    if leaf_relation_bases(input).len() == 1 {
+        return input
+            .column_names()
+            .iter()
+            .cloned()
+            .map(strip_qualified_identifiers)
+            .collect();
+    }
+    input.column_names()
+}
+
 fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
     match plan {
         Plan::Projection { input, targets, .. } => {
@@ -1873,7 +1885,8 @@ fn plan_contains_cte_scan(plan: &Plan) -> bool {
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. }
-        | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_cte_scan),
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_cte_scan),
         Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_cte_scan(bitmapqual),
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
@@ -2013,12 +2026,17 @@ fn push_nonverbose_plan_details(
                 | Plan::BitmapHeapScan { .. }
         ) =>
         {
-            if let Some(rendered) = render_nonverbose_expr_with_dynamic_type_names(
-                predicate,
-                &input.column_names(),
-                ctx,
-            ) {
+            let column_names = nonverbose_filter_input_column_names(input, ctx);
+            if let Some(rendered) =
+                render_nonverbose_expr_with_dynamic_type_names(predicate, &column_names, ctx)
+            {
                 lines.push(format!("{prefix}Filter: {rendered}"));
+                true
+            } else if column_names.as_slice() != input.column_names() {
+                lines.push(format!(
+                    "{prefix}Filter: {}",
+                    render_explain_expr(predicate, &column_names)
+                ));
                 true
             } else {
                 false
@@ -4231,7 +4249,7 @@ fn push_verbose_join_qual_details(
     }
 }
 
-fn nonverbose_scan_filter_column_names(input: &Plan, ctx: &VerboseExplainContext) -> Vec<String> {
+fn nonverbose_scan_filter_column_names(input: &Plan, _ctx: &VerboseExplainContext) -> Vec<String> {
     match input {
         Plan::SeqScan {
             relation_name,
@@ -4252,16 +4270,31 @@ fn nonverbose_scan_filter_column_names(input: &Plan, ctx: &VerboseExplainContext
             relation_name,
             desc,
             ..
-        } => context_relation_scan_alias(ctx, relation_name)
-            .map(|alias| {
-                desc.columns
-                    .iter()
-                    .map(|column| format!("{alias}.{}", column.name))
-                    .collect()
-            })
-            .unwrap_or_else(|| qualified_scan_output_exprs(relation_name, desc)),
+        } => nonverbose_scan_relation_column_names(relation_name, desc),
         _ => input.column_names(),
     }
+}
+
+fn nonverbose_scan_relation_column_names(
+    relation_name: &str,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+) -> Vec<String> {
+    if let Some((_, alias)) = relation_name.rsplit_once(' ')
+        && inherited_root_alias(alias).is_none()
+    {
+        return qualified_scan_output_exprs(relation_name, desc);
+    }
+    desc.columns
+        .iter()
+        .map(|column| {
+            column
+                .name
+                .rsplit_once('.')
+                .map(|(_, name)| name)
+                .unwrap_or(&column.name)
+                .to_string()
+        })
+        .collect()
 }
 
 fn push_verbose_filtered_function_scan_plan(
@@ -7734,8 +7767,13 @@ fn render_verbose_composite_null_test(
         .iter()
         .map(|(_, field_expr)| {
             let field = render_verbose_expr(field_expr, column_names, ctx);
-            let composite_field = expr_sql_type_hint(field_expr)
-                .is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Composite | SqlTypeKind::Record));
+            let composite_field = expr_sql_type_hint(field_expr).is_some_and(|ty| {
+                matches!(
+                    ty.kind,
+                    crate::backend::parser::SqlTypeKind::Composite
+                        | crate::backend::parser::SqlTypeKind::Record
+                )
+            });
             let op = match (is_null, composite_field) {
                 (true, true) => "IS NOT DISTINCT FROM NULL",
                 (true, false) => "IS NULL",
