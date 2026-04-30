@@ -41,13 +41,13 @@ use self::json::{
 pub(crate) use self::ops::bind_concat_operands;
 pub(super) use self::ops::bind_lowered_comparison_expr;
 use self::ops::bind_order_by_using_direction;
+pub(super) use self::ops::supports_comparison_operator;
 use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_catalog_binary_operator_expr,
     bind_catalog_equality_operator_expr, bind_comparison_expr, bind_concat_expr,
     bind_maybe_network_arithmetic, bind_maybe_network_bitwise, bind_maybe_network_operator,
     bind_maybe_tsquery_contains, bind_overloaded_binary_expr, bind_prefix_operator_expr,
     bind_shift_expr, bind_text_pattern_comparison_expr, bind_text_starts_with_expr,
-    supports_comparison_operator,
 };
 pub(super) use self::subquery::exists_subquery_query;
 use self::subquery::{

@@ -562,9 +562,16 @@ pub(super) fn collect_direct_relation_oids_from_select(
     rels: &mut BTreeSet<u32>,
 ) {
     let cte_base = visible_ctes.len();
-    for cte in &select.with {
-        collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
-        visible_ctes.push(cte.name.to_ascii_lowercase());
+    if select.with_recursive {
+        visible_ctes.extend(select.with.iter().map(|cte| cte.name.to_ascii_lowercase()));
+        for cte in &select.with {
+            collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
+        }
+    } else {
+        for cte in &select.with {
+            collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
+            visible_ctes.push(cte.name.to_ascii_lowercase());
+        }
     }
 
     if let Some(set_operation) = &select.set_operation {
@@ -607,9 +614,16 @@ fn collect_direct_relation_oids_from_values(
     rels: &mut BTreeSet<u32>,
 ) {
     let cte_base = visible_ctes.len();
-    for cte in &values.with {
-        collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
-        visible_ctes.push(cte.name.to_ascii_lowercase());
+    if values.with_recursive {
+        visible_ctes.extend(values.with.iter().map(|cte| cte.name.to_ascii_lowercase()));
+        for cte in &values.with {
+            collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
+        }
+    } else {
+        for cte in &values.with {
+            collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
+            visible_ctes.push(cte.name.to_ascii_lowercase());
+        }
     }
     for row in &values.rows {
         for expr in row {

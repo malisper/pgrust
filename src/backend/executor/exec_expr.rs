@@ -5433,7 +5433,7 @@ fn index_display_names_for_heap(
 fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let catalog = executor_catalog(ctx)?;
     let relation_oid = match values {
-        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
+        [Value::Null] | [Value::Null, _] => return Ok(Value::Null),
         [value] | [value, _] => {
             if let Some(text) = value.as_text() {
                 catalog

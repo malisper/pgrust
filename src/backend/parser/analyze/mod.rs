@@ -3812,6 +3812,7 @@ pub fn normalize_create_view_name(stmt: &CreateViewStatement) -> Result<String, 
 }
 
 fn apply_cte_column_names(
+    cte_name: &str,
     mut query: Query,
     desc: RelationDesc,
     column_names: &[String],
@@ -3823,7 +3824,8 @@ fn apply_cte_column_names(
         return Err(ParseError::UnexpectedToken {
             expected: "CTE column alias count matching query width",
             actual: format!(
-                "CTE query has {} columns but {} column aliases were specified",
+                "WITH query \"{}\" has {} columns available but {} columns specified",
+                cte_name,
                 desc.columns.len(),
                 column_names.len()
             ),
@@ -3999,25 +4001,54 @@ fn bind_ctes(
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<Vec<BoundCte>, ParseError> {
-    let mut bound = Vec::with_capacity(ctes.len());
-    for cte in ctes {
+    let binding_order = if with_recursive {
+        recursive_cte_binding_order(ctes)?
+    } else {
+        (0..ctes.len()).collect()
+    };
+    let mut bound_by_index = vec![None; ctes.len()];
+    for cte_index in binding_order {
+        let cte = &ctes[cte_index];
         let cte_id = NEXT_CTE_ID.fetch_add(1, Ordering::Relaxed);
-        let mut visible = bound.clone();
+        let mut visible = bound_by_index
+            .iter()
+            .filter_map(|bound| bound.clone())
+            .collect::<Vec<_>>();
         visible.extend_from_slice(outer_ctes);
         let self_references_cte = cte_body_references_table(&cte.body, &cte.name);
+        if with_recursive && self_references_cte && cte_body_is_modifying(&cte.body) {
+            return Err(ParseError::InvalidRecursion(format!(
+                "recursive query \"{}\" must not contain data-modifying statements",
+                cte.name
+            )));
+        }
+        if with_recursive
+            && self_references_cte
+            && !matches!(cte.body, CteBody::RecursiveUnion { .. })
+        {
+            return Err(invalid_recursive_cte_shape(&cte.name));
+        }
+        if !self_references_cte
+            && (cte.search.is_some() || cte.cycle.is_some())
+            && let CteBody::RecursiveUnion { recursive, .. } = &cte.body
+            && recursive
+                .with
+                .iter()
+                .any(|inner_cte| inner_cte.name.eq_ignore_ascii_case(&cte.name))
+        {
+            return Err(ParseError::FeatureNotSupportedMessage(format!(
+                "with a SEARCH or CYCLE clause, the recursive reference to WITH query \"{}\" must be at the top level of its right-hand SELECT",
+                cte.name
+            )));
+        }
         let (plan, desc) = match &cte.body {
             CteBody::RecursiveUnion {
                 all,
                 anchor,
                 recursive,
-            } if self_references_cte => {
-                if !with_recursive {
-                    return Err(ParseError::FeatureNotSupported(
-                        "recursive CTE requires WITH RECURSIVE".into(),
-                    ));
-                }
+            } if with_recursive && self_references_cte => {
                 validate_recursive_cte_non_recursive_term(anchor, &cte.name)?;
-                let (anchor_query, anchor_desc) = analyze_non_recursive_cte_body(
+                let (base_anchor_query, base_anchor_desc) = analyze_non_recursive_cte_body(
                     anchor,
                     catalog,
                     outer_scopes,
@@ -4025,11 +4056,33 @@ fn bind_ctes(
                     &visible,
                     expanded_views,
                 )?;
-                let (anchor_query, desc) =
-                    apply_cte_column_names(anchor_query, anchor_desc, &cte.column_names)?;
                 validate_recursive_cte_recursive_term(recursive, &cte.name)?;
+                let (base_anchor_query, base_desc) = apply_cte_column_names(
+                    &cte.name,
+                    base_anchor_query,
+                    base_anchor_desc,
+                    &cte.column_names,
+                )?;
+                validate_cte_search_cycle_clauses(cte, &base_desc, catalog)?;
+                let (anchor_query, recursive_stmt, desc) =
+                    if cte.search.is_some() || cte.cycle.is_some() {
+                        validate_search_cycle_recursive_shape(&cte.name, anchor, recursive)?;
+                        let (rewritten_anchor, rewritten_recursive) =
+                            rewrite_search_cycle_recursive_cte(cte, anchor, recursive, &base_desc)?;
+                        let (anchor_query, desc) = analyze_non_recursive_cte_body(
+                            &rewritten_anchor,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.clone(),
+                            &visible,
+                            expanded_views,
+                        )?;
+                        (anchor_query, rewritten_recursive, desc)
+                    } else {
+                        (base_anchor_query, (**recursive).clone(), base_desc)
+                    };
                 let recursive_references_worktable =
-                    select_statement_references_table(recursive, &cte.name);
+                    select_statement_references_table(&recursive_stmt, &cte.name);
                 let worktable_id = NEXT_WORKTABLE_ID.fetch_add(1, Ordering::Relaxed);
                 let output_columns = desc
                     .columns
@@ -4079,7 +4132,7 @@ fn bind_ctes(
                 });
                 let recursive_outer_scopes = cte_body_outer_scopes(outer_scopes);
                 let (mut recursive_query, _) = analyze_select_query_with_outer(
-                    recursive,
+                    &recursive_stmt,
                     catalog,
                     &recursive_outer_scopes,
                     grouped_outer.clone(),
@@ -4120,14 +4173,23 @@ fn bind_ctes(
                             );
                             target.sql_type = left.sql_type;
                         } else {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "recursive term column types matching non-recursive term",
-                                actual: format!(
-                                    "recursive CTE column {} has type {} in the non-recursive term but {} in the recursive term",
+                            let overall_type =
+                                resolve_common_scalar_type(left.sql_type, right.sql_type)
+                                    .unwrap_or(right.sql_type);
+                            return Err(ParseError::DetailedError {
+                                message: format!(
+                                    "recursive query \"{}\" column {} has type {} in non-recursive term but type {} overall",
+                                    cte.name,
                                     index + 1,
-                                    sql_type_name(left.sql_type),
-                                    sql_type_name(right.sql_type)
+                                    recursive_cte_error_type_name(left.sql_type),
+                                    sql_type_name(overall_type)
                                 ),
+                                detail: None,
+                                hint: Some(
+                                    "Cast the output of the non-recursive term to the correct type."
+                                        .into(),
+                                ),
+                                sqlstate: "42804",
                             });
                         }
                     }
@@ -4182,10 +4244,10 @@ fn bind_ctes(
                     &visible,
                     expanded_views,
                 )?;
-                apply_cte_column_names(query, desc, &cte.column_names)?
+                apply_cte_column_names(&cte.name, query, desc, &cte.column_names)?
             }
         };
-        bound.push(BoundCte {
+        bound_by_index[cte_index] = Some(BoundCte {
             name: cte.name.clone(),
             cte_id,
             plan,
@@ -4194,7 +4256,632 @@ fn bind_ctes(
             worktable_id: 0,
         });
     }
-    Ok(bound)
+    Ok(bound_by_index
+        .into_iter()
+        .map(|bound| bound.expect("all CTEs are bound"))
+        .collect())
+}
+
+fn recursive_cte_binding_order(ctes: &[CommonTableExpr]) -> Result<Vec<usize>, ParseError> {
+    fn visit(
+        index: usize,
+        ctes: &[CommonTableExpr],
+        states: &mut [u8],
+        order: &mut Vec<usize>,
+    ) -> Result<(), ParseError> {
+        match states[index] {
+            1 => {
+                return Err(ParseError::InvalidRecursion(
+                    "mutual recursion between WITH items is not implemented".into(),
+                ));
+            }
+            2 => return Ok(()),
+            _ => {}
+        }
+        states[index] = 1;
+        for dependency in recursive_cte_dependencies(ctes, index) {
+            visit(dependency, ctes, states, order)?;
+        }
+        states[index] = 2;
+        order.push(index);
+        Ok(())
+    }
+
+    let mut states = vec![0; ctes.len()];
+    let mut order = Vec::with_capacity(ctes.len());
+    for index in 0..ctes.len() {
+        visit(index, ctes, &mut states, &mut order)?;
+    }
+    Ok(order)
+}
+
+fn recursive_cte_dependencies(ctes: &[CommonTableExpr], index: usize) -> Vec<usize> {
+    ctes.iter()
+        .enumerate()
+        .filter_map(|(other_index, other)| {
+            if other_index == index {
+                return None;
+            }
+            cte_body_references_table(&ctes[index].body, &other.name).then_some(other_index)
+        })
+        .collect()
+}
+
+fn cte_body_is_modifying(body: &CteBody) -> bool {
+    match body {
+        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => true,
+        CteBody::Select(_) | CteBody::Values(_) => false,
+        CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            cte_body_is_modifying(anchor)
+                || recursive
+                    .with
+                    .iter()
+                    .any(|cte| cte_body_is_modifying(&cte.body))
+        }
+    }
+}
+
+fn invalid_recursive_cte_shape(cte_name: &str) -> ParseError {
+    ParseError::InvalidRecursion(format!(
+        "recursive query \"{cte_name}\" does not have the form non-recursive-term UNION [ALL] recursive-term"
+    ))
+}
+
+fn recursive_cte_error_type_name(sql_type: SqlType) -> String {
+    if let Some((precision, scale)) = sql_type.numeric_precision_scale() {
+        return format!("numeric({precision},{scale})");
+    }
+    sql_type_name(sql_type)
+}
+
+fn validate_cte_search_cycle_clauses(
+    cte: &CommonTableExpr,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    let output_names = desc
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    if let Some(search) = &cte.search {
+        validate_cte_search_clause(search, &output_names)?;
+    }
+    if let Some(cycle) = &cte.cycle {
+        validate_cte_cycle_clause(cycle, &output_names)?;
+        validate_cte_cycle_clause_types(cycle, catalog)?;
+    }
+    if let (Some(search), Some(cycle)) = (&cte.search, &cte.cycle) {
+        if search
+            .sequence_column
+            .eq_ignore_ascii_case(&cycle.mark_column)
+        {
+            return Err(ParseError::FeatureNotSupportedMessage(
+                "search sequence column name and cycle mark column name are the same".into(),
+            ));
+        }
+        if search
+            .sequence_column
+            .eq_ignore_ascii_case(&cycle.path_column)
+        {
+            return Err(ParseError::FeatureNotSupportedMessage(
+                "search sequence column name and cycle path column name are the same".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_search_cycle_recursive_shape(
+    cte_name: &str,
+    anchor: &CteBody,
+    recursive: &SelectStatement,
+) -> Result<(), ParseError> {
+    if matches!(anchor, CteBody::RecursiveUnion { .. }) {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "with a SEARCH or CYCLE clause, the left side of the UNION must be a SELECT".into(),
+        ));
+    }
+    if recursive.set_operation.is_some() {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "with a SEARCH or CYCLE clause, the right side of the UNION must be a SELECT".into(),
+        ));
+    }
+    if recursive
+        .with
+        .iter()
+        .any(|cte| cte.name.eq_ignore_ascii_case(cte_name))
+    {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "with a SEARCH or CYCLE clause, the recursive reference to WITH query \"{cte_name}\" must be at the top level of its right-hand SELECT"
+        )));
+    }
+    if recursive
+        .from
+        .as_ref()
+        .and_then(|from| direct_recursive_cte_ref_qualifier(from, cte_name))
+        .is_none()
+    {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "with a SEARCH or CYCLE clause, the recursive reference to WITH query \"{cte_name}\" must be at the top level of its right-hand SELECT"
+        )));
+    }
+    Ok(())
+}
+
+fn rewrite_search_cycle_recursive_cte(
+    cte: &CommonTableExpr,
+    anchor: &CteBody,
+    recursive: &SelectStatement,
+    base_desc: &RelationDesc,
+) -> Result<(CteBody, SelectStatement), ParseError> {
+    let base_names = base_desc
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let mut expanded_names = base_names.clone();
+    if let Some(search) = &cte.search {
+        expanded_names.push(search.sequence_column.clone());
+    }
+    if let Some(cycle) = &cte.cycle {
+        expanded_names.push(cycle.mark_column.clone());
+        expanded_names.push(cycle.path_column.clone());
+    }
+
+    let anchor_alias = "__pgrust_sc_anchor";
+    let recursive_alias = "__pgrust_sc_recursive";
+    let self_qualifier = recursive
+        .from
+        .as_ref()
+        .and_then(|from| direct_recursive_cte_ref_qualifier(from, &cte.name))
+        .ok_or_else(|| {
+            ParseError::FeatureNotSupportedMessage(format!(
+                "with a SEARCH or CYCLE clause, the recursive reference to WITH query \"{}\" must be at the top level of its right-hand SELECT",
+                cte.name
+            ))
+        })?;
+
+    let anchor_select = cte_body_as_select(anchor)?;
+    let mut anchor_targets = base_names
+        .iter()
+        .map(|name| select_item(name, qualified_column(anchor_alias, name)))
+        .collect::<Vec<_>>();
+    append_search_cycle_anchor_targets(&mut anchor_targets, cte, anchor_alias);
+    let rewritten_anchor = CteBody::Select(Box::new(select_from_derived(
+        anchor_select,
+        anchor_alias,
+        base_names.clone(),
+        anchor_targets,
+    )));
+
+    let mut inner_recursive = recursive.clone();
+    rewrite_self_star_targets(
+        &mut inner_recursive,
+        &self_qualifier,
+        &cte.name,
+        &base_names,
+    );
+    append_carried_recursive_targets(&mut inner_recursive.targets, cte, &self_qualifier);
+    if let Some(cycle) = &cte.cycle {
+        let filter = SqlExpr::NotEq(
+            Box::new(qualified_column(&self_qualifier, &cycle.mark_column)),
+            Box::new(cycle_mark_value(cycle)),
+        );
+        inner_recursive.where_clause = Some(match inner_recursive.where_clause.take() {
+            Some(existing) => SqlExpr::And(Box::new(existing), Box::new(filter)),
+            None => filter,
+        });
+    }
+
+    let mut recursive_targets = base_names
+        .iter()
+        .map(|name| select_item(name, qualified_column(recursive_alias, name)))
+        .collect::<Vec<_>>();
+    append_search_cycle_recursive_targets(&mut recursive_targets, cte, recursive_alias);
+    let rewritten_recursive = select_from_derived(
+        inner_recursive,
+        recursive_alias,
+        expanded_names,
+        recursive_targets,
+    );
+
+    Ok((rewritten_anchor, rewritten_recursive))
+}
+
+fn select_item(name: &str, expr: SqlExpr) -> SelectItem {
+    SelectItem {
+        output_name: name.to_string(),
+        expr,
+    }
+}
+
+fn select_from_derived(
+    source: SelectStatement,
+    alias: &str,
+    column_names: Vec<String>,
+    targets: Vec<SelectItem>,
+) -> SelectStatement {
+    SelectStatement {
+        with_recursive: false,
+        with: Vec::new(),
+        distinct: false,
+        distinct_on: Vec::new(),
+        from: Some(FromItem::Alias {
+            source: Box::new(FromItem::DerivedTable(Box::new(source))),
+            alias: alias.to_string(),
+            column_aliases: AliasColumnSpec::Names(column_names),
+            preserve_source_names: false,
+        }),
+        targets,
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        window_clauses: Vec::new(),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        locking_clause: None,
+        locking_targets: Vec::new(),
+        set_operation: None,
+    }
+}
+
+fn append_search_cycle_anchor_targets(
+    targets: &mut Vec<SelectItem>,
+    cte: &CommonTableExpr,
+    alias: &str,
+) {
+    if let Some(search) = &cte.search {
+        targets.push(select_item(
+            &search.sequence_column,
+            search_anchor_expr(search, alias),
+        ));
+    }
+    if let Some(cycle) = &cte.cycle {
+        targets.push(select_item(&cycle.mark_column, cycle_default_value(cycle)));
+        targets.push(select_item(
+            &cycle.path_column,
+            initial_path_expr(&cycle.columns, alias),
+        ));
+    }
+}
+
+fn append_search_cycle_recursive_targets(
+    targets: &mut Vec<SelectItem>,
+    cte: &CommonTableExpr,
+    alias: &str,
+) {
+    if let Some(search) = &cte.search {
+        targets.push(select_item(
+            &search.sequence_column,
+            search_recursive_expr(search, alias),
+        ));
+    }
+    if let Some(cycle) = &cte.cycle {
+        targets.push(select_item(
+            &cycle.mark_column,
+            cycle_mark_case(cycle, alias),
+        ));
+        targets.push(select_item(
+            &cycle.path_column,
+            path_cat_expr(&cycle.path_column, &cycle.columns, alias),
+        ));
+    }
+}
+
+fn append_carried_recursive_targets(
+    targets: &mut Vec<SelectItem>,
+    cte: &CommonTableExpr,
+    qualifier: &str,
+) {
+    if let Some(search) = &cte.search {
+        targets.push(select_item(
+            &search.sequence_column,
+            qualified_column(qualifier, &search.sequence_column),
+        ));
+    }
+    if let Some(cycle) = &cte.cycle {
+        targets.push(select_item(
+            &cycle.mark_column,
+            qualified_column(qualifier, &cycle.mark_column),
+        ));
+        targets.push(select_item(
+            &cycle.path_column,
+            qualified_column(qualifier, &cycle.path_column),
+        ));
+    }
+}
+
+fn search_anchor_expr(search: &CteSearchClause, alias: &str) -> SqlExpr {
+    if search.breadth_first {
+        let mut items = vec![SqlExpr::Const(Value::Int64(0))];
+        items.extend(
+            search
+                .columns
+                .iter()
+                .map(|name| qualified_column(alias, name)),
+        );
+        SqlExpr::Row(items)
+    } else {
+        initial_path_expr(&search.columns, alias)
+    }
+}
+
+fn search_recursive_expr(search: &CteSearchClause, alias: &str) -> SqlExpr {
+    if search.breadth_first {
+        let depth = SqlExpr::FieldSelect {
+            expr: Box::new(qualified_column(alias, &search.sequence_column)),
+            field: "f1".into(),
+        };
+        let mut items = vec![SqlExpr::Add(
+            Box::new(depth),
+            Box::new(SqlExpr::Const(Value::Int64(1))),
+        )];
+        items.extend(
+            search
+                .columns
+                .iter()
+                .map(|name| qualified_column(alias, name)),
+        );
+        SqlExpr::Row(items)
+    } else {
+        path_cat_expr(&search.sequence_column, &search.columns, alias)
+    }
+}
+
+fn cycle_mark_case(cycle: &CteCycleClause, alias: &str) -> SqlExpr {
+    SqlExpr::Case {
+        arg: None,
+        args: vec![SqlCaseWhen {
+            expr: SqlExpr::QuantifiedArray {
+                left: Box::new(path_row_expr(&cycle.columns, alias)),
+                op: SubqueryComparisonOp::Eq,
+                is_all: false,
+                array: Box::new(qualified_column(alias, &cycle.path_column)),
+            },
+            result: cycle_mark_value(cycle),
+        }],
+        defresult: Some(Box::new(cycle_default_value(cycle))),
+    }
+}
+
+fn initial_path_expr(columns: &[String], alias: &str) -> SqlExpr {
+    SqlExpr::ArrayLiteral(vec![path_row_expr(columns, alias)])
+}
+
+fn path_cat_expr(path_column: &str, columns: &[String], alias: &str) -> SqlExpr {
+    SqlExpr::FuncCall {
+        name: "array_cat".into(),
+        args: SqlCallArgs::Args(vec![
+            SqlFunctionArg::positional(qualified_column(alias, path_column)),
+            SqlFunctionArg::positional(initial_path_expr(columns, alias)),
+        ]),
+        order_by: Vec::new(),
+        within_group: None,
+        distinct: false,
+        func_variadic: false,
+        filter: None,
+        null_treatment: None,
+        over: None,
+    }
+}
+
+fn path_row_expr(columns: &[String], alias: &str) -> SqlExpr {
+    SqlExpr::Row(
+        columns
+            .iter()
+            .map(|name| qualified_column(alias, name))
+            .collect(),
+    )
+}
+
+fn cycle_mark_value(cycle: &CteCycleClause) -> SqlExpr {
+    cycle
+        .mark_value
+        .clone()
+        .unwrap_or(SqlExpr::Const(Value::Bool(true)))
+}
+
+fn cycle_default_value(cycle: &CteCycleClause) -> SqlExpr {
+    cycle
+        .default_value
+        .clone()
+        .unwrap_or(SqlExpr::Const(Value::Bool(false)))
+}
+
+fn qualified_column(qualifier: &str, column: &str) -> SqlExpr {
+    SqlExpr::Column(format!("{qualifier}.{column}"))
+}
+
+fn rewrite_self_star_targets(
+    stmt: &mut SelectStatement,
+    self_qualifier: &str,
+    cte_name: &str,
+    base_names: &[String],
+) {
+    let only_self_reference = stmt
+        .from
+        .as_ref()
+        .is_some_and(|from| from_item_is_only_recursive_reference(from, cte_name));
+    let mut rewritten = Vec::new();
+    for target in std::mem::take(&mut stmt.targets) {
+        if target_is_self_star(&target.expr, self_qualifier, cte_name, only_self_reference) {
+            rewritten.extend(
+                base_names
+                    .iter()
+                    .map(|name| select_item(name, qualified_column(self_qualifier, name))),
+            );
+        } else {
+            rewritten.push(target);
+        }
+    }
+    stmt.targets = rewritten;
+}
+
+fn target_is_self_star(
+    expr: &SqlExpr,
+    self_qualifier: &str,
+    cte_name: &str,
+    only_self_reference: bool,
+) -> bool {
+    match expr {
+        SqlExpr::Column(name) if name == "*" => only_self_reference,
+        SqlExpr::Column(name) => name.strip_suffix(".*").is_some_and(|qualifier| {
+            qualifier.eq_ignore_ascii_case(self_qualifier)
+                || qualifier.eq_ignore_ascii_case(cte_name)
+        }),
+        SqlExpr::FieldSelect { expr, field } if field == "*" => {
+            matches!(expr.as_ref(), SqlExpr::Column(name) if name.eq_ignore_ascii_case(self_qualifier) || name.eq_ignore_ascii_case(cte_name))
+        }
+        _ => false,
+    }
+}
+
+fn direct_recursive_cte_ref_qualifier(item: &FromItem, cte_name: &str) -> Option<String> {
+    match item {
+        FromItem::Table { name, .. } if name.eq_ignore_ascii_case(cte_name) => Some(name.clone()),
+        FromItem::Alias { source, alias, .. } => match source.as_ref() {
+            FromItem::Table { name, .. } if name.eq_ignore_ascii_case(cte_name) => {
+                Some(alias.clone())
+            }
+            _ => direct_recursive_cte_ref_qualifier(source, cte_name),
+        },
+        FromItem::TableSample { source, .. } | FromItem::Lateral(source) => {
+            direct_recursive_cte_ref_qualifier(source, cte_name)
+        }
+        FromItem::Join { left, right, .. } => direct_recursive_cte_ref_qualifier(left, cte_name)
+            .or_else(|| direct_recursive_cte_ref_qualifier(right, cte_name)),
+        FromItem::Values { .. }
+        | FromItem::Table { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_)
+        | FromItem::DerivedTable(_) => None,
+    }
+}
+
+fn from_item_is_only_recursive_reference(item: &FromItem, cte_name: &str) -> bool {
+    match item {
+        FromItem::Table { name, .. } => name.eq_ignore_ascii_case(cte_name),
+        FromItem::Alias { source, .. }
+        | FromItem::TableSample { source, .. }
+        | FromItem::Lateral(source) => from_item_is_only_recursive_reference(source, cte_name),
+        _ => false,
+    }
+}
+
+fn validate_cte_search_clause(
+    search: &CteSearchClause,
+    output_names: &[&str],
+) -> Result<(), ParseError> {
+    for column in &search.columns {
+        if !name_in_list(output_names, column) {
+            return Err(ParseError::FeatureNotSupportedMessage(format!(
+                "search column \"{column}\" not in WITH query column list"
+            )));
+        }
+        if search
+            .columns
+            .iter()
+            .filter(|other| other.eq_ignore_ascii_case(column))
+            .count()
+            > 1
+        {
+            return Err(ParseError::FeatureNotSupportedMessage(format!(
+                "search column \"{column}\" specified more than once"
+            )));
+        }
+    }
+    if name_in_list(output_names, &search.sequence_column) {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "search sequence column name \"{}\" already used in WITH query column list",
+            search.sequence_column
+        )));
+    }
+    Ok(())
+}
+
+fn validate_cte_cycle_clause(
+    cycle: &CteCycleClause,
+    output_names: &[&str],
+) -> Result<(), ParseError> {
+    for column in &cycle.columns {
+        if !name_in_list(output_names, column) {
+            return Err(ParseError::FeatureNotSupportedMessage(format!(
+                "cycle column \"{column}\" not in WITH query column list"
+            )));
+        }
+        if cycle
+            .columns
+            .iter()
+            .filter(|other| other.eq_ignore_ascii_case(column))
+            .count()
+            > 1
+        {
+            return Err(ParseError::FeatureNotSupportedMessage(format!(
+                "cycle column \"{column}\" specified more than once"
+            )));
+        }
+    }
+    if name_in_list(output_names, &cycle.mark_column) {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "cycle mark column name \"{}\" already used in WITH query column list",
+            cycle.mark_column
+        )));
+    }
+    if name_in_list(output_names, &cycle.path_column) {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "cycle path column name \"{}\" already used in WITH query column list",
+            cycle.path_column
+        )));
+    }
+    if cycle.mark_column.eq_ignore_ascii_case(&cycle.path_column) {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "cycle mark column name and cycle path column name are the same".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cte_cycle_clause_types(
+    cycle: &CteCycleClause,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    let scope = empty_scope();
+    let outer_scopes = Vec::new();
+    let mark_value = cycle_mark_value(cycle);
+    let default_value = cycle_default_value(cycle);
+    let mark_type = infer_sql_expr_type(&mark_value, &scope, catalog, &outer_scopes, None);
+    let default_type = infer_sql_expr_type(&default_value, &scope, catalog, &outer_scopes, None);
+    let common_type = resolve_common_scalar_type(mark_type, default_type).ok_or_else(|| {
+        ParseError::FeatureNotSupportedMessage(format!(
+            "CYCLE types {} and {} cannot be matched",
+            sql_type_name(mark_type),
+            sql_type_name(default_type)
+        ))
+    })?;
+    if !cycle_mark_type_has_equality(catalog, common_type) {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "could not identify an equality operator for type {}",
+            sql_type_name(common_type)
+        )));
+    }
+    Ok(())
+}
+
+fn cycle_mark_type_has_equality(catalog: &dyn CatalogLookup, sql_type: SqlType) -> bool {
+    if matches!(sql_type.kind, SqlTypeKind::Point) && !sql_type.is_array {
+        return false;
+    }
+    supports_comparison_operator(catalog, "=", sql_type, sql_type)
+}
+
+fn name_in_list(names: &[&str], needle: &str) -> bool {
+    names.iter().any(|name| name.eq_ignore_ascii_case(needle))
 }
 
 pub(crate) fn cte_body_references_table(body: &CteBody, table_name: &str) -> bool {
@@ -4378,8 +5065,13 @@ impl<'a> RecursiveReferenceChecker<'a> {
             CteBody::RecursiveUnion {
                 anchor, recursive, ..
             } => {
-                self.visit_cte_body(anchor, RecursiveReferenceContext::Subquery)?;
-                self.visit_select(recursive, RecursiveReferenceContext::Subquery)
+                let nested_context = if context == RecursiveReferenceContext::Ok {
+                    RecursiveReferenceContext::Ok
+                } else {
+                    RecursiveReferenceContext::Subquery
+                };
+                self.visit_cte_body(anchor, nested_context)?;
+                self.visit_select(recursive, nested_context)
             }
         }
     }
@@ -4393,8 +5085,13 @@ impl<'a> RecursiveReferenceChecker<'a> {
             return Ok(());
         }
 
+        let cte_context = if context == RecursiveReferenceContext::Ok {
+            RecursiveReferenceContext::Ok
+        } else {
+            RecursiveReferenceContext::Subquery
+        };
         for cte in &stmt.with {
-            self.visit_cte_body(&cte.body, RecursiveReferenceContext::Subquery)?;
+            self.visit_cte_body(&cte.body, cte_context)?;
         }
         if let Some(from) = &stmt.from {
             self.visit_from(from, context)?;
@@ -4819,33 +5516,269 @@ fn validate_recursive_cte_non_recursive_term(
 fn validate_recursive_cte_recursive_term_decorations(
     stmt: &SelectStatement,
 ) -> Result<(), ParseError> {
+    if select_statement_contains_recursive_term_aggregate(stmt) {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "aggregate functions are not allowed in a recursive query's recursive term".into(),
+        ));
+    }
     if !stmt.order_by.is_empty() {
-        return Err(ParseError::FeatureNotSupported(
+        return Err(ParseError::FeatureNotSupportedMessage(
             "ORDER BY in a recursive query is not implemented".into(),
         ));
     }
     if stmt.offset.is_some() {
-        return Err(ParseError::FeatureNotSupported(
+        return Err(ParseError::FeatureNotSupportedMessage(
             "OFFSET in a recursive query is not implemented".into(),
         ));
     }
     if stmt.limit.is_some() {
-        return Err(ParseError::FeatureNotSupported(
+        return Err(ParseError::FeatureNotSupportedMessage(
             "LIMIT in a recursive query is not implemented".into(),
         ));
     }
     if stmt.locking_clause.is_some() {
-        return Err(ParseError::FeatureNotSupported(
+        return Err(ParseError::FeatureNotSupportedMessage(
             "FOR UPDATE/SHARE in a recursive query is not implemented".into(),
         ));
     }
     Ok(())
 }
 
+fn select_statement_contains_recursive_term_aggregate(stmt: &SelectStatement) -> bool {
+    stmt.targets
+        .iter()
+        .any(|target| sql_expr_contains_aggregate_call(&target.expr))
+        || stmt
+            .having
+            .as_ref()
+            .is_some_and(|expr| sql_expr_contains_aggregate_call(expr))
+        || stmt
+            .order_by
+            .iter()
+            .any(|item| sql_expr_contains_aggregate_call(&item.expr))
+        || stmt.set_operation.as_ref().is_some_and(|setop| {
+            setop
+                .inputs
+                .iter()
+                .any(select_statement_contains_recursive_term_aggregate)
+        })
+}
+
+fn sql_expr_contains_aggregate_call(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => false,
+        SqlExpr::Collate { expr, .. }
+        | SqlExpr::UnaryPlus(expr)
+        | SqlExpr::Negate(expr)
+        | SqlExpr::BitNot(expr)
+        | SqlExpr::Subscript { expr, .. }
+        | SqlExpr::PrefixOperator { expr, .. }
+        | SqlExpr::Cast(expr, _)
+        | SqlExpr::Not(expr)
+        | SqlExpr::IsNull(expr)
+        | SqlExpr::IsNotNull(expr)
+        | SqlExpr::FieldSelect { expr, .. }
+        | SqlExpr::GeometryUnaryOp { expr, .. } => sql_expr_contains_aggregate_call(expr),
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            sql_expr_contains_aggregate_call(left) || sql_expr_contains_aggregate_call(right)
+        }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            sql_expr_contains_aggregate_call(expr) || sql_expr_contains_aggregate_call(zone)
+        }
+        SqlExpr::BinaryOperator { left, right, .. } => {
+            sql_expr_contains_aggregate_call(left) || sql_expr_contains_aggregate_call(right)
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            sql_expr_contains_aggregate_call(expr)
+                || sql_expr_contains_aggregate_call(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| sql_expr_contains_aggregate_call(expr))
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_ref()
+                .is_some_and(|expr| sql_expr_contains_aggregate_call(expr))
+                || args.iter().any(|arm| {
+                    sql_expr_contains_aggregate_call(&arm.expr)
+                        || sql_expr_contains_aggregate_call(&arm.result)
+                })
+                || defresult
+                    .as_ref()
+                    .is_some_and(|expr| sql_expr_contains_aggregate_call(expr))
+        }
+        SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => {
+            items.iter().any(sql_expr_contains_aggregate_call)
+        }
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            filter,
+            over,
+            ..
+        } => {
+            is_builtin_aggregate_name(name)
+                || args
+                    .args()
+                    .iter()
+                    .any(|arg| sql_expr_contains_aggregate_call(&arg.value))
+                || order_by
+                    .iter()
+                    .any(|item| sql_expr_contains_aggregate_call(&item.expr))
+                || within_group.as_ref().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| sql_expr_contains_aggregate_call(&item.expr))
+                })
+                || filter
+                    .as_ref()
+                    .is_some_and(|expr| sql_expr_contains_aggregate_call(expr))
+                || over.as_ref().is_some_and(|over| {
+                    over.partition_by
+                        .iter()
+                        .any(sql_expr_contains_aggregate_call)
+                        || over
+                            .order_by
+                            .iter()
+                            .any(|item| sql_expr_contains_aggregate_call(&item.expr))
+                })
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            sql_expr_contains_aggregate_call(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| sql_expr_contains_aggregate_call(expr))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| sql_expr_contains_aggregate_call(expr))
+                })
+        }
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            sql_expr_contains_aggregate_call(left) || sql_expr_contains_aggregate_call(array)
+        }
+        SqlExpr::InSubquery { expr, .. } | SqlExpr::QuantifiedSubquery { left: expr, .. } => {
+            sql_expr_contains_aggregate_call(expr)
+        }
+        SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::Xml(_)
+        | SqlExpr::JsonQueryFunction(_) => false,
+    }
+}
+
+fn is_builtin_aggregate_name(name: &str) -> bool {
+    let unqualified = name.rsplit('.').next().unwrap_or(name);
+    matches!(
+        unqualified.to_ascii_lowercase().as_str(),
+        "array_agg"
+            | "avg"
+            | "bit_and"
+            | "bit_or"
+            | "bool_and"
+            | "bool_or"
+            | "count"
+            | "every"
+            | "json_agg"
+            | "json_object_agg"
+            | "jsonb_agg"
+            | "jsonb_object_agg"
+            | "max"
+            | "min"
+            | "string_agg"
+            | "sum"
+            | "xmlagg"
+    )
+}
+
 pub(crate) fn select_statement_references_table(stmt: &SelectStatement, table_name: &str) -> bool {
+    if stmt
+        .with
+        .iter()
+        .any(|cte| cte.name.eq_ignore_ascii_case(table_name))
+    {
+        return false;
+    }
     stmt.from
         .as_ref()
         .is_some_and(|from| from_item_references_table(from, table_name))
+        || stmt
+            .with
+            .iter()
+            .any(|cte| cte_body_references_table(&cte.body, table_name))
         || stmt.set_operation.as_ref().is_some_and(|setop| {
             setop
                 .inputs

@@ -1783,6 +1783,202 @@ fn recursive_cte_rejects_self_reference_inside_subquery() {
 }
 
 #[test]
+fn recursive_cte_forward_reference_binds_in_dependency_order() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "with recursive
+            x(n) as (select n from y),
+            y(n) as (values (1))
+        select * from x",
+    );
+
+    assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+}
+
+#[test]
+fn recursive_cte_rejects_mutual_recursion_before_binding() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive
+              x(id) as (select 1 union all select id + 1 from y where id < 5),
+              y(id) as (select 1 union all select id + 1 from x where id < 5)
+            select * from x",
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::InvalidRecursion(message))
+            if message == "mutual recursion between WITH items is not implemented"
+    ));
+}
+
+#[test]
+fn recursive_cte_rejects_non_union_self_reference_shape() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive x(n) as (select 1 intersect select n + 1 from x)
+            select * from x",
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::InvalidRecursion(message))
+            if message == "recursive query \"x\" does not have the form non-recursive-term UNION [ALL] recursive-term"
+    ));
+}
+
+#[test]
+fn recursive_cte_rejects_aggregate_in_recursive_term() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive x(n) as (select 1 union all select count(*) from x)
+            select * from x",
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "aggregate functions are not allowed in a recursive query's recursive term"
+    ));
+}
+
+#[test]
+fn recursive_cte_type_mismatch_uses_postgres_diagnostic() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive foo(i) as (
+                select i::numeric(3,0) from (values (1), (2)) t(i)
+                union all
+                select (i + 1)::numeric(10,0) from foo where i < 10
+            )
+            select * from foo",
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, hint: Some(hint), .. })
+            if message == "recursive query \"foo\" column 1 has type numeric(3,0) in non-recursive term but type numeric overall"
+                && hint == "Cast the output of the non-recursive term to the correct type."
+    ));
+}
+
+#[test]
+fn recursive_cte_search_cycle_clauses_parse_and_validate_names() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive g(f, t) as (
+                select 1, 2
+                union all
+                select f + 1, t + 1 from g
+            ) search depth first by missing set seq
+            select * from g",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "search column \"missing\" not in WITH query column list"
+    ));
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive g(f, t) as (
+                select 1, 2
+                union all
+                select f + 1, t + 1 from g
+            ) cycle f set t using path
+            select * from g",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "cycle mark column name \"t\" already used in WITH query column list"
+    ));
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive g(f, t) as (
+                select 1, 2
+                union all
+                select f + 1, t + 1 from g
+            ) cycle f set is_cycle to true default 55 using path
+            select * from g",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "CYCLE types boolean and integer cannot be matched"
+    ));
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive g(f, t) as (
+                select 1, 2
+                union all
+                select f + 1, t + 1 from g
+            ) cycle f set is_cycle to point '(1,1)' default point '(0,0)' using path
+            select * from g",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "could not identify an equality operator for type point"
+    ));
+
+    let err = session
+        .execute(
+            &db,
+            "with recursive x(col) as (
+                select 1
+                union
+                (with x as (select * from x)
+                 select * from x)
+            ) search depth first by col set seq
+            select * from x",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "with a SEARCH or CYCLE clause, the recursive reference to WITH query \"x\" must be at the top level of its right-hand SELECT"
+    ));
+}
+
+#[test]
 fn recursive_cte_intermediate_setop_with_can_read_worktable() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -1987,7 +2183,7 @@ fn recursive_cte_rejects_unsupported_term_decorations() {
         let err = session.execute(&db, sql).unwrap_err();
         assert!(matches!(
             err,
-            ExecError::Parse(ParseError::FeatureNotSupported(message)) if message == expected
+            ExecError::Parse(ParseError::FeatureNotSupportedMessage(message)) if message == expected
         ));
     }
 }
@@ -51069,6 +51265,137 @@ fn pg_get_viewdef_returns_canonical_view_query() {
             " SELECT (f1)::integer AS f1\n   FROM t1\n      LEFT JOIN t2 USING (f1)\n  GROUP BY f1;"
                 .into()
         )]]
+    );
+}
+
+#[test]
+fn create_recursive_view_executes_and_viewdef_keeps_with() {
+    let dir = temp_dir("create_recursive_view_with");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create recursive view nums(n) as values (1) union all select n + 1 from nums where n < 3",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from nums"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ]
+    );
+    let rows = query_rows(&db, 1, "select pg_get_viewdef('nums'::regclass, true)");
+    let Value::Text(definition) = &rows[0][0] else {
+        panic!("expected text view definition");
+    };
+    assert!(definition.contains("WITH RECURSIVE nums(n) AS"));
+}
+
+#[test]
+fn recursive_cte_search_depth_first_executes() {
+    let dir = temp_dir("recursive_cte_search_depth");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table graph0(f int4, t int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into graph0 values (1,2,'arc 1 -> 2'), (1,3,'arc 1 -> 3'), (2,3,'arc 2 -> 3')",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "with recursive search_graph(f, t, label) as (
+            select * from graph0 g
+            union all
+            select g.* from graph0 g, search_graph sg where g.f = sg.t
+        ) search depth first by f, t set seq
+        select f, t, label from search_graph order by seq",
+    );
+
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Text("arc 1 -> 2".into())
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Text("arc 2 -> 3".into())
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Int32(3),
+                Value::Text("arc 1 -> 3".into())
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Text("arc 2 -> 3".into())
+            ],
+        ]
+    );
+}
+
+#[test]
+fn recursive_cte_search_union_distinct_hashes_record_path() {
+    let dir = temp_dir("recursive_cte_search_union_distinct");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table graph0(f int4, t int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into graph0 values (1,2,'arc 1 -> 2'), (1,3,'arc 1 -> 3'), (2,3,'arc 2 -> 3')",
+    )
+    .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "with recursive search_graph(f, t, label) as (
+            select * from graph0 g
+            union distinct
+            select g.* from graph0 g, search_graph sg where g.f = sg.t
+        ) search depth first by f, t set seq
+        select count(*) from search_graph",
+    );
+
+    assert_eq!(rows, vec![vec![Value::Int64(4)]]);
+}
+
+#[test]
+fn recursive_cte_cycle_clause_executes() {
+    let dir = temp_dir("recursive_cte_cycle");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "with recursive test(x) as (
+            select 0
+            union all
+            select (x + 1) % 3 from test
+        ) cycle x set is_cycle using path
+        select x, is_cycle from test",
+    );
+
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int32(0), Value::Bool(false)],
+            vec![Value::Int32(1), Value::Bool(false)],
+            vec![Value::Int32(2), Value::Bool(false)],
+            vec![Value::Int32(0), Value::Bool(true)],
+        ]
     );
 }
 

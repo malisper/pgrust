@@ -176,6 +176,13 @@ pub(crate) fn format_view_definition(
     relation_desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Result<String, ParseError> {
+    let display_name = view_display_name(relation_oid, None);
+    if let Ok(sql) = return_rule_sql(catalog, relation_oid, &display_name) {
+        let (body, _) = split_stored_view_definition_sql(&sql);
+        if body.trim_start().to_ascii_lowercase().starts_with("with ") {
+            return Ok(format!(" {};", body.trim()));
+        }
+    }
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, &[])?;
     Ok(render_view_query(&query, catalog))
 }

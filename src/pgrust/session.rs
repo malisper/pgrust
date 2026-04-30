@@ -36,9 +36,9 @@ use crate::backend::parser::{
     AlterTableAddColumnStatement, BoundCte, CallStatement, CatalogLookup, CommonTableExpr,
     CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
     CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
-    CreateTableAsQuery, CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode,
-    DiscardTarget, ExecuteStatement, FromItem, InsertSource, InsertStatement, OrderByItem,
-    ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
+    CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause, DeallocateStatement,
+    DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, InsertSource, InsertStatement,
+    OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
     PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
     RuleEvent, SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement,
     UpdateStatement, ValuesStatement, bind_delete, bind_delete_with_outer_scopes_and_ctes,
@@ -8846,6 +8846,28 @@ impl Session {
                     recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
                 },
             },
+            search: cte.search.clone(),
+            cycle: cte
+                .cycle
+                .as_ref()
+                .map(|cycle| {
+                    Ok::<_, ExecError>(CteCycleClause {
+                        columns: cycle.columns.clone(),
+                        mark_column: cycle.mark_column.clone(),
+                        mark_value: cycle
+                            .mark_value
+                            .as_ref()
+                            .map(|expr| Self::substitute_sql_expr(expr, subst))
+                            .transpose()?,
+                        default_value: cycle
+                            .default_value
+                            .as_ref()
+                            .map(|expr| Self::substitute_sql_expr(expr, subst))
+                            .transpose()?,
+                        path_column: cycle.path_column.clone(),
+                    })
+                })
+                .transpose()?,
         })
     }
 

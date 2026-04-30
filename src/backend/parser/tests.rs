@@ -11490,6 +11490,28 @@ fn parse_insert_update_delete() {
     assert!(
         matches!(parse_statement("create view item_names as select id, name from people").unwrap(), Statement::CreateView(CreateViewStatement { schema_name: None, view_name, query_sql, or_replace: false, check_option: ViewCheckOption::None, .. }) if view_name == "item_names" && query_sql == "select id, name from people")
     );
+    match parse_statement(
+        "create or replace recursive view nums(n) as values (1) union all select n + 1 from nums",
+    )
+    .unwrap()
+    {
+        Statement::CreateView(CreateViewStatement {
+            view_name,
+            recursive,
+            query,
+            query_sql,
+            or_replace,
+            ..
+        }) => {
+            assert_eq!(view_name, "nums");
+            assert!(recursive);
+            assert!(or_replace);
+            assert!(query.with_recursive);
+            assert_eq!(query.with.len(), 1);
+            assert!(query_sql.starts_with("WITH RECURSIVE nums(n) AS"));
+        }
+        other => panic!("expected CREATE RECURSIVE VIEW, got {:?}", other),
+    }
     assert!(
         matches!(
             parse_statement("create view secure_names with (security_barrier, security_invoker=false) as select id from people").unwrap(),
@@ -13050,6 +13072,13 @@ fn parse_create_table_if_not_exists() {
 }
 
 #[test]
+fn parse_create_table_rejects_unquoted_with_column_name() {
+    assert!(parse_statement("create table foo (with baz)").is_err());
+    assert!(parse_statement("create table foo (with ordinality)").is_err());
+    assert!(parse_statement("create table foo (\"with\" int4)").is_ok());
+}
+
+#[test]
 fn parse_create_table_inherits_clause() {
     match parse_statement("create table child (id int4) inherits (parent1, parent2)").unwrap() {
         Statement::CreateTable(ct) => {
@@ -13671,6 +13700,36 @@ fn parse_with_recursive_cte_union_all() {
 }
 
 #[test]
+fn parse_with_recursive_cte_search_and_cycle_clauses() {
+    match parse_statement(
+        "with recursive g(f, t) as (
+            select 1, 2
+            union all
+            select f + 1, t + 1 from g
+        ) search breadth first by f, t set seq
+          cycle f set is_cycle to true default false using path
+        select * from g",
+    )
+    .unwrap()
+    {
+        Statement::Select(SelectStatement { with, .. }) => {
+            assert_eq!(with.len(), 1);
+            let search = with[0].search.as_ref().expect("SEARCH clause");
+            assert!(search.breadth_first);
+            assert_eq!(search.columns, vec!["f", "t"]);
+            assert_eq!(search.sequence_column, "seq");
+            let cycle = with[0].cycle.as_ref().expect("CYCLE clause");
+            assert_eq!(cycle.columns, vec!["f"]);
+            assert_eq!(cycle.mark_column, "is_cycle");
+            assert!(cycle.mark_value.is_some());
+            assert!(cycle.default_value.is_some());
+            assert_eq!(cycle.path_column, "path");
+        }
+        other => panic!("expected Select with SEARCH/CYCLE clauses, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_scalar_values_subquery_expr() {
     let stmt = parse_select("select (values (1))").unwrap();
     assert_eq!(stmt.targets.len(), 1);
@@ -13698,6 +13757,17 @@ fn parse_union_all_select_chain() {
     assert_eq!(set_operation.inputs.len(), 2);
     assert!(stmt.targets.is_empty());
     assert!(stmt.from.is_none());
+}
+
+#[test]
+fn parse_union_distinct_select_chain() {
+    let stmt = parse_select("select 1 as x union distinct select 2 as x").unwrap();
+    let set_operation = stmt.set_operation.expect("set operation");
+    assert!(matches!(
+        set_operation.op,
+        SetOperator::Union { all: false }
+    ));
+    assert_eq!(set_operation.inputs.len(), 2);
 }
 
 #[test]
