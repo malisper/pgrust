@@ -4923,6 +4923,55 @@ impl Session {
         result
     }
 
+    pub(crate) fn fire_login_event_triggers(&mut self, db: &Database) -> Result<(), ExecError> {
+        if !self.event_triggers_guc_enabled() {
+            return Ok(());
+        }
+        db.install_auth_state(self.client_id, self.auth.clone());
+        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+        db.install_session_replication_role(self.client_id, self.session_replication_role());
+        db.install_temp_backend_id(self.client_id, self.temp_backend_id);
+        db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
+        db.install_plpgsql_function_cache(self.client_id, Arc::clone(&self.plpgsql_function_cache));
+        db.install_interrupt_state(self.client_id, self.interrupts());
+        db.accept_invalidation_messages(self.client_id);
+
+        if !db.current_database_has_login_event_triggers()? {
+            return Ok(());
+        }
+        if !db.event_trigger_may_fire(self.client_id, None, "login", "login")? {
+            return Ok(());
+        }
+
+        let _interrupt_guard = self.statement_interrupt_guard()?;
+        self.active_txn = Some(self.active_transaction_without_xid(db));
+        self.stats_state.write().begin_top_level_xact();
+        let effect_start = 0;
+        let cid = {
+            let txn = self.active_txn.as_mut().unwrap();
+            let cid = txn.next_command_id;
+            txn.next_command_id = txn.next_command_id.saturating_add(1);
+            cid
+        };
+        let xid = self.ensure_active_xid(db);
+        let result = self
+            .fire_event_trigger_event(db, xid, cid, None, "login", "login")
+            .and_then(|_| {
+                self.advance_catalog_command_id_after_statement(cid, effect_start);
+                self.process_catalog_command_end(db, effect_start);
+                self.validate_constraints_for_active_txn(db, false)?;
+                Ok(StatementResult::AffectedRows(0))
+            });
+        let txn = self.active_txn.take().unwrap();
+        let result = self.finalize_taken_transaction(db, txn, result);
+        if result.is_ok() {
+            self.portals.drop_transaction_portals(true);
+        } else {
+            self.portals.drop_transaction_portals(false);
+        }
+        result.map(|_| ())
+    }
+
     fn execute_internal(
         &mut self,
         db: &Database,

@@ -29,6 +29,7 @@ pub struct PgDatabaseRow {
     pub daticurules: Option<String>,
     pub datcollversion: Option<String>,
     pub datacl: Option<Vec<String>>,
+    pub dathasloginevt: bool,
 }
 
 pub fn pg_database_desc() -> RelationDesc {
@@ -57,6 +58,7 @@ pub fn pg_database_desc() -> RelationDesc {
                 SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
                 true,
             ),
+            column_desc("dathasloginevt", SqlType::new(SqlTypeKind::Bool), false),
         ],
     }
 }
@@ -78,6 +80,7 @@ fn bootstrap_row(oid: u32, name: &str, datistemplate: bool, datallowconn: bool) 
         daticurules: None,
         datcollversion: None,
         datacl: None,
+        dathasloginevt: false,
     }
 }
 
@@ -119,6 +122,7 @@ mod tests {
                 "daticurules",
                 "datcollversion",
                 "datacl",
+                "dathasloginevt",
             ]
         );
     }
