@@ -1714,6 +1714,7 @@ pub trait CatalogLookup {
     fn pg_user_mappings_rows(&self) -> Vec<Vec<Value>> {
         build_pg_user_mappings_rows(
             self.authid_rows(),
+            self.auth_members_rows(),
             self.foreign_server_rows(),
             self.user_mapping_rows(),
             self.current_user_oid(),

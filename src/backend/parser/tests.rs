@@ -6829,6 +6829,7 @@ fn parse_create_trigger_statement_with_when_and_update_of() {
         stmt,
         Statement::CreateTrigger(CreateTriggerStatement {
             replace_existing: true,
+            is_constraint: false,
             trigger_name: "audit_row".into(),
             schema_name: Some("public".into()),
             table_name: "people".into(),
@@ -6863,6 +6864,7 @@ fn parse_create_instead_of_trigger_statement() {
         stmt,
         Statement::CreateTrigger(CreateTriggerStatement {
             replace_existing: false,
+            is_constraint: false,
             trigger_name: "audit_row".into(),
             schema_name: Some("public".into()),
             table_name: "people_view".into(),
@@ -6899,6 +6901,24 @@ fn parse_create_trigger_statement_for_statement_without_each() {
         }
         other => panic!("expected create trigger, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_create_constraint_trigger_statement() {
+    let stmt = parse_statement(
+        "create constraint trigger audit_constraint after insert on public.people for each row execute function public.audit_people()",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateTrigger(CreateTriggerStatement {
+            is_constraint: true,
+            trigger_name,
+            timing: TriggerTiming::After,
+            level: TriggerLevel::Row,
+            ..
+        }) if trigger_name == "audit_constraint"
+    ));
 }
 
 #[test]
@@ -7091,6 +7111,7 @@ fn parse_create_trigger_statement_with_referencing_and_truncate() {
         stmt,
         Statement::CreateTrigger(CreateTriggerStatement {
             replace_existing: false,
+            is_constraint: false,
             trigger_name: "audit_stmt".into(),
             schema_name: None,
             table_name: "people".into(),
@@ -15749,6 +15770,54 @@ fn parse_foreign_data_wrapper_statements() {
     );
     assert_eq!(create_table.create_table.elements.len(), 2);
 
+    let Statement::CreateForeignTable(create_table) = parse_statement(
+        "create foreign table ft_child (a int options (column_name 'remote_a')) inherits (ft_parent) server srv",
+    )
+    .unwrap() else {
+        panic!("expected inherited create foreign table");
+    };
+    assert_eq!(create_table.create_table.table_name, "ft_child");
+    assert_eq!(create_table.create_table.inherits, vec!["ft_parent"]);
+    assert_eq!(create_table.server_name, "srv");
+    assert_eq!(create_table.column_options.len(), 1);
+
+    let Statement::CreateForeignTable(create_table) = parse_statement(
+        "create foreign table ft_part partition of parted for values in (1) server srv options (delimiter ',')",
+    )
+    .unwrap() else {
+        panic!("expected foreign partition");
+    };
+    assert_eq!(create_table.create_table.table_name, "ft_part");
+    assert_eq!(
+        create_table.create_table.partition_of.as_deref(),
+        Some("parted")
+    );
+    assert!(matches!(
+        create_table.create_table.partition_bound,
+        Some(RawPartitionBoundSpec::List { .. })
+    ));
+    assert_eq!(create_table.options[0].name, "delimiter");
+
+    let Statement::CreateForeignTable(create_table) = parse_statement(
+        "create foreign table if not exists ft_part partition of parted (a options (column_name 'remote_a')) default server srv",
+    )
+    .unwrap() else {
+        panic!("expected if not exists foreign default partition");
+    };
+    assert!(create_table.create_table.if_not_exists);
+    assert_eq!(
+        create_table.create_table.partition_of.as_deref(),
+        Some("parted")
+    );
+    assert!(matches!(
+        create_table.create_table.partition_bound,
+        Some(RawPartitionBoundSpec::List {
+            is_default: true,
+            ..
+        })
+    ));
+    assert_eq!(create_table.column_options.len(), 1);
+
     let Statement::AlterTableAddColumn(add_column) = parse_statement(
         "alter foreign table ft add column if not exists c int options (column_name 'remote_c')",
     )
@@ -16633,6 +16702,75 @@ fn parse_rollup_group_by_items() {
         items[1],
         GroupByItem::Expr(SqlExpr::Column(ref name)) if name == "b"
     ));
+}
+
+#[test]
+fn parse_grouping_sets_query_shapes_do_not_fallback() {
+    let queries = [
+        "select sum(c) from gstest2
+          group by grouping sets((), grouping sets((), grouping sets(())))
+          order by 1 desc",
+        "select sum(c) from gstest2
+          group by grouping sets(grouping sets(rollup(c), grouping sets(cube(c))))
+          order by 1 desc",
+        "select sum(c) from gstest2
+          group by grouping sets(grouping sets(a, grouping sets(a, grouping sets(a), ((a)), a, grouping sets(a), (a)), a))
+          order by 1 desc",
+        "select a, b, sum(v), count(*) from gstest_empty
+          group by grouping sets ((a,b),a)",
+        "select four, x
+          from (select four, ten, 'foo'::text as x from tenk1) as t
+          group by grouping sets (four, x)
+          having x = 'foo'",
+        "select a, b, c, d from gstest2
+          group by rollup(a,b),grouping sets(c,d)",
+        "select distinct on (a, b) a, b
+          from gstest2
+          group by grouping sets ((a, b), (a))
+          order by a, b",
+        "select v.c, (select count(*) from gstest2 group by () having v.c)
+          from (values (false),(true)) v(c) order by v.c",
+        "select ten, sum(distinct four) from onek a
+          group by grouping sets((ten,four),(ten))
+          having exists (select 1 from onek b where sum(distinct a.four) = b.four)",
+        "select *
+          from (values (1),(2)) v(x),
+               lateral (select a, b, sum(v.x) from gstest_data(v.x) group by grouping sets (a,b)) s",
+        "select * from (values (1),(2)) v(a)
+          left join lateral
+            (select v.a, four, ten, count(*) from onek group by grouping sets(four,ten)) s
+          on true order by v.a,four,ten",
+        "select array(select row(v.a,s1.*)
+          from (select two,four, count(*) from onek group by grouping sets(two,four) order by two,four) s1)
+          from (values (1),(2)) v(a)",
+        "select a, b, c
+          from (values (1, 2, 3), (4, null, 6), (7, 8, 9)) as t (a, b, c)
+          group by all rollup(a, b), rollup(a, c)
+          order by a, b, c",
+        "select a, b, c
+          from (values (1, 2, 3), (4, null, 6), (7, 8, 9)) as t (a, b, c)
+          group by distinct rollup(a, b), rollup(a, c)
+          order by a, b, c",
+        "select grouping((select t1.v from gstest5 t2 where id = t1.id)),
+                 (select t1.v from gstest5 t2 where id = t1.id) as s
+          from gstest5 t1
+          group by grouping sets(v, s)
+          order by case when grouping((select t1.v from gstest5 t2 where id = t1.id)) = 0
+                        then (select t1.v from gstest5 t2 where id = t1.id)
+                        else null end
+                   nulls first",
+        "select distinct on (a, b+1) a, b+1
+          from (values (1, 0), (2, 1)) as t (a, b) where a = b+1
+          group by grouping sets((a, b+1), (a))
+          order by a, b+1",
+        "select a, b, row_number() over (order by a, b nulls first)
+          from (values (1, 1), (2, 2)) as t (a, b) where a = b
+          group by grouping sets((a, b), (a))",
+    ];
+
+    for sql in queries {
+        parse_select(sql).unwrap_or_else(|err| panic!("{sql}\n{err:?}"));
+    }
 }
 
 #[test]

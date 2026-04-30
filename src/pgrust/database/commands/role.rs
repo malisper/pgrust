@@ -491,6 +491,12 @@ impl Database {
                     .map(OwnedObject::drop_detail)
                     .collect::<Vec<_>>();
                 detail_lines.extend(shared_dependency_details);
+                detail_lines.sort_by(|left, right| {
+                    role_drop_detail_priority(left)
+                        .cmp(&role_drop_detail_priority(right))
+                        .then_with(|| left.cmp(right))
+                });
+                detail_lines.dedup();
                 let detail = detail_lines.join("\n");
                 return Err(ExecError::DetailedError {
                     message: format!(
@@ -617,32 +623,142 @@ impl Database {
                 waiter: Some(self.txn_waiter.clone()),
                 interrupts: interrupts.clone(),
             };
-            let effect = match object.kind {
+            let effects = match object.kind {
                 OwnedObjectKind::CompositeType => self
                     .catalog
                     .write()
                     .drop_composite_type_by_oid_mvcc(object.oid, &ctx)
-                    .map(|(_, effect)| effect),
+                    .map(|(_, effect)| vec![effect])
+                    .map_err(map_role_catalog_error),
                 OwnedObjectKind::Function => self
                     .catalog
                     .write()
                     .drop_proc_by_oid_mvcc(object.oid, &ctx)
-                    .map(|(_, effect)| effect),
+                    .map(|(_, effect)| vec![effect])
+                    .map_err(map_role_catalog_error),
                 OwnedObjectKind::View => self
                     .catalog
                     .write()
                     .drop_view_by_oid_mvcc(object.oid, &ctx)
-                    .map(|(_, effect)| effect),
+                    .map(|(_, effect)| vec![effect])
+                    .map_err(map_role_catalog_error),
                 OwnedObjectKind::Index => self
                     .catalog
                     .write()
                     .drop_relation_entry_by_oid_mvcc(object.oid, &ctx)
-                    .map(|(_, effect)| effect),
+                    .map(|(_, effect)| vec![effect])
+                    .map_err(map_role_catalog_error),
+                OwnedObjectKind::ForeignServer => {
+                    let catcache = self
+                        .txn_backend_catcache(client_id, xid, current_cid)
+                        .map_err(map_role_catalog_error)?;
+                    let server = catcache
+                        .foreign_server_rows()
+                        .into_iter()
+                        .find(|row| row.oid == object.oid)
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "server \"{}\" does not exist",
+                                object.name
+                            )))
+                        })?;
+                    let dependent_mappings = catcache
+                        .user_mapping_rows()
+                        .into_iter()
+                        .filter(|row| row.umserver == server.oid)
+                        .collect::<Vec<_>>();
+                    let dependent_tables = catcache
+                        .foreign_table_rows()
+                        .into_iter()
+                        .filter(|row| row.ftserver == server.oid)
+                        .collect::<Vec<_>>();
+                    if !stmt.cascade
+                        && (!dependent_mappings.is_empty() || !dependent_tables.is_empty())
+                    {
+                        if let Some(mapping) = dependent_mappings.first() {
+                            let username = owned_user_mapping_name(&catcache, mapping.umuser);
+                            return Err(ExecError::DetailedError {
+                                message:
+                                    "cannot drop desired object(s) because other objects depend on them"
+                                        .into(),
+                                detail: Some(format!(
+                                    "user mapping for {username} on server {} depends on server {}",
+                                    server.srvname, server.srvname
+                                )),
+                                hint: Some(
+                                    "Use DROP ... CASCADE to drop the dependent objects too.".into(),
+                                ),
+                                sqlstate: "2BP01",
+                            });
+                        }
+                        let table_name = dependent_tables
+                            .first()
+                            .and_then(|table| catcache.class_by_oid(table.ftrelid))
+                            .map(|row| row.relname.clone())
+                            .unwrap_or_else(|| dependent_tables[0].ftrelid.to_string());
+                        return Err(ExecError::DetailedError {
+                            message:
+                                "cannot drop desired object(s) because other objects depend on them"
+                                    .into(),
+                            detail: Some(format!(
+                                "foreign table {table_name} depends on server {}",
+                                server.srvname
+                            )),
+                            hint: Some(
+                                "Use DROP ... CASCADE to drop the dependent objects too.".into(),
+                            ),
+                            sqlstate: "2BP01",
+                        });
+                    }
+                    let mut effects = Vec::new();
+                    if stmt.cascade {
+                        let mut notices = Vec::new();
+                        for mapping in &dependent_mappings {
+                            notices.push(format!(
+                                "drop cascades to user mapping for {} on server {}",
+                                owned_user_mapping_name(&catcache, mapping.umuser),
+                                server.srvname
+                            ));
+                        }
+                        for table in &dependent_tables {
+                            let table_name = catcache
+                                .class_by_oid(table.ftrelid)
+                                .map(|row| row.relname.clone())
+                                .unwrap_or_else(|| table.ftrelid.to_string());
+                            notices.push(format!("drop cascades to foreign table {table_name}"));
+                        }
+                        push_owned_drop_cascade_notices(notices);
+                        for table in dependent_tables {
+                            let (_, effect) = self
+                                .catalog
+                                .write()
+                                .drop_relation_by_oid_mvcc(table.ftrelid, &ctx)
+                                .map_err(map_role_catalog_error)?;
+                            effects.push(effect);
+                        }
+                        for mapping in dependent_mappings {
+                            let effect = self
+                                .catalog
+                                .write()
+                                .drop_user_mapping_mvcc(&mapping, &ctx)
+                                .map_err(map_role_catalog_error)?;
+                            effects.push(effect);
+                        }
+                    }
+                    let effect = self
+                        .catalog
+                        .write()
+                        .drop_foreign_server_mvcc(&server, &ctx)
+                        .map_err(map_role_catalog_error)?;
+                    effects.push(effect);
+                    Ok(effects)
+                }
                 OwnedObjectKind::Publication => self
                     .catalog
                     .write()
                     .drop_publication_mvcc(object.oid, &ctx)
-                    .map(|(_, effect)| effect),
+                    .map(|(_, effect)| vec![effect])
+                    .map_err(map_role_catalog_error),
                 OwnedObjectKind::Schema => {
                     let catcache = self
                         .txn_backend_catcache(client_id, xid, current_cid)
@@ -653,27 +769,34 @@ impl Database {
                             object.name
                         )))
                     })?;
-                    self.catalog.write().drop_namespace_mvcc(
-                        schema.oid,
-                        &schema.nspname,
-                        schema.nspowner,
-                        schema.nspacl.clone(),
-                        &ctx,
-                    )
+                    self.catalog
+                        .write()
+                        .drop_namespace_mvcc(
+                            schema.oid,
+                            &schema.nspname,
+                            schema.nspowner,
+                            schema.nspacl.clone(),
+                            &ctx,
+                        )
+                        .map(|effect| vec![effect])
+                        .map_err(map_role_catalog_error)
                 }
                 OwnedObjectKind::Type => {
                     self.drop_owned_dynamic_type_by_oid(client_id, object.oid)?;
-                    Ok(CatalogMutationEffect::default())
+                    Ok(vec![CatalogMutationEffect::default()])
                 }
                 _ => self
                     .catalog
                     .write()
                     .drop_relation_by_oid_mvcc(object.oid, &ctx)
-                    .map(|(_, effect)| effect),
-            }
-            .map_err(map_role_catalog_error)?;
-            if !matches!(object.kind, OwnedObjectKind::View) {
-                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    .map(|(_, effect)| vec![effect])
+                    .map_err(map_role_catalog_error),
+            }?;
+            for effect in effects {
+                if !matches!(object.kind, OwnedObjectKind::View) {
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                }
+                catalog_effects.push(effect);
             }
             if matches!(object.kind, OwnedObjectKind::Table) {
                 self.session_stats_state(client_id)
@@ -685,7 +808,6 @@ impl Database {
                     .write()
                     .note_function_drop(object.oid, &self.stats);
             }
-            catalog_effects.push(effect);
             current_cid = current_cid.saturating_add(1);
         }
 
@@ -1087,6 +1209,31 @@ impl Database {
                         )
                         .map_err(map_role_catalog_error)?
                 }
+                OwnedObjectKind::ForeignServer => {
+                    let catcache = self
+                        .txn_backend_catcache(client_id, xid, cid.saturating_add(offset as u32))
+                        .map_err(map_role_catalog_error)?;
+                    let server = catcache
+                        .foreign_server_rows()
+                        .into_iter()
+                        .find(|row| row.oid == object.oid)
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "server \"{}\" does not exist",
+                                object.name
+                            )))
+                        })?;
+                    let replacement = crate::include::catalog::PgForeignServerRow {
+                        srvowner: new_role.oid,
+                        ..server.clone()
+                    };
+                    let (_, effect) = self
+                        .catalog
+                        .write()
+                        .replace_foreign_server_mvcc(&server, replacement, &ctx)
+                        .map_err(map_role_catalog_error)?;
+                    effect
+                }
                 OwnedObjectKind::Schema => self
                     .catalog
                     .write()
@@ -1385,6 +1532,7 @@ enum OwnedObjectKind {
     CompositeType,
     EventTrigger,
     Function,
+    ForeignServer,
     Index,
     Publication,
     Schema,
@@ -1400,6 +1548,7 @@ impl OwnedObject {
             OwnedObjectKind::CompositeType | OwnedObjectKind::Type => "type",
             OwnedObjectKind::EventTrigger => "event trigger",
             OwnedObjectKind::Function => "function",
+            OwnedObjectKind::ForeignServer => "server",
             OwnedObjectKind::Index => "index",
             OwnedObjectKind::Publication => "publication",
             OwnedObjectKind::Schema => "schema",
@@ -1509,8 +1658,45 @@ fn owned_objects_for_roles(
                 name: row.pubname,
             }),
     );
+    objects.extend(
+        catcache
+            .foreign_server_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.srvowner))
+            .map(|row| OwnedObject {
+                oid: row.oid,
+                kind: OwnedObjectKind::ForeignServer,
+                name: row.srvname,
+            }),
+    );
     objects.sort_by(|left, right| left.oid.cmp(&right.oid).then(left.kind.cmp(&right.kind)));
     Ok(objects)
+}
+
+fn owned_user_mapping_name(
+    catcache: &crate::backend::utils::cache::catcache::CatCache,
+    umuser: u32,
+) -> String {
+    if umuser == 0 {
+        return "public".into();
+    }
+    catcache
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.oid == umuser)
+        .map(|row| row.rolname)
+        .unwrap_or_else(|| format!("unknown (OID={umuser})"))
+}
+
+fn push_owned_drop_cascade_notices(notices: Vec<String>) {
+    match notices.as_slice() {
+        [] => {}
+        [notice] => crate::backend::utils::misc::notices::push_notice(notice.clone()),
+        notices => crate::backend::utils::misc::notices::push_notice_with_detail(
+            format!("drop cascades to {} other objects", notices.len()),
+            notices.join("\n"),
+        ),
+    }
 }
 
 fn function_owned_object_name(
@@ -1561,12 +1747,21 @@ fn owned_object_drop_priority(kind: OwnedObjectKind) -> u8 {
         OwnedObjectKind::EventTrigger => 0,
         OwnedObjectKind::View => 0,
         OwnedObjectKind::Function => 1,
+        OwnedObjectKind::ForeignServer => 1,
         OwnedObjectKind::Index => 2,
         OwnedObjectKind::Publication => 3,
         OwnedObjectKind::CompositeType | OwnedObjectKind::Type => 4,
         OwnedObjectKind::Sequence => 5,
         OwnedObjectKind::Table => 6,
         OwnedObjectKind::Schema => 7,
+    }
+}
+
+fn role_drop_detail_priority(detail: &str) -> u8 {
+    if detail.starts_with("privileges for ") {
+        0
+    } else {
+        1
     }
 }
 
@@ -1580,10 +1775,37 @@ fn acl_item_depends_on_role(item: &str, role_names: &BTreeSet<&str>) -> bool {
     (!grantee.is_empty() && role_names.contains(grantee)) || role_names.contains(grantor)
 }
 
+fn acl_item_depends_on_role_excluding_owner_default(
+    item: &str,
+    role_names: &BTreeSet<&str>,
+    owner_name: &str,
+) -> bool {
+    let Some((grantee, rest)) = item.split_once('=') else {
+        return false;
+    };
+    let Some((_, grantor)) = rest.split_once('/') else {
+        return false;
+    };
+    if grantee == owner_name && grantor == owner_name {
+        return false;
+    }
+    (!grantee.is_empty() && role_names.contains(grantee)) || role_names.contains(grantor)
+}
+
 fn acl_depends_on_role(acl: Option<&[String]>, role_names: &BTreeSet<&str>) -> bool {
     acl.unwrap_or_default()
         .iter()
         .any(|item| acl_item_depends_on_role(item, role_names))
+}
+
+fn acl_depends_on_role_excluding_owner_default(
+    acl: Option<&[String]>,
+    role_names: &BTreeSet<&str>,
+    owner_name: &str,
+) -> bool {
+    acl.unwrap_or_default()
+        .iter()
+        .any(|item| acl_item_depends_on_role_excluding_owner_default(item, role_names, owner_name))
 }
 
 fn acl_item_mentions_role_name(item: &str, role_names: &BTreeSet<String>) -> bool {
@@ -1690,7 +1912,15 @@ fn shared_role_dependency_details_for_roles(
         if role_oids.contains(&wrapper.fdwowner) {
             details.push(format!("owner of foreign-data wrapper {}", wrapper.fdwname));
         }
-        if acl_depends_on_role(wrapper.fdwacl.as_deref(), &target_role_names) {
+        let owner_name = role_names
+            .get(&wrapper.fdwowner)
+            .copied()
+            .unwrap_or_default();
+        if acl_depends_on_role_excluding_owner_default(
+            wrapper.fdwacl.as_deref(),
+            &target_role_names,
+            owner_name,
+        ) {
             details.push(format!(
                 "privileges for foreign-data wrapper {}",
                 wrapper.fdwname
@@ -1698,11 +1928,16 @@ fn shared_role_dependency_details_for_roles(
         }
     }
     for server in catcache.foreign_server_rows() {
-        if role_oids.contains(&server.srvowner) {
-            details.push(format!("owner of server {}", server.srvname));
-        }
-        if acl_depends_on_role(server.srvacl.as_deref(), &target_role_names) {
-            details.push(format!("privileges for foreign server {}", server.srvname));
+        let owner_name = role_names
+            .get(&server.srvowner)
+            .copied()
+            .unwrap_or_default();
+        if acl_depends_on_role_excluding_owner_default(
+            server.srvacl.as_deref(),
+            &target_role_names,
+            owner_name,
+        ) {
+            details.push(format!("privileges for server {}", server.srvname));
         }
     }
     let server_names = catcache
