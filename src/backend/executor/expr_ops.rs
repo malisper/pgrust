@@ -165,7 +165,7 @@ pub(crate) fn compare_order_values(
         (Value::TsQuery(a), Value::TsQuery(b)) => {
             Ok(crate::backend::executor::compare_tsquery(a, b))
         }
-        (Value::Record(a), Value::Record(b)) => Ok(compare_record_values(a, b)),
+        (Value::Record(a), Value::Record(b)) => compare_record_values(a, b, true),
         (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
             compare_text_values(a.as_text().unwrap(), b.as_text().unwrap(), collation_oid)
         }
@@ -334,9 +334,9 @@ pub(crate) fn compare_values(
         )),
         (Value::TsVector(l), Value::TsVector(r)) => Ok(Value::Bool(l == r)),
         (Value::TsQuery(l), Value::TsQuery(r)) => Ok(Value::Bool(l == r)),
-        (Value::Record(l), Value::Record(r)) => {
-            Ok(Value::Bool(compare_record_values(l, r) == Ordering::Equal))
-        }
+        (Value::Record(l), Value::Record(r)) => Ok(Value::Bool(
+            compare_record_values(l, r, false)? == Ordering::Equal,
+        )),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => {
             ensure_builtin_collation_supported(collation_oid)?;
             Ok(Value::Bool(l.as_text() == r.as_text()))
@@ -480,7 +480,9 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         }
         (Value::TsVector(l), Value::TsVector(r)) => l != r,
         (Value::TsQuery(l), Value::TsQuery(r)) => l != r,
-        (Value::Record(l), Value::Record(r)) => compare_record_values(l, r) != Ordering::Equal,
+        (Value::Record(l), Value::Record(r)) => compare_record_values(l, r, false)
+            .map(|ordering| ordering != Ordering::Equal)
+            .unwrap_or(true),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
         (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => {
@@ -1983,16 +1985,21 @@ fn compare_record_field_values(
     compare_order_values(left_value, right_value, collation_oid, None, false)
 }
 
-fn compare_record_values(left: &RecordValue, right: &RecordValue) -> Ordering {
+fn compare_record_values(
+    left: &RecordValue,
+    right: &RecordValue,
+    ordering_required: bool,
+) -> Result<Ordering, ExecError> {
+    validate_record_comparison(left, right, ordering_required)?;
     for (idx, (left_value, right_value)) in left.fields.iter().zip(&right.fields).enumerate() {
         let field_type = left.descriptor.fields.get(idx).map(|field| field.sql_type);
         let value_ordering = compare_record_field_values(left_value, right_value, field_type, None)
-            .expect("record field comparisons use implicit default collation");
+            .map_err(|_| record_field_operator_error(field_type, ordering_required))?;
         if value_ordering != Ordering::Equal {
-            return value_ordering;
+            return Ok(value_ordering);
         }
     }
-    left.fields.len().cmp(&right.fields.len())
+    Ok(left.fields.len().cmp(&right.fields.len()))
 }
 
 fn order_record_values(
@@ -2001,13 +2008,15 @@ fn order_record_values(
     right: &RecordValue,
     collation_oid: Option<u32>,
 ) -> Result<Value, ExecError> {
+    validate_record_comparison(left, right, true)?;
     for (idx, (left_value, right_value)) in left.fields.iter().zip(&right.fields).enumerate() {
         if matches!(left_value, Value::Null) || matches!(right_value, Value::Null) {
             return Ok(Value::Null);
         }
         let field_type = left.descriptor.fields.get(idx).map(|field| field.sql_type);
         let ordering =
-            compare_record_field_values(left_value, right_value, field_type, collation_oid)?;
+            compare_record_field_values(left_value, right_value, field_type, collation_oid)
+                .map_err(|_| record_field_operator_error(field_type, true))?;
         if ordering != Ordering::Equal {
             return Ok(Value::Bool(compare_ord(ordering, Ordering::Equal, op)));
         }
@@ -2017,6 +2026,251 @@ fn order_record_values(
         Ordering::Equal,
         op,
     )))
+}
+
+pub(crate) fn order_record_image_values(
+    op: &'static str,
+    left: &RecordValue,
+    right: &RecordValue,
+) -> Result<Value, ExecError> {
+    validate_record_image_comparison(left, right)?;
+    let ordering = compare_record_image_values(left, right)?;
+    Ok(Value::Bool(match op {
+        "=" => ordering == Ordering::Equal,
+        "<>" => ordering != Ordering::Equal,
+        "<" => ordering == Ordering::Less,
+        "<=" => ordering != Ordering::Greater,
+        ">" => ordering == Ordering::Greater,
+        ">=" => ordering != Ordering::Less,
+        _ => unreachable!(),
+    }))
+}
+
+fn compare_record_image_values(
+    left: &RecordValue,
+    right: &RecordValue,
+) -> Result<Ordering, ExecError> {
+    for (idx, (left_value, right_value)) in left.fields.iter().zip(&right.fields).enumerate() {
+        let field_type = left.descriptor.fields.get(idx).map(|field| field.sql_type);
+        match (left_value, right_value) {
+            (Value::Null, Value::Null) => {}
+            (Value::Null, _) => return Ok(Ordering::Greater),
+            (_, Value::Null) => return Ok(Ordering::Less),
+            _ => {
+                let ordering = record_image_bytes(left_value, field_type)
+                    .cmp(&record_image_bytes(right_value, field_type));
+                if ordering != Ordering::Equal {
+                    return Ok(ordering);
+                }
+            }
+        }
+    }
+    Ok(left.fields.len().cmp(&right.fields.len()))
+}
+
+fn validate_record_image_comparison(
+    left: &RecordValue,
+    right: &RecordValue,
+) -> Result<(), ExecError> {
+    if left.fields.len() != right.fields.len() {
+        return Err(ExecError::DetailedError {
+            message: "cannot compare record types with different numbers of columns".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    for (idx, (left_field, right_field)) in left
+        .descriptor
+        .fields
+        .iter()
+        .zip(&right.descriptor.fields)
+        .enumerate()
+    {
+        if !record_field_types_match(left_field.sql_type, right_field.sql_type) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot compare dissimilar column types {} and {} at record column {}",
+                    record_field_type_name(left_field.sql_type),
+                    record_field_type_name(right_field.sql_type),
+                    idx + 1
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn record_image_bytes(value: &Value, field_type: Option<SqlType>) -> Vec<u8> {
+    if let Some(field_type) = field_type {
+        match field_type.kind {
+            SqlTypeKind::Int2 => {
+                if let Some(value) = value_as_i64(value).and_then(|value| i16::try_from(value).ok())
+                {
+                    return value.to_ne_bytes().to_vec();
+                }
+            }
+            SqlTypeKind::Int4 | SqlTypeKind::Oid => {
+                if let Some(value) = value_as_i64(value).and_then(|value| i32::try_from(value).ok())
+                {
+                    return value.to_ne_bytes().to_vec();
+                }
+            }
+            SqlTypeKind::Int8 => {
+                if let Some(value) = value_as_i64(value) {
+                    return value.to_ne_bytes().to_vec();
+                }
+            }
+            _ => {}
+        }
+    }
+    match value {
+        Value::Int16(value) => value.to_ne_bytes().to_vec(),
+        Value::Int32(value) => value.to_ne_bytes().to_vec(),
+        Value::Int64(value) => value.to_ne_bytes().to_vec(),
+        Value::Bool(value) => vec![u8::from(*value)],
+        Value::Float64(value) => value.to_ne_bytes().to_vec(),
+        Value::Numeric(value) => value
+            .render()
+            .parse::<i64>()
+            .ok()
+            .map(i64::to_ne_bytes)
+            .map(Vec::from)
+            .unwrap_or_else(|| value.render().as_bytes().to_vec()),
+        Value::Point(point) => {
+            let mut bytes = point.x.to_ne_bytes().to_vec();
+            bytes.extend(point.y.to_ne_bytes());
+            bytes
+        }
+        Value::Text(value) => record_image_text_bytes(value, field_type),
+        Value::TextRef(_, _) => {
+            record_image_text_bytes(value.as_text().unwrap_or_default(), field_type)
+        }
+        Value::Bytea(bytes) | Value::Jsonb(bytes) => bytes.clone(),
+        Value::Null => Vec::new(),
+        other => other.as_text().unwrap_or_default().as_bytes().to_vec(),
+    }
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Int16(value) => Some(i64::from(*value)),
+        Value::Int32(value) => Some(i64::from(*value)),
+        Value::Int64(value) => Some(*value),
+        Value::Numeric(value) => value.render().parse().ok(),
+        Value::Text(value) => value.parse().ok(),
+        Value::TextRef(_, _) => value.as_text()?.parse().ok(),
+        _ => None,
+    }
+}
+
+fn record_image_text_bytes(value: &str, field_type: Option<SqlType>) -> Vec<u8> {
+    if field_type.is_none()
+        && let Ok(parsed) = value.parse::<i64>()
+    {
+        return parsed.to_ne_bytes().to_vec();
+    }
+    value.as_bytes().to_vec()
+}
+
+fn validate_record_comparison(
+    left: &RecordValue,
+    right: &RecordValue,
+    ordering_required: bool,
+) -> Result<(), ExecError> {
+    if left.fields.len() != right.fields.len() {
+        return Err(ExecError::DetailedError {
+            message: "cannot compare record types with different numbers of columns".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+
+    for (idx, (left_field, right_field)) in left
+        .descriptor
+        .fields
+        .iter()
+        .zip(&right.descriptor.fields)
+        .enumerate()
+    {
+        if !record_field_types_match(left_field.sql_type, right_field.sql_type) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot compare dissimilar column types {} and {} at record column {}",
+                    record_field_type_name(left_field.sql_type),
+                    record_field_type_name(right_field.sql_type),
+                    idx + 1
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        if !record_field_type_is_comparable(left_field.sql_type, ordering_required) {
+            return Err(record_field_operator_error(
+                Some(left_field.sql_type),
+                ordering_required,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn record_field_types_match(left: SqlType, right: SqlType) -> bool {
+    left.kind == right.kind
+        && left.is_array == right.is_array
+        && (left.type_oid == 0 || right.type_oid == 0 || left.type_oid == right.type_oid)
+        && (left.typrelid == 0 || right.typrelid == 0 || left.typrelid == right.typrelid)
+}
+
+fn record_field_type_is_comparable(sql_type: SqlType, ordering_required: bool) -> bool {
+    !matches!(
+        (sql_type.kind, ordering_required),
+        (SqlTypeKind::Point, _) | (SqlTypeKind::Lseg, true) | (SqlTypeKind::Path, true)
+    )
+}
+
+fn record_field_operator_error(field_type: Option<SqlType>, ordering_required: bool) -> ExecError {
+    let type_name = field_type
+        .map(record_field_type_name)
+        .unwrap_or_else(|| "record".into());
+    let message = if ordering_required {
+        format!("could not identify a comparison function for type {type_name}")
+    } else {
+        format!("could not identify an equality operator for type {type_name}")
+    };
+    ExecError::DetailedError {
+        message,
+        detail: None,
+        hint: None,
+        sqlstate: "42883",
+    }
+}
+
+fn record_field_type_name(sql_type: SqlType) -> String {
+    let base = match sql_type.kind {
+        SqlTypeKind::Int2 => "smallint",
+        SqlTypeKind::Int4 => "integer",
+        SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Bool => "boolean",
+        SqlTypeKind::Float4 => "real",
+        SqlTypeKind::Float8 => "double precision",
+        SqlTypeKind::Point => "point",
+        SqlTypeKind::Lseg => "lseg",
+        SqlTypeKind::Path => "path",
+        SqlTypeKind::Record | SqlTypeKind::Composite => "record",
+        _ => "record",
+    };
+    if sql_type.is_array {
+        format!("{base}[]")
+    } else {
+        base.into()
+    }
 }
 
 fn normalize_array_value(value: &Value) -> Option<ArrayValue> {

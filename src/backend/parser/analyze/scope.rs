@@ -423,6 +423,13 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         }) {
             return Err(ParseError::UnknownColumn(name.to_string()));
         }
+        if scope.columns.iter().any(|column| {
+            !column.hidden
+                && !column.qualified_only
+                && column.output_name.eq_ignore_ascii_case(relation)
+        }) {
+            return Err(ParseError::MissingFromClauseEntry(normalized_relation));
+        }
         return Err(ParseError::UnknownColumn(name.to_string()));
     }
 
@@ -852,6 +859,33 @@ fn is_physical_pg_type_relation_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("pg_catalog.pg_type")
 }
 
+fn passthrough_cte_target<'a>(cte: &'a BoundCte, ctes: &'a [BoundCte]) -> Option<&'a BoundCte> {
+    let [rte] = cte.plan.rtable.as_slice() else {
+        return None;
+    };
+    let crate::include::nodes::parsenodes::RangeTblEntryKind::Cte { cte_id, .. } = rte.kind else {
+        return None;
+    };
+    if !matches!(
+        cte.plan.jointree,
+        Some(crate::include::nodes::parsenodes::JoinTreeNode::RangeTblRef(1))
+    ) {
+        return None;
+    }
+    if cte.plan.target_list.len() != cte.desc.columns.len() {
+        return None;
+    }
+    for (index, target) in cte.plan.target_list.iter().enumerate() {
+        let Expr::Var(var) = &target.expr else {
+            return None;
+        };
+        if var.varno != 1 || var.varattno != user_attrno(index) || target.resjunk {
+            return None;
+        }
+    }
+    ctes.iter().find(|candidate| candidate.cte_id == cte_id)
+}
+
 pub(super) fn bind_from_item_with_ctes(
     stmt: &FromItem,
     catalog: &dyn CatalogLookup,
@@ -883,7 +917,17 @@ pub(super) fn bind_from_item_with_ctes(
                         ),
                     ));
                 }
-                let plan = AnalyzedFrom::cte_scan(cte.name.clone(), cte.cte_id, cte.plan.clone());
+                let scan_cte = passthrough_cte_target(cte, ctes).unwrap_or(cte);
+                let mut plan = AnalyzedFrom::cte_scan(
+                    scan_cte.name.clone(),
+                    scan_cte.cte_id,
+                    scan_cte.plan.clone(),
+                );
+                if scan_cte.cte_id != cte.cte_id
+                    && let Some(rte) = plan.rtable.last_mut()
+                {
+                    rte.alias_preserves_source_names = true;
+                }
                 return Ok((
                     plan.clone(),
                     scope_with_output_exprs(
@@ -953,6 +997,16 @@ pub(super) fn bind_from_item_with_ctes(
             ctes,
         ),
         FromItem::DerivedTable(select) => {
+            if select
+                .with
+                .iter()
+                .any(|cte| super::cte_body_is_modifying(&cte.body))
+            {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "WITH clause containing a data-modifying statement must be at the top level"
+                        .into(),
+                ));
+            }
             reject_from_subselect_outer_aggregates(
                 select,
                 catalog,
@@ -992,6 +1046,16 @@ pub(super) fn bind_from_item_with_ctes(
         }
         FromItem::Lateral(source) => match source.as_ref() {
             FromItem::DerivedTable(select) => {
+                if select
+                    .with
+                    .iter()
+                    .any(|cte| super::cte_body_is_modifying(&cte.body))
+                {
+                    return Err(ParseError::FeatureNotSupportedMessage(
+                        "WITH clause containing a data-modifying statement must be at the top level"
+                            .into(),
+                    ));
+                }
                 reject_from_subselect_outer_aggregates(
                     select,
                     catalog,
@@ -2994,6 +3058,15 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     ctes,
                 )?);
+                if args.len() == 1
+                    && let Some(columns) = resolved_row_columns.clone()
+                {
+                    for column in columns {
+                        desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
+                        output_columns.push(column);
+                    }
+                    continue;
+                }
                 if args.len() == 1
                     && let Some(columns) =
                         output_columns_for_unnest_composite_element(element_type, catalog)?
@@ -5690,9 +5763,12 @@ fn apply_relation_alias(
     let mut relations = scope.relations.clone();
     let mut renamed = false;
     if let Some(rte) = plan.rtable.last_mut() {
+        let preserve_rte_name = rte.alias_preserves_source_names;
         rte.alias = Some(alias.to_string());
         rte.alias_preserves_source_names = preserve_source_names;
-        rte.eref.aliasname = alias.to_string();
+        if !preserve_rte_name {
+            rte.eref.aliasname = alias.to_string();
+        }
     }
 
     let aliasable_single_function_column =

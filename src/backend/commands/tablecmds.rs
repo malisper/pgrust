@@ -3,10 +3,11 @@ use std::rc::Rc;
 
 use parking_lot::RwLock;
 
+use crate::backend::access::heap::HeapWalPolicy;
 use crate::backend::access::heap::heapam::{
-    HeapError, heap_delete_with_waiter, heap_fetch, heap_fetch_visible_with_txns,
-    heap_insert_mvcc_with_cid, heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple,
-    heap_scan_prepare_next_page, heap_update_with_waiter,
+    HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
+    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid, heap_scan_begin_visible,
+    heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_update_with_waiter,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -29,15 +30,16 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundRuleAction, BoundTemporalConstraint, BoundUpdateStatement,
-    BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement, CteBody, DeleteStatement,
-    DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction, InsertStatement,
-    MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent, SelectStatement,
-    SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement, UpdateStatement,
-    VacuumStatement, bind_create_table, bind_delete, bind_generated_expr, bind_insert,
-    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_rule_action_statement,
-    bind_scalar_expr_in_scope, bind_update, parse_expr, rewrite_bound_delete_auto_view_target,
-    rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
-    rewrite_local_vars_for_output_exprs, rewrite_planned_local_vars_for_output_exprs,
+    BoundUpdateTarget, Catalog, CatalogLookup, CommonTableExpr, CreateTableAsStatement, CteBody,
+    DeleteStatement, DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction,
+    InsertStatement, MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent,
+    SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_delete, bind_generated_expr,
+    bind_insert, bind_referenced_by_foreign_keys, bind_relation_constraints,
+    bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update, parse_expr,
+    rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
+    rewrite_bound_update_auto_view_target, rewrite_local_vars_for_output_exprs,
+    rewrite_planned_local_vars_for_output_exprs,
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::rewrite::split_stored_rule_action_sql;
@@ -527,6 +529,9 @@ pub(crate) fn execute_explain(
         statement,
     } = stmt;
     let statement = *statement;
+    if !analyze && explain_statement_has_writable_ctes(&statement) {
+        return Ok(explain_placeholder_result("Result"));
+    }
     if let Statement::Update(update) = statement {
         return execute_explain_update(
             update,
@@ -790,6 +795,49 @@ fn execute_explain_analyze_create_table_as(
         .saturating_add(consumed_catalog_cids as u32);
     ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
     Ok(())
+}
+
+fn explain_placeholder_result(label: &str) -> StatementResult {
+    StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: vec![vec![Value::Text(label.into())]],
+    }
+}
+
+fn explain_statement_has_writable_ctes(statement: &Statement) -> bool {
+    match statement {
+        Statement::Select(stmt) => select_statement_has_writable_ctes(stmt),
+        Statement::Insert(stmt) => ctes_have_writable_body(&stmt.with),
+        Statement::Update(stmt) => ctes_have_writable_body(&stmt.with),
+        Statement::Delete(stmt) => ctes_have_writable_body(&stmt.with),
+        Statement::Merge(stmt) => ctes_have_writable_body(&stmt.with),
+        Statement::Values(stmt) => ctes_have_writable_body(&stmt.with),
+        _ => false,
+    }
+}
+
+fn ctes_have_writable_body(ctes: &[CommonTableExpr]) -> bool {
+    ctes.iter().any(|cte| cte_body_is_writable(&cte.body))
+}
+
+fn select_statement_has_writable_ctes(stmt: &SelectStatement) -> bool {
+    ctes_have_writable_body(&stmt.with)
+        || stmt
+            .set_operation
+            .as_ref()
+            .is_some_and(|setop| setop.inputs.iter().any(select_statement_has_writable_ctes))
+}
+
+fn cte_body_is_writable(body: &CteBody) -> bool {
+    match body {
+        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => true,
+        CteBody::Select(stmt) => select_statement_has_writable_ctes(stmt),
+        CteBody::Values(stmt) => ctes_have_writable_body(&stmt.with),
+        CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => cte_body_is_writable(anchor) || select_statement_has_writable_ctes(recursive),
+    }
 }
 
 enum EitherExplainTarget {
@@ -7129,6 +7177,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
                         relation_oid: row.relation.relation_oid,
                         relkind: 'r',
                         partition_delete_root_oid: None,
+                        relpersistence: row.relation.relpersistence,
                         toast: row.relation.toast,
                         desc: row.relation.desc.clone(),
                         referenced_by_foreign_keys,
@@ -10666,10 +10715,13 @@ pub(crate) fn apply_assignment_target(
             &ctx.datetime_config,
         )
     }
-    .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
+    .map_err(|err| {
+        rewrite_assignment_coercion_error(desc, target, &value, assignment_type, err, ctx)
+    })?;
     let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
-    enforce_domain_constraints_for_value_ref(&value, assignment_type, ctx)
-        .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
+    enforce_domain_constraints_for_value_ref(&value, assignment_type, ctx).map_err(|err| {
+        rewrite_assignment_coercion_error(desc, target, &value, assignment_type, err, ctx)
+    })?;
     let resolved_indirection = if target.indirection.is_empty() {
         target
             .subscripts
@@ -10773,6 +10825,53 @@ fn coerce_record_assignment_value(
     Ok(Value::Record(RecordValue::from_descriptor(
         descriptor, fields,
     )))
+}
+
+fn rewrite_assignment_coercion_error(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    value: &Value,
+    assignment_type: SqlType,
+    err: ExecError,
+    ctx: &ExecutorContext,
+) -> ExecError {
+    if let Some(field) = assignment_target_final_field(target)
+        && let Some(actual_type) = value.sql_type_hint()
+    {
+        return ExecError::DetailedError {
+            message: format!(
+                "subfield \"{}\" is of type {} but expression is of type {}",
+                field,
+                sql_type_display_name_with_catalog(assignment_type, ctx.catalog.as_deref()),
+                sql_type_display_name_with_catalog(actual_type, ctx.catalog.as_deref()),
+            ),
+            detail: None,
+            hint: Some("You will need to rewrite or cast the expression.".into()),
+            sqlstate: "42804",
+        };
+    }
+    rewrite_subscripted_assignment_error(desc, target, value, err)
+}
+
+fn assignment_target_final_field(target: &BoundAssignmentTarget) -> Option<&str> {
+    target
+        .indirection
+        .iter()
+        .rev()
+        .find_map(|step| match step {
+            BoundAssignmentTargetIndirection::Field(field) => Some(field.as_str()),
+            BoundAssignmentTargetIndirection::Subscript(_) => None,
+        })
+        .or_else(|| target.field_path.last().map(String::as_str))
+}
+
+fn sql_type_display_name_with_catalog(ty: SqlType, catalog: Option<&dyn CatalogLookup>) -> String {
+    if matches!(ty.kind, SqlTypeKind::Composite)
+        && let Some(row) = catalog.and_then(|catalog| catalog.type_by_oid(ty.type_oid))
+    {
+        return row.typname.to_string();
+    }
+    sql_type_display_name(ty)
 }
 
 fn rewrite_subscripted_assignment_error(
@@ -10920,18 +11019,32 @@ fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarge
 }
 
 fn assignment_navigation_sql_type(sql_type: SqlType, ctx: &ExecutorContext) -> SqlType {
-    let Some(domain) = ctx
+    let sql_type = if let Some(domain) = ctx
         .catalog
         .as_deref()
         .and_then(|catalog| catalog.domain_by_type_oid(sql_type.type_oid))
-    else {
-        return sql_type;
-    };
-    if sql_type.is_array && !domain.sql_type.is_array {
-        SqlType::array_of(domain.sql_type)
+    {
+        if sql_type.is_array && !domain.sql_type.is_array {
+            SqlType::array_of(domain.sql_type)
+        } else {
+            domain.sql_type
+        }
     } else {
-        domain.sql_type
+        sql_type
+    };
+
+    if !sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite)
+        && sql_type.typrelid == 0
+        && let Some(row) = ctx
+            .catalog
+            .as_deref()
+            .and_then(|catalog| catalog.type_by_oid(sql_type.type_oid))
+        && row.typrelid != 0
+    {
+        return sql_type.with_identity(row.oid, row.typrelid);
     }
+    sql_type
 }
 
 #[derive(Clone)]
@@ -11310,7 +11423,7 @@ fn assignment_record_value(
     ctx: &ExecutorContext,
 ) -> Result<RecordValue, ExecError> {
     match current {
-        Value::Record(record) => Ok(record),
+        Value::Record(record) => normalize_assignment_record_value(record, sql_type, ctx),
         Value::Null => {
             let descriptor = assignment_record_descriptor(sql_type, ctx)?;
             Ok(RecordValue::from_descriptor(
@@ -11324,6 +11437,33 @@ fn assignment_record_value(
             right: Value::Null,
         }),
     }
+}
+
+fn normalize_assignment_record_value(
+    record: RecordValue,
+    sql_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<RecordValue, ExecError> {
+    let descriptor = assignment_record_descriptor(sql_type, ctx)?;
+    if descriptor.fields == record.descriptor.fields {
+        return Ok(record);
+    }
+    let fields = descriptor
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, target_field)| {
+            record
+                .descriptor
+                .fields
+                .iter()
+                .position(|source_field| source_field.name.eq_ignore_ascii_case(&target_field.name))
+                .and_then(|source_index| record.fields.get(source_index).cloned())
+                .or_else(|| record.fields.get(index).cloned())
+                .unwrap_or(Value::Null)
+        })
+        .collect();
+    Ok(RecordValue::from_descriptor(descriptor, fields))
 }
 
 fn assign_record_field_path(
@@ -13465,7 +13605,7 @@ fn execute_delete_from_joined_input(
                 } else {
                     None
                 };
-                match heap_delete_with_waiter(
+                match heap_delete_with_waiter_with_wal_policy(
                     &*ctx.pool,
                     ctx.client_id,
                     target.rel,
@@ -13474,6 +13614,7 @@ fn execute_delete_from_joined_input(
                     current_tid,
                     &snapshot,
                     waiter,
+                    HeapWalPolicy::from_relpersistence(target.relpersistence),
                 ) {
                     Ok(()) => {
                         if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref()) {
@@ -13712,23 +13853,6 @@ pub fn execute_delete_with_waiter(
                 let mut current_tid = *tid;
                 let mut current_values = values.clone();
                 loop {
-                    if let Some(catalog) = ctx.catalog.as_deref() {
-                        let namespace_oid = catalog
-                            .class_row_by_oid(target.relation_oid)
-                            .map(|row| row.relnamespace)
-                            .unwrap_or(0);
-                        let indexes = catalog.index_relations_for_heap(target.relation_oid);
-                        enforce_publication_replica_identity(
-                            &target.relation_name,
-                            target.relation_oid,
-                            namespace_oid,
-                            &target.desc,
-                            &indexes,
-                            catalog,
-                            PublicationDmlAction::Delete,
-                            true,
-                        )?;
-                    }
                     if let Some(triggers) = &triggers {
                         if !triggers.before_row_delete(&current_values, ctx)? {
                             break;
@@ -13754,7 +13878,7 @@ pub fn execute_delete_with_waiter(
                     } else {
                         None
                     };
-                    match heap_delete_with_waiter(
+                    match heap_delete_with_waiter_with_wal_policy(
                         &*ctx.pool,
                         ctx.client_id,
                         target.rel,
@@ -13763,6 +13887,7 @@ pub fn execute_delete_with_waiter(
                         current_tid,
                         &snapshot,
                         waiter,
+                        HeapWalPolicy::from_relpersistence(target.relpersistence),
                     ) {
                         Ok(()) => {
                             if let (Some(toast), Some(old_tuple)) =
@@ -14423,7 +14548,7 @@ pub(crate) fn apply_base_delete_row(
         } else {
             None
         };
-        match heap_delete_with_waiter(
+        match heap_delete_with_waiter_with_wal_policy(
             &*ctx.pool,
             ctx.client_id,
             target.rel,
@@ -14432,6 +14557,7 @@ pub(crate) fn apply_base_delete_row(
             current_tid,
             &snapshot,
             waiter,
+            HeapWalPolicy::from_relpersistence(target.relpersistence),
         ) {
             Ok(()) => {
                 if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref()) {

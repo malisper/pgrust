@@ -163,6 +163,20 @@ pub(super) fn reject_nested_local_ctes_in_agg_expr(expr: &Expr) -> Result<(), Pa
     Ok(())
 }
 
+pub(super) fn reject_nested_local_ctes_in_raw_agg_expr(expr: &SqlExpr) -> Result<(), ParseError> {
+    let Some(context) = current_grouped_agg_cte_context() else {
+        return Ok(());
+    };
+    if let Some(cte_name) = context
+        .local_ctes
+        .values()
+        .find(|cte_name| super::sql_expr_references_table(expr, cte_name))
+    {
+        return Err(ParseError::OuterLevelAggregateNestedCte(cte_name.clone()));
+    }
+    Ok(())
+}
+
 fn set_returning_not_allowed_error(context: &'static str) -> ParseError {
     ParseError::FeatureNotSupported(format!(
         "set-returning functions are not allowed in {context}"

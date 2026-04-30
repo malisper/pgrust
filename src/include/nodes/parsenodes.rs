@@ -1707,6 +1707,24 @@ pub struct CommonTableExpr {
     pub name: String,
     pub column_names: Vec<String>,
     pub body: CteBody,
+    pub search: Option<CteSearchClause>,
+    pub cycle: Option<CteCycleClause>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CteSearchClause {
+    pub breadth_first: bool,
+    pub columns: Vec<String>,
+    pub sequence_column: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CteCycleClause {
+    pub columns: Vec<String>,
+    pub mark_column: String,
+    pub mark_value: Option<SqlExpr>,
+    pub default_value: Option<SqlExpr>,
+    pub path_column: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1721,10 +1739,11 @@ pub enum CteBody {
     Values(ValuesStatement),
     Insert(Box<InsertStatement>),
     Update(Box<UpdateStatement>),
-    Merge(Box<MergeStatement>),
     Delete(Box<DeleteStatement>),
+    Merge(Box<MergeStatement>),
     RecursiveUnion {
         all: bool,
+        left_nested: bool,
         anchor: Box<CteBody>,
         recursive: Box<SelectStatement>,
     },
@@ -2424,6 +2443,7 @@ pub struct CreateViewStatement {
     pub query: SelectStatement,
     pub query_sql: String,
     pub or_replace: bool,
+    pub recursive: bool,
     pub check_option: ViewCheckOption,
 }
 
@@ -2470,7 +2490,7 @@ pub struct RuleActionStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRuleStatement {
-    pub or_replace: bool,
+    pub replace_existing: bool,
     pub rule_name: String,
     pub relation_name: String,
     pub event: RuleEvent,

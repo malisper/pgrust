@@ -114,6 +114,7 @@ pub struct BoundDeleteTarget {
     pub relation_oid: u32,
     pub relkind: char,
     pub partition_delete_root_oid: Option<u32>,
+    pub relpersistence: char,
     pub toast: Option<ToastRelationRef>,
     pub desc: RelationDesc,
     pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
@@ -472,14 +473,25 @@ fn update_explain_target_name(stmt: &UpdateStatement) -> String {
 }
 
 fn assignment_navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
-    let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
-        return sql_type;
-    };
-    if sql_type.is_array && !domain.sql_type.is_array {
-        SqlType::array_of(domain.sql_type)
+    let sql_type = if let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) {
+        if sql_type.is_array && !domain.sql_type.is_array {
+            SqlType::array_of(domain.sql_type)
+        } else {
+            domain.sql_type
+        }
     } else {
-        domain.sql_type
+        sql_type
+    };
+
+    if !sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite)
+        && sql_type.typrelid == 0
+        && let Some(row) = catalog.type_by_oid(sql_type.type_oid)
+        && row.typrelid != 0
+    {
+        return sql_type.with_identity(row.oid, row.typrelid);
     }
+    sql_type
 }
 
 fn resolve_assignment_field_type(
@@ -1572,15 +1584,30 @@ pub fn plan_merge(
     stmt: &MergeStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundMergeStatement, ParseError> {
+    if stmt.with_recursive {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "WITH RECURSIVE is not supported for MERGE statement".into(),
+        ));
+    }
+    plan_merge_with_outer_ctes(stmt, catalog, &[])
+}
+
+pub(crate) fn plan_merge_with_outer_ctes(
+    stmt: &MergeStatement,
+    catalog: &dyn CatalogLookup,
+    outer_ctes: &[BoundCte],
+) -> Result<BoundMergeStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
         &[],
         None,
-        &[],
+        outer_ctes,
         &[],
     )?;
+    let mut visible_ctes = local_ctes.clone();
+    visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.target_table)?;
     let auto_view_target = if entry.relkind == 'v'
         && let Some(event) = merge_mutating_event(stmt)
@@ -1609,7 +1636,7 @@ pub fn plan_merge(
         })
         .unwrap_or_else(|| stmt.target_table.clone());
     let column_defaults =
-        bind_insert_column_defaults(&execution_relation.desc, catalog, &local_ctes)?;
+        bind_insert_column_defaults(&execution_relation.desc, catalog, &visible_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
     let explain_target_name = auto_view_target
         .as_ref()
@@ -1646,7 +1673,7 @@ pub fn plan_merge(
         target_scope.output_exprs = resolved.visible_output_exprs.clone();
     }
     let (source_base, source_scope_raw) =
-        bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &local_ctes, &[])?;
+        bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &visible_ctes, &[])?;
     let (source_from, source_visible_count) = with_merge_source_present(source_base);
 
     if source_scope_raw.relations.iter().any(|relation| {
@@ -1682,7 +1709,7 @@ pub fn plan_merge(
         catalog,
         &[],
         None,
-        &local_ctes,
+        &visible_ctes,
     )?;
     let join_condition = and_predicates(
         Some(join_condition),
@@ -1743,7 +1770,7 @@ pub fn plan_merge(
         &returning_scope,
         returning_visible_column_count,
         catalog,
-        &local_ctes,
+        &visible_ctes,
     )?;
     let merge_update_rls = build_target_relation_row_security(
         &stmt.target_table,
@@ -1783,7 +1810,7 @@ pub fn plan_merge(
                 &action_source_scope,
                 &action_merged_scope,
                 catalog,
-                &local_ctes,
+                &visible_ctes,
                 &entry.desc,
             )
         })
@@ -3120,6 +3147,18 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         !stmt.returning.is_empty(),
         catalog,
     )?;
+    let base_column_defaults =
+        bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])
+            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
+    let source = match stmt.source {
+        BoundInsertSource::DefaultValues(_) => BoundInsertSource::DefaultValues(
+            target_columns
+                .iter()
+                .map(|target| base_column_defaults[target.column_index].clone())
+                .collect(),
+        ),
+        other => other,
+    };
 
     Ok(BoundInsertStatement {
         relation_name: relation_name.clone(),
@@ -3144,11 +3183,10 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         )
         .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?,
         indexes: catalog.index_relations_for_heap(resolved.base_relation.relation_oid),
-        column_defaults: bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])
-            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?,
+        column_defaults: base_column_defaults,
         target_columns,
         overriding: stmt.overriding,
-        source: stmt.source,
+        source,
         on_conflict,
         raw_on_conflict: None,
         returning: rewrite_auto_view_returning_targets(
@@ -3517,6 +3555,7 @@ fn build_delete_target(
         relation_oid: child.relation_oid,
         relkind: child.relkind,
         partition_delete_root_oid,
+        relpersistence: child.relpersistence,
         toast: child.toast,
         desc: child.desc.clone(),
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
@@ -3551,6 +3590,7 @@ fn build_delete_target_from_joined_input(
         relation_oid: child.relation_oid,
         relkind: child.relkind,
         partition_delete_root_oid,
+        relpersistence: child.relpersistence,
         toast: child.toast,
         desc: child.desc.clone(),
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
@@ -4843,18 +4883,29 @@ pub(crate) fn bind_delete_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<BoundDeleteStatement, ParseError> {
+    bind_delete_with_outer_scopes_and_ctes(stmt, catalog, outer_scopes, &[])
+}
+
+pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
+    stmt: &DeleteStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<BoundDeleteStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
         outer_scopes,
         None,
-        &[],
+        outer_ctes,
         &[],
     )?;
+    let mut visible_ctes = local_ctes.clone();
+    visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     if stmt.using.is_some() {
-        return bind_delete_using(stmt, catalog, outer_scopes, &local_ctes, &entry);
+        return bind_delete_using(stmt, catalog, outer_scopes, &visible_ctes, &entry);
     }
     let visible_target_name = stmt.target_alias.as_deref().unwrap_or(&stmt.table_name);
     let scope = scope_for_base_relation_with_generated(
@@ -4868,7 +4919,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         .where_clause
         .as_ref()
         .map(|expr| {
-            bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
+            bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &visible_ctes)
         })
         .transpose()?;
     let returning = bind_returning_targets(
@@ -4876,7 +4927,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         &returning_scope,
         catalog,
         outer_scopes,
-        &local_ctes,
+        &visible_ctes,
     )?;
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,

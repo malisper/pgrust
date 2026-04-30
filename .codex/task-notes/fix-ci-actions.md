@@ -1,4 +1,31 @@
 Goal:
+Fix cargo-test CI failure in
+`foreign_key_locking_blocks_parent_delete_until_child_insert_finishes`.
+
+Key decisions:
+Track whether interruptible relation-lock acquisition actually waited.
+For autocommit and session DML paths, refresh the executor snapshot after a
+relation-lock wait before running the write. This keeps uncontended statement
+snapshot timing unchanged while making FK parent deletes see child rows that
+commit while the delete is blocked on the FK partner lock.
+
+Files touched:
+src/backend/storage/lmgr/lock.rs
+src/pgrust/database/commands/execute.rs
+src/pgrust/session.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet foreign_key_locking_blocks_parent_delete_until_child_insert_finishes -- --nocapture
+scripts/cargo_isolated.sh check
+
+Remaining:
+No local failure for the attached CI repro; check still emits existing
+unreachable-pattern warnings.
+
+---
+
+Goal:
 Fix cargo-test CI failure from cargo-test-run__2_2__73522505530.log.
 
 Key decisions:

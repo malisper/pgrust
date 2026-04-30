@@ -18916,6 +18916,8 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
     let mut name = None;
     let mut column_names = Vec::new();
     let mut body = None;
+    let mut search = None;
+    let mut cycle = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
@@ -18932,6 +18934,8 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
                     part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
                 )?)
             }
+            Rule::cte_search_clause => search = Some(build_cte_search_clause(part)?),
+            Rule::cte_cycle_clause => cycle = Some(build_cte_cycle_clause(part)?),
             _ => {}
         }
     }
@@ -18939,37 +18943,102 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
         name: name.ok_or(ParseError::UnexpectedEof)?,
         column_names,
         body: body.ok_or(ParseError::UnexpectedEof)?,
+        search,
+        cycle,
+    })
+}
+
+fn build_cte_search_clause(pair: Pair<'_, Rule>) -> Result<CteSearchClause, ParseError> {
+    let mut breadth_first = None;
+    let mut columns = Vec::new();
+    let mut sequence_column = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::cte_search_kind => {
+                breadth_first = Some(part.as_str().eq_ignore_ascii_case("breadth"));
+            }
+            Rule::ident_list => columns = part.into_inner().map(build_identifier).collect(),
+            Rule::identifier => sequence_column = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(CteSearchClause {
+        breadth_first: breadth_first.ok_or(ParseError::UnexpectedEof)?,
+        columns,
+        sequence_column: sequence_column.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_cte_cycle_clause(pair: Pair<'_, Rule>) -> Result<CteCycleClause, ParseError> {
+    let mut columns = Vec::new();
+    let mut mark_column = None;
+    let mut mark_value = None;
+    let mut default_value = None;
+    let mut path_column = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident_list => columns = part.into_inner().map(build_identifier).collect(),
+            Rule::identifier if mark_column.is_none() => mark_column = Some(build_identifier(part)),
+            Rule::identifier => path_column = Some(build_identifier(part)),
+            Rule::cte_cycle_mark_values => {
+                let mut values = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::expr);
+                mark_value = Some(build_expr(values.next().ok_or(ParseError::UnexpectedEof)?)?);
+                default_value = Some(build_expr(values.next().ok_or(ParseError::UnexpectedEof)?)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(CteCycleClause {
+        columns,
+        mark_column: mark_column.ok_or(ParseError::UnexpectedEof)?,
+        mark_value,
+        default_value,
+        path_column: path_column.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
 fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
     match pair.as_rule() {
         Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
-            Ok(CteBody::Select(Box::new(build_select(pair)?)))
+            Ok(select_statement_as_cte_body(build_select(pair)?))
         }
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
         Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
         Rule::update_stmt => Ok(CteBody::Update(Box::new(build_update(pair)?))),
-        Rule::merge_stmt => Ok(CteBody::Merge(Box::new(build_merge(pair)?))),
         Rule::delete_stmt => Ok(CteBody::Delete(Box::new(build_delete(pair)?))),
+        Rule::merge_stmt => Ok(CteBody::Merge(Box::new(build_merge(pair)?))),
         Rule::recursive_union_cte_body => {
-            let all = contains_union_all(pair.as_str());
+            let raw = pair.as_str();
+            let body_start = pair.as_span().start();
             let mut inner = pair.into_inner();
-            let anchor = build_cte_body(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let anchor_pair = inner.next().ok_or(ParseError::UnexpectedEof)?;
+            let anchor_end = anchor_pair.as_span().end();
+            let anchor = build_cte_body(anchor_pair)?;
             let mut recursive = None;
+            let mut recursive_start = None;
             for part in inner {
                 match part.as_rule() {
                     Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
+                        recursive_start = Some(part.as_span().start());
                         recursive = Some(build_select(part)?)
                     }
                     Rule::parenthesized_set_operation_term => {
+                        recursive_start = Some(part.as_span().start());
                         recursive = Some(build_set_operation_term(part)?)
                     }
                     _ => {}
                 }
             }
+            let between = &raw[anchor_end - body_start
+                ..recursive_start.ok_or(ParseError::UnexpectedEof)? - body_start];
+            let all = between
+                .split_ascii_whitespace()
+                .any(|token| token.eq_ignore_ascii_case("all"));
             Ok(CteBody::RecursiveUnion {
                 all,
+                left_nested: false,
                 anchor: Box::new(anchor),
                 recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
             })
@@ -18981,15 +19050,156 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
     }
 }
 
-fn contains_union_all(sql: &str) -> bool {
-    let mut prev_union = false;
-    for token in sql.split_whitespace() {
-        if prev_union && token.eq_ignore_ascii_case("all") {
-            return true;
-        }
-        prev_union = token.eq_ignore_ascii_case("union");
+fn select_statement_as_cte_body(stmt: SelectStatement) -> CteBody {
+    if let Some((all, left_nested, anchor, recursive)) = split_leftmost_union(stmt.clone()) {
+        return CteBody::RecursiveUnion {
+            all,
+            left_nested,
+            anchor: Box::new(select_term_as_cte_body(anchor)),
+            recursive: Box::new(recursive),
+        };
     }
-    false
+    CteBody::Select(Box::new(stmt))
+}
+
+fn split_leftmost_union(
+    mut stmt: SelectStatement,
+) -> Option<(bool, bool, SelectStatement, SelectStatement)> {
+    let outer_with_recursive = stmt.with_recursive;
+    let outer_with = std::mem::take(&mut stmt.with);
+    let outer_order_by = std::mem::take(&mut stmt.order_by);
+    let outer_limit = stmt.limit.take();
+    let outer_offset = stmt.offset.take();
+    let outer_locking_clause = stmt.locking_clause.take();
+    let outer_locking_targets = std::mem::take(&mut stmt.locking_targets);
+    let set_operation = stmt.set_operation?;
+    if set_operation.inputs.len() != 2 {
+        return None;
+    }
+    let mut inputs = set_operation.inputs;
+    let left = inputs.remove(0);
+    let right = inputs.remove(0);
+
+    if left.set_operation.is_some() {
+        let (all, _left_nested, anchor, recursive_tail) = split_leftmost_union(left)?;
+        let mut recursive =
+            select_statement_for_set_operation(set_operation.op, recursive_tail, right);
+        attach_cte_body_select_context(
+            &mut recursive,
+            outer_with_recursive,
+            &outer_with,
+            outer_order_by,
+            outer_limit,
+            outer_offset,
+            outer_locking_clause,
+            outer_locking_targets,
+        );
+        return Some((all, true, anchor, recursive));
+    }
+
+    match set_operation.op {
+        SetOperator::Union { all } => {
+            let mut anchor = left;
+            let mut recursive = right;
+            attach_cte_body_select_context(
+                &mut anchor,
+                outer_with_recursive,
+                &outer_with,
+                Vec::new(),
+                None,
+                None,
+                None,
+                Vec::new(),
+            );
+            attach_cte_body_select_context(
+                &mut recursive,
+                outer_with_recursive,
+                &outer_with,
+                outer_order_by,
+                outer_limit,
+                outer_offset,
+                outer_locking_clause,
+                outer_locking_targets,
+            );
+            Some((all, false, anchor, recursive))
+        }
+        SetOperator::Intersect { .. } | SetOperator::Except { .. } => None,
+    }
+}
+
+fn attach_cte_body_select_context(
+    stmt: &mut SelectStatement,
+    with_recursive: bool,
+    with: &[CommonTableExpr],
+    order_by: Vec<OrderByItem>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    locking_clause: Option<SelectLockingClause>,
+    locking_targets: Vec<String>,
+) {
+    if with_recursive {
+        stmt.with_recursive = true;
+    }
+    if !with.is_empty() {
+        let mut local_with = std::mem::take(&mut stmt.with);
+        local_with.extend_from_slice(with);
+        stmt.with = local_with;
+    }
+    if !order_by.is_empty() {
+        stmt.order_by = order_by;
+    }
+    if limit.is_some() {
+        stmt.limit = limit;
+    }
+    if offset.is_some() {
+        stmt.offset = offset;
+    }
+    if locking_clause.is_some() {
+        stmt.locking_clause = locking_clause;
+        stmt.locking_targets = locking_targets;
+    }
+}
+
+fn select_term_as_cte_body(stmt: SelectStatement) -> CteBody {
+    if let Some(values) = wrapped_values_statement(&stmt) {
+        CteBody::Values(values)
+    } else {
+        CteBody::Select(Box::new(stmt))
+    }
+}
+
+fn wrapped_values_statement(stmt: &SelectStatement) -> Option<ValuesStatement> {
+    let Some(FromItem::Values { rows }) = &stmt.from else {
+        return None;
+    };
+    if stmt.distinct
+        || !stmt.distinct_on.is_empty()
+        || stmt.targets.len() != 1
+        || !matches!(
+            stmt.targets.first(),
+            Some(SelectItem {
+                output_name,
+                expr: SqlExpr::Column(name),
+            }) if output_name == "*" && name == "*"
+        )
+        || stmt.where_clause.is_some()
+        || !stmt.group_by.is_empty()
+        || stmt.having.is_some()
+        || !stmt.window_clauses.is_empty()
+        || stmt.locking_clause.is_some()
+        || !stmt.locking_targets.is_empty()
+        || stmt.set_operation.is_some()
+    {
+        return None;
+    }
+    Some(ValuesStatement {
+        with_recursive: stmt.with_recursive,
+        with: stmt.with.clone(),
+        rows: rows.clone(),
+        order_by: stmt.order_by.clone(),
+        limit: stmt.limit,
+        offset: stmt.offset,
+    })
 }
 
 fn build_group_by_clause(pair: Pair<'_, Rule>) -> Result<(bool, Vec<GroupByItem>), ParseError> {
@@ -20820,6 +21030,7 @@ fn build_create_materialized_view(
 }
 
 fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseError> {
+    let raw = pair.as_str().trim().to_string();
     let mut relation_name = None;
     let mut column_names = Vec::new();
     let mut persistence = TablePersistence::Permanent;
@@ -20827,6 +21038,7 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
     let mut query = None;
     let mut query_sql = None;
     let mut or_replace = false;
+    let recursive = create_view_statement_is_recursive(&raw);
     let mut check_option = ViewCheckOption::None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -20876,21 +21088,117 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
         }
     }
     let (schema_name, view_name) = relation_name.ok_or(ParseError::UnexpectedEof)?;
+    let mut query = query.ok_or(ParseError::UnexpectedEof)?;
+    let mut query_sql = query_sql.ok_or(ParseError::UnexpectedEof)?;
+    if recursive {
+        let lowered = build_recursive_view_query(&view_name, &column_names, query, &query_sql)?;
+        query = lowered.0;
+        query_sql = lowered.1;
+    }
     Ok(CreateViewStatement {
         schema_name,
         view_name,
         column_names,
         persistence,
         options,
-        query: query.ok_or(ParseError::UnexpectedEof)?,
-        query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
+        query,
+        query_sql,
         or_replace,
+        recursive,
         check_option,
     })
 }
 
+fn create_view_statement_is_recursive(sql: &str) -> bool {
+    let mut words = sql
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == '(')
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_ascii_lowercase());
+    if words.next().as_deref() != Some("create") {
+        return false;
+    }
+    let mut next = words.next();
+    if next.as_deref() == Some("or") {
+        if words.next().as_deref() != Some("replace") {
+            return false;
+        }
+        next = words.next();
+    }
+    if matches!(next.as_deref(), Some("temp" | "temporary")) {
+        next = words.next();
+    }
+    next.as_deref() == Some("recursive")
+}
+
+fn build_recursive_view_query(
+    view_name: &str,
+    column_names: &[String],
+    body_query: SelectStatement,
+    body_sql: &str,
+) -> Result<(SelectStatement, String), ParseError> {
+    let cte_column_sql = if column_names.is_empty() {
+        String::new()
+    } else {
+        format!("({})", column_names.join(", "))
+    };
+    let targets = if column_names.is_empty() {
+        vec![SelectItem {
+            output_name: "*".into(),
+            expr: SqlExpr::Column("*".into()),
+        }]
+    } else {
+        column_names
+            .iter()
+            .map(|name| SelectItem {
+                output_name: name.clone(),
+                expr: SqlExpr::Column(name.clone()),
+            })
+            .collect()
+    };
+    let target_sql = if column_names.is_empty() {
+        "*".to_string()
+    } else {
+        column_names.join(", ")
+    };
+    let query_sql = format!(
+        "WITH RECURSIVE {view_name}{cte_column_sql} AS ({}) SELECT {target_sql} FROM {view_name}",
+        body_sql.trim().trim_end_matches(';')
+    );
+    Ok((
+        SelectStatement {
+            with_recursive: true,
+            with: vec![CommonTableExpr {
+                name: view_name.to_string(),
+                column_names: column_names.to_vec(),
+                body: select_statement_as_cte_body(body_query),
+                search: None,
+                cycle: None,
+            }],
+            distinct: false,
+            distinct_on: Vec::new(),
+            from: Some(FromItem::Table {
+                name: view_name.to_string(),
+                only: false,
+            }),
+            targets,
+            where_clause: None,
+            group_by: Vec::new(),
+            group_by_distinct: false,
+            having: None,
+            window_clauses: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            locking_clause: None,
+            locking_targets: Vec::new(),
+            set_operation: None,
+        },
+        query_sql,
+    ))
+}
+
 fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseError> {
-    let mut or_replace = false;
+    let mut replace_existing = false;
     let mut rule_name = None;
     let mut relation_name = None;
     let mut event = None;
@@ -20900,7 +21208,7 @@ fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseE
     let mut actions = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::create_or_replace_clause => or_replace = true,
+            Rule::create_or_replace_clause => replace_existing = true,
             Rule::identifier if rule_name.is_none() => rule_name = Some(build_identifier(part)),
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_identifier(part));
@@ -20922,7 +21230,7 @@ fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseE
         }
     }
     Ok(CreateRuleStatement {
-        or_replace,
+        replace_existing,
         rule_name: rule_name.ok_or(ParseError::UnexpectedEof)?,
         relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
         event: event.ok_or(ParseError::UnexpectedEof)?,
@@ -23402,7 +23710,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
         SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => "array".to_string(),
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
-        SqlExpr::FieldSelect { field, .. } => field.clone(),
+        SqlExpr::FieldSelect { field, .. } => field.rsplit('.').next().unwrap_or(field).to_string(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
             SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => select_item_name(inner, index),
             SqlExpr::ArraySubscript { .. }
@@ -24251,8 +24559,11 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                             .find(|part| part.as_rule() == Rule::identifier)
                             .map(build_identifier)
                             .ok_or(ParseError::UnexpectedEof)?;
-                        field_path.push(field.clone());
-                        indirection.push(AssignmentTargetIndirection::Field(field));
+                        for field_part in field.split('.') {
+                            let field_part = field_part.to_string();
+                            field_path.push(field_part.clone());
+                            indirection.push(AssignmentTargetIndirection::Field(field_part));
+                        }
                     }
                     _ => {}
                 }
@@ -24268,8 +24579,11 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                     .find(|inner| inner.as_rule() == Rule::identifier)
                     .map(build_identifier)
                     .ok_or(ParseError::UnexpectedEof)?;
-                field_path.push(field.clone());
-                indirection.push(AssignmentTargetIndirection::Field(field));
+                for field_part in field.split('.') {
+                    let field_part = field_part.to_string();
+                    field_path.push(field_part.clone());
+                    indirection.push(AssignmentTargetIndirection::Field(field_part));
+                }
             }
             _ => {}
         }
@@ -25622,6 +25936,9 @@ fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
                 name,
                 array_bounds: array_bounds.saturating_add(1),
             },
+            RawTypeName::Record => RawTypeName::Builtin(SqlType::array_of(SqlType::record(
+                crate::include::catalog::RECORD_TYPE_OID,
+            ))),
             other => other,
         };
     }
@@ -27519,12 +27836,70 @@ fn build_comparison_expr(left: SqlExpr, op: &str, right: SqlExpr) -> Result<SqlE
             left: Box::new(left),
             right: Box::new(right),
         },
+        "*=" => SqlExpr::BinaryOperator {
+            op: "*=".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*<>" => SqlExpr::BinaryOperator {
+            op: "*<>".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*<" => SqlExpr::BinaryOperator {
+            op: "*<".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*<=" => SqlExpr::BinaryOperator {
+            op: "*<=".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*>" => SqlExpr::BinaryOperator {
+            op: "*>".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*>=" => SqlExpr::BinaryOperator {
+            op: "*>=".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
         "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
         "<=" => SqlExpr::LtEq(Box::new(left), Box::new(right)),
         ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
         ">=" => SqlExpr::GtEq(Box::new(left), Box::new(right)),
+        "~~" => SqlExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            escape: None,
+            case_insensitive: false,
+            negated: false,
+        },
+        "!~~" => SqlExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            escape: None,
+            case_insensitive: false,
+            negated: true,
+        },
+        "~~*" => SqlExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            escape: None,
+            case_insensitive: true,
+            negated: false,
+        },
+        "!~~*" => SqlExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            escape: None,
+            case_insensitive: true,
+            negated: true,
+        },
         "~" => SqlExpr::RegexMatch(Box::new(left), Box::new(right)),
         "!~" => SqlExpr::Not(Box::new(SqlExpr::RegexMatch(
             Box::new(left),

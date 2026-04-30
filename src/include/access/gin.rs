@@ -333,9 +333,22 @@ impl GinPostingTupleData {
 }
 
 impl GinPendingTupleData {
+    pub fn serialized_len(&self) -> usize {
+        10 + self
+            .entries
+            .iter()
+            .map(|entry| 8 + entry.bytes.len())
+            .sum::<usize>()
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        encode_tid(&mut out, self.tid);
+        let mut out = Vec::with_capacity(self.serialized_len());
+        self.serialize_into(&mut out);
+        out
+    }
+
+    pub fn serialize_into(&self, out: &mut Vec<u8>) {
+        encode_tid(out, self.tid);
         out.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
         for entry in &self.entries {
             out.extend_from_slice(&entry.attnum.to_le_bytes());
@@ -344,7 +357,6 @@ impl GinPendingTupleData {
             out.extend_from_slice(&(entry.bytes.len() as u32).to_le_bytes());
             out.extend_from_slice(&entry.bytes);
         }
-        out
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, GinPageError> {
@@ -477,5 +489,31 @@ mod tests {
             }],
         };
         assert_eq!(GinEntryTupleData::parse(&tuple.serialize()).unwrap(), tuple);
+    }
+
+    #[test]
+    fn gin_pending_tuple_serialized_len_matches_bytes() {
+        let tuple = GinPendingTupleData {
+            tid: ItemPointerData {
+                block_number: 9,
+                offset_number: 4,
+            },
+            entries: vec![
+                GinEntryKey {
+                    attnum: 1,
+                    category: GinNullCategory::NormalKey,
+                    bytes: b"alpha".to_vec(),
+                },
+                GinEntryKey {
+                    attnum: 2,
+                    category: GinNullCategory::EmptyItem,
+                    bytes: Vec::new(),
+                },
+            ],
+        };
+
+        let serialized = tuple.serialize();
+        assert_eq!(tuple.serialized_len(), serialized.len());
+        assert_eq!(GinPendingTupleData::parse(&serialized).unwrap(), tuple);
     }
 }

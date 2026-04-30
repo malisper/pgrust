@@ -14,6 +14,8 @@ use crate::include::access::visibilitymapdefs::{
 use crate::include::storage::buf_internals::Error as BufferError;
 use crate::{BufferPool, ClientId};
 
+use super::HeapWalPolicy;
+
 const MAP_HEADER_SIZE: usize = (SIZE_OF_PAGE_HEADER_DATA + (MAXALIGN - 1)) & !(MAXALIGN - 1);
 const MAPSIZE: usize = BLCKSZ - MAP_HEADER_SIZE;
 const HEAPBLOCKS_PER_BYTE: usize = 8 / BITS_PER_HEAPBLOCK;
@@ -103,6 +105,26 @@ pub fn visibilitymap_clear(
     vmbuf: &Option<VisibilityMapBuffer>,
     flags: u8,
 ) -> Result<bool, VisibilityMapError> {
+    visibilitymap_clear_with_wal_policy(
+        pool,
+        client_id,
+        rel,
+        heap_blk,
+        vmbuf,
+        flags,
+        HeapWalPolicy::Wal,
+    )
+}
+
+pub fn visibilitymap_clear_with_wal_policy(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    heap_blk: u32,
+    vmbuf: &Option<VisibilityMapBuffer>,
+    flags: u8,
+    wal_policy: HeapWalPolicy,
+) -> Result<bool, VisibilityMapError> {
     if flags & VISIBILITYMAP_VALID_BITS == 0 || flags == VISIBILITYMAP_ALL_VISIBLE {
         return Err(VisibilityMapError::InvalidFlags(flags));
     }
@@ -120,7 +142,20 @@ pub fn visibilitymap_clear(
     }
     guard[idx] &= !mask;
     let page = *guard;
-    pool.write_page_image_locked_with_rmgr(pin.buffer_id(), 0, &page, &mut guard, RM_HEAP2_ID)?;
+    match wal_policy {
+        HeapWalPolicy::Wal => {
+            pool.write_page_image_locked_with_rmgr(
+                pin.buffer_id(),
+                0,
+                &page,
+                &mut guard,
+                RM_HEAP2_ID,
+            )?;
+        }
+        HeapWalPolicy::NoWal => {
+            pool.write_page_no_wal_locked(pin.buffer_id(), &page, &mut guard)?;
+        }
+    }
     Ok(true)
 }
 

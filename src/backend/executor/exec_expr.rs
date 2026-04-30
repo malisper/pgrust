@@ -81,8 +81,8 @@ use super::expr_ops::{
     bitwise_xor_values, compare_values, compare_values_with_type, concat_values,
     concat_values_with_cast_context, div_values, eval_and, eval_or, mixed_date_timestamp_ordering,
     mod_values, mul_values, negate_value, not_equal_values, not_equal_values_with_type,
-    order_values, shift_left_values, shift_right_values, sub_values, sub_values_with_config,
-    values_are_distinct,
+    order_record_image_values, order_values, shift_left_values, shift_right_values, sub_values,
+    sub_values_with_config, values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_partition::eval_satisfies_hash_partition;
@@ -861,6 +861,31 @@ fn eval_pg_index_column_has_property(
 
 fn catalog_lookup(ctx: Option<&ExecutorContext>) -> Option<&dyn CatalogLookup> {
     ctx.and_then(|ctx| ctx.catalog.as_deref())
+}
+
+fn value_is_sql_null(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Record(record) => record
+            .fields
+            .iter()
+            .all(|field| matches!(field, Value::Null)),
+        _ => false,
+    }
+}
+
+fn value_is_sql_not_null(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Record(record) => {
+            !record.fields.is_empty()
+                && record
+                    .fields
+                    .iter()
+                    .all(|field| !matches!(field, Value::Null))
+        }
+        _ => true,
+    }
 }
 
 fn soft_input_error_info_with_context(
@@ -8525,6 +8550,29 @@ fn eval_op_expr(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if is_record_image_operator(op.opno) {
+        let [left, right] = op.args.as_slice() else {
+            return Err(malformed_expr_error("record image operator"));
+        };
+        let left_value = eval_expr(left, slot, ctx)?;
+        let right_value = eval_expr(right, slot, ctx)?;
+        if matches!(left_value, Value::Null) || matches!(right_value, Value::Null) {
+            return Ok(Value::Null);
+        }
+        let (Value::Record(left), Value::Record(right)) = (left_value, right_value) else {
+            return Err(malformed_expr_error("record image operator"));
+        };
+        let op_text = match op.op {
+            OpExprKind::Eq => "=",
+            OpExprKind::NotEq => "<>",
+            OpExprKind::Lt => "<",
+            OpExprKind::LtEq => "<=",
+            OpExprKind::Gt => ">",
+            OpExprKind::GtEq => ">=",
+            _ => return Err(malformed_expr_error("record image operator")),
+        };
+        return order_record_image_values(op_text, &left, &right);
+    }
     match (op.op, op.args.as_slice()) {
         (OpExprKind::UnaryPlus, [inner]) => eval_expr(inner, slot, ctx),
         (OpExprKind::Negate, [inner]) => negate_value(eval_expr(inner, slot, ctx)?),
@@ -8665,6 +8713,10 @@ fn eval_op_expr(
         (OpExprKind::JsonPathText, [left, right]) => eval_json_path(left, right, true, slot, ctx),
         _ => Err(malformed_expr_error("operator")),
     }
+}
+
+fn is_record_image_operator(opno: u32) -> bool {
+    matches!(opno, 3188..=3193)
 }
 
 fn order_values_with_type(
@@ -9004,6 +9056,7 @@ fn eval_scalar_array_op_expr(
 fn eval_bound_tuple_var(
     tuple: Option<&Vec<Value>>,
     var: &crate::include::nodes::primnodes::Var,
+    ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     let index = attrno_index(var.varattno).ok_or_else(|| ExecError::DetailedError {
         message: "special executor Var referenced an unsupported system attribute".into(),
@@ -9023,7 +9076,8 @@ fn eval_bound_tuple_var(
         hint: None,
         sqlstate: "XX000",
     })?;
-    row.get(index)
+    let value = row
+        .get(index)
         .cloned()
         .ok_or_else(|| ExecError::DetailedError {
             message: "special executor Var referenced beyond the bound tuple width".into(),
@@ -9036,7 +9090,8 @@ fn eval_bound_tuple_var(
             )),
             hint: None,
             sqlstate: "XX000",
-        })
+        })?;
+    normalize_composite_value_for_type(value, var.vartype, ctx)
 }
 
 fn whole_row_relation_varno(fields: &[(String, Expr)]) -> Option<usize> {
@@ -9183,33 +9238,33 @@ pub fn eval_expr(
                     Ok(eval_bound_system_var(&ctx.expr_bindings.outer_system_bindings, var)
                         .unwrap_or(Value::Null))
                 } else {
-                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var)
+                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), var, ctx)
                 }
             } else if var.varno == INNER_VAR {
                 if is_system_attr(var.varattno) {
                     Ok(eval_bound_system_var(&ctx.expr_bindings.inner_system_bindings, var)
                         .unwrap_or(Value::Null))
                 } else {
-                    eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
+                    eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var, ctx)
                 }
             } else if var.varno == INDEX_VAR {
                 if is_system_attr(var.varattno) {
                     Ok(eval_bound_system_var(&ctx.expr_bindings.index_system_bindings, var)
                         .unwrap_or(Value::Null))
                 } else {
-                    eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
+                    eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var, ctx)
                 }
             } else if var.varno == RULE_OLD_VAR {
                 if is_system_attr(var.varattno) {
                     Ok(Value::Null)
                 } else {
-                    eval_bound_tuple_var(ctx.expr_bindings.rule_old_tuple.as_ref(), var)
+                    eval_bound_tuple_var(ctx.expr_bindings.rule_old_tuple.as_ref(), var, ctx)
                 }
             } else if var.varno == RULE_NEW_VAR {
                 if is_system_attr(var.varattno) {
                     Ok(Value::Null)
                 } else {
-                    eval_bound_tuple_var(ctx.expr_bindings.rule_new_tuple.as_ref(), var)
+                    eval_bound_tuple_var(ctx.expr_bindings.rule_new_tuple.as_ref(), var, ctx)
                 }
             } else if var.varlevelsup == 1 {
                 let mut outer_var = var.clone();
@@ -9224,7 +9279,7 @@ pub fn eval_expr(
                         .unwrap_or(Value::Null),
                     )
                 } else {
-                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var)
+                    eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var, ctx)
                 }
             } else if var.varlevelsup > 0 {
                 Err(ExecError::DetailedError {
@@ -9256,7 +9311,7 @@ pub fn eval_expr(
                     malformed_expr_error("system attribute outside executor support")
                 })?;
                 let val = slot.get_attr(index)?;
-                Ok(val.clone())
+                normalize_composite_value_for_type(val.clone(), var.vartype, ctx)
             }
         }
         Expr::Const(value) => Ok(value.clone()),
@@ -9289,7 +9344,7 @@ pub fn eval_expr(
         }
         Expr::FieldSelect { expr, field, .. } => {
             let value = eval_expr(expr, slot, ctx)?;
-            eval_record_field(value, field)
+            eval_record_field(value, field, expr_sql_type_hint(expr), ctx)
         }
         Expr::Cast(inner, ty) => {
             let value = eval_expr(inner, slot, ctx)?;
@@ -9355,14 +9410,10 @@ pub fn eval_expr(
             };
             eval_similar(&left, &pattern, escape.as_ref(), *collation_oid, *negated)
         }
-        Expr::IsNull(inner) => Ok(Value::Bool(matches!(
-            eval_expr(inner, slot, ctx)?,
-            Value::Null
-        ))),
-        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(
-            eval_expr(inner, slot, ctx)?,
-            Value::Null
-        ))),
+        Expr::IsNull(inner) => Ok(Value::Bool(value_is_sql_null(&eval_expr(inner, slot, ctx)?))),
+        Expr::IsNotNull(inner) => Ok(Value::Bool(value_is_sql_not_null(&eval_expr(
+            inner, slot, ctx,
+        )?))),
         Expr::IsDistinctFrom(left, right) => Ok(Value::Bool(values_are_distinct(
             &eval_expr(left, slot, ctx)?,
             &eval_expr(right, slot, ctx)?,
@@ -9723,7 +9774,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
         )),
         Expr::FieldSelect { expr, field, .. } => {
             let value = eval_plpgsql_expr(expr, slot)?;
-            eval_record_field(value, field)
+            eval_record_field_without_catalog(value, field)
         }
         Expr::Collate { expr, .. } => eval_plpgsql_expr(expr, slot),
         Expr::Case(case_expr) => {
@@ -9794,14 +9845,12 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             };
             eval_similar(&left, &pattern, escape.as_ref(), *collation_oid, *negated)
         }
-        Expr::IsNull(inner) => Ok(Value::Bool(matches!(
-            eval_plpgsql_expr(inner, slot)?,
-            Value::Null
-        ))),
-        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(
-            eval_plpgsql_expr(inner, slot)?,
-            Value::Null
-        ))),
+        Expr::IsNull(inner) => Ok(Value::Bool(value_is_sql_null(&eval_plpgsql_expr(
+            inner, slot,
+        )?))),
+        Expr::IsNotNull(inner) => Ok(Value::Bool(value_is_sql_not_null(&eval_plpgsql_expr(
+            inner, slot,
+        )?))),
         Expr::IsDistinctFrom(left, right) => Ok(Value::Bool(values_are_distinct(
             &eval_plpgsql_expr(left, slot)?,
             &eval_plpgsql_expr(right, slot)?,
@@ -9881,7 +9930,111 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
     }
 }
 
-fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
+pub(crate) fn normalize_composite_value_for_catalog(
+    value: Value,
+    sql_type: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    let Value::Record(record) = value else {
+        return Ok(value);
+    };
+    let sql_type = if !sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite)
+        && sql_type.typrelid == 0
+        && let Some(catalog) = catalog
+        && let Some(row) = catalog.type_by_oid(sql_type.type_oid)
+        && row.typrelid != 0
+    {
+        sql_type.with_identity(row.oid, row.typrelid)
+    } else {
+        sql_type
+    };
+    if !matches!(sql_type.kind, SqlTypeKind::Composite) || sql_type.typrelid == 0 {
+        return Ok(Value::Record(record));
+    }
+    let Some(catalog) = catalog else {
+        return Ok(Value::Record(record));
+    };
+    let Some(relation) = catalog.lookup_relation_by_oid(sql_type.typrelid) else {
+        return Ok(Value::Record(record));
+    };
+    let descriptor = crate::include::nodes::datum::RecordDescriptor::named(
+        sql_type.type_oid,
+        sql_type.typrelid,
+        sql_type.typmod,
+        relation
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped)
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    );
+    if descriptor.fields == record.descriptor.fields {
+        return Ok(Value::Record(record));
+    }
+    let fields = descriptor
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, target_field)| {
+            record
+                .descriptor
+                .fields
+                .iter()
+                .position(|source_field| source_field.name.eq_ignore_ascii_case(&target_field.name))
+                .and_then(|source_index| record.fields.get(source_index).cloned())
+                .or_else(|| record.fields.get(index).cloned())
+                .unwrap_or(Value::Null)
+        })
+        .collect();
+    Ok(Value::Record(
+        crate::include::nodes::datum::RecordValue::from_descriptor(descriptor, fields),
+    ))
+}
+
+pub(crate) fn normalize_composite_result_values_for_catalog(
+    values: &[Value],
+    columns: &[crate::include::nodes::primnodes::QueryColumn],
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Vec<Value>, ExecError> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            columns
+                .get(index)
+                .map(|column| {
+                    normalize_composite_value_for_catalog(value.clone(), column.sql_type, catalog)
+                })
+                .unwrap_or_else(|| Ok(value.clone()))
+        })
+        .collect()
+}
+
+fn normalize_composite_value_for_type(
+    value: Value,
+    sql_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    normalize_composite_value_for_catalog(value, sql_type, ctx.catalog.as_deref())
+}
+
+fn eval_record_field(
+    value: Value,
+    field: &str,
+    sql_type: Option<SqlType>,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let value = if let Some(sql_type) = sql_type {
+        normalize_composite_value_for_type(value, sql_type, ctx)?
+    } else {
+        value
+    };
+    eval_record_field_without_catalog(value, field)
+}
+
+fn eval_record_field_without_catalog(value: Value, field: &str) -> Result<Value, ExecError> {
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }

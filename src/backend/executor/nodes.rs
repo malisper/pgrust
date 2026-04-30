@@ -62,9 +62,9 @@ use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan, Plan,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
-    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, SubLinkType, Var,
-    attrno_index, is_special_varno,
+    AggAccum, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType,
+    OUTER_VAR, OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall,
+    SubLinkType, Var, attrno_index, is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -4101,6 +4101,12 @@ fn render_explain_expr_inner_with_qualifier(
                     return rendered;
                 }
                 let op_text = infix_operator_text(op.opno, op.op).unwrap_or("~");
+                if let (Some(left), Some(right)) = (
+                    render_explain_row_comparison_operand(left, qualifier, column_names),
+                    render_explain_row_comparison_operand(right, qualifier, column_names),
+                ) {
+                    return format!("{left} {op_text} {right}");
+                }
                 let display_type = comparison_display_type(left, right, op.collation_oid);
                 format!(
                     "{} {} {}",
@@ -4197,6 +4203,8 @@ fn render_explain_expr_inner_with_qualifier(
         }
         Expr::Func(func) => render_explain_func_expr(func, qualifier, column_names),
         Expr::ScalarArrayOp(saop) => render_explain_scalar_array_op(saop, qualifier, column_names),
+        Expr::Case(case_expr) => render_explain_whole_row_case(case_expr, qualifier, column_names)
+            .unwrap_or_else(|| format!("{expr:?}")),
         Expr::ArrayLiteral {
             elements,
             array_type,
@@ -6379,6 +6387,25 @@ fn render_explain_array_literal_const(expr: &Expr, element_type: SqlType) -> Opt
 fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> String {
     let value = cast_value(value.clone(), element_type).unwrap_or_else(|_| value.clone());
     match &value {
+        Value::Record(record) => {
+            let rendered = crate::backend::executor::value_io::format_record_text(record)
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            format!("\"{rendered}\"")
+        }
+        Value::Text(_) | Value::TextRef(_, _)
+            if matches!(
+                element_type.kind,
+                SqlTypeKind::Composite | SqlTypeKind::Record
+            ) =>
+        {
+            let rendered = value
+                .as_text()
+                .unwrap_or_default()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            format!("\"{rendered}\"")
+        }
         Value::Text(_) | Value::TextRef(_, _) => value
             .as_text()
             .unwrap_or_default()
@@ -6405,6 +6432,84 @@ fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> S
         Value::Null => "NULL".into(),
         _ => render_explain_literal(&value),
     }
+}
+
+fn render_explain_row_comparison_operand(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    match expr {
+        Expr::Row { fields, .. } => Some(format!(
+            "ROW({})",
+            fields
+                .iter()
+                .map(|(_, expr)| render_explain_expr_inner_with_qualifier(
+                    expr,
+                    qualifier,
+                    column_names
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Expr::Const(Value::Record(record)) => Some(format!(
+            "ROW({})",
+            record
+                .fields
+                .iter()
+                .map(|value| render_explain_expr_inner(&Expr::Const(value.clone()), &[]))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Expr::Cast(inner, ty)
+            if matches!(ty.kind, SqlTypeKind::Composite | SqlTypeKind::Record) =>
+        {
+            render_explain_row_comparison_operand(inner, qualifier, column_names)
+        }
+        _ => None,
+    }
+}
+
+fn render_explain_whole_row_case(
+    case_expr: &CaseExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    if case_expr.arg.is_some() || case_expr.args.len() != 1 {
+        return None;
+    }
+    if !matches!(&case_expr.args.first()?.result, Expr::Const(Value::Null)) {
+        return None;
+    }
+    let Expr::Row { fields, .. } = case_expr.defresult.as_ref() else {
+        return None;
+    };
+    let rendered_fields = fields
+        .iter()
+        .map(|(_, expr)| {
+            let Expr::Var(var) = expr else {
+                return None;
+            };
+            render_explain_var_name(var, column_names)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if rendered_fields.is_empty() {
+        return None;
+    }
+    if let Some(qualifier) = qualifier {
+        return Some(format!("{qualifier}.*"));
+    }
+    let prefix = rendered_fields
+        .iter()
+        .filter_map(|name| name.rsplit_once('.').map(|(prefix, _)| prefix))
+        .next()?;
+    rendered_fields
+        .iter()
+        .all(|name| {
+            name.rsplit_once('.')
+                .is_some_and(|(candidate, _)| candidate == prefix)
+        })
+        .then(|| format!("{prefix}.*"))
 }
 
 fn render_explain_sql_type_name(ty: SqlType) -> String {

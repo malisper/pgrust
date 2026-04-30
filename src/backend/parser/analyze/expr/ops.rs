@@ -1168,7 +1168,7 @@ fn bind_money_arithmetic_expr(
     })
 }
 
-pub(super) fn supports_comparison_operator(
+pub(crate) fn supports_comparison_operator(
     catalog: &dyn CatalogLookup,
     op: &str,
     left: SqlType,
@@ -1391,12 +1391,24 @@ fn is_network_type(ty: SqlType) -> bool {
 // pgrust does not bootstrap that polymorphic operator surface yet, so allow the
 // exact same-type array operators that the executor already supports.
 fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -> bool {
-    left.is_array
-        && right.is_array
-        && left == right
-        && matches!(
+    if !left.is_array
+        || !right.is_array
+        || !matches!(
             op,
             "=" | "<>" | "<" | "<=" | ">" | ">=" | "@>" | "<@" | "&&"
+        )
+    {
+        return false;
+    }
+    if left == right {
+        return true;
+    }
+    let left_elem = left.element_type();
+    let right_elem = right.element_type();
+    matches!(left_elem.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+        && matches!(
+            right_elem.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
         )
 }
 

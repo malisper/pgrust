@@ -18,7 +18,7 @@ use crate::backend::utils::cache::syscache::{
     ensure_am_rows, ensure_amop_rows, ensure_amproc_rows, ensure_attribute_rows, ensure_class_rows,
     ensure_collation_rows, ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows,
     ensure_namespace_rows, ensure_opclass_rows, ensure_proc_rows, ensure_rewrite_rows,
-    ensure_statistic_rows, ensure_type_rows,
+    ensure_statistic_rows, ensure_type_rows, with_backend_catcache,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
@@ -2318,21 +2318,24 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn publication_rows(&self) -> Vec<PgPublicationRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.publication_rows())
-            .unwrap_or_default()
+        with_backend_catcache(&self.db, self.client_id, self.txn_ctx, |catcache| {
+            catcache.publication_rows()
+        })
+        .unwrap_or_default()
     }
 
     fn publication_rel_rows(&self) -> Vec<PgPublicationRelRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.publication_rel_rows())
-            .unwrap_or_default()
+        with_backend_catcache(&self.db, self.client_id, self.txn_ctx, |catcache| {
+            catcache.publication_rel_rows()
+        })
+        .unwrap_or_default()
     }
 
     fn publication_namespace_rows(&self) -> Vec<PgPublicationNamespaceRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .map(|catcache| catcache.publication_namespace_rows())
-            .unwrap_or_default()
+        with_backend_catcache(&self.db, self.client_id, self.txn_ctx, |catcache| {
+            catcache.publication_namespace_rows()
+        })
+        .unwrap_or_default()
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {

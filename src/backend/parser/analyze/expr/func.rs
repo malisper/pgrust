@@ -181,18 +181,12 @@ fn bind_row_to_json_arg_expr(
 ) -> Result<(Expr, SqlType), ParseError> {
     match arg {
         SqlExpr::Column(name) => {
-            if let Some(fields) = resolve_relation_row_expr_with_outer(scope, outer_scopes, name) {
-                let descriptor = assign_anonymous_record_descriptor(
-                    fields
-                        .iter()
-                        .map(|(field_name, expr)| {
-                            (
-                                field_name.clone(),
-                                expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
-                            )
-                        })
-                        .collect(),
-                );
+            if let Some(resolved) =
+                resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, name)
+            {
+                let relation_oid = resolved.relation_oid;
+                let fields = resolved.fields;
+                let descriptor = row_to_json_relation_descriptor(relation_oid, &fields, catalog);
                 Ok((
                     Expr::Row {
                         descriptor: descriptor.clone(),
@@ -244,6 +238,45 @@ fn bind_row_to_json_arg_expr(
             ))
         }
     }
+}
+
+fn row_to_json_relation_descriptor(
+    relation_oid: Option<u32>,
+    fields: &[(String, Expr)],
+    catalog: &dyn CatalogLookup,
+) -> RecordDescriptor {
+    if let Some((type_oid, typrelid)) = relation_row_type_identity(catalog, relation_oid)
+        && let Some(relation) = catalog.lookup_relation_by_oid(typrelid)
+    {
+        let columns = relation
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped)
+            .collect::<Vec<_>>();
+        if columns.len() == fields.len() {
+            return RecordDescriptor::named(
+                type_oid,
+                typrelid,
+                -1,
+                columns
+                    .into_iter()
+                    .map(|column| (column.name.clone(), column.sql_type))
+                    .collect(),
+            );
+        }
+    }
+    assign_anonymous_record_descriptor(
+        fields
+            .iter()
+            .map(|(field_name, expr)| {
+                (
+                    field_name.clone(),
+                    expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn bind_json_constructor_arg_expr(
