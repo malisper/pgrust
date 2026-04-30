@@ -7221,6 +7221,170 @@ fn relation_main_fork_size(
     Ok(i64::from(nblocks) * i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32))
 }
 
+fn brin_relation_oid_arg(
+    value: &Value,
+    function_name: &'static str,
+    ctx: &ExecutorContext,
+) -> Result<u32, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    match oid_arg_to_u32(value, function_name) {
+        Ok(oid) => Ok(oid),
+        Err(err) if value.as_text().is_some() => {
+            let relation_name = value.as_text().expect("guarded above");
+            catalog
+                .lookup_any_relation(relation_name)
+                .map(|relation| relation.relation_oid)
+                .ok_or(err)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn brin_block_arg(value: &Value, function_name: &'static str) -> Result<u32, ExecError> {
+    let block = match value {
+        Value::Int16(block) => i64::from(*block),
+        Value::Int32(block) => i64::from(*block),
+        Value::Int64(block) => *block,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: function_name,
+                left: other.clone(),
+                right: Value::Int64(0),
+            });
+        }
+    };
+    if !(0..=i64::from(u32::MAX)).contains(&block) {
+        return Err(ExecError::DetailedError {
+            message: format!("block number out of range: {block}"),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
+        });
+    }
+    Ok(block as u32)
+}
+
+fn brin_maintenance_context(
+    index_oid: u32,
+    function_name: &'static str,
+    ctx: &ExecutorContext,
+) -> Result<crate::include::access::amapi::IndexVacuumContext, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let class = catalog
+        .class_row_by_oid(index_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("could not open relation with OID {index_oid}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let Some(index_row) = catalog.index_row_by_oid(index_oid) else {
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is not an index", class.relname),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    };
+    let Some(heap_relation) = catalog.relation_by_oid(index_row.indrelid) else {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "could not open heap relation with OID {} for index \"{}\"",
+                index_row.indrelid, class.relname
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    let Some(index_relation) = catalog
+        .index_relations_for_heap(index_row.indrelid)
+        .into_iter()
+        .find(|index| index.relation_oid == index_oid)
+    else {
+        return Err(ExecError::DetailedError {
+            message: format!("could not open index \"{}\"", class.relname),
+            detail: None,
+            hint: Some(format!("{function_name} requires a visible index relation")),
+            sqlstate: "XX000",
+        });
+    };
+    if index_relation.index_meta.am_oid != BRIN_AM_OID {
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is not a BRIN index", class.relname),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+
+    Ok(crate::include::access::amapi::IndexVacuumContext {
+        pool: ctx.pool.clone(),
+        txns: ctx.txns.clone(),
+        client_id: ctx.client_id,
+        interrupts: ctx.interrupts.clone(),
+        heap_relation: heap_relation.rel,
+        heap_desc: heap_relation.desc,
+        heap_toast: heap_relation.toast,
+        index_relation: index_relation.rel,
+        index_name: index_relation.name,
+        index_desc: index_relation.desc,
+        index_meta: index_relation.index_meta,
+    })
+}
+
+fn map_brin_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("{err:?}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    }
+}
+
+fn eval_brin_maintenance_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match (func, values) {
+        (BuiltinScalarFunction::BrinSummarizeNewValues, [Value::Null]) => Ok(Value::Null),
+        (BuiltinScalarFunction::BrinSummarizeNewValues, [index]) => {
+            let index_oid = brin_relation_oid_arg(index, "brin_summarize_new_values", ctx)?;
+            let brin_ctx = brin_maintenance_context(index_oid, "brin_summarize_new_values", ctx)?;
+            crate::backend::access::brin::brin_summarize_new_values(&brin_ctx)
+                .map(Value::Int32)
+                .map_err(map_brin_catalog_error)
+        }
+        (BuiltinScalarFunction::BrinSummarizeRange, [Value::Null, _] | [_, Value::Null]) => {
+            Ok(Value::Null)
+        }
+        (BuiltinScalarFunction::BrinSummarizeRange, [index, block]) => {
+            let index_oid = brin_relation_oid_arg(index, "brin_summarize_range", ctx)?;
+            let block = brin_block_arg(block, "brin_summarize_range")?;
+            let brin_ctx = brin_maintenance_context(index_oid, "brin_summarize_range", ctx)?;
+            crate::backend::access::brin::brin_summarize_range(&brin_ctx, block)
+                .map(Value::Int32)
+                .map_err(map_brin_catalog_error)
+        }
+        (BuiltinScalarFunction::BrinDesummarizeRange, [Value::Null, _] | [_, Value::Null]) => {
+            Ok(Value::Null)
+        }
+        (BuiltinScalarFunction::BrinDesummarizeRange, [index, block]) => {
+            let index_oid = brin_relation_oid_arg(index, "brin_desummarize_range", ctx)?;
+            let block = brin_block_arg(block, "brin_desummarize_range")?;
+            let brin_ctx = brin_maintenance_context(index_oid, "brin_desummarize_range", ctx)?;
+            crate::backend::access::brin::brin_desummarize_range(&brin_ctx, block)
+                .map(|_| Value::Null)
+                .map_err(map_brin_catalog_error)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "BRIN maintenance function arguments",
+            actual: format!("{func:?}({} args)", values.len()),
+        })),
+    }
+}
+
 fn eval_pg_table_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let [value] = values else {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -10261,6 +10425,9 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgTsTemplateIsVisible
         | BuiltinScalarFunction::PgTsConfigIsVisible
         | BuiltinScalarFunction::PgTableSize
+        | BuiltinScalarFunction::BrinSummarizeNewValues
+        | BuiltinScalarFunction::BrinSummarizeRange
+        | BuiltinScalarFunction::BrinDesummarizeRange
         | BuiltinScalarFunction::PgTablespaceLocation => Err(ExecError::DetailedError {
             message: "catalog helper requires executor context".into(),
             detail: None,
@@ -12657,6 +12824,11 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgFilenodeRelation => eval_pg_filenode_relation(&values, ctx),
         BuiltinScalarFunction::PgRelationSize => eval_pg_relation_size(&values, ctx),
         BuiltinScalarFunction::PgTableSize => eval_pg_table_size(&values, ctx),
+        BuiltinScalarFunction::BrinSummarizeNewValues
+        | BuiltinScalarFunction::BrinSummarizeRange
+        | BuiltinScalarFunction::BrinDesummarizeRange => {
+            eval_brin_maintenance_function(func, &values, ctx)
+        }
         BuiltinScalarFunction::PgTablespaceLocation => eval_pg_tablespace_location(&values, ctx),
         BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(&values, func_variadic, true)),
         BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(&values, func_variadic, false)),

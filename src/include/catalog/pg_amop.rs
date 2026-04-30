@@ -623,6 +623,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         (BRIN_PG_LSN_MINMAX_FAMILY_OID, PG_LSN_TYPE_OID),
         (BRIN_MACADDR_MINMAX_FAMILY_OID, MACADDR_TYPE_OID),
         (BRIN_MACADDR8_MINMAX_FAMILY_OID, MACADDR8_TYPE_OID),
+        (BRIN_NAME_MINMAX_FAMILY_OID, NAME_TYPE_OID),
         // :HACK: pgrust only executes generic BRIN minmax today. Keep these
         // PostgreSQL-compatible catalog rows visible until generic
         // minmax-multi runtime support lands.

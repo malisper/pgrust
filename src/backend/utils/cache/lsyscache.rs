@@ -1195,6 +1195,13 @@ pub fn default_opclass_for_am_and_type(
     {
         return Some(row.clone());
     }
+    if am_oid == crate::include::catalog::BRIN_AM_OID
+        && input_type_oid == crate::include::catalog::CIDR_TYPE_OID
+    {
+        return opclasses
+            .into_iter()
+            .find(|row| row.oid == crate::include::catalog::INET_BRIN_INCLUSION_OPCLASS_OID);
+    }
     if am_oid == crate::include::catalog::BTREE_AM_OID
         && input_type_oid == crate::include::catalog::VARCHAR_TYPE_OID
     {

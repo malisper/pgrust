@@ -7015,6 +7015,7 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
                 interrupts: ctx.interrupts.clone(),
                 heap_relation: entry.rel,
                 heap_desc: entry.desc.clone(),
+                heap_toast: entry.toast,
                 index_relation: index.rel,
                 index_name: index.name.clone(),
                 index_desc: index.desc.clone(),
@@ -7376,7 +7377,7 @@ fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
         SqlTypeKind::Uuid => opcintype == UUID_TYPE_OID,
         SqlTypeKind::Bit => opcintype == BIT_TYPE_OID,
         SqlTypeKind::VarBit => opcintype == VARBIT_TYPE_OID,
-        SqlTypeKind::Cidr => opcintype == CIDR_TYPE_OID,
+        SqlTypeKind::Cidr => matches!(opcintype, CIDR_TYPE_OID | INET_TYPE_OID),
         SqlTypeKind::Inet => opcintype == INET_TYPE_OID,
         SqlTypeKind::PgLsn => opcintype == PG_LSN_TYPE_OID,
         SqlTypeKind::Composite | SqlTypeKind::Record => opcintype == RECORD_TYPE_OID,
@@ -7610,11 +7611,6 @@ pub fn execute_create_index(
     reject_system_columns_in_index(&key_columns, stmt.predicate_sql.as_deref())?;
     for column in &mut key_columns {
         if let Some(expr_sql) = column.expr_sql.as_deref() {
-            if access_method.oid == BRIN_AM_OID {
-                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                    "BRIN expression indexes".into(),
-                )));
-            }
             column.expr_type = Some(
                 crate::backend::parser::infer_relation_expr_sql_type(
                     expr_sql,

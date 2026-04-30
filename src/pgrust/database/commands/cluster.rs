@@ -512,6 +512,7 @@ fn rebuild_cluster_index(
         snapshot: ctx.snapshot.clone(),
         heap_relation: relation.rel,
         heap_desc: relation.desc.clone(),
+        heap_toast: relation.toast,
         index_relation: index.rel,
         index_name: index.name.clone(),
         index_desc: index.desc.clone(),
