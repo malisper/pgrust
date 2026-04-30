@@ -2313,10 +2313,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::TsLexize => args.len() == 2,
             BuiltinScalarFunction::TsHeadline => matches!(args.len(), 2 | 3 | 4),
             BuiltinScalarFunction::TsQueryNot => args.len() == 1,
+            BuiltinScalarFunction::TsVectorIn | BuiltinScalarFunction::TsQueryIn => {
+                matches!(args.len(), 1 | 3)
+            }
             BuiltinScalarFunction::TsQueryNumnode
-            | BuiltinScalarFunction::TsVectorIn
             | BuiltinScalarFunction::TsVectorOut
-            | BuiltinScalarFunction::TsQueryIn
             | BuiltinScalarFunction::TsQueryOut
             | BuiltinScalarFunction::TsVectorStrip
             | BuiltinScalarFunction::TsVectorToArray
@@ -5951,6 +5952,8 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
             | BuiltinScalarFunction::JsonbPathQueryFirst
+            | BuiltinScalarFunction::TsVectorIn
+            | BuiltinScalarFunction::TsQueryIn
     )
 }
 

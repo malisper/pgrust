@@ -57,6 +57,14 @@ fn validate_jsonpath_text(text: &str) -> Result<(), ExecError> {
 }
 
 fn jsonpath_input_error(text: &str, err: ExecError) -> ExecError {
+    if text.is_empty() {
+        return ExecError::DetailedError {
+            message: "invalid input syntax for type jsonpath: \"\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        };
+    }
     if matches!(err, ExecError::Regex(_) | ExecError::DetailedError { .. }) {
         return err;
     }

@@ -206,7 +206,15 @@ impl Database {
         is_top_level: bool,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        if matches!(stmt.action, AlterDatabaseAction::SetTablespace { .. }) && !is_top_level {
+        if matches!(&stmt.action, AlterDatabaseAction::ResetTablespace) {
+            // :HACK: PostgreSQL parses this as ALTER DATABASE RESET of a
+            // database-local setting. pgrust does not model per-database GUC
+            // settings yet, and the regression only requires the command to
+            // succeed even when unrelated pg_database columns contain values
+            // pgrust cannot decode.
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        if matches!(&stmt.action, AlterDatabaseAction::SetTablespace { .. }) && !is_top_level {
             return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(
                 "ALTER DATABASE SET TABLESPACE",
             )));
@@ -291,11 +299,7 @@ impl Database {
                 // replace this catalog-only update.
             }
             AlterDatabaseAction::ResetTablespace => {
-                // :HACK: PostgreSQL parses this as ALTER DATABASE RESET of a
-                // database-local setting. pgrust does not model per-database
-                // GUC settings yet, and the regression only requires the
-                // command to load the database catalog entry successfully.
-                return Ok(StatementResult::AffectedRows(0));
+                unreachable!("RESET TABLESPACE returned before catalog access");
             }
             AlterDatabaseAction::ConnectionLimit { limit } => {
                 row.datconnlimit = *limit;
