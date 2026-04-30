@@ -30,6 +30,7 @@ mod ops;
 mod subquery;
 mod targets;
 
+pub(super) use self::func::bind_user_defined_scalar_function_call_from_resolved_typed_args;
 use self::func::{
     bind_resolved_user_defined_scalar_function_call, bind_row_to_json_call,
     bind_scalar_function_call, bind_scalar_function_call_from_typed_args,
@@ -70,6 +71,38 @@ use super::ranges::{
     bind_maybe_range_over_position, bind_maybe_range_shift,
 };
 use std::collections::BTreeSet;
+
+pub(super) fn explicit_collation_display_name(
+    expr: &SqlExpr,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let name = explicit_collation_name(expr)?;
+    let oid = resolve_collation_oid(name, catalog).ok()?;
+    catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.oid == oid)
+        .map(|row| format!("\"{}\"", row.collname))
+        .or_else(|| Some(format!("\"{name}\"")))
+}
+
+fn explicit_collation_name(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Collate { collation, .. } => Some(collation.as_str()),
+        SqlExpr::FuncCall {
+            within_group: Some(items),
+            ..
+        } => items
+            .iter()
+            .find_map(|item| explicit_collation_name(&item.expr)),
+        SqlExpr::Cast(expr, _)
+        | SqlExpr::UnaryPlus(expr)
+        | SqlExpr::Negate(expr)
+        | SqlExpr::BitNot(expr)
+        | SqlExpr::Not(expr) => explicit_collation_name(expr),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TypedExpr {
@@ -2236,10 +2269,15 @@ fn bind_visible_outer_aggregate_call(
     _grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Option<Expr>, ParseError> {
+    let within_group_aggkind = (!order_by.is_empty())
+        .then(|| aggregate_call_kind_matches_catalog(catalog, name, args, Some(order_by)))
+        .flatten();
+    let builtin_hypothetical = resolve_builtin_hypothetical_aggregate(name).is_some();
+    let builtin_ordered_set = resolve_builtin_ordered_set_aggregate(name).is_some();
     let hypothetical =
-        resolve_builtin_hypothetical_aggregate(name).is_some() && !direct_args.is_empty();
+        (builtin_hypothetical || within_group_aggkind == Some('h')) && !direct_args.is_empty();
     let ordered_set =
-        resolve_builtin_ordered_set_aggregate(name).is_some() && !direct_args.is_empty();
+        (builtin_ordered_set || within_group_aggkind == Some('o')) && !order_by.is_empty();
     let Some((aggno, visible_scope)) = match_visible_aggregate_call(
         name,
         direct_args,
@@ -2283,6 +2321,23 @@ fn bind_visible_outer_aggregate_call(
             )
         })
         .collect::<Vec<_>>();
+    let direct_arg_types = if hypothetical || ordered_set {
+        direct_args
+            .iter()
+            .map(|arg| {
+                infer_sql_expr_type_with_ctes(
+                    &arg.value,
+                    owner_scope,
+                    catalog,
+                    owner_outer_scopes,
+                    None,
+                    ctes,
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let resolved = if hypothetical || ordered_set {
         None
     } else {
@@ -2401,80 +2456,107 @@ fn bind_visible_outer_aggregate_call(
             return Err(set_returning_not_allowed_error("aggregate ORDER BY"));
         }
     }
-    let (coerced_direct_args, coerced_args, bound_order_by) = if hypothetical {
-        let direct_arg_types = direct_args
-            .iter()
-            .map(|arg| {
-                infer_sql_expr_type_with_ctes(
-                    &arg.value,
-                    owner_scope,
-                    catalog,
-                    owner_outer_scopes,
-                    None,
-                    ctes,
-                )
-            })
-            .collect::<Vec<_>>();
-        coerce_hypothetical_aggregate_inputs(
-            name,
-            direct_args,
-            &direct_arg_types,
-            bound_direct_args,
-            args.args(),
-            &arg_types,
-            bound_args,
-            order_by,
-            bound_order_exprs,
-            catalog,
-        )?
-    } else if ordered_set {
-        let direct_arg_types = direct_args
-            .iter()
-            .map(|arg| {
-                infer_sql_expr_type_with_ctes(
-                    &arg.value,
-                    owner_scope,
-                    catalog,
-                    owner_outer_scopes,
-                    None,
-                    ctes,
-                )
-            })
-            .collect::<Vec<_>>();
-        coerce_ordered_set_aggregate_inputs(
-            name,
-            direct_args,
-            &direct_arg_types,
-            bound_direct_args,
-            args.args(),
-            &arg_types,
-            bound_args,
-            order_by,
-            bound_order_exprs,
-            catalog,
-        )?
-    } else {
-        let bound_order_by = bound_order_exprs
-            .into_iter()
-            .zip(order_by.iter())
-            .map(|(bound_expr, item)| build_bound_order_by_entry(item, bound_expr, 0, catalog))
-            .collect::<Result<Vec<_>, ParseError>>()?;
-        let resolved = resolved
-            .as_ref()
-            .expect("non-hypothetical aggregate resolution should exist");
-        let coerced_args = bound_args
-            .into_iter()
-            .zip(arg_types.iter().copied())
-            .zip(resolved.declared_arg_types.iter().copied())
-            .map(|((arg, actual_type), declared_type)| {
-                coerce_bound_expr(arg, actual_type, declared_type)
-            })
-            .collect();
-        let coerced_args =
-            preserve_array_agg_array_arg_type(resolved.builtin_impl, &arg_types, coerced_args);
-        (Vec::new(), coerced_args, bound_order_by)
-    };
-    let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
+    let (coerced_direct_args, coerced_args, bound_order_by) =
+        if hypothetical && builtin_hypothetical {
+            let direct_arg_types = direct_args
+                .iter()
+                .map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        owner_scope,
+                        catalog,
+                        owner_outer_scopes,
+                        None,
+                        ctes,
+                    )
+                })
+                .collect::<Vec<_>>();
+            coerce_hypothetical_aggregate_inputs(
+                name,
+                direct_args,
+                &direct_arg_types,
+                bound_direct_args,
+                args.args(),
+                &arg_types,
+                bound_args,
+                order_by,
+                bound_order_exprs,
+                catalog,
+            )?
+        } else if ordered_set && builtin_ordered_set {
+            let direct_arg_types = direct_args
+                .iter()
+                .map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        owner_scope,
+                        catalog,
+                        owner_outer_scopes,
+                        None,
+                        ctes,
+                    )
+                })
+                .collect::<Vec<_>>();
+            coerce_ordered_set_aggregate_inputs(
+                name,
+                direct_args,
+                &direct_arg_types,
+                bound_direct_args,
+                args.args(),
+                &arg_types,
+                bound_args,
+                order_by,
+                bound_order_exprs,
+                catalog,
+            )?
+        } else if hypothetical || ordered_set {
+            let expected_aggkind = if hypothetical { 'h' } else { 'o' };
+            let resolved_catalog = resolve_catalog_within_group_aggregate_call(
+                catalog,
+                name,
+                &direct_arg_types,
+                &arg_types,
+                func_variadic,
+                expected_aggkind,
+            )
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "supported aggregate",
+                actual: name.to_string(),
+            })?;
+            coerce_catalog_within_group_aggregate_inputs(
+                direct_args,
+                &direct_arg_types,
+                bound_direct_args,
+                args.args(),
+                &arg_types,
+                bound_args,
+                order_by,
+                bound_order_exprs,
+                &resolved_catalog.declared_arg_types,
+                catalog,
+            )?
+        } else {
+            let bound_order_by = bound_order_exprs
+                .into_iter()
+                .zip(order_by.iter())
+                .map(|(bound_expr, item)| build_bound_order_by_entry(item, bound_expr, 0, catalog))
+                .collect::<Result<Vec<_>, ParseError>>()?;
+            let resolved = resolved
+                .as_ref()
+                .expect("non-hypothetical aggregate resolution should exist");
+            let coerced_args = bound_args
+                .into_iter()
+                .zip(arg_types.iter().copied())
+                .zip(resolved.declared_arg_types.iter().copied())
+                .map(|((arg, actual_type), declared_type)| {
+                    coerce_bound_expr(arg, actual_type, declared_type)
+                })
+                .collect();
+            let coerced_args =
+                preserve_array_agg_array_arg_type(resolved.builtin_impl, &arg_types, coerced_args);
+            (Vec::new(), coerced_args, bound_order_by)
+        };
+    let (aggfnoid, aggtype, aggvariadic) = if hypothetical && builtin_hypothetical {
         let resolved = resolve_hypothetical_aggregate_call(name).ok_or_else(|| {
             ParseError::UnexpectedToken {
                 expected: "supported aggregate",
@@ -2482,14 +2564,32 @@ fn bind_visible_outer_aggregate_call(
             }
         })?;
         (resolved.proc_oid, resolved.result_type, false)
-    } else if ordered_set {
-        let resolved = resolve_ordered_set_aggregate_call(name, &arg_types).ok_or_else(|| {
-            ParseError::UnexpectedToken {
+    } else if ordered_set && builtin_ordered_set {
+        let resolved = resolve_ordered_set_aggregate_call(name, &direct_arg_types, &arg_types)
+            .ok_or_else(|| ParseError::UnexpectedToken {
                 expected: "supported aggregate",
                 actual: name.to_string(),
-            }
-        })?;
+            })?;
         (resolved.proc_oid, resolved.result_type, false)
+    } else if hypothetical || ordered_set {
+        let expected_aggkind = if hypothetical { 'h' } else { 'o' };
+        let resolved = resolve_catalog_within_group_aggregate_call(
+            catalog,
+            name,
+            &direct_arg_types,
+            &arg_types,
+            func_variadic,
+            expected_aggkind,
+        )
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "supported aggregate",
+            actual: name.to_string(),
+        })?;
+        (
+            resolved.proc_oid,
+            resolved.result_type,
+            resolved.func_variadic,
+        )
     } else {
         let resolved = resolved
             .as_ref()
@@ -5471,6 +5571,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if within_group.is_some()
                 && resolve_builtin_hypothetical_aggregate(name).is_none()
                 && resolve_builtin_ordered_set_aggregate(name).is_none()
+                && aggregate_call_kind_matches_catalog(catalog, name, args, within_group.as_deref())
+                    .is_none()
             {
                 return Err(not_ordered_set_aggregate_error(name));
             }
@@ -5609,6 +5711,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     Box::new(Expr::Const(Value::Int64(UNKNOWN_TYPE_OID as i64))),
                     SqlType::new(SqlTypeKind::RegType),
                 ));
+            }
+            if name.eq_ignore_ascii_case("pg_collation_for")
+                && !*func_variadic
+                && args_list.len() == 1
+                && args_list[0].name.is_none()
+            {
+                return Ok(Expr::Const(Value::Text(
+                    explicit_collation_display_name(&args_list[0].value, catalog)
+                        .unwrap_or_default()
+                        .into(),
+                )));
             }
             if !*func_variadic
                 && !name.eq_ignore_ascii_case("pg_lsn")

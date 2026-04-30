@@ -9665,6 +9665,36 @@ fn unnest_single_and_multi_arg_work() {
 }
 
 #[test]
+fn unnest_multidimensional_array_flattens_storage_order() {
+    let base = temp_dir("unnest_multidimensional_array");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from unnest(ARRAY[[1, 2], [3, 4]]) as u(x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["x"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                    vec![Value::Int32(4)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn unnest_composite_array_expands_record_fields() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);

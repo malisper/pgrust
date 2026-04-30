@@ -507,6 +507,7 @@ fn validate_view_shape(
 ) -> Result<(), ParseError> {
     validate_view_function_target_columns(query, catalog)?;
     let actual_columns = query.columns();
+    let values_query = query_is_single_values_rte(query);
     if actual_columns.len() != relation_desc.columns.len() {
         if actual_columns.len() > relation_desc.columns.len()
             && prune_added_view_columns_by_name(query, &actual_columns, relation_desc)
@@ -523,7 +524,32 @@ fn validate_view_shape(
         .zip(relation_desc.columns.iter())
         .enumerate()
     {
-        if actual_column.sql_type != stored_column.sql_type {
+        if actual_column.name != stored_column.name
+            && !values_query
+            && !query
+                .columns()
+                .iter()
+                .skip(index)
+                .any(|column| column.name == stored_column.name)
+        {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "attribute {} of type record has been dropped",
+                    dropped_view_attribute_number(
+                        query,
+                        catalog,
+                        query.target_list.get(index),
+                        index,
+                        &stored_column.name,
+                        &actual_column.name,
+                    )
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
+        }
+        if !view_column_sql_types_compatible(actual_column.sql_type, stored_column.sql_type) {
             return Err(ParseError::DetailedError {
                 message: format!(
                     "attribute {} of type record has wrong type",
@@ -543,6 +569,24 @@ fn validate_view_shape(
         }
     }
     Ok(())
+}
+
+fn query_is_single_values_rte(query: &Query) -> bool {
+    query.rtable.len() == 1
+        && matches!(
+            query.rtable.first().map(|rte| &rte.kind),
+            Some(RangeTblEntryKind::Values { .. })
+        )
+}
+
+fn view_column_sql_types_compatible(actual: SqlType, stored: SqlType) -> bool {
+    if actual == stored {
+        return true;
+    }
+    actual.is_array
+        && stored.is_array
+        && matches!(actual.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+        && matches!(stored.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
 }
 
 fn validate_view_function_target_columns(
@@ -741,6 +785,148 @@ fn prune_added_view_columns_by_name(
         keep
     });
     true
+}
+
+fn dropped_view_attribute_number(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    target: Option<&TargetEntry>,
+    index: usize,
+    stored_name: &str,
+    actual_name: &str,
+) -> usize {
+    if let Some(attr_index) = dropped_attr_from_query_function_call(
+        query,
+        catalog,
+        target,
+        index,
+        stored_name,
+        actual_name,
+    ) {
+        return attr_index.saturating_add(1);
+    }
+    if let Some(Expr::Var(var)) = target.map(|target| &target.expr)
+        && var.varno > 0
+        && let Some(rte) = query.rtable.get(var.varno.saturating_sub(1))
+    {
+        if let Some(attr_index) = dropped_attr_before_actual_column(&rte.desc, actual_name) {
+            return attr_index.saturating_add(1);
+        }
+        if let Some((attr_index, _)) = rte
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.dropped && column.name == stored_name)
+        {
+            return attr_index.saturating_add(1);
+        }
+    }
+    if let Some(attr_index) = query
+        .rtable
+        .iter()
+        .filter_map(|rte| dropped_attr_before_actual_column(&rte.desc, actual_name))
+        .next()
+    {
+        return attr_index.saturating_add(1);
+    }
+    index.saturating_add(1)
+}
+
+fn dropped_attr_from_query_function_call(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    target: Option<&TargetEntry>,
+    index: usize,
+    stored_name: &str,
+    actual_name: &str,
+) -> Option<usize> {
+    if let Some(Expr::Var(var)) = target.map(|target| &target.expr)
+        && var.varno > 0
+        && let Some(rte) = query.rtable.get(var.varno.saturating_sub(1))
+        && let RangeTblEntryKind::Function { call } = &rte.kind
+    {
+        let rte_index = attrno_index(var.varattno).unwrap_or(index);
+        if let Some(attr_index) =
+            dropped_attr_from_call(call, catalog, rte_index, stored_name, actual_name)
+        {
+            return Some(attr_index);
+        }
+    }
+    query.rtable.iter().find_map(|rte| match &rte.kind {
+        RangeTblEntryKind::Function { call } => {
+            dropped_attr_from_call(call, catalog, index, stored_name, actual_name)
+        }
+        _ => None,
+    })
+}
+
+fn dropped_attr_from_call(
+    call: &SetReturningCall,
+    catalog: &dyn CatalogLookup,
+    index: usize,
+    stored_name: &str,
+    actual_name: &str,
+) -> Option<usize> {
+    match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            let mut offset = 0usize;
+            for item in items {
+                let width = item.output_columns().len();
+                if index < offset.saturating_add(width) {
+                    return match &item.source {
+                        RowsFromSource::Function(call) => dropped_attr_from_call(
+                            call,
+                            catalog,
+                            index.saturating_sub(offset),
+                            stored_name,
+                            actual_name,
+                        ),
+                        RowsFromSource::Project { .. } => None,
+                    };
+                }
+                offset = offset.saturating_add(width);
+            }
+            None
+        }
+        SetReturningCall::UserDefined { proc_oid, .. } => {
+            dropped_attr_from_proc_return(catalog, *proc_oid, stored_name, actual_name)
+        }
+        _ => None,
+    }
+}
+
+fn dropped_attr_from_proc_return(
+    catalog: &dyn CatalogLookup,
+    proc_oid: u32,
+    stored_name: &str,
+    actual_name: &str,
+) -> Option<usize> {
+    let proc_row = catalog.proc_row_by_oid(proc_oid)?;
+    let return_type = catalog.type_by_oid(proc_row.prorettype)?;
+    let relation = catalog.relation_by_oid(return_type.typrelid)?;
+    dropped_attr_before_actual_column(&relation.desc, actual_name).or_else(|| {
+        relation
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.dropped && column.name == stored_name)
+            .map(|(index, _)| index)
+    })
+}
+
+fn dropped_attr_before_actual_column(desc: &RelationDesc, actual_name: &str) -> Option<usize> {
+    let actual_index = desc
+        .columns
+        .iter()
+        .position(|column| !column.dropped && column.name == actual_name)?;
+    desc.columns
+        .iter()
+        .enumerate()
+        .take(actual_index)
+        .rev()
+        .find_map(|(index, column)| column.dropped.then_some(index))
 }
 
 fn apply_relation_desc_target_names(query: &mut Query, relation_desc: &RelationDesc) {

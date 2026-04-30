@@ -31,7 +31,9 @@ use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, jsonb_to_value, parse_json_text_input, parse_jsonb_text,
     parse_jsonb_text_with_limit, render_jsonb_bytes, validate_json_text_input_with_limit,
 };
-use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
+use crate::backend::libpq::pqformat::{
+    FloatFormatOptions, format_bytea_text, format_float4_text, format_float8_text,
+};
 use crate::backend::parser::{
     CatalogLookup, DomainConstraintLookupKind, ParseError, RawTypeName, SqlType, SqlTypeKind,
     parse_type_name, resolve_raw_type_name,
@@ -59,6 +61,7 @@ use crate::include::nodes::datetime::{
 };
 use crate::include::nodes::datum::{ArrayDimension, BitString, RecordDescriptor, RecordValue};
 use crate::pgrust::compact_string::CompactString;
+use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
@@ -5716,6 +5719,12 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         Value::Bytea(bytes) => {
             match ty.kind {
                 SqlTypeKind::Bytea => Ok(Value::Bytea(bytes)),
+                SqlTypeKind::Text
+                | SqlTypeKind::Name
+                | SqlTypeKind::Char
+                | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
+                    format_bytea_text(&bytes, ByteaOutputFormat::Hex),
+                ))),
                 SqlTypeKind::Int2 => bytea_to_signed_int(&bytes, 2, "smallint")
                     .map(|value| Value::Int16(value as i16)),
                 SqlTypeKind::Int4 => bytea_to_signed_int(&bytes, 4, "integer")

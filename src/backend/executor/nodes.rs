@@ -9122,16 +9122,77 @@ fn expr_is_plain_aggregate_safe(expr: &Expr) -> bool {
     }
 }
 
+fn aggregate_state_share_owners(
+    accumulators: &[AggAccum],
+    runtimes: &[AggregateRuntime],
+) -> Vec<usize> {
+    let mut owners = Vec::with_capacity(accumulators.len());
+    for i in 0..accumulators.len() {
+        let owner = (0..i)
+            .find(|&candidate| {
+                custom_aggregate_states_are_shareable(
+                    &accumulators[candidate],
+                    &runtimes[candidate],
+                    &accumulators[i],
+                    &runtimes[i],
+                )
+            })
+            .map(|candidate| owners[candidate])
+            .unwrap_or(i);
+        owners.push(owner);
+    }
+    owners
+}
+
+fn custom_aggregate_states_are_shareable(
+    left_accum: &AggAccum,
+    left_runtime: &AggregateRuntime,
+    right_accum: &AggAccum,
+    right_runtime: &AggregateRuntime,
+) -> bool {
+    let (AggregateRuntime::Custom(left), AggregateRuntime::Custom(right)) =
+        (left_runtime, right_runtime)
+    else {
+        return false;
+    };
+    left.transfn_oid == right.transfn_oid
+        && left.transfn_strict == right.transfn_strict
+        && left.combinefn_oid == right.combinefn_oid
+        && left.combinefn_strict == right.combinefn_strict
+        && left.transtype == right.transtype
+        && left.transfn_arg_types == right.transfn_arg_types
+        && left.combinefn_arg_types == right.combinefn_arg_types
+        && left.init_value == right.init_value
+        && left_accum.args == right_accum.args
+        && left_accum.direct_args == right_accum.direct_args
+        && left_accum.order_by == right_accum.order_by
+        && left_accum.filter == right_accum.filter
+        && left_accum.distinct == right_accum.distinct
+        && left_accum.agg_variadic == right_accum.agg_variadic
+}
+
 fn execute_plain_aggregate_fast_path(
     state: &mut AggregateState,
     runtimes: &[AggregateRuntime],
     ctx: &mut ExecutorContext,
 ) -> Result<Option<Vec<MaterializedRow>>, ExecError> {
+    let state_share_owners = aggregate_state_share_owners(&state.accumulators, runtimes);
     let mut accum_states = runtimes
         .iter()
         .zip(state.accumulators.iter())
         .map(|(runtime, accum)| runtime.initialize_state(accum))
         .collect::<Vec<_>>();
+    let custom_combine_states = runtimes
+        .iter()
+        .zip(state.accumulators.iter())
+        .map(|(runtime, accum)| {
+            runtime
+                .supports_custom_combine()
+                .then(|| runtime.initialize_state(accum))
+        })
+        .collect::<Vec<_>>();
+    let mut custom_combine_states = custom_combine_states;
+    let mut custom_combine_state_has_rows = vec![false; runtimes.len()];
     let const_arg_values = state
         .accumulators
         .iter()
@@ -9147,41 +9208,59 @@ fn execute_plain_aggregate_fast_path(
         })
         .collect::<Vec<_>>();
 
+    let mut input_row_index = 0usize;
     while let Some(slot) = state.input.exec_proc_node(ctx)? {
         ctx.check_for_interrupts()?;
         clear_inner_expr_bindings(ctx);
         for (i, accum) in state.accumulators.iter().enumerate() {
+            if state_share_owners[i] != i {
+                continue;
+            }
+            let use_combine_state = input_row_index % 2 == 1 && custom_combine_states[i].is_some();
+            let target_state = if use_combine_state {
+                custom_combine_state_has_rows[i] = true;
+                custom_combine_states[i]
+                    .as_mut()
+                    .expect("combine state exists")
+            } else {
+                &mut accum_states[i]
+            };
             if let Some(values) = const_arg_values[i].as_ref() {
-                runtimes[i].transition(&mut accum_states[i], values, ctx)?;
+                runtimes[i].transition(target_state, values, ctx)?;
                 continue;
             }
             match accum.args.as_slice() {
-                [] => runtimes[i].transition(&mut accum_states[i], &[], ctx)?,
+                [] => runtimes[i].transition(target_state, &[], ctx)?,
                 [arg] => {
                     let value = eval_expr(arg, slot, ctx)?;
-                    runtimes[i].transition(
-                        &mut accum_states[i],
-                        std::slice::from_ref(&value),
-                        ctx,
-                    )?;
+                    runtimes[i].transition(target_state, std::slice::from_ref(&value), ctx)?;
                 }
                 args => {
                     let values = args
                         .iter()
                         .map(|arg| eval_expr(arg, slot, ctx))
                         .collect::<Result<Vec<_>, _>>()?;
-                    runtimes[i].transition(&mut accum_states[i], &values, ctx)?;
+                    runtimes[i].transition(target_state, &values, ctx)?;
                 }
             }
         }
+        input_row_index += 1;
+    }
+
+    for (i, runtime) in runtimes.iter().enumerate() {
+        if state_share_owners[i] != i || !custom_combine_state_has_rows[i] {
+            continue;
+        }
+        let partial = custom_combine_states[i]
+            .as_ref()
+            .expect("combine state exists")
+            .finalize();
+        runtime.combine_partial(&state.accumulators[i], &mut accum_states[i], &partial, ctx)?;
     }
 
     let mut row_values = Vec::with_capacity(state.accumulators.len());
-    for ((runtime, accum_state), accum) in runtimes
-        .iter()
-        .zip(accum_states.iter())
-        .zip(state.accumulators.iter())
-    {
+    for (i, (runtime, accum)) in runtimes.iter().zip(state.accumulators.iter()).enumerate() {
+        let accum_state = &accum_states[state_share_owners[i]];
         row_values.push(runtime.finalize(accum, accum_state, &[], &[], ctx)?);
     }
 
@@ -9202,10 +9281,22 @@ fn new_aggregate_group(
         .zip(accumulators.iter())
         .map(|(runtime, accum)| runtime.initialize_state(accum))
         .collect();
+    let custom_combine_states = runtimes
+        .iter()
+        .zip(accumulators.iter())
+        .map(|(runtime, accum)| {
+            runtime
+                .supports_custom_combine()
+                .then(|| runtime.initialize_state(accum))
+        })
+        .collect::<Vec<_>>();
     AggGroup {
         key_values,
         passthrough_values,
         accum_states,
+        custom_combine_state_has_rows: vec![false; custom_combine_states.len()],
+        custom_combine_states,
+        input_row_index: 0,
         distinct_inputs: accumulators
             .iter()
             .map(|accum| accum.distinct.then(Vec::new))
@@ -9220,6 +9311,7 @@ fn advance_aggregate_group(
     group: &mut AggGroup,
     accumulators: &[AggAccum],
     runtimes: &[AggregateRuntime],
+    state_share_owners: &[usize],
     phase: AggregatePhase,
     group_by_len: usize,
     passthrough_len: usize,
@@ -9228,6 +9320,9 @@ fn advance_aggregate_group(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for (i, accum) in accumulators.iter().enumerate() {
+        if state_share_owners[i] != i {
+            continue;
+        }
         if phase == AggregatePhase::Finalize {
             let partial_index = group_by_len + passthrough_len + i;
             let partial = outer_values
@@ -9237,6 +9332,8 @@ fn advance_aggregate_group(
             runtimes[i].combine_partial(accum, &mut group.accum_states[i], &partial, ctx)?;
             continue;
         }
+        let can_use_custom_combine_state =
+            accum.order_by.is_empty() && !accum.distinct && accum.filter.is_none();
         if let Some(filter) = accum.filter.as_ref() {
             match eval_expr(filter, slot, ctx)? {
                 Value::Bool(true) => {}
@@ -9258,8 +9355,19 @@ fn advance_aggregate_group(
             }
             seen_inputs.push(values.clone());
         }
+        let use_combine_state = can_use_custom_combine_state
+            && group.input_row_index % 2 == 1
+            && group.custom_combine_states[i].is_some();
+        let target_state = if use_combine_state {
+            group.custom_combine_state_has_rows[i] = true;
+            group.custom_combine_states[i]
+                .as_mut()
+                .expect("combine state exists")
+        } else {
+            &mut group.accum_states[i]
+        };
         if accum.order_by.is_empty() {
-            runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
+            runtimes[i].transition(target_state, &values, ctx)?;
         } else {
             let sort_keys = accum
                 .order_by
@@ -9272,6 +9380,33 @@ fn advance_aggregate_group(
             });
         }
     }
+    if phase != AggregatePhase::Finalize {
+        group.input_row_index += 1;
+    }
+    Ok(())
+}
+
+fn finish_custom_combine_states(
+    group: &mut AggGroup,
+    accumulators: &[AggAccum],
+    runtimes: &[AggregateRuntime],
+    state_share_owners: &[usize],
+    phase: AggregatePhase,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if phase != AggregatePhase::Complete {
+        return Ok(());
+    }
+    for (i, runtime) in runtimes.iter().enumerate() {
+        if state_share_owners[i] != i || !group.custom_combine_state_has_rows[i] {
+            continue;
+        }
+        let partial = group.custom_combine_states[i]
+            .as_ref()
+            .expect("combine state exists")
+            .finalize();
+        runtime.combine_partial(&accumulators[i], &mut group.accum_states[i], &partial, ctx)?;
+    }
     Ok(())
 }
 
@@ -9279,6 +9414,7 @@ fn finish_ordered_aggregate_inputs(
     group: &mut AggGroup,
     accumulators: &[AggAccum],
     runtimes: &[AggregateRuntime],
+    state_share_owners: &[usize],
     phase: AggregatePhase,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
@@ -9286,6 +9422,9 @@ fn finish_ordered_aggregate_inputs(
         return Ok(());
     }
     for (i, accum) in accumulators.iter().enumerate() {
+        if state_share_owners[i] != i {
+            continue;
+        }
         if accum.order_by.is_empty() {
             continue;
         }
@@ -9353,6 +9492,7 @@ impl PlanNode for AggregateState {
                 .runtimes
                 .clone()
                 .expect("aggregate runtimes initialized above");
+            let state_share_owners = aggregate_state_share_owners(&self.accumulators, &runtimes);
             if aggregate_uses_plain_fast_path(self)
                 && let Some(result_rows) = execute_plain_aggregate_fast_path(self, &runtimes, ctx)?
             {
@@ -9450,6 +9590,7 @@ impl PlanNode for AggregateState {
                         group,
                         &self.accumulators,
                         &runtimes,
+                        &state_share_owners,
                         self.phase,
                         self.group_by.len(),
                         self.passthrough_exprs.len(),
@@ -9463,6 +9604,7 @@ impl PlanNode for AggregateState {
                         group,
                         &self.accumulators,
                         &runtimes,
+                        &state_share_owners,
                         self.phase,
                         self.group_by.len(),
                         self.passthrough_exprs.len(),
@@ -9501,6 +9643,15 @@ impl PlanNode for AggregateState {
                     group,
                     &self.accumulators,
                     &runtimes,
+                    &state_share_owners,
+                    self.phase,
+                    ctx,
+                )?;
+                finish_custom_combine_states(
+                    group,
+                    &self.accumulators,
+                    &runtimes,
+                    &state_share_owners,
                     self.phase,
                     ctx,
                 )?;
@@ -9510,6 +9661,15 @@ impl PlanNode for AggregateState {
                     group,
                     &self.accumulators,
                     &runtimes,
+                    &state_share_owners,
+                    self.phase,
+                    ctx,
+                )?;
+                finish_custom_combine_states(
+                    group,
+                    &self.accumulators,
+                    &runtimes,
+                    &state_share_owners,
                     self.phase,
                     ctx,
                 )?;
@@ -9532,12 +9692,11 @@ impl PlanNode for AggregateState {
                 };
                 let mut row_values = group.key_values.clone();
                 row_values.extend(group.passthrough_values.iter().cloned());
-                for (i, ((runtime, accum_state), accum)) in runtimes
-                    .iter()
-                    .zip(group.accum_states.iter())
-                    .zip(self.accumulators.iter())
-                    .enumerate()
+                for (i, (runtime, accum)) in
+                    runtimes.iter().zip(self.accumulators.iter()).enumerate()
                 {
+                    let state_owner = state_share_owners[i];
+                    let accum_state = &group.accum_states[state_owner];
                     if self.phase == AggregatePhase::Partial {
                         row_values.push(runtime.partial_value(accum, accum_state)?);
                         continue;
@@ -9566,7 +9725,7 @@ impl PlanNode for AggregateState {
                     row_values.push(runtime.finalize(
                         accum,
                         accum_state,
-                        &group.ordered_inputs[i],
+                        &group.ordered_inputs[state_owner],
                         &direct_arg_values,
                         ctx,
                     )?);

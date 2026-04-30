@@ -390,12 +390,22 @@ impl HypotheticalAggFunc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderedSetAggFunc {
     PercentileDisc,
+    PercentileDiscMulti,
+    PercentileCont,
+    PercentileContMulti,
+    Mode,
 }
 
 impl OrderedSetAggFunc {
     pub fn name(&self) -> &'static str {
         match self {
-            OrderedSetAggFunc::PercentileDisc => "percentile_disc",
+            OrderedSetAggFunc::PercentileDisc | OrderedSetAggFunc::PercentileDiscMulti => {
+                "percentile_disc"
+            }
+            OrderedSetAggFunc::PercentileCont | OrderedSetAggFunc::PercentileContMulti => {
+                "percentile_cont"
+            }
+            OrderedSetAggFunc::Mode => "mode",
         }
     }
 }
@@ -910,6 +920,7 @@ pub enum BuiltinScalarFunction {
     Int4Pl,
     Int4Mi,
     Int4Smaller,
+    Int4Sum,
     Int8Inc,
     Int8IncAny,
     Int4AvgAccum,

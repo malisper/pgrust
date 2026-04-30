@@ -2730,13 +2730,13 @@ fn eval_unnest(
                 arrays.push(Some(values));
             }
             Value::PgArray(array) => {
-                let values = array.to_nested_values();
+                let values = unnest_array_values(array);
                 max_len = max_len.max(values.len());
                 arrays.push(Some(values));
             }
             other => {
                 if let Some(array) = normalize_array_value(&other) {
-                    let values = array.to_nested_values();
+                    let values = unnest_array_values(array);
                     max_len = max_len.max(values.len());
                     arrays.push(Some(values));
                     continue;
@@ -2746,7 +2746,7 @@ fn eval_unnest(
                         && matches!(ty.kind, SqlTypeKind::Int2Vector | SqlTypeKind::OidVector)
                 }) && let Some(array) = normalize_array_value(&other)
                 {
-                    let values = array.to_nested_values();
+                    let values = unnest_array_values(array);
                     max_len = max_len.max(values.len());
                     arrays.push(Some(values));
                     continue;
@@ -2797,6 +2797,10 @@ fn eval_unnest(
         rows.push(TupleSlot::virtual_row(row));
     }
     Ok(rows)
+}
+
+fn unnest_array_values(array: ArrayValue) -> Vec<Value> {
+    array.elements
 }
 
 fn unnest_expands_single_composite_arg(args: &[Expr], output_columns: &[QueryColumn]) -> bool {

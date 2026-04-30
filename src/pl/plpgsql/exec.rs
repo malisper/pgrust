@@ -574,19 +574,33 @@ fn execute_user_defined_scalar_function_values_with_actual_arg_types(
 ) -> Result<Value, ExecError> {
     let compiled = compiled_function_for_proc(proc_oid, None, actual_arg_types, ctx)?;
 
-    let FunctionReturnContract::Scalar { setof, ty, .. } = &compiled.return_contract else {
-        return Err(function_runtime_error(
-            "record-returning function called in scalar context",
-            None,
-            "0A000",
-        ));
-    };
-    if *setof {
-        return Err(function_runtime_error(
-            "set-returning function called in scalar context",
-            None,
-            "0A000",
-        ));
+    match &compiled.return_contract {
+        FunctionReturnContract::Scalar { setof: true, .. }
+        | FunctionReturnContract::FixedRow { setof: true, .. }
+        | FunctionReturnContract::AnonymousRecord { setof: true } => {
+            return Err(function_runtime_error(
+                "set-returning function called in scalar context",
+                None,
+                "0A000",
+            ));
+        }
+        FunctionReturnContract::Trigger { .. } => {
+            return Err(function_runtime_error(
+                "trigger function called in scalar context",
+                None,
+                "0A000",
+            ));
+        }
+        FunctionReturnContract::EventTrigger { .. } => {
+            return Err(function_runtime_error(
+                "event trigger function called in scalar context",
+                None,
+                "0A000",
+            ));
+        }
+        FunctionReturnContract::Scalar { .. }
+        | FunctionReturnContract::FixedRow { .. }
+        | FunctionReturnContract::AnonymousRecord { setof: false } => {}
     }
 
     let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
@@ -605,12 +619,39 @@ fn execute_user_defined_scalar_function_values_with_actual_arg_types(
         )
     })?;
     let values = row.values()?;
-    match values {
-        [value] => cast_function_scalar_return_value(value.clone(), *ty),
-        other => Err(function_runtime_error(
-            "scalar function returned an unexpected row shape",
-            Some(format!("expected 1 column, got {}", other.len())),
-            "42804",
+    match &compiled.return_contract {
+        FunctionReturnContract::Scalar { ty, .. } => match values {
+            [value] => cast_function_scalar_return_value(value.clone(), *ty),
+            other => Err(function_runtime_error(
+                "scalar function returned an unexpected row shape",
+                Some(format!("expected 1 column, got {}", other.len())),
+                "42804",
+            )),
+        },
+        FunctionReturnContract::FixedRow { columns, .. } => {
+            let descriptor = anonymous_record_descriptor_for_columns(columns);
+            Ok(Value::Record(RecordValue::from_descriptor(
+                descriptor,
+                values.to_vec(),
+            )))
+        }
+        FunctionReturnContract::AnonymousRecord { .. } => match values {
+            [value] => Ok(value.clone()),
+            other => Err(function_runtime_error(
+                "record function returned an unexpected row shape",
+                Some(format!("expected 1 column, got {}", other.len())),
+                "42804",
+            )),
+        },
+        FunctionReturnContract::Trigger { .. } => Err(function_runtime_error(
+            "trigger function called in scalar context",
+            None,
+            "0A000",
+        )),
+        FunctionReturnContract::EventTrigger { .. } => Err(function_runtime_error(
+            "event trigger function called in scalar context",
+            None,
+            "0A000",
         )),
     }
 }

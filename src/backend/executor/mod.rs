@@ -614,6 +614,17 @@ impl ExecutorContext {
         stack_depth::check_stack_depth(self.datetime_config.max_stack_depth_kb)
     }
 
+    pub fn bytea_output(&self) -> crate::pgrust::session::ByteaOutputFormat {
+        match self
+            .gucs
+            .get("bytea_output")
+            .map(|value| value.trim().to_ascii_lowercase())
+        {
+            Some(value) if value == "escape" => crate::pgrust::session::ByteaOutputFormat::Escape,
+            _ => crate::pgrust::session::ByteaOutputFormat::Hex,
+        }
+    }
+
     pub fn transaction_xid(&self) -> Option<TransactionId> {
         if self.snapshot.current_xid != INVALID_TRANSACTION_ID {
             return Some(self.snapshot.current_xid);
