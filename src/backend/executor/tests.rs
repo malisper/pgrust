@@ -2842,6 +2842,90 @@ fn manual_merge_join_null_keys_do_not_match_each_other() {
 }
 
 #[test]
+fn manual_merge_full_join_null_component_preserves_later_matches() {
+    let base = temp_dir("manual_merge_full_join_null_component");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let int4 = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4);
+    let output_columns = vec![
+        QueryColumn {
+            name: "a".into(),
+            sql_type: int4,
+            wire_type_oid: None,
+        },
+        QueryColumn {
+            name: "c".into(),
+            sql_type: int4,
+            wire_type_oid: None,
+        },
+    ];
+
+    let plan = Plan::MergeJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![
+                vec![Expr::Const(Value::Int32(-1)), Expr::Const(Value::Null)],
+                vec![Expr::Const(Value::Int32(1)), Expr::Const(Value::Int32(1))],
+                vec![Expr::Const(Value::Int32(3)), Expr::Const(Value::Int32(3))],
+            ],
+            output_columns: output_columns.clone(),
+        }),
+        right: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![
+                vec![Expr::Const(Value::Int32(2)), Expr::Const(Value::Int32(2))],
+                vec![Expr::Const(Value::Int32(3)), Expr::Const(Value::Int32(3))],
+            ],
+            output_columns,
+        }),
+        kind: JoinType::Full,
+        merge_clauses: vec![
+            Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Eq,
+                vec![local_var(0), local_var(2)],
+            ),
+            Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Eq,
+                vec![local_var(1), local_var(3)],
+            ),
+        ],
+        outer_merge_keys: vec![local_var(0), local_var(1)],
+        inner_merge_keys: vec![local_var(0), local_var(1)],
+        merge_key_descending: vec![false, false],
+        join_qual: vec![],
+        qual: vec![],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["a".into(), "c".into(), "a".into(), "c".into()],
+                vec![Value::Int32(-1), Value::Null, Value::Null, Value::Null],
+            ),
+            (
+                vec!["a".into(), "c".into(), "a".into(), "c".into()],
+                vec![Value::Int32(1), Value::Int32(1), Value::Null, Value::Null],
+            ),
+            (
+                vec!["a".into(), "c".into(), "a".into(), "c".into()],
+                vec![Value::Null, Value::Null, Value::Int32(2), Value::Int32(2)],
+            ),
+            (
+                vec!["a".into(), "c".into(), "a".into(), "c".into()],
+                vec![
+                    Value::Int32(3),
+                    Value::Int32(3),
+                    Value::Int32(3),
+                    Value::Int32(3),
+                ],
+            ),
+        ]
+    );
+}
+
+#[test]
 fn manual_merge_join_join_qual_and_qual_preserve_outer_join_rules() {
     let base = temp_dir("manual_merge_join_join_qual");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -5810,6 +5894,217 @@ fn whole_row_outer_join_disables_partitionwise_join() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn partitionwise_nway_join_preserves_child_output_layout() {
+    let base = temp_dir("partitionwise_nway_join_layout");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+    seed_partition_join_fixture_in_session(&db, &mut session);
+    for sql in [
+        "create table prt1_e (a int, b int, c int) partition by range(((a + b)/2))",
+        "create table prt1_e_p1 partition of prt1_e for values from (0) to (250)",
+        "create table prt1_e_p2 partition of prt1_e for values from (250) to (500)",
+        "create table prt1_e_p3 partition of prt1_e for values from (500) to (600)",
+        "insert into prt1_e select i, i, i % 25 from generate_series(0, 599, 2) i",
+        "create index iprt1_e_p1_ab2 on prt1_e_p1(((a+b)/2))",
+        "create index iprt1_e_p2_ab2 on prt1_e_p2(((a+b)/2))",
+        "create index iprt1_e_p3_ab2 on prt1_e_p3(((a+b)/2))",
+        "analyze prt1_e",
+    ] {
+        session.execute(&db, sql).unwrap();
+    }
+
+    assert_query_rows(
+        session
+            .execute(
+                &db,
+                "select t1.a, t1.c, t2.b, t2.c, t3.a + t3.b, t3.c
+                 from prt1 t1, prt2 t2, prt1_e t3
+                 where t1.a = t2.b
+                   and t1.a = (t3.a + t3.b)/2
+                   and t1.b = 0
+                 order by t1.a, t2.b",
+            )
+            .unwrap(),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Text("0000".into()),
+                Value::Int32(0),
+                Value::Text("0000".into()),
+                Value::Int32(0),
+                Value::Int32(0),
+            ],
+            vec![
+                Value::Int32(150),
+                Value::Text("0150".into()),
+                Value::Int32(150),
+                Value::Text("0150".into()),
+                Value::Int32(300),
+                Value::Int32(0),
+            ],
+            vec![
+                Value::Int32(300),
+                Value::Text("0300".into()),
+                Value::Int32(300),
+                Value::Text("0300".into()),
+                Value::Int32(600),
+                Value::Int32(0),
+            ],
+            vec![
+                Value::Int32(450),
+                Value::Text("0450".into()),
+                Value::Int32(450),
+                Value::Text("0450".into()),
+                Value::Int32(900),
+                Value::Int32(0),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn partitionwise_list_join_does_not_match_null_partition_keys() {
+    let base = temp_dir("partitionwise_list_null_keys");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+    for sql in [
+        "set enable_partitionwise_join to true",
+        "create table lt1 (a int, b int, c text) partition by list (c)",
+        "create table lt1_p1 partition of lt1 for values in (null, '0001', '0003')",
+        "create table lt1_p2 partition of lt1 for values in ('0004', '0006')",
+        "create table lt1_p3 partition of lt1 for values in ('0008', '0009')",
+        "insert into lt1 values (-1, -1, null), (1, 1, '0001'), (3, 3, '0003'), (4, 4, '0004'), (6, 6, '0006'), (8, 8, '0008'), (9, 9, '0009')",
+        "create table lt2 (a int, b int, c text) partition by list (c)",
+        "create table lt2_p1 partition of lt2 for values in ('0002', '0003')",
+        "create table lt2_p2 partition of lt2 for values in ('0004', '0006')",
+        "create table lt2_p3 partition of lt2 for values in (null, '0007', '0009')",
+        "insert into lt2 values (-1, -1, null), (2, 2, '0002'), (3, 3, '0003'), (4, 4, '0004'), (6, 6, '0006'), (7, 7, '0007'), (9, 9, '0009')",
+        "analyze lt1",
+        "analyze lt2",
+    ] {
+        session.execute(&db, sql).unwrap();
+    }
+
+    assert_query_rows(
+        session
+            .execute(
+                &db,
+                "select t1.a, t1.c, t2.a, t2.c
+                 from lt1 t1 left join lt2 t2
+                   on t1.a = t2.a and t1.c = t2.c
+                 where t1.b < 10
+                 order by t1.a",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(-1), Value::Null, Value::Null, Value::Null],
+            vec![
+                Value::Int32(1),
+                Value::Text("0001".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("0003".into()),
+                Value::Int32(3),
+                Value::Text("0003".into()),
+            ],
+            vec![
+                Value::Int32(4),
+                Value::Text("0004".into()),
+                Value::Int32(4),
+                Value::Text("0004".into()),
+            ],
+            vec![
+                Value::Int32(6),
+                Value::Text("0006".into()),
+                Value::Int32(6),
+                Value::Text("0006".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Text("0008".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Text("0009".into()),
+                Value::Int32(9),
+                Value::Text("0009".into()),
+            ],
+        ],
+    );
+
+    assert_query_rows(
+        session
+            .execute(
+                &db,
+                "select t1.a, t1.c, t2.a, t2.c
+                 from lt1 t1 full join lt2 t2
+                   on t1.a = t2.a and t1.c = t2.c
+                 where coalesce(t1.b, 0) < 10 and coalesce(t2.b, 0) < 10
+                 order by t1.a, t2.a",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(-1), Value::Null, Value::Null, Value::Null],
+            vec![
+                Value::Int32(1),
+                Value::Text("0001".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("0003".into()),
+                Value::Int32(3),
+                Value::Text("0003".into()),
+            ],
+            vec![
+                Value::Int32(4),
+                Value::Text("0004".into()),
+                Value::Int32(4),
+                Value::Text("0004".into()),
+            ],
+            vec![
+                Value::Int32(6),
+                Value::Text("0006".into()),
+                Value::Int32(6),
+                Value::Text("0006".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Text("0008".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Text("0009".into()),
+                Value::Int32(9),
+                Value::Text("0009".into()),
+            ],
+            vec![Value::Null, Value::Null, Value::Int32(-1), Value::Null],
+            vec![
+                Value::Null,
+                Value::Null,
+                Value::Int32(2),
+                Value::Text("0002".into()),
+            ],
+            vec![
+                Value::Null,
+                Value::Null,
+                Value::Int32(7),
+                Value::Text("0007".into()),
+            ],
+        ],
+    );
+}
+
 #[test]
 fn inner_join_returns_matching_rows() {
     let base = temp_dir("join_sql");

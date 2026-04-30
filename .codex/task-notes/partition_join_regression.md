@@ -39,3 +39,41 @@ The former lateral timeout now returns the expected 12 rows. `partition_join` st
 Final rerun after refactor:
 `CARGO_TARGET_DIR=/tmp/pgrust-target-partition-join scripts/run_regression.sh --test partition_join --results-dir /tmp/diffs/partition_join_fix --timeout 180 --port 56633`
 Result: FAIL, 482/614 queries matched, 132 mismatched, 5547 diff lines, Timed out: 0.
+
+Current follow-up:
+Goal:
+Fix the remaining real failures in the partition_join regression after the initial lateral timeout work.
+
+Key decisions:
+- Kept fixes scoped to SQL/planner/executor layers touched by the failing regression.
+- Preserved PostgreSQL semantics for equality partitionwise joins by not treating list NULL partition bounds as overlapping equality keys.
+- Added projection/setrefs slot-layout rewrites for partitionwise child joins instead of changing executor slot layout globally.
+- Lowered TABLESAMPLE SYSTEM to the existing deterministic BERNOULLI-style predicate as a temporary compatibility shim; this has a nearby :HACK: comment.
+- Fixed merge full join NULL-key handling by retaining sort keys and tracking matchability separately, so NULL-containing keys keep their merge position but never match.
+
+Files touched:
+- src/backend/optimizer/path/allpaths.rs
+- src/backend/optimizer/partitionwise.rs
+- src/backend/parser/analyze/scope.rs
+- src/backend/optimizer/setrefs.rs
+- src/backend/executor/mergejoin.rs
+- src/backend/executor/node_mergejoin.rs
+- src/backend/executor/tests.rs
+- src/pgrust/database_tests.rs
+- .codex/task-notes/partition_join_regression.md
+
+Tests run:
+- cargo fmt
+- CARGO_TARGET_DIR=/tmp/pgrust-target-chennai-partition-join cargo test --lib --quiet manual_merge_full_join_null_component_preserves_later_matches
+- CARGO_TARGET_DIR=/tmp/pgrust-target-chennai-partition-join cargo test --lib --quiet partitionwise_list_join_does_not_match_null_partition_keys
+- Earlier focused tests in this workspace:
+  - scripts/cargo_isolated.sh test --lib --quiet partitionwise_nway_join_preserves_child_output_layout
+  - scripts/cargo_isolated.sh test --lib --quiet partitionwise_list_join_does_not_match_null_partition_keys
+  - CARGO_TARGET_DIR=/tmp/pgrust-target-chennai-partition-join scripts/cargo_isolated.sh test --lib --quiet tablesample_system_accepts_lateral_expressions_in_explain
+  - CARGO_TARGET_DIR=/tmp/pgrust-target-chennai-partition-join scripts/cargo_isolated.sh test --lib --quiet partition_prune_nested_sublink_filter_does_not_panic
+- CARGO_TARGET_DIR=/tmp/pgrust-target-chennai-partition-join scripts/run_regression.sh --test partition_join --jobs 1 --timeout 600 --port 56555 --results-dir /tmp/diffs/partition_join_chennai_fix11
+
+Remaining:
+- partition_join now completes without panic, server disconnect, timeout, ERROR diffs, or row-output diffs.
+- Latest full run: FAIL, 484/614 queries matched, 130 mismatched, 124 hunks, 5648 diff lines.
+- Remaining hunks appear to be EXPLAIN plan-shape/rendering differences. Examples include plan choices like Nested Loop/Memoize versus PostgreSQL Hash/Merge plans and some explain alias rendering such as `Hash Cond: (t3_1.a = t3_1.a)` in self-join partitionwise plans.
