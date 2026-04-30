@@ -199,6 +199,18 @@ impl TransactionManager {
         self.write_status_bits(xid, TransactionStatus::Aborted);
     }
 
+    pub fn replay_prepare(&mut self, xid: TransactionId) {
+        if xid >= self.next_xid {
+            self.next_xid = xid + 1;
+            self.write_next_xid();
+        }
+        self.statuses.insert(xid, TransactionStatus::InProgress);
+        if !self.in_progress.contains(&xid) {
+            self.in_progress.push(xid);
+        }
+        self.write_status_bits(xid, TransactionStatus::InProgress);
+    }
+
     pub fn status(&self, xid: TransactionId) -> Option<TransactionStatus> {
         if matches!(xid, BOOTSTRAP_TRANSACTION_ID | FROZEN_TRANSACTION_ID) {
             return Some(TransactionStatus::Committed);

@@ -803,11 +803,22 @@ fn lock_current_row_marks(
         if !seen.insert((row_mark.relation_oid, tid)) {
             continue;
         }
-        ctx.acquire_row_lock(
-            row_mark.relation_oid,
-            tid,
-            RowLockMode::from_select_locking_clause(row_mark.strength),
-        )?;
+        let mode = RowLockMode::from_select_locking_clause(row_mark.strength);
+        if row_mark.nowait {
+            if !ctx.try_acquire_row_lock(row_mark.relation_oid, tid, mode) {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "could not obtain lock on row in relation \"{}\"",
+                        row_mark.relation_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55P03",
+                });
+            }
+        } else {
+            ctx.acquire_row_lock(row_mark.relation_oid, tid, mode)?;
+        }
     }
     Ok(())
 }

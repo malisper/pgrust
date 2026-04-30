@@ -725,6 +725,19 @@ impl ExecutorContext {
         }
     }
 
+    pub fn try_acquire_row_lock(
+        &self,
+        relation_oid: u32,
+        tid: crate::include::access::itemptr::ItemPointerData,
+        mode: RowLockMode,
+    ) -> bool {
+        self.row_locks.try_lock(
+            RowLockTag { relation_oid, tid },
+            mode,
+            self.row_lock_owner(),
+        )
+    }
+
     pub fn record_catalog_effect(&mut self, effect: CatalogMutationEffect) {
         self.pending_catalog_effects.push(effect);
     }

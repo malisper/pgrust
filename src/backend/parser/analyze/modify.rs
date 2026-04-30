@@ -1274,6 +1274,7 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         limit_offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,

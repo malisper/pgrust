@@ -10,7 +10,9 @@ use crate::backend::utils::misc::interrupts::{
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::{ClientId, RelFileLocator};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum TableLockMode {
     AccessShare,
     RowShare,
@@ -123,6 +125,12 @@ impl TableLockMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableLockPreparedEntry {
+    pub rel: RelFileLocator,
+    pub mode: TableLockMode,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableLockSnapshotRow {
     pub rel: RelFileLocator,
@@ -135,6 +143,7 @@ pub struct TableLockSnapshotRow {
 struct TableLockEntry {
     mode: TableLockMode,
     holder: ClientId,
+    count: usize,
 }
 
 struct TableLockWaiter {
@@ -242,7 +251,11 @@ impl TableLockManager {
         let mut state = self.state.lock();
         if let Some(entries) = state.locks.get_mut(&rel) {
             if let Some(idx) = entries.iter().rposition(|e| e.holder == client_id) {
-                entries.remove(idx);
+                if entries[idx].count > 1 {
+                    entries[idx].count -= 1;
+                } else {
+                    entries.remove(idx);
+                }
             }
             if entries.is_empty() {
                 state.locks.remove(&rel);
@@ -269,6 +282,42 @@ impl TableLockManager {
         if released_any {
             self.cv.notify_all();
         }
+    }
+
+    pub fn transfer_all_for_client(&self, old_client_id: ClientId, new_client_id: ClientId) {
+        let mut state = self.state.lock();
+        let mut changed = false;
+        for entries in state.locks.values_mut() {
+            for entry in entries {
+                if entry.holder == old_client_id {
+                    entry.holder = new_client_id;
+                    changed = true;
+                }
+            }
+        }
+        for entries in state.waiters.values_mut() {
+            for entry in entries {
+                if entry.holder == old_client_id {
+                    entry.holder = new_client_id;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.cv.notify_all();
+        }
+    }
+
+    pub fn restore_locks_for_client(&self, client_id: ClientId, locks: &[TableLockPreparedEntry]) {
+        let mut state = self.state.lock();
+        for lock in locks {
+            grant_table_lock(
+                state.locks.entry(lock.rel).or_default(),
+                client_id,
+                lock.mode,
+            );
+        }
+        self.cv.notify_all();
     }
 
     pub fn snapshot(&self) -> Vec<TableLockSnapshotRow> {
@@ -390,10 +439,12 @@ pub(crate) fn lock_table_requests_interruptible(
 fn grant_table_lock(entries: &mut Vec<TableLockEntry>, client_id: ClientId, mode: TableLockMode) {
     if let Some(entry) = entries.iter_mut().find(|entry| entry.holder == client_id) {
         entry.mode = entry.mode.strongest(mode);
+        entry.count = entry.count.saturating_add(1);
     } else {
         entries.push(TableLockEntry {
             mode,
             holder: client_id,
+            count: 1,
         });
     }
 }
@@ -434,8 +485,9 @@ fn mode_for_holder(
 
 #[cfg(test)]
 mod tests {
-    use super::TableLockMode;
     use super::TableLockMode::*;
+    use super::{TableLockManager, TableLockMode};
+    use crate::RelFileLocator;
 
     const MODES: [TableLockMode; 8] = [
         AccessShare,
@@ -514,5 +566,24 @@ mod tests {
         assert_eq!(ShareRowExclusive.pg_mode_name(), "ShareRowExclusiveLock");
         assert_eq!(Exclusive.pg_mode_name(), "ExclusiveLock");
         assert_eq!(AccessExclusive.pg_mode_name(), "AccessExclusiveLock");
+    }
+
+    #[test]
+    fn repeated_holder_lock_requires_matching_unlocks() {
+        let locks = TableLockManager::new();
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: 42,
+        };
+
+        locks.lock_table(rel, AccessExclusive, 1);
+        locks.lock_table(rel, AccessExclusive, 1);
+        locks.unlock_table(rel, 1);
+
+        assert!(!locks.try_lock_table(rel, AccessShare, 2));
+
+        locks.unlock_table(rel, 1);
+        assert!(locks.try_lock_table(rel, AccessShare, 2));
     }
 }

@@ -54,6 +54,8 @@ type WalSegNo = u64;
 pub const XLOG_FPI: u8 = 0;
 pub const XLOG_HEAP_INSERT: u8 = 1;
 pub const XLOG_XACT_COMMIT: u8 = 0;
+pub const XLOG_XACT_PREPARE: u8 = 1;
+pub const XLOG_XACT_ABORT: u8 = 2;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x11;
 
@@ -301,6 +303,13 @@ pub enum WalRecord {
         record: XlHeapVisible,
     },
     XactCommit {
+        xid: u32,
+    },
+    XactPrepare {
+        xid: u32,
+        data: Vec<u8>,
+    },
+    XactAbort {
         xid: u32,
     },
     Checkpoint {
@@ -936,6 +945,11 @@ impl WalReader {
                 }
             }
             (RM_XACT_ID, XLOG_XACT_COMMIT) => WalRecord::XactCommit { xid: decoded.xid },
+            (RM_XACT_ID, XLOG_XACT_PREPARE) => WalRecord::XactPrepare {
+                xid: decoded.xid,
+                data: decoded.main_data.clone(),
+            },
+            (RM_XACT_ID, XLOG_XACT_ABORT) => WalRecord::XactAbort { xid: decoded.xid },
             (RM_XLOG_ID, XLOG_CHECKPOINT_ONLINE | XLOG_CHECKPOINT_SHUTDOWN) => {
                 if decoded.main_data.len() < 8 {
                     return Err(WalError::Corrupt(
@@ -1197,6 +1211,27 @@ impl WalWriter {
             xid,
             RM_XACT_ID,
             XLOG_XACT_COMMIT,
+        )
+    }
+
+    pub fn write_prepare(&self, xid: u32, data: &[u8]) -> Result<Lsn, WalError> {
+        crate::backend::access::transam::xloginsert::xlog_begin_insert();
+        crate::backend::access::transam::xloginsert::xlog_register_data(data);
+        crate::backend::access::transam::xloginsert::xlog_insert(
+            self,
+            xid,
+            RM_XACT_ID,
+            XLOG_XACT_PREPARE,
+        )
+    }
+
+    pub fn write_abort(&self, xid: u32) -> Result<Lsn, WalError> {
+        crate::backend::access::transam::xloginsert::xlog_begin_insert();
+        crate::backend::access::transam::xloginsert::xlog_insert(
+            self,
+            xid,
+            RM_XACT_ID,
+            XLOG_XACT_ABORT,
         )
     }
 

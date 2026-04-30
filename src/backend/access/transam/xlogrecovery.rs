@@ -16,7 +16,7 @@ use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use super::{
     INVALID_LSN, Lsn, RM_BTREE_ID, RM_GIST_ID, RM_HASH_ID, RM_HEAP_ID, RM_HEAP2_ID, RM_XACT_ID,
     RM_XLOG_ID, WalError, WalReader, XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI,
-    XLOG_HEAP_INSERT, XLOG_XACT_COMMIT,
+    XLOG_HEAP_INSERT, XLOG_XACT_ABORT, XLOG_XACT_COMMIT, XLOG_XACT_PREPARE,
 };
 use crate::include::access::heapam_xlog::XLOG_HEAP2_VISIBLE;
 
@@ -45,6 +45,16 @@ pub fn perform_wal_recovery_from(
     smgr: &mut MdStorageManager,
     txns: &mut TransactionManager,
     start_lsn: Lsn,
+) -> Result<RecoveryStats, WalError> {
+    perform_wal_recovery_from_preserving_xids(wal_dir, smgr, txns, start_lsn, &HashSet::new())
+}
+
+pub fn perform_wal_recovery_from_preserving_xids(
+    wal_dir: &Path,
+    smgr: &mut MdStorageManager,
+    txns: &mut TransactionManager,
+    start_lsn: Lsn,
+    preserve_in_progress_xids: &HashSet<u32>,
 ) -> Result<RecoveryStats, WalError> {
     let mut reader = if start_lsn == INVALID_LSN {
         WalReader::open(wal_dir)?
@@ -183,6 +193,11 @@ pub fn perform_wal_recovery_from(
                 committed_xids.insert(record.xid);
                 txns.replay_commit(record.xid);
             }
+            (RM_XACT_ID, XLOG_XACT_ABORT) => {
+                stats.aborted += 1;
+                txns.replay_abort(record.xid);
+            }
+            (RM_XACT_ID, XLOG_XACT_PREPARE) => {}
             (RM_XLOG_ID, XLOG_CHECKPOINT_ONLINE | XLOG_CHECKPOINT_SHUTDOWN) => {}
             _ => {
                 return Err(WalError::Corrupt(format!(
@@ -196,10 +211,13 @@ pub fn perform_wal_recovery_from(
     // Any transaction with WAL records but no commit record was in-flight
     // at crash time — mark it aborted.
     for &xid in &seen_xids {
-        if !committed_xids.contains(&xid) {
+        if !committed_xids.contains(&xid) && !preserve_in_progress_xids.contains(&xid) {
             txns.replay_abort(xid);
             stats.aborted += 1;
         }
+    }
+    for &xid in preserve_in_progress_xids {
+        txns.replay_prepare(xid);
     }
 
     // Persist the updated CLOG to disk.

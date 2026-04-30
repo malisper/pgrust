@@ -301,7 +301,9 @@ pub struct BootstrapCatalogRelation {
     pub name: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum BootstrapCatalogKind {
     PgNamespace,
     PgClass,

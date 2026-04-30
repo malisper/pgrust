@@ -138,6 +138,20 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
     }
 
+    pub fn write_wal_prepare(&self, xid: u32, data: &[u8]) -> Result<Lsn, String> {
+        match &self.wal {
+            Some(wal) => wal.write_prepare(xid, data).map_err(|e| e.to_string()),
+            None => Ok(INVALID_LSN),
+        }
+    }
+
+    pub fn write_wal_abort(&self, xid: u32) -> Result<Lsn, String> {
+        match &self.wal {
+            Some(wal) => wal.write_abort(xid).map_err(|e| e.to_string()),
+            None => Ok(INVALID_LSN),
+        }
+    }
+
     pub fn wal_writer(&self) -> Option<Arc<WalWriter>> {
         self.wal.as_ref().map(Arc::clone)
     }

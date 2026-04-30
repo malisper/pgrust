@@ -4380,6 +4380,7 @@ fn analyze_sql_function_target_only_body(
         limit_offset: stmt.offset,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,

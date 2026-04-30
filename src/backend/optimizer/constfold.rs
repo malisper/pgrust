@@ -113,6 +113,7 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
         locking_targets: query.locking_targets,
+        locking_nowait: query.locking_nowait,
         row_marks: query.row_marks,
         has_target_srfs: query.has_target_srfs,
         recursive_union: query

@@ -64,7 +64,7 @@ pub(crate) struct CatalogStoreSnapshot {
     extra_type_rows: Vec<PgTypeRow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CatalogMutationEffect {
     pub touched_catalogs: Vec<BootstrapCatalogKind>,
     pub created_rels: Vec<RelFileLocator>,

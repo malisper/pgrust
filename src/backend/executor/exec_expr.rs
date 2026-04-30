@@ -2967,6 +2967,7 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
     match name.as_str() {
         "block_size" => return Ok(Value::Text("8192".into())),
         "fsync" => return Ok(Value::Text("on".into())),
+        "max_prepared_transactions" => return Ok(Value::Text("64".into())),
         "synchronous_commit" => return Ok(Value::Text("on".into())),
         "wal_sync_method" => return Ok(Value::Text("fsync".into())),
         _ => {}
@@ -3008,6 +3009,7 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
     match name.as_str() {
         "block_size" => return Ok(Value::Text("8192".into())),
         "fsync" => return Ok(Value::Text("on".into())),
+        "max_prepared_transactions" => return Ok(Value::Text("64".into())),
         "server_encoding" => return Ok(Value::Text("UTF8".into())),
         "synchronous_commit" => return Ok(Value::Text("on".into())),
         "wal_sync_method" => return Ok(Value::Text("fsync".into())),

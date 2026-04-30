@@ -1297,6 +1297,45 @@ fn try_parse_prepared_statement(
 ) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     if keyword_at_start(trimmed, "prepare") {
+        let rest = consume_keyword(trimmed, "prepare").trim_start();
+        if keyword_at_start(rest, "transaction") {
+            let (gid, tail) = parse_copy_string_literal(consume_keyword(rest, "transaction"))?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "end of PREPARE TRANSACTION",
+                    actual: tail.trim().into(),
+                });
+            }
+            return Ok(Some(Statement::PrepareTransaction(gid)));
+        }
+    }
+    if keyword_at_start(trimmed, "commit") {
+        let rest = consume_keyword(trimmed, "commit").trim_start();
+        if keyword_at_start(rest, "prepared") {
+            let (gid, tail) = parse_copy_string_literal(consume_keyword(rest, "prepared"))?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "end of COMMIT PREPARED",
+                    actual: tail.trim().into(),
+                });
+            }
+            return Ok(Some(Statement::CommitPrepared(gid)));
+        }
+    }
+    if keyword_at_start(trimmed, "rollback") {
+        let rest = consume_keyword(trimmed, "rollback").trim_start();
+        if keyword_at_start(rest, "prepared") {
+            let (gid, tail) = parse_copy_string_literal(consume_keyword(rest, "prepared"))?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "end of ROLLBACK PREPARED",
+                    actual: tail.trim().into(),
+                });
+            }
+            return Ok(Some(Statement::RollbackPrepared(gid)));
+        }
+    }
+    if keyword_at_start(trimmed, "prepare") {
         return build_raw_prepare_statement(trimmed, options).map(Some);
     }
     if keyword_at_start(trimmed, "execute") {
@@ -17108,6 +17147,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         set_operation: None,
     })
 }
@@ -18585,6 +18625,7 @@ fn build_simple_select_statement(
     let mut offset = None;
     let mut locking_clause = None;
     let mut locking_targets = Vec::new();
+    let mut locking_nowait = false;
     for part in parts {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -18617,9 +18658,10 @@ fn build_simple_select_statement(
                         Rule::limit_clause => limit = build_limit_clause(inner)?,
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
                         Rule::locking_clause => {
-                            let (strength, targets) = build_locking_clause(inner)?;
+                            let (strength, targets, nowait) = build_locking_clause(inner)?;
                             locking_clause = Some(strength);
                             locking_targets = targets;
+                            locking_nowait = nowait;
                         }
                         _ => {}
                     }
@@ -18639,9 +18681,10 @@ fn build_simple_select_statement(
             Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => {
-                let (strength, targets) = build_locking_clause(part)?;
+                let (strength, targets, nowait) = build_locking_clause(part)?;
                 locking_clause = Some(strength);
                 locking_targets = targets;
+                locking_nowait = nowait;
             }
             _ => {}
         }
@@ -18663,6 +18706,7 @@ fn build_simple_select_statement(
         offset,
         locking_clause,
         locking_targets,
+        locking_nowait,
         set_operation: None,
     })
 }
@@ -18782,6 +18826,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     let mut offset = None;
     let mut locking_clause = None;
     let mut locking_targets = Vec::new();
+    let mut locking_nowait = false;
     let mut operators = Vec::new();
     let mut inputs = Vec::new();
 
@@ -18810,9 +18855,10 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             Rule::limit_clause => limit = build_limit_clause(part)?,
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             Rule::locking_clause => {
-                let (strength, targets) = build_locking_clause(part)?;
+                let (strength, targets, nowait) = build_locking_clause(part)?;
                 locking_clause = Some(strength);
                 locking_targets = targets;
+                locking_nowait = nowait;
             }
             _ => {}
         }
@@ -18844,6 +18890,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         offset,
         locking_clause,
         locking_targets,
+        locking_nowait,
         set_operation: Some(Box::new(nested_set_operation)),
     })
 }
@@ -18908,6 +18955,7 @@ fn select_statement_for_set_operation(
         offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         set_operation: Some(Box::new(SetOperationStatement {
             op,
             inputs: vec![left, right],
@@ -18967,6 +19015,7 @@ pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         offset: stmt.offset,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         set_operation: None,
     }
 }
@@ -19147,6 +19196,7 @@ fn split_leftmost_union(
     let outer_offset = stmt.offset.take();
     let outer_locking_clause = stmt.locking_clause.take();
     let outer_locking_targets = std::mem::take(&mut stmt.locking_targets);
+    let outer_locking_nowait = stmt.locking_nowait;
     let set_operation = stmt.set_operation?;
     if set_operation.inputs.len() != 2 {
         return None;
@@ -19168,6 +19218,7 @@ fn split_leftmost_union(
             outer_offset,
             outer_locking_clause,
             outer_locking_targets,
+            outer_locking_nowait,
         );
         return Some((all, true, anchor, recursive));
     }
@@ -19185,6 +19236,7 @@ fn split_leftmost_union(
                 None,
                 None,
                 Vec::new(),
+                false,
             );
             attach_cte_body_select_context(
                 &mut recursive,
@@ -19195,6 +19247,7 @@ fn split_leftmost_union(
                 outer_offset,
                 outer_locking_clause,
                 outer_locking_targets,
+                outer_locking_nowait,
             );
             Some((all, false, anchor, recursive))
         }
@@ -19211,6 +19264,7 @@ fn attach_cte_body_select_context(
     offset: Option<usize>,
     locking_clause: Option<SelectLockingClause>,
     locking_targets: Vec<String>,
+    locking_nowait: bool,
 ) {
     if with_recursive {
         stmt.with_recursive = true;
@@ -19232,6 +19286,7 @@ fn attach_cte_body_select_context(
     if locking_clause.is_some() {
         stmt.locking_clause = locking_clause;
         stmt.locking_targets = locking_targets;
+        stmt.locking_nowait = locking_nowait;
     }
 }
 
@@ -19364,8 +19419,20 @@ fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, Parse
 
 fn build_locking_clause(
     pair: Pair<'_, Rule>,
-) -> Result<(SelectLockingClause, Vec<String>), ParseError> {
-    let raw = pair.as_str().trim().to_ascii_lowercase();
+) -> Result<(SelectLockingClause, Vec<String>, bool), ParseError> {
+    let mut raw = pair.as_str().trim().to_ascii_lowercase();
+    let nowait = raw
+        .split_ascii_whitespace()
+        .last()
+        .is_some_and(|token| token.eq_ignore_ascii_case("nowait"));
+    if nowait {
+        let without_nowait = raw
+            .strip_suffix(" nowait")
+            .unwrap_or(&raw)
+            .trim_end()
+            .to_string();
+        raw = without_nowait;
+    }
     let strength = raw
         .split_once(" of ")
         .map(|(strength, _)| strength)
@@ -19390,7 +19457,7 @@ fn build_locking_clause(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Ok((locking_clause, targets))
+    Ok((locking_clause, targets, nowait))
 }
 
 fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> {
@@ -21273,6 +21340,7 @@ fn build_recursive_view_query(
             offset: None,
             locking_clause: None,
             locking_targets: Vec::new(),
+            locking_nowait: false,
             set_operation: None,
         },
         query_sql,

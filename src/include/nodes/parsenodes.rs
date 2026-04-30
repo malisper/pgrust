@@ -563,6 +563,9 @@ pub enum Statement {
     Begin(TransactionOptions),
     Commit(TransactionEndOptions),
     Rollback(TransactionEndOptions),
+    PrepareTransaction(String),
+    CommitPrepared(String),
+    RollbackPrepared(String),
     Savepoint(String),
     RollbackTo(String),
     ReleaseSavepoint(String),
@@ -619,6 +622,7 @@ pub struct Query {
     pub limit_offset: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
     pub locking_targets: Vec<String>,
+    pub locking_nowait: bool,
     pub row_marks: Vec<QueryRowMark>,
     pub has_target_srfs: bool,
     pub recursive_union: Option<Box<RecursiveUnionQuery>>,
@@ -649,6 +653,7 @@ impl Query {
 pub struct QueryRowMark {
     pub rtindex: usize,
     pub strength: SelectLockingClause,
+    pub nowait: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1629,6 +1634,7 @@ pub struct SelectStatement {
     pub offset: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
     pub locking_targets: Vec<String>,
+    pub locking_nowait: bool,
     pub set_operation: Option<Box<SetOperationStatement>>,
 }
 

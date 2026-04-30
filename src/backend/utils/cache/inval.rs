@@ -8,7 +8,7 @@ use crate::backend::utils::cache::syscache::{BackendCacheState, drain_pending_in
 use crate::include::catalog::BootstrapCatalogKind;
 use crate::pgrust::database::Database;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CatalogInvalidation {
     pub touched_catalogs: BTreeSet<BootstrapCatalogKind>,
     pub relation_oids: BTreeSet<u32>,

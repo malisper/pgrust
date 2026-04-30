@@ -4182,6 +4182,9 @@ impl Database {
             | Statement::Begin(_)
             | Statement::Commit(_)
             | Statement::Rollback(_)
+            | Statement::PrepareTransaction(_)
+            | Statement::CommitPrepared(_)
+            | Statement::RollbackPrepared(_)
             | Statement::Savepoint(_)
             | Statement::ReleaseSavepoint(_)
             | Statement::RollbackTo(_) => Ok(StatementResult::AffectedRows(0)),

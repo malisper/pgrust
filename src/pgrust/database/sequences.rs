@@ -59,7 +59,7 @@ pub(crate) fn pg_sequence_row(seqrelid: u32, data: &SequenceData) -> PgSequenceR
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum SequenceMutationEffect {
     Upsert {
         relation_oid: u32,

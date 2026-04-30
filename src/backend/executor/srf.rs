@@ -533,7 +533,7 @@ fn execute_native_set_returning_function(
         "show_all_file_settings" => Some(Vec::new()),
         "pg_hba_file_rules" => Some(eval_pg_hba_file_rules()),
         "pg_ident_file_mappings" => Some(Vec::new()),
-        "pg_prepared_xact" => Some(Vec::new()),
+        "pg_prepared_xact" => Some(eval_pg_prepared_xact(ctx)),
         "pg_cursor" => Some(eval_pg_cursor(ctx)),
         "pg_prepared_statement" => Some(eval_pg_prepared_statement(ctx)),
         "pg_stat_get_wal_receiver" => Some(Vec::new()),
@@ -1158,6 +1158,24 @@ fn eval_pg_prepared_statement(ctx: &ExecutorContext) -> Vec<TupleSlot> {
                 Value::Bool(row.from_sql),
                 Value::Int64(row.generic_plans),
                 Value::Int64(row.custom_plans),
+            ])
+        })
+        .collect()
+}
+
+fn eval_pg_prepared_xact(ctx: &ExecutorContext) -> Vec<TupleSlot> {
+    ctx.database
+        .as_ref()
+        .map(|db| db.prepared_xacts.rows())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| {
+            TupleSlot::virtual_row(vec![
+                Value::Int64(i64::from(row.transaction)),
+                Value::Text(row.gid.into()),
+                Value::TimestampTz(TimestampTzADT(row.prepared_at)),
+                Value::Text(row.owner_name.into()),
+                Value::Text(row.database_name.into()),
             ])
         })
         .collect()

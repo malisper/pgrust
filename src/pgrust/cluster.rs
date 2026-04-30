@@ -32,8 +32,9 @@ use crate::pgrust::autovacuum::{AutovacuumConfig, AutovacuumRuntime};
 use crate::pgrust::database::{
     AsyncNotifyRuntime, BaseTypeEntry, ConversionEntry, Database, DatabaseCreateGrant,
     DatabaseError, DatabaseOpenOptions, DatabaseStatsStore, DomainEntry, EnumTypeEntry,
-    LargeObjectRuntime, RangeTypeEntry, SequenceRuntime, SessionStatsState, SessionViewState,
-    StatisticsObjectEntry, TempBackendId, TempNamespace, load_range_type_entries,
+    LargeObjectRuntime, PreparedTransactionManager, RangeTypeEntry, SequenceRuntime,
+    SessionStatsState, SessionViewState, StatisticsObjectEntry, TempBackendId, TempNamespace,
+    load_range_type_entries,
 };
 use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId};
@@ -53,6 +54,7 @@ pub(crate) struct ClusterShared {
     pub txns: Arc<RwLock<TransactionManager>>,
     pub shared_catalog: Arc<RwLock<CatalogStore>>,
     pub txn_waiter: Arc<TransactionWaiter>,
+    pub prepared_xacts: Arc<PreparedTransactionManager>,
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
     pub open_databases: Arc<RwLock<HashMap<u32, Arc<OpenDatabaseState>>>>,
@@ -223,6 +225,7 @@ impl Cluster {
         ensure_bootstrap_databases(&base_dir, &shared_catalog)?;
 
         let wal_dir = base_dir.join("pg_wal");
+        let prepared_xacts_for_recovery = PreparedTransactionManager::load(&base_dir)?;
         let needs_recovery = control_snapshot.state != ControlFileState::ShutDown;
         if needs_recovery && has_wal_segments(&wal_dir).map_err(DatabaseError::Wal)? {
             control_file.update(|control| {
@@ -236,11 +239,13 @@ impl Cluster {
                 let local_store = CatalogStore::load_database(&base_dir, row.oid)?;
                 create_relfiles_for_store_with_smg(&mut recovery_smgr, &local_store)?;
             }
-            let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery_from(
+            let prepared_xids = prepared_xacts_for_recovery.prepared_xids();
+            let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery_from_preserving_xids(
                 &wal_dir,
                 &mut recovery_smgr,
                 &mut txns,
                 control_snapshot.redo_lsn,
+                &prepared_xids,
             )
             .map_err(DatabaseError::Wal)?;
             if stats.records_replayed > 0 {
@@ -251,6 +256,7 @@ impl Cluster {
             }
         }
 
+        let prepared_xacts = Arc::new(PreparedTransactionManager::load(&base_dir)?);
         let wal = Arc::new(
             WalWriter::new_with_fsync(&wal_dir, checkpoint_config.fsync)
                 .map_err(DatabaseError::Wal)?,
@@ -321,6 +327,7 @@ impl Cluster {
             txns,
             shared_catalog: Arc::new(RwLock::new(shared_catalog)),
             txn_waiter: Arc::new(TransactionWaiter::new()),
+            prepared_xacts,
             table_locks: Arc::new(TableLockManager::new()),
             plan_cache: Arc::new(PlanCache::new()),
             open_databases: Arc::new(RwLock::new(open_databases)),
@@ -335,6 +342,31 @@ impl Cluster {
             checkpointer,
             wal_bg_writer: Some(Arc::new(wal_bg_writer)),
         });
+        for record in shared.prepared_xacts.records() {
+            shared
+                .txn_waiter
+                .register_holder(record.xid, record.prepared_client_id);
+            for xid in &record.subxids {
+                shared
+                    .txn_waiter
+                    .register_holder(*xid, record.prepared_client_id);
+            }
+            shared
+                .table_locks
+                .restore_locks_for_client(record.prepared_client_id, &record.held_table_locks);
+            if let Some(state) = shared.open_databases.read().get(&record.db_oid) {
+                state.row_locks.restore_transaction_locks(
+                    record.prepared_client_id,
+                    record.advisory_scope_id,
+                    &record.row_locks,
+                );
+                state.advisory_locks.restore_transaction_locks(
+                    record.prepared_client_id,
+                    record.advisory_scope_id,
+                    &record.advisory_locks,
+                );
+            }
+        }
         autovacuum_runtime.start(Arc::downgrade(&shared), options.autovacuum);
         Ok(Self { shared })
     }
@@ -429,6 +461,7 @@ impl Cluster {
                 txns,
                 shared_catalog: Arc::new(RwLock::new(shared_catalog)),
                 txn_waiter: Arc::new(TransactionWaiter::new()),
+                prepared_xacts: Arc::new(PreparedTransactionManager::new_ephemeral()),
                 table_locks: Arc::new(TableLockManager::new()),
                 plan_cache: Arc::new(PlanCache::new()),
                 open_databases: Arc::new(RwLock::new(open_databases)),
@@ -488,6 +521,7 @@ impl Cluster {
             shared_catalog: Arc::clone(&self.shared.shared_catalog),
             catalog: Arc::clone(&state.catalog),
             txn_waiter: Arc::clone(&self.shared.txn_waiter),
+            prepared_xacts: Arc::clone(&self.shared.prepared_xacts),
             table_locks: Arc::clone(&self.shared.table_locks),
             plan_cache: Arc::clone(&self.shared.plan_cache),
             backend_cache_states: Arc::clone(&state.backend_cache_states),
