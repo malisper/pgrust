@@ -18,6 +18,9 @@ use crate::backend::commands::copyto::{
     CopyToDmlEvent, CopyToSink, IoCopyToSink, begin_copy_to, begin_copy_to_dml_capture,
     finish_copy_to, finish_copy_to_dml_capture, write_copy_to, write_copy_to_row,
 };
+use crate::backend::commands::rolecmds::{
+    PasswordEncryption, PasswordSettings, parse_scram_iterations, role_settings,
+};
 use crate::backend::commands::tablecmds::{
     check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
     check_relation_column_privileges, execute_merge, execute_prepared_insert_row,
@@ -50,7 +53,10 @@ use crate::backend::parser::{
     plan_merge, plan_merge_with_outer_ctes, select_statement_references_table,
     update_statement_references_table,
 };
-use crate::backend::rewrite::relation_row_security_is_enabled_for_user;
+use crate::backend::rewrite::{
+    load_view_return_query, relation_has_security_invoker,
+    relation_row_security_is_enabled_for_user,
+};
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
@@ -74,14 +80,14 @@ use crate::backend::utils::misc::stack_depth::{
 };
 use crate::include::catalog::{
     ANYARRAYOID, ANYELEMENTOID, ANYOID, BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_FOREIGN, INT4_TYPE_OID,
-    NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID,
-    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID,
-    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, PG_WRITE_SERVER_FILES_OID, PgProcRow,
-    TEXT_TYPE_OID,
+    NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CHECKPOINT_OID, PG_CLASS_RELATION_OID,
+    PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_MAINTAIN_OID,
+    PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
+    PG_WRITE_SERVER_FILES_OID, PgProcRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::execnodes::ScalarType;
 use crate::include::nodes::pathnodes::PlannerConfig;
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{QueryColumn, set_returning_call_exprs};
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::commands::privilege::{
@@ -1172,6 +1178,7 @@ struct CopyInsertOptions<'a> {
     null_marker: &'a str,
     default_marker: Option<&'a str>,
     on_error: CopyOnError,
+    where_clause: Option<&'a str>,
     where_filter: Option<CopyWhereFilter>,
     progress: Option<CopyProgressOptions>,
 }
@@ -1222,6 +1229,163 @@ impl CopyWhereFilter {
             literal: self.literal.clone(),
         })
     }
+}
+
+fn visible_non_generated_column_indexes(desc: &RelationDesc) -> Vec<usize> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, column)| (!column.dropped && column.generated.is_none()).then_some(idx))
+        .collect()
+}
+
+fn copy_target_column_indexes(
+    desc: &RelationDesc,
+    target_columns: Option<&[String]>,
+) -> Result<Vec<usize>, ExecError> {
+    let Some(columns) = target_columns else {
+        return Ok(visible_non_generated_column_indexes(desc));
+    };
+    let mut indexes = Vec::with_capacity(columns.len());
+    for name in columns {
+        let Some(index) = desc
+            .columns
+            .iter()
+            .position(|column| !column.dropped && column.name == *name)
+        else {
+            return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+        };
+        if desc.columns[index].generated.is_some() {
+            return Err(copy_generated_column_error(&desc.columns[index].name));
+        }
+        indexes.push(index);
+    }
+    Ok(indexes)
+}
+
+fn copy_target_column_names(
+    desc: &RelationDesc,
+    target_columns: Option<&[String]>,
+) -> Result<Vec<String>, ExecError> {
+    copy_target_column_indexes(desc, target_columns).map(|indexes| {
+        indexes
+            .into_iter()
+            .map(|index| desc.columns[index].name.clone())
+            .collect()
+    })
+}
+
+fn copy_generated_column_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("column \"{column_name}\" is a generated column"),
+        detail: Some("Generated columns cannot be used in COPY.".into()),
+        hint: None,
+        sqlstate: "428C9",
+    }
+}
+
+fn copy_generated_where_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: "generated columns are not supported in COPY FROM WHERE conditions".into(),
+        detail: Some(format!("Column \"{column_name}\" is a generated column.")),
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn validate_copy_where_generated_references(
+    table_name: &str,
+    desc: &RelationDesc,
+    clause: &str,
+) -> Result<(), ExecError> {
+    let generated_columns = desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped && column.generated.is_some())
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    let Some(first_generated) = generated_columns.first().copied() else {
+        return Ok(());
+    };
+    let identifiers = copy_where_identifiers(clause);
+    for generated in generated_columns {
+        if identifiers
+            .iter()
+            .any(|identifier| identifier.eq_ignore_ascii_case(generated))
+        {
+            return Err(copy_generated_where_error(generated));
+        }
+    }
+    let relation_name = table_name.rsplit('.').next().unwrap_or(table_name);
+    if identifiers
+        .iter()
+        .any(|identifier| identifier.eq_ignore_ascii_case(relation_name))
+    {
+        return Err(copy_generated_where_error(first_generated));
+    }
+    Ok(())
+}
+
+fn copy_where_identifiers(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if ch == '\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] as char == '\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '"' {
+            i += 1;
+            let mut ident = String::new();
+            while i < bytes.len() {
+                let quoted = bytes[i] as char;
+                if quoted == '"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                        ident.push('"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                ident.push(quoted);
+                i += 1;
+            }
+            if !ident.is_empty() {
+                out.push(ident);
+            }
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                let next = bytes[i] as char;
+                if next == '_' || next.is_ascii_alphanumeric() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(input[start..i].to_string());
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 fn bind_copy_column_defaults(
@@ -2469,6 +2633,8 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "transaction_deferrable" => Some("off"),
         "lo_compat_privileges" => Some("off"),
         "vacuum_cost_delay" => Some("0"),
+        "password_encryption" => Some("scram-sha-256"),
+        "scram_iterations" => Some("4096"),
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
@@ -2780,11 +2946,8 @@ impl Session {
             return Ok(StatementResult::AffectedRows(0));
         };
         if txn.failed {
-            let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
             self.abort_taken_transaction(db, &txn);
-            for rel in held_locks {
-                db.table_locks.unlock_table(rel, self.client_id);
-            }
+            db.table_locks.unlock_all_for_client(self.client_id);
             self.restore_guc_state(db, txn.guc_start_state);
             self.portals.drop_transaction_portals(false);
             return Ok(StatementResult::AffectedRows(0));
@@ -2805,11 +2968,8 @@ impl Session {
         let Some(txn) = self.active_txn.take() else {
             return;
         };
-        let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
         self.abort_taken_transaction(db, &txn);
-        for rel in held_locks {
-            db.table_locks.unlock_table(rel, self.client_id);
-        }
+        db.table_locks.unlock_all_for_client(self.client_id);
         self.restore_guc_state(db, txn.guc_start_state);
         self.portals.drop_transaction_portals(false);
     }
@@ -3089,6 +3249,45 @@ impl Session {
                 .filter(|schema| !schema.is_empty())
                 .collect(),
         )
+    }
+
+    fn password_settings(&self) -> PasswordSettings {
+        let default = PasswordSettings::default();
+        let encryption = self
+            .gucs
+            .get("password_encryption")
+            .and_then(|value| PasswordEncryption::parse(value))
+            .unwrap_or(default.encryption);
+        let scram_iterations = self
+            .gucs
+            .get("scram_iterations")
+            .and_then(|value| parse_scram_iterations(value))
+            .unwrap_or(default.scram_iterations);
+        PasswordSettings {
+            encryption,
+            scram_iterations,
+        }
+    }
+
+    fn apply_active_role_settings(&mut self, db: &Database) -> Result<(), ExecError> {
+        let Some(active_role_oid) = self.auth.active_role_oid() else {
+            return Ok(());
+        };
+        let settings = role_settings(db.database_oid, active_role_oid);
+        if settings.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.capture_guc_state();
+        let mut changed = Vec::new();
+        for (name, value) in settings {
+            let normalized = apply_guc_value_to_state(&mut state, &name, &value)?;
+            changed.push(normalized);
+        }
+        self.install_guc_state(state);
+        for normalized in changed {
+            self.after_guc_change(db, &normalized);
+        }
+        Ok(())
     }
 
     pub(crate) fn row_security_enabled(&self) -> bool {
@@ -5957,11 +6156,8 @@ impl Session {
         let Some(txn) = self.active_txn.take() else {
             return;
         };
-        let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
         self.abort_taken_transaction(db, &txn);
-        for rel in held_locks {
-            db.table_locks.unlock_table(rel, self.client_id);
-        }
+        db.table_locks.unlock_all_for_client(self.client_id);
         self.restore_guc_state(db, txn.guc_start_state);
         self.portals.drop_transaction_portals(false);
     }
@@ -6223,7 +6419,6 @@ impl Session {
         txn: ActiveTransaction,
         result: Result<StatementResult, ExecError>,
     ) -> Result<StatementResult, ExecError> {
-        let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
         let result = match result {
             Ok(r) => {
                 (|| {
@@ -6301,9 +6496,7 @@ impl Session {
                 Err(e)
             }
         };
-        for rel in held_locks {
-            db.table_locks.unlock_table(rel, self.client_id);
-        }
+        db.table_locks.unlock_all_for_client(self.client_id);
         if result.is_ok() && txn.local_auth_active && self.auth != txn.auth_at_start {
             self.auth = txn.auth_at_start.clone();
             db.install_auth_state(self.client_id, self.auth.clone());
@@ -8616,6 +8809,7 @@ impl Session {
                         self.client_id,
                         create_stmt,
                         self.gucs.get("createrole_self_grant").map(String::as_str),
+                        self.password_settings(),
                     )
                 }
             }
@@ -8629,7 +8823,7 @@ impl Session {
                     }
                     result
                 } else {
-                    db.execute_alter_role_stmt(self.client_id, alter_stmt)
+                    db.execute_alter_role_stmt(self.client_id, alter_stmt, self.password_settings())
                 }
             }
             Statement::DropRole(ref drop_stmt) => {
@@ -8782,6 +8976,7 @@ impl Session {
                     result
                 } else {
                     self.auth = db.execute_set_role_stmt(self.client_id, set_stmt)?;
+                    self.apply_active_role_settings(db)?;
                     Ok(StatementResult::AffectedRows(0))
                 }
             }
@@ -9303,11 +9498,8 @@ impl Session {
                 if self.active_txn.as_ref().is_some_and(|txn| txn.failed) {
                     let txn = self.active_txn.take().unwrap();
                     let chained_options = options.chain.then(|| txn.chained_options());
-                    let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                     self.abort_taken_transaction(db, &txn);
-                    for rel in held_locks {
-                        db.table_locks.unlock_table(rel, self.client_id);
-                    }
+                    db.table_locks.unlock_all_for_client(self.client_id);
                     self.restore_guc_state(db, txn.guc_start_state);
                     self.portals.drop_transaction_portals(false);
                     if let Some(chained_options) = chained_options {
@@ -9358,11 +9550,8 @@ impl Session {
                     }
                 };
                 let chained_options = options.chain.then(|| txn.chained_options());
-                let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                 self.abort_taken_transaction(db, &txn);
-                for rel in held_locks {
-                    db.table_locks.unlock_table(rel, self.client_id);
-                }
+                db.table_locks.unlock_all_for_client(self.client_id);
                 self.restore_guc_state(db, txn.guc_start_state);
                 self.portals.drop_transaction_portals(false);
                 if let Some(chained_options) = chained_options {
@@ -11719,6 +11908,1134 @@ impl Session {
         }
     }
 
+    fn collect_lock_table_relation(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        relation: crate::backend::parser::BoundRelation,
+        require_acl: bool,
+        include_descendants: bool,
+        require_view_ref_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        let class_row = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation with OID {} does not exist", relation.relation_oid),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+
+        if !matches!(class_row.relkind, 'r' | 'p' | 'v') {
+            return Err(ExecError::DetailedError {
+                message: format!("cannot lock relation \"{}\"", class_row.relname),
+                detail: None,
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
+        if require_acl && !Self::lock_table_acl_allows(&class_row, auth, auth_catalog, mode) {
+            return Err(Self::lock_table_permission_denied(
+                class_row.relkind,
+                &class_row.relname,
+            ));
+        }
+        if !visited.insert(relation.relation_oid) {
+            return Ok(());
+        }
+
+        targets.push((
+            crate::pgrust::database::relation_lock_tag(&relation),
+            class_row.relname.clone(),
+        ));
+
+        if include_descendants && matches!(class_row.relkind, 'r' | 'p') {
+            for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+                if child_oid == relation.relation_oid {
+                    continue;
+                }
+                let Some(child_relation) = catalog.relation_by_oid(child_oid) else {
+                    continue;
+                };
+                Self::collect_lock_table_relation(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    child_relation,
+                    false,
+                    false,
+                    require_view_ref_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+        }
+
+        if class_row.relkind == 'v' {
+            let referenced_relations_need_acl = require_view_ref_acl
+                || relation_has_security_invoker(catalog, relation.relation_oid);
+            Self::collect_lock_view_dependency_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                relation.relation_oid,
+                referenced_relations_need_acl,
+                visited,
+                targets,
+            )?;
+            let query =
+                load_view_return_query(relation.relation_oid, &relation.desc, None, catalog, &[])
+                    .map_err(ExecError::Parse)?;
+            Self::collect_lock_query_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &query,
+                referenced_relations_need_acl,
+                visited,
+                targets,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn collect_lock_view_dependency_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        view_oid: u32,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        let return_rule_oids = catalog
+            .rewrite_rows_for_relation(view_oid)
+            .into_iter()
+            .filter(|row| row.rulename == "_RETURN")
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
+        if return_rule_oids.is_empty() {
+            return Ok(());
+        }
+        let mut relation_oids = catalog
+            .depend_rows()
+            .into_iter()
+            .filter(|row| {
+                row.classid == PG_REWRITE_RELATION_OID
+                    && return_rule_oids.contains(&row.objid)
+                    && row.refclassid == PG_CLASS_RELATION_OID
+                    && row.refobjid != view_oid
+            })
+            .map(|row| row.refobjid)
+            .collect::<Vec<_>>();
+        relation_oids.sort_unstable();
+        relation_oids.dedup();
+        for relation_oid in relation_oids {
+            if let Some(relation) = catalog.relation_by_oid(relation_oid) {
+                Self::collect_lock_table_relation(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    relation,
+                    require_acl,
+                    true,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_lock_query_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        query: &crate::include::nodes::parsenodes::Query,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        for rte in &query.rtable {
+            for qual in &rte.security_quals {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    qual,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            match &rte.kind {
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Relation {
+                    relation_oid,
+                    ..
+                } => {
+                    if let Some(relation) = catalog.relation_by_oid(*relation_oid) {
+                        Self::collect_lock_table_relation(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            relation,
+                            require_acl,
+                            true,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Join {
+                    joinaliasvars,
+                    ..
+                } => {
+                    for expr in joinaliasvars {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            expr,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Values { rows, .. } => {
+                    for expr in rows.iter().flatten() {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            expr,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Function { call } => {
+                    for expr in set_returning_call_exprs(call) {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            expr,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Cte { query, .. }
+                | crate::include::nodes::parsenodes::RangeTblEntryKind::Subquery { query } => {
+                    Self::collect_lock_query_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        query,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Result
+                | crate::include::nodes::parsenodes::RangeTblEntryKind::WorkTable { .. } => {}
+            }
+        }
+        if let Some(jointree) = &query.jointree {
+            Self::collect_lock_join_tree_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                jointree,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for target in &query.target_list {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &target.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for clause in &query.distinct_on {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &clause.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(where_qual) = &query.where_qual {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                where_qual,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for expr in &query.group_by {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for accum in &query.accumulators {
+            Self::collect_lock_agg_accum_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                accum,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for clause in &query.window_clauses {
+            Self::collect_lock_window_clause_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                clause,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(having_qual) = &query.having_qual {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                having_qual,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for clause in &query.sort_clause {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &clause.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(recursive_union) = &query.recursive_union {
+            Self::collect_lock_query_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &recursive_union.anchor,
+                require_acl,
+                visited,
+                targets,
+            )?;
+            Self::collect_lock_query_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &recursive_union.recursive,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(set_operation) = &query.set_operation {
+            for input in &set_operation.inputs {
+                Self::collect_lock_query_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    input,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_lock_join_tree_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        node: &crate::include::nodes::parsenodes::JoinTreeNode,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        match node {
+            crate::include::nodes::parsenodes::JoinTreeNode::RangeTblRef(_) => Ok(()),
+            crate::include::nodes::parsenodes::JoinTreeNode::JoinExpr {
+                left,
+                right,
+                quals,
+                ..
+            } => {
+                Self::collect_lock_join_tree_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    left,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_join_tree_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    right,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    quals,
+                    require_acl,
+                    visited,
+                    targets,
+                )
+            }
+        }
+    }
+
+    fn collect_lock_agg_accum_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        accum: &crate::include::nodes::primnodes::AggAccum,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        for expr in &accum.args {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for item in &accum.order_by {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &item.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(filter) = &accum.filter {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                filter,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn collect_lock_window_clause_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        clause: &crate::include::nodes::primnodes::WindowClause,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        for expr in &clause.spec.partition_by {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for item in &clause.spec.order_by {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &item.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        Self::collect_lock_window_frame_bound_relations(
+            catalog,
+            auth,
+            auth_catalog,
+            mode,
+            &clause.spec.frame.start_bound,
+            require_acl,
+            visited,
+            targets,
+        )?;
+        Self::collect_lock_window_frame_bound_relations(
+            catalog,
+            auth,
+            auth_catalog,
+            mode,
+            &clause.spec.frame.end_bound,
+            require_acl,
+            visited,
+            targets,
+        )?;
+        for func in &clause.functions {
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) = &func.kind
+            {
+                Self::collect_lock_aggref_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    aggref,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            for arg in &func.args {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    arg,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_lock_window_frame_bound_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        bound: &crate::include::nodes::primnodes::WindowFrameBound,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        match bound {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset)
+            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &offset.expr,
+                    require_acl,
+                    visited,
+                    targets,
+                )
+            }
+            crate::include::nodes::primnodes::WindowFrameBound::UnboundedPreceding
+            | crate::include::nodes::primnodes::WindowFrameBound::CurrentRow
+            | crate::include::nodes::primnodes::WindowFrameBound::UnboundedFollowing => Ok(()),
+        }
+    }
+
+    fn collect_lock_aggref_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        aggref: &crate::include::nodes::primnodes::Aggref,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        for arg in &aggref.direct_args {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                arg,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for arg in &aggref.args {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                arg,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for item in &aggref.aggorder {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &item.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(filter) = &aggref.aggfilter {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                filter,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn collect_lock_expr_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        expr: &Expr,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        match expr {
+            Expr::Aggref(aggref) => Self::collect_lock_aggref_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                aggref,
+                require_acl,
+                visited,
+                targets,
+            )?,
+            Expr::GroupingKey(grouping_key) => Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &grouping_key.expr,
+                require_acl,
+                visited,
+                targets,
+            )?,
+            Expr::GroupingFunc(grouping_func) => {
+                for arg in &grouping_func.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::WindowFunc(func) => {
+                if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                    &func.kind
+                {
+                    Self::collect_lock_aggref_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        aggref,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                for arg in &func.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Op(op) => {
+                for arg in &op.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Bool(bool_expr) => {
+                for arg in &bool_expr.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Case(case_expr) => {
+                if let Some(arg) = &case_expr.arg {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                for arm in &case_expr.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        &arm.expr,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        &arm.result,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &case_expr.defresult,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::Func(func) => {
+                for arg in &func.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::SqlJsonQueryFunction(func) => {
+                for child in func.child_exprs() {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        child,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::SetReturning(srf) => {
+                for arg in set_returning_call_exprs(&srf.call) {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::SubLink(sublink) => {
+                if let Some(testexpr) = &sublink.testexpr {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        testexpr,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                Self::collect_lock_query_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &sublink.subselect,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::SubPlan(subplan) => {
+                if let Some(testexpr) = &subplan.testexpr {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        testexpr,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                for arg in &subplan.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::ScalarArrayOp(saop) => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &saop.left,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &saop.right,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::Xml(xml) => {
+                for child in xml.child_exprs() {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        child,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    inner,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            }
+            | Expr::Similar {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    expr,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    pattern,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                if let Some(escape) = escape {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        escape,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    inner,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::IsDistinctFrom(left, right)
+            | Expr::IsNotDistinctFrom(left, right)
+            | Expr::Coalesce(left, right) => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    left,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    right,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::ArrayLiteral { elements, .. } => {
+                for element in elements {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        element,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Row { fields, .. } => {
+                for (_, expr) in fields {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        expr,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::FieldSelect { expr, .. } => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    expr,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::ArraySubscript { array, subscripts } => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    array,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                for subscript in subscripts {
+                    if let Some(lower) = &subscript.lower {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            lower,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                    if let Some(upper) = &subscript.upper {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            upper,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn try_lock_table_if_needed(
         &mut self,
         db: &Database,
@@ -11762,35 +13079,23 @@ impl Session {
         let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
         let mut targets = Vec::new();
 
-        for table_name in &stmt.table_names {
+        let mut visited = BTreeSet::new();
+        for target in &stmt.targets {
             let relation = catalog
-                .lookup_any_relation(table_name)
-                .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
-            let class_row = catalog
-                .class_row_by_oid(relation.relation_oid)
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: format!("relation with OID {} does not exist", relation.relation_oid),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                })?;
-
-            if !matches!(class_row.relkind, 'r' | 'p' | 'v') {
-                return Err(ExecError::DetailedError {
-                    message: format!("cannot lock relation \"{}\"", class_row.relname),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42809",
-                });
-            }
-            if !Self::lock_table_acl_allows(&class_row, self.auth_state(), &auth_catalog, mode) {
-                return Err(Self::lock_table_permission_denied(
-                    class_row.relkind,
-                    &class_row.relname,
-                ));
-            }
-
-            targets.push((relation.rel, class_row.relname.clone()));
+                .lookup_any_relation(&target.name)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.name.clone())))?;
+            Self::collect_lock_table_relation(
+                &catalog,
+                self.auth_state(),
+                &auth_catalog,
+                mode,
+                relation,
+                true,
+                !target.only,
+                false,
+                &mut visited,
+                &mut targets,
+            )?;
         }
 
         for (rel, relation_name) in targets {
@@ -14269,11 +15574,13 @@ impl Session {
                     self.apply_alter_index_set(db, alter_stmt)
                 }
                 Statement::CreateRole(ref create_stmt) => {
+                    let password_settings = self.password_settings();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_create_role_stmt_in_transaction(
                         client_id,
                         create_stmt,
                         self.gucs.get("createrole_self_grant").map(String::as_str),
+                        password_settings,
                         xid,
                         cid,
                         &mut txn.catalog_effects,
@@ -14294,10 +15601,12 @@ impl Session {
                     )
                 }
                 Statement::AlterRole(ref alter_stmt) => {
+                    let password_settings = self.password_settings();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_role_stmt_in_transaction(
                         client_id,
                         alter_stmt,
+                        password_settings,
                         xid,
                         cid,
                         &mut txn.catalog_effects,
@@ -14522,6 +15831,7 @@ impl Session {
                 Statement::SetRole(ref set_stmt) => {
                     self.auth =
                         db.execute_set_role_stmt_in_transaction(client_id, set_stmt, xid, cid)?;
+                    self.apply_active_role_settings(db)?;
                     Ok(StatementResult::AffectedRows(0))
                 }
                 Statement::ResetRole(ref reset_stmt) => {
@@ -17089,6 +18399,7 @@ impl Session {
                 } else {
                     CopyOnError::Stop
                 },
+                where_clause: copy.options.where_clause.as_deref(),
                 where_filter,
                 progress,
             },
@@ -17118,22 +18429,10 @@ impl Session {
             .read()
             .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
         let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
-        let target_indexes = if let Some(columns) = columns {
-            let mut indexes = Vec::with_capacity(columns.len());
-            for name in columns {
-                let Some(index) = desc
-                    .columns
-                    .iter()
-                    .position(|column| !column.dropped && column.name == *name)
-                else {
-                    return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
-                };
-                indexes.push(index);
-            }
-            indexes
-        } else {
-            desc.visible_column_indexes()
-        };
+        let target_indexes = copy_target_column_indexes(&desc, columns.as_deref())?;
+        if let Some(clause) = copy.options.where_clause.as_deref() {
+            validate_copy_where_generated_references(name, &desc, clause)?;
+        }
         check_relation_column_privileges(&ctx, relation_oid, 'a', target_indexes.iter().copied())?;
         if relation_row_security_is_enabled_for_user(
             relation_oid,
@@ -17147,10 +18446,11 @@ impl Session {
                 sqlstate: "0A000",
             });
         }
+        let visible_default_indexes = visible_non_generated_column_indexes(&desc);
         let validation_default_indexes = if copy.options.default_marker.is_some() {
-            desc.visible_column_indexes()
+            visible_default_indexes
         } else {
-            desc.visible_column_indexes()
+            visible_default_indexes
                 .into_iter()
                 .filter(|column_index| !target_indexes.contains(column_index))
                 .collect::<Vec<_>>()
@@ -17229,20 +18529,11 @@ impl Session {
         table_name: &str,
         target_columns: Option<&[String]>,
     ) -> Result<Vec<String>, ExecError> {
-        if let Some(columns) = target_columns {
-            return Ok(columns.to_vec());
-        }
         let catalog = self.catalog_lookup(db);
         let entry = catalog
             .lookup_any_relation(table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.to_string())))?;
-        Ok(entry
-            .desc
-            .columns
-            .iter()
-            .filter(|column| !column.dropped)
-            .map(|column| column.name.clone())
-            .collect())
+        copy_target_column_names(&entry.desc, target_columns)
     }
 
     fn copy_query_rows(
@@ -17273,9 +18564,13 @@ impl Session {
                     }
                 }
                 self.ensure_copy_to_relation_source(db, name, columns.as_deref())?;
+                let target_columns = relation
+                    .as_ref()
+                    .map(|entry| copy_target_column_names(&entry.desc, columns.as_deref()))
+                    .transpose()?;
                 relation_copy_to_query_sql(
                     name,
-                    columns.as_deref(),
+                    target_columns.as_deref(),
                     relation.is_some_and(|entry| entry.relkind == 'r'),
                 )
             }
@@ -17326,6 +18621,7 @@ impl Session {
                 null_marker,
                 default_marker: None,
                 on_error: CopyOnError::Stop,
+                where_clause: None,
                 where_filter: None,
                 progress: None,
             },
@@ -17397,28 +18693,10 @@ impl Session {
                             catalog.index_relations_for_heap(entry.relation_oid),
                         )
                     };
-                    let target_indexes = if let Some(columns) = target_columns {
-                        let mut indexes = Vec::with_capacity(columns.len());
-                        for name in columns {
-                            let Some(index) = desc
-                                .columns
-                                .iter()
-                                .position(|column| !column.dropped && column.name == *name)
-                            else {
-                                return Err(ExecError::Parse(ParseError::UnknownColumn(
-                                    name.clone(),
-                                )));
-                            };
-                            indexes.push(index);
-                        }
-                        indexes
-                    } else {
-                        desc.columns
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(idx, column)| (!column.dropped).then_some(idx))
-                            .collect()
-                    };
+                    let target_indexes = copy_target_column_indexes(&desc, target_columns)?;
+                    if let Some(clause) = options.where_clause {
+                        validate_copy_where_generated_references(table_name, &desc, clause)?;
+                    }
                     let where_filter = options
                         .where_filter
                         .as_ref()
@@ -17459,14 +18737,15 @@ impl Session {
                         target_indexes.iter().copied(),
                     )?;
                     let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
-                    let omitted_default_indexes = desc
-                        .visible_column_indexes()
-                        .into_iter()
+                    let visible_default_indexes = visible_non_generated_column_indexes(&desc);
+                    let omitted_default_indexes = visible_default_indexes
+                        .iter()
+                        .copied()
                         .filter(|column_index| !target_indexes.contains(column_index))
                         .collect::<Vec<_>>();
                     if rows.is_empty() {
                         let validation_default_indexes = if options.default_marker.is_some() {
-                            desc.visible_column_indexes()
+                            visible_default_indexes
                         } else {
                             omitted_default_indexes.clone()
                         };
@@ -18442,7 +19721,6 @@ impl Session {
 
 fn relation_copy_to_query_sql(table_name: &str, columns: Option<&[String]>, only: bool) -> String {
     let target = columns
-        .filter(|columns| !columns.is_empty())
         .map(|columns| {
             columns
                 .iter()
@@ -18540,6 +19818,34 @@ fn apply_guc_value_to_state(
         }
         "vacuum_cost_delay" => {
             parse_vacuum_cost_delay_ms(value)?;
+        }
+        "password_encryption" => {
+            let encryption =
+                PasswordEncryption::parse(value).ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for parameter \"password_encryption\": \"{value}\""
+                    ),
+                    detail: None,
+                    hint: Some("Available values: md5, scram-sha-256.".into()),
+                    sqlstate: "22023",
+                })?;
+            stored_value = match encryption {
+                PasswordEncryption::Md5 => "md5",
+                PasswordEncryption::ScramSha256 => "scram-sha-256",
+            }
+            .to_string();
+        }
+        "scram_iterations" => {
+            let iterations =
+                parse_scram_iterations(value).ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for parameter \"scram_iterations\": \"{value}\""
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                })?;
+            stored_value = iterations.to_string();
         }
         "seq_page_cost" => {
             let parsed = value.parse::<f64>().map_err(|_| ExecError::DetailedError {

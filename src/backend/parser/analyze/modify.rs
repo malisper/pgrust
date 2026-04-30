@@ -1599,18 +1599,33 @@ fn returning_pseudo_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr>
         .collect()
 }
 
-fn scope_with_returning_pseudo_rows(
+fn returning_pseudo_output_exprs_with_generated(
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    varno: usize,
+) -> Result<Vec<Expr>, ParseError> {
+    let base_output_exprs = returning_pseudo_output_exprs(desc, varno);
+    generated_relation_output_exprs(desc, catalog).map(|output_exprs| {
+        output_exprs
+            .into_iter()
+            .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_output_exprs))
+            .collect()
+    })
+}
+
+fn scope_with_returning_pseudo_rows_with_generated(
     scope: BoundScope,
     desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
     relation_oid: Option<u32>,
-) -> BoundScope {
-    scope_with_returning_pseudo_row_exprs(
+) -> Result<BoundScope, ParseError> {
+    Ok(scope_with_returning_pseudo_row_exprs(
         scope,
         desc,
-        returning_pseudo_output_exprs(desc, OUTER_VAR),
-        returning_pseudo_output_exprs(desc, INNER_VAR),
+        returning_pseudo_output_exprs_with_generated(desc, catalog, OUTER_VAR)?,
+        returning_pseudo_output_exprs_with_generated(desc, catalog, INNER_VAR)?,
         relation_oid,
-    )
+    ))
 }
 
 fn scope_with_hidden_invalid_relation(
@@ -2799,11 +2814,12 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
             Some(entry.relation_oid),
         )
     } else {
-        scope_with_returning_pseudo_rows(
+        scope_with_returning_pseudo_rows_with_generated(
             returning_merged_scope,
             &execution_relation.desc,
+            catalog,
             Some(execution_relation.relation_oid),
-        )
+        )?
     };
     let returning = bind_merge_returning_targets(
         &stmt.returning,
@@ -4342,13 +4358,14 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         .target_columns
         .iter()
         .map(|target| {
+            let column_index = map_auto_view_column_index(
+                &stmt.desc,
+                &resolved.updatable_column_map,
+                &resolved.non_updatable_column_reasons,
+                target.column_index,
+            )?;
             Ok(BoundAssignmentTarget {
-                column_index: map_auto_view_column_index(
-                    &stmt.desc,
-                    &resolved.updatable_column_map,
-                    &resolved.non_updatable_column_reasons,
-                    target.column_index,
-                )?,
+                column_index,
                 subscripts: rewrite_assignment_subscripts(
                     &target.subscripts,
                     &resolved.visible_output_exprs,
@@ -4358,7 +4375,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
                     &target.indirection,
                     &resolved.visible_output_exprs,
                 ),
-                target_sql_type: target.target_sql_type,
+                target_sql_type: resolved.base_relation.desc.columns[column_index].sql_type,
             })
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
@@ -4465,6 +4482,84 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         required_privileges,
         subplans: stmt.subplans,
     })
+}
+
+struct AutoViewInsertContext {
+    base_desc: RelationDesc,
+    base_column_defaults: Vec<Expr>,
+    updatable_column_map: Vec<Option<usize>>,
+}
+
+fn build_auto_view_insert_context(
+    entry: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+) -> Result<Option<AutoViewInsertContext>, ParseError> {
+    if entry.relkind != 'v' {
+        return Ok(None);
+    }
+    let resolved = match resolve_auto_updatable_view_target(
+        entry.relation_oid,
+        &entry.desc,
+        ViewDmlEvent::Insert,
+        catalog,
+        &[],
+    ) {
+        Ok(resolved) => resolved,
+        Err(_) => return Ok(None),
+    };
+    let base_column_defaults =
+        bind_insert_column_defaults(&resolved.base_relation.desc, catalog, local_ctes)?;
+    Ok(Some(AutoViewInsertContext {
+        base_desc: resolved.base_relation.desc,
+        base_column_defaults,
+        updatable_column_map: resolved.updatable_column_map,
+    }))
+}
+
+fn auto_view_base_target(
+    ctx: &AutoViewInsertContext,
+    target: &BoundAssignmentTarget,
+) -> Option<BoundAssignmentTarget> {
+    let column_index = ctx
+        .updatable_column_map
+        .get(target.column_index)
+        .copied()
+        .flatten()?;
+    Some(BoundAssignmentTarget {
+        column_index,
+        subscripts: target.subscripts.clone(),
+        field_path: target.field_path.clone(),
+        indirection: target.indirection.clone(),
+        target_sql_type: ctx.base_desc.columns[column_index].sql_type,
+    })
+}
+
+fn ensure_auto_view_insert_generated_assignment_allowed(
+    ctx: Option<&AutoViewInsertContext>,
+    target: &BoundAssignmentTarget,
+    expr: Option<&SqlExpr>,
+) -> Result<(), ParseError> {
+    let Some(ctx) = ctx else {
+        return Ok(());
+    };
+    let Some(base_target) = auto_view_base_target(ctx, target) else {
+        return Ok(());
+    };
+    ensure_generated_assignment_allowed(&ctx.base_desc, &base_target, expr)
+}
+
+fn insert_default_expr_for_target(
+    column_defaults: &[Expr],
+    auto_view_ctx: Option<&AutoViewInsertContext>,
+    target: &BoundAssignmentTarget,
+) -> Expr {
+    auto_view_ctx
+        .and_then(|ctx| {
+            auto_view_base_target(ctx, target)
+                .map(|base_target| ctx.base_column_defaults[base_target.column_index].clone())
+        })
+        .unwrap_or_else(|| column_defaults[target.column_index].clone())
 }
 
 fn normalize_auto_view_identity_values(
@@ -5417,15 +5512,17 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         catalog,
     )?;
     let expr_scope = empty_scope();
-    let mut returning_scope = scope_with_returning_pseudo_rows(
+    let mut returning_scope = scope_with_returning_pseudo_rows_with_generated(
         target_scope.clone(),
         &entry.desc,
+        catalog,
         Some(entry.relation_oid),
-    );
+    )?;
     if stmt.on_conflict.is_some() {
         returning_scope =
             scope_with_hidden_invalid_relation(returning_scope, "excluded", &entry.desc);
     }
+    let auto_view_insert_context = build_auto_view_insert_context(&entry, catalog, &visible_ctes)?;
     let returning = bind_returning_targets(
         &stmt.returning,
         &returning_scope,
@@ -5473,6 +5570,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                         .zip(target_columns.iter())
                         .map(|(cell, target)| match cell {
                             InsertValuesCell::Raw(expr) => {
+                                ensure_auto_view_insert_generated_assignment_allowed(
+                                    auto_view_insert_context.as_ref(),
+                                    target,
+                                    Some(expr),
+                                )?;
                                 ensure_generated_assignment_allowed(
                                     &entry.desc,
                                     target,
@@ -5480,7 +5582,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                                 )?;
                                 if matches!(expr, SqlExpr::Default) {
                                     reject_default_indirection_assignment(target)?;
-                                    return Ok(column_defaults[target.column_index].clone());
+                                    return Ok(insert_default_expr_for_target(
+                                        &column_defaults,
+                                        auto_view_insert_context.as_ref(),
+                                        target,
+                                    ));
                                 }
                                 match normalize_identity_insert_expr(
                                     &entry.desc,
@@ -5505,6 +5611,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                                 }
                             }
                             InsertValuesCell::Bound(expr) => {
+                                ensure_auto_view_insert_generated_assignment_allowed(
+                                    auto_view_insert_context.as_ref(),
+                                    target,
+                                    Some(&SqlExpr::Const(Value::Null)),
+                                )?;
                                 ensure_generated_assignment_allowed(
                                     &entry.desc,
                                     target,
@@ -5586,6 +5697,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                 });
             }
             for target in &target_columns {
+                ensure_auto_view_insert_generated_assignment_allowed(
+                    auto_view_insert_context.as_ref(),
+                    target,
+                    Some(&SqlExpr::Const(Value::Null)),
+                )?;
                 if entry.desc.columns[target.column_index].generated.is_some() {
                     ensure_generated_assignment_allowed(
                         &entry.desc,
@@ -5800,8 +5916,12 @@ fn bind_simple_update(
     if stmt.target_alias.is_some() {
         scope = mark_scope_hidden_invalid_relation(scope, &stmt.table_name);
     }
-    let returning_scope =
-        scope_with_returning_pseudo_rows(scope.clone(), &entry.desc, Some(entry.relation_oid));
+    let returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let predicate = stmt
         .where_clause
@@ -5999,8 +6119,12 @@ fn bind_update_from(
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
     let eval_scope = align_relation_outputs_to_projected_slots(eval_scope);
-    let returning_scope =
-        scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc, Some(entry.relation_oid));
+    let returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        eval_scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
 
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
@@ -6321,8 +6445,12 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
             stmt.table_name.clone(),
         ));
     }
-    let returning_scope =
-        scope_with_returning_pseudo_rows(scope.clone(), &entry.desc, Some(entry.relation_oid));
+    let returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
     let predicate = stmt
         .where_clause
         .as_ref()
@@ -6447,8 +6575,12 @@ fn bind_delete_using(
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
     let eval_scope = align_relation_outputs_to_projected_slots(eval_scope);
-    let returning_scope =
-        scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc, Some(entry.relation_oid));
+    let returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        eval_scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
 
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
