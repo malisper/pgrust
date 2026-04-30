@@ -5,8 +5,8 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, RelationPrivilegeMask,
-    RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr, SubLink, attrno_index,
-    is_system_attr, user_attrno,
+    RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan,
+    attrno_index, is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -756,6 +756,31 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
     source_varno: usize,
     output_exprs: &[Expr],
 ) -> Expr {
+    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, false)
+}
+
+pub(crate) fn rewrite_planned_local_vars_for_output_exprs(
+    expr: Expr,
+    source_varno: usize,
+    output_exprs: &[Expr],
+) -> Expr {
+    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, true)
+}
+
+fn rewrite_local_vars_for_output_exprs_impl(
+    expr: Expr,
+    source_varno: usize,
+    output_exprs: &[Expr],
+    allow_planned_subqueries: bool,
+) -> Expr {
+    let rewrite_local_vars_for_output_exprs = |expr, source_varno, output_exprs| {
+        rewrite_local_vars_for_output_exprs_impl(
+            expr,
+            source_varno,
+            output_exprs,
+            allow_planned_subqueries,
+        )
+    };
     match expr {
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op
@@ -994,6 +1019,23 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
                     Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs))
                 }),
             ..*sublink
+        })),
+        Expr::SubPlan(subplan) if allow_planned_subqueries => Expr::SubPlan(Box::new(SubPlan {
+            testexpr: subplan
+                .testexpr
+                .map(|expr| {
+                    Box::new(rewrite_local_vars_for_output_exprs(
+                        *expr,
+                        source_varno,
+                        output_exprs,
+                    ))
+                }),
+            args: subplan
+                .args
+                .into_iter()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs))
+                .collect(),
+            ..*subplan
         })),
         Expr::SubPlan(_) => {
             unreachable!("semantic analyze should not rewrite planned subqueries")

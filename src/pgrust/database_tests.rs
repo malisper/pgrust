@@ -49834,6 +49834,80 @@ fn partitioned_insert_rls_reports_parent_table_name() {
 }
 
 #[test]
+fn partitioned_on_conflict_do_update_subquery() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table upsert_test (a int primary key, b text) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table upsert_test_1 partition of upsert_test for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into upsert_test values (1, 'Boo')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "with aaa as (select 1 as a, 'Foo' as b)
+             insert into upsert_test values (1, 'Bar')
+             on conflict(a) do update set (b, a) = (select b, a from aaa)
+             returning a, b",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("Foo".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table upsert_test_2 (b text, a int primary key)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table upsert_test attach partition upsert_test_2 for values in (2)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into upsert_test_2(b, a) values ('Zoo', 2)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "with aaa as (select 1 as ctea, ' Foo' as cteb)
+             insert into upsert_test values (1, 'Bar'), (2, 'Baz')
+             on conflict(a) do update
+                set b = (select upsert_test.b || cteb from aaa),
+                    a = (select upsert_test.a from aaa)
+             returning a, b",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("Foo Foo".into())],
+            vec![Value::Int32(2), Value::Text("Zoo Foo".into())],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from upsert_test order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Text("Foo Foo".into())],
+            vec![Value::Int32(2), Value::Text("Zoo Foo".into())],
+        ]
+    );
+}
+
+#[test]
 fn rls_policy_subquery_privileges_are_checked_for_select_and_explain() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);
