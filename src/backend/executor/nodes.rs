@@ -263,7 +263,10 @@ fn aggregate_key_values_equal(left: &[Value], right: &[Value]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{pg_sql_sort_by, render_explain_const, render_explain_datetime_cast_literal};
+    use super::{
+        pg_sql_sort_by, postgres_explain_datetime_config, push_explain_datetime_config,
+        render_explain_const, render_explain_datetime_cast_literal,
+    };
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::time::datetime::days_from_ymd;
     use crate::include::nodes::datetime::DateADT;
@@ -337,6 +340,8 @@ mod tests {
             "'01-01-1997'::date"
         );
 
+        let config = postgres_explain_datetime_config();
+        let _guard = push_explain_datetime_config(&config);
         let expr = Expr::Const(Value::Text("1997-01-01".into()));
         assert_eq!(
             render_explain_datetime_cast_literal(&expr, SqlType::new(SqlTypeKind::Date)),

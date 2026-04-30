@@ -23581,27 +23581,29 @@ fn alter_table_inherit_supports_attach_duplicate_and_cycle_errors() {
 fn explain_inherited_append_uses_relation_names_and_sql_casts() {
     let base = temp_dir("explain_inherited_append_format");
     let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
 
-    db.execute(1, "create table nv_parent (d date)").unwrap();
-    db.execute(1, "create table nv_child_2009 () inherits (nv_parent)")
+    session
+        .execute(&db, "set datestyle to 'Postgres, MDY'")
         .unwrap();
-    db.execute(1, "create table nv_child_2010 () inherits (nv_parent)")
+    session
+        .execute(&db, "create table nv_parent (d date)")
         .unwrap();
-    db.execute(1, "create table nv_child_2011 () inherits (nv_parent)")
+    session
+        .execute(&db, "create table nv_child_2009 () inherits (nv_parent)")
+        .unwrap();
+    session
+        .execute(&db, "create table nv_child_2010 () inherits (nv_parent)")
+        .unwrap();
+    session
+        .execute(&db, "create table nv_child_2011 () inherits (nv_parent)")
         .unwrap();
 
-    let rows = query_rows(
+    let rendered = query_text_column(
+        &mut session,
         &db,
-        1,
         "explain select * from nv_parent where d >= '2009-08-01'::date and d <= '2009-08-31'::date",
     );
-    let rendered = rows
-        .into_iter()
-        .map(|row| match &row[0] {
-            Value::Text(text) => text.clone(),
-            other => panic!("expected explain text row, got {other:?}"),
-        })
-        .collect::<Vec<_>>();
 
     assert!(rendered.iter().any(|line| line.contains("Append")));
     assert!(
@@ -24369,8 +24371,8 @@ fn alter_table_add_column_uses_command_end_invalidation_and_rolls_back() {
 }
 
 #[test]
-fn alter_table_add_column_rejects_unsupported_forms() {
-    let base = temp_dir("alter_table_add_column_rejects_unsupported");
+fn alter_table_add_column_handles_supported_forms() {
+    let base = temp_dir("alter_table_add_column_supported_forms");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table items (id int4 not null)")
@@ -24387,17 +24389,21 @@ fn alter_table_add_column_rejects_unsupported_forms() {
     db.execute(1, "alter table items add column note text not null")
         .unwrap();
 
-    match db.execute(1, "alter table items add column key_id int4 primary key") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "ADD COLUMN without PRIMARY KEY" && actual == "PRIMARY KEY" => {}
-        other => panic!("expected PRIMARY KEY rejection, got {other:?}"),
-    }
+    db.execute(1, "alter table items add column key_id int4 primary key")
+        .unwrap();
+    db.execute(1, "alter table items add column code text unique")
+        .unwrap();
 
-    match db.execute(1, "alter table items add column code text unique") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "ADD COLUMN without UNIQUE" && actual == "UNIQUE" => {}
-        other => panic!("expected UNIQUE rejection, got {other:?}"),
-    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select contype from pg_constraint \
+             where conrelid = 'items'::regclass and contype in ('p', 'u') \
+             order by contype",
+        ),
+        vec![vec![Value::Text("p".into())], vec![Value::Text("u".into())],]
+    );
 }
 
 #[test]

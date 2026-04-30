@@ -33,8 +33,8 @@ use crate::backend::parser::{
 use crate::backend::storage::smgr::{ForkNumber, segment_path};
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, relkind_is_analyzable,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, relkind_is_analyzable,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -1423,12 +1423,24 @@ fn collect_persistence_relation_oids(
             if depend.classid == PG_CLASS_RELATION_OID
                 && depend.objsubid == 0
                 && depend.refobjsubid > 0
-                && depend.deptype == DEPENDENCY_AUTO
+                && matches!(depend.deptype, DEPENDENCY_AUTO | DEPENDENCY_INTERNAL)
                 && catalog
                     .class_row_by_oid(depend.objid)
                     .is_some_and(|row| row.relkind == 'S')
             {
                 push_unique_relation_oid(&mut relation_oids, depend.objid);
+            }
+        }
+        for column in &relation.desc.columns {
+            if column.dropped {
+                continue;
+            }
+            if let Some(sequence_oid) = column.default_sequence_oid
+                && catalog
+                    .class_row_by_oid(sequence_oid)
+                    .is_some_and(|row| row.relkind == 'S')
+            {
+                push_unique_relation_oid(&mut relation_oids, sequence_oid);
             }
         }
     }
