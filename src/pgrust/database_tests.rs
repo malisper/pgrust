@@ -3297,6 +3297,74 @@ fn stats_import_locks_partitioned_index_and_parent() {
 }
 
 #[test]
+fn alter_reloptions_hold_pg_compatible_relation_locks() {
+    let db = Database::open_ephemeral(64).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table reloption_lock_items (id int4, note text)",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "alter table reloption_lock_items set (fillfactor = 80)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks
+             where relation = 'reloption_lock_items'::regclass
+               and pid = pg_backend_pid()
+               and mode = 'ShareUpdateExclusiveLock'
+               and granted",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
+
+    session
+        .execute(
+            &db,
+            "create view reloption_lock_view with (security_barrier = true) as select id from reloption_lock_items",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "alter view reloption_lock_view reset (security_barrier)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_locks
+             where relation = 'reloption_lock_view'::regclass
+               and pid = pg_backend_pid()
+               and mode = 'AccessExclusiveLock'
+               and granted",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select reloptions from pg_class where relname = 'reloption_lock_view'",
+        ),
+        vec![vec![Value::Null]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
 fn filtered_cross_join_preserves_left_outer_row_order() {
     let base = temp_dir("filtered_cross_join_left_order");
     let db = Database::open(&base, 16).unwrap();
@@ -15177,6 +15245,38 @@ fn create_view_persists_security_reloptions() {
         )]]
     );
 
+    db.execute(1, "alter view secure_items reset (security_barrier)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'secure_items'",
+        ),
+        vec![vec![Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![Value::Text(
+                "security_invoker=true".into(),
+            )])
+            .with_element_type_oid(TEXT_TYPE_OID)
+        )]]
+    );
+
+    db.execute(1, "alter view secure_items reset (security_invoker)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'secure_items'",
+        ),
+        vec![vec![Value::Null]]
+    );
+
+    db.execute(
+        1,
+        "alter view secure_items set (security_barrier=true, security_invoker=true)",
+    )
+    .unwrap();
     db.execute(
         1,
         "create or replace view secure_items as select id from items",
@@ -25283,6 +25383,59 @@ fn alter_table_alter_column_type_allows_textlike_cast_without_using() {
 }
 
 #[test]
+fn alter_table_alter_column_type_using_same_type_rewrites_rows() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(1, "create table rewrite_same_type (test int4 unique)")
+        .unwrap();
+    db.execute(1, "insert into rewrite_same_type values (1), (2)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table rewrite_same_type alter column test type integer using 0",
+    ) {
+        Err(ExecError::UniqueViolation { .. }) => {}
+        other => panic!("expected ALTER TYPE rewrite to hit unique violation, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select test from rewrite_same_type order by test"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn alter_table_alter_column_type_revalidates_check_constraints_before_mutation() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(1, "create table rewrite_check (a int4 check (a <= 10))")
+        .unwrap();
+    db.execute(1, "insert into rewrite_check values (1)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table rewrite_check alter column a type boolean using true",
+    ) {
+        Err(ExecError::Parse(_)) | Err(ExecError::DetailedError { .. }) => {}
+        other => panic!("expected CHECK constraint revalidation failure, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select atttypid::regtype::text from pg_attribute \
+             where attrelid = 'rewrite_check'::regclass and attname = 'a'",
+        ),
+        vec![vec![Value::Text("integer".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a + 1 from rewrite_check"),
+        vec![vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
 fn alter_table_alter_column_type_allows_foreign_key_columns() {
     let base = temp_dir("alter_table_alter_column_type_foreign_key");
     let db = Database::open(&base, 16).unwrap();
@@ -25416,6 +25569,36 @@ fn alter_table_alter_column_type_rebuilds_indexed_target_column() {
     assert_eq!(
         query_rows(&db, 1, "select note from items where note = 20"),
         vec![vec![Value::Int64(20)]]
+    );
+}
+
+#[test]
+fn alter_table_alter_column_type_preserves_clustered_index_flag() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(1, "create table rewrite_cluster (a int4, b text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index rewrite_cluster_b_idx on rewrite_cluster (b)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table rewrite_cluster cluster on rewrite_cluster_b_idx",
+    )
+    .unwrap();
+    db.execute(1, "alter table rewrite_cluster alter column b type varchar")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indisclustered from pg_index \
+             where indexrelid = 'rewrite_cluster_b_idx'::regclass",
+        ),
+        vec![vec![Value::Bool(true)]]
     );
 }
 
@@ -36001,6 +36184,55 @@ fn partitioned_table_rejects_not_null_no_inherit() {
             assert_eq!(sqlstate, "42P16");
         }
         other => panic!("expected partitioned NOT NULL NO INHERIT failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn partitioned_table_rejects_no_inherit_and_only_check_constraints() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(
+        1,
+        "create table part_check_parent (a int4, b text) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part_check_child partition of part_check_parent for values in (1)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table part_check_parent add constraint part_check_parent_a check (a > 0) no inherit",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot add NO INHERIT constraint to partitioned table \"part_check_parent\""
+            );
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected partitioned CHECK NO INHERIT failure, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "alter table only part_check_parent add constraint part_check_parent_b check (b <> 'zz')",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "constraint must be added to child tables too");
+            assert_eq!(hint.as_deref(), Some("Do not specify the ONLY keyword."));
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected partitioned ONLY CHECK failure, got {other:?}"),
     }
 }
 

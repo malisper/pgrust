@@ -6303,7 +6303,59 @@ fn try_parse_view_statement(sql: &str) -> Result<Option<Statement>, ParseError> 
         return build_alter_view_rename_statement(trimmed)
             .map(|stmt| Some(Statement::AlterViewRename(stmt)));
     }
+    if lowered.contains(" reset ") {
+        return build_alter_view_reset_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTableReset(stmt)));
+    }
     Ok(None)
+}
+
+fn build_alter_view_reset_statement(sql: &str) -> Result<AlterTableResetStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim(), "alter view").trim_start();
+    let if_exists = if keyword_at_start(rest, "if exists") {
+        rest = consume_keyword(rest, "if exists").trim_start();
+        true
+    } else {
+        false
+    };
+    let (parts, next) = parse_qualified_identifier_parts(rest)?;
+    let table_name = parts.join(".");
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "reset") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER VIEW RESET",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "reset").trim_start();
+    let Some(inner) = rest
+        .strip_prefix('(')
+        .and_then(|tail| tail.strip_suffix(')'))
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RESET option list",
+            actual: rest.into(),
+        });
+    };
+    let options = split_comma_separated_sql(inner)?
+        .into_iter()
+        .map(|option| {
+            let (name, tail) = parse_sql_identifier(option)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "RESET option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AlterTableResetStatement {
+        if_exists,
+        only: false,
+        table_name,
+        options,
+    })
 }
 
 fn try_parse_materialized_view_access_method_statement(

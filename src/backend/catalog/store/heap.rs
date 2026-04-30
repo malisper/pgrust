@@ -10374,6 +10374,18 @@ fn preserve_non_derived_relation_rows_mvcc(
     kinds: &[BootstrapCatalogKind],
     new_rows: &mut PhysicalCatalogRows,
 ) -> Result<(), CatalogError> {
+    if matches!(entry.relkind, 'i' | 'I')
+        && kinds.contains(&BootstrapCatalogKind::PgIndex)
+        && let Some(old_index) = index_row_by_index_oid_mvcc(store, ctx, entry.relation_oid)?
+        && let Some(new_index) = new_rows
+            .indexes
+            .iter_mut()
+            .find(|row| row.indexrelid == entry.relation_oid)
+    {
+        new_index.indisclustered = old_index.indisclustered;
+        new_index.indisreplident = old_index.indisreplident;
+    }
+
     if kinds.contains(&BootstrapCatalogKind::PgDepend) {
         for row in relation_rewrites_mvcc(store, ctx, entry.relation_oid)? {
             new_rows.depends.extend(depend_rows_for_object_mvcc(

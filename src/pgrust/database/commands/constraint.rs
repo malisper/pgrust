@@ -2561,6 +2561,29 @@ impl Database {
                 }
             }
             crate::backend::parser::NormalizedAlterTableConstraint::Check(action) => {
+                if relation.relkind == 'p' && action.no_inherit {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot add NO INHERIT constraint to partitioned table \"{}\"",
+                            table_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
+                if alter_stmt.only
+                    && !action.no_inherit
+                    && !direct_inheritance_children(&catalog, relation.relation_oid)?.is_empty()
+                {
+                    return Err(ExecError::DetailedError {
+                        message: "constraint must be added to child tables too".into(),
+                        detail: None,
+                        hint: (relation.relkind == 'p')
+                            .then_some("Do not specify the ONLY keyword.".into()),
+                        sqlstate: "42P16",
+                    });
+                }
                 crate::backend::parser::bind_check_constraint_expr(
                     &action.expr_sql,
                     Some(&table_name),

@@ -1738,12 +1738,26 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
-            Statement::AlterTableReset(ref alter_stmt) => self
-                .execute_alter_table_reset_stmt_with_search_path(
-                    client_id,
-                    alter_stmt,
-                    configured_search_path,
-                ),
+            Statement::AlterTableReset(ref alter_stmt) => {
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let is_view = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .is_some_and(|relation| relation.relkind == 'v');
+                drop(catalog);
+                if is_view {
+                    self.execute_alter_view_reset_options_stmt_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        configured_search_path,
+                    )
+                } else {
+                    self.execute_alter_table_reset_stmt_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        configured_search_path,
+                    )
+                }
+            }
             Statement::AlterTableSetPersistence(ref alter_stmt) => self
                 .execute_alter_table_set_persistence_stmt_with_search_path(
                     client_id,

@@ -22,10 +22,10 @@ use crate::backend::utils::cache::syscache::{
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
-    PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
-    builtin_type_name_for_oid, relkind_is_analyzable,
+    CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
+    builtin_range_name_for_sql_type, builtin_type_name_for_oid, relkind_is_analyzable,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{ColumnGeneratedKind, Query, RangeTblEntryKind};
@@ -1739,6 +1739,9 @@ pub(super) fn automatic_alter_type_cast_allowed(
     if is_text_like_type(from) && is_text_like_type(to) {
         return true;
     }
+    if !from.is_array && !to.is_array && is_text_like_type(to) {
+        return true;
+    }
     if !from.is_array
         && !to.is_array
         && matches!(from.kind, SqlTypeKind::Bool)
@@ -2213,6 +2216,7 @@ fn alter_column_type_error(
 
 pub(super) fn validate_alter_table_alter_column_type(
     catalog: &dyn CatalogLookup,
+    relation_oid: u32,
     desc: &RelationDesc,
     column_name: &str,
     ty: &RawTypeName,
@@ -2277,23 +2281,6 @@ pub(super) fn validate_alter_table_alter_column_type(
         });
     }
 
-    if let Some(default_sql) = current_column.default_expr.as_deref() {
-        let default_expr =
-            crate::backend::parser::parse_expr(default_sql).map_err(ExecError::Parse)?;
-        let (_bound_default, default_type) =
-            bind_scalar_expr_in_scope(&default_expr, &[], catalog).map_err(ExecError::Parse)?;
-        if !automatic_alter_type_cast_allowed(catalog, default_type, target_sql_type) {
-            return alter_column_type_error(
-                format!(
-                    "default for column \"{}\" cannot be cast automatically to type {}",
-                    current_column.name,
-                    format_sql_type_name(target_sql_type),
-                ),
-                None,
-            );
-        }
-    }
-
     let scope_columns = desc
         .columns
         .iter()
@@ -2341,6 +2328,23 @@ pub(super) fn validate_alter_table_alter_column_type(
         );
     }
 
+    if let Some(default_sql) = current_column.default_expr.as_deref() {
+        let default_expr =
+            crate::backend::parser::parse_expr(default_sql).map_err(ExecError::Parse)?;
+        let (_bound_default, default_type) =
+            bind_scalar_expr_in_scope(&default_expr, &[], catalog).map_err(ExecError::Parse)?;
+        if !automatic_alter_type_cast_allowed(catalog, default_type, target_sql_type) {
+            return alter_column_type_error(
+                format!(
+                    "default for column \"{}\" cannot be cast automatically to type {}",
+                    current_column.name,
+                    format_sql_type_name(target_sql_type),
+                ),
+                None,
+            );
+        }
+    }
+
     let mut new_column = column_desc(
         current_column.name.clone(),
         target_sql_type,
@@ -2382,6 +2386,25 @@ pub(super) fn validate_alter_table_alter_column_type(
             .as_deref()
             .and_then(|sql| derive_literal_default_value(sql, target_sql_type).ok())
     };
+
+    let mut desc_with_new_type = desc.clone();
+    desc_with_new_type.columns[column_index] = new_column.clone();
+    let relation_name = relation_name_for_oid(catalog, relation_oid);
+    for constraint in catalog.constraint_rows_for_relation(relation_oid) {
+        if constraint.contype != CONSTRAINT_CHECK {
+            continue;
+        }
+        let Some(expr_sql) = constraint.conbin.as_deref() else {
+            continue;
+        };
+        crate::backend::parser::bind_check_constraint_expr(
+            expr_sql,
+            Some(&relation_name),
+            &desc_with_new_type,
+            catalog,
+        )
+        .map_err(ExecError::Parse)?;
+    }
 
     Ok(AlterColumnTypePlan {
         column_index,
