@@ -129,6 +129,23 @@ fn expand_named_star_targets(
     outer_scopes: &[BoundScope],
     relation: &str,
 ) -> Result<Vec<TargetEntry>, ParseError> {
+    if relation.eq_ignore_ascii_case("old") || relation.eq_ignore_ascii_case("new") {
+        for (depth, outer_scope) in outer_scopes.iter().enumerate() {
+            if !outer_scope_has_rule_pseudo_relation(outer_scope, relation) {
+                continue;
+            }
+            if let Ok(entries) = expand_star_targets(outer_scope, Some(relation)) {
+                return Ok(entries
+                    .into_iter()
+                    .map(|entry| TargetEntry {
+                        expr: raise_expr_varlevels(entry.expr, depth + 1),
+                        input_resno: None,
+                        ..entry
+                    })
+                    .collect());
+            }
+        }
+    }
     match expand_star_targets(scope, Some(relation)) {
         Ok(entries) => Ok(entries),
         Err(ParseError::UnknownColumn(_)) => outer_scopes
@@ -151,6 +168,23 @@ fn expand_named_star_targets(
             .unwrap_or_else(|| Err(ParseError::UnknownColumn(format!("{relation}.*")))),
         Err(err) => Err(err),
     }
+}
+
+fn outer_scope_has_rule_pseudo_relation(scope: &BoundScope, relation: &str) -> bool {
+    let varno = if relation.eq_ignore_ascii_case("old") {
+        crate::include::nodes::primnodes::RULE_OLD_VAR
+    } else if relation.eq_ignore_ascii_case("new") {
+        crate::include::nodes::primnodes::RULE_NEW_VAR
+    } else {
+        return false;
+    };
+    scope.relations.iter().any(|scope_relation| {
+        scope_relation.system_varno == Some(varno)
+            && scope_relation
+                .relation_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(relation))
+    })
 }
 
 fn expand_record_expr_targets(

@@ -6,7 +6,7 @@ use std::{
 use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::rewrite::format_stored_rule_definition;
 use crate::backend::statistics::types::{PgMcvItem, decode_pg_mcv_list_payload};
-use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
+use crate::backend::utils::cache::pg_catalog_view_definitions::PG_CATALOG_VIEW_DEFINITIONS;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, INT4_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID,
     PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID,
@@ -876,6 +876,7 @@ pub fn build_pg_indexes_rows(
             ))
         })
         .collect::<Vec<_>>();
+    rows.extend(synthetic_pg_catalog_rule_rows());
     rows.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
@@ -890,19 +891,25 @@ fn append_synthetic_pg_catalog_view_rows(
     rows: &mut Vec<(String, String, Vec<Value>)>,
     role_names: &BTreeMap<u32, String>,
 ) {
+    // :HACK: pgrust does not yet store PostgreSQL's analyzed pg_catalog view
+    // rules in pg_rewrite. Keep the metadata deparse rows here so pg_views
+    // matches PostgreSQL while the executable synthetic views remain local.
     let view_owner = role_names
         .get(&BOOTSTRAP_SUPERUSER_OID)
         .cloned()
         .unwrap_or_else(|| "unknown".into());
+    let existing_catalog_views = rows
+        .iter()
+        .filter(|(schemaname, _, _)| schemaname == "pg_catalog")
+        .map(|(_, viewname, _)| viewname.clone())
+        .collect::<BTreeSet<_>>();
     rows.extend(
-        synthetic_system_views()
+        PG_CATALOG_VIEW_DEFINITIONS
             .iter()
-            .filter(|view| {
-                view.has_metadata_definition() && view.canonical_name.starts_with("pg_catalog.")
-            })
-            .map(|view| {
+            .filter(|(viewname, _)| !existing_catalog_views.contains(*viewname))
+            .map(|(viewname, definition)| {
                 let schemaname = "pg_catalog".to_string();
-                let viewname = view.unqualified_name().to_string();
+                let viewname = (*viewname).to_string();
                 (
                     schemaname.clone(),
                     viewname.clone(),
@@ -910,7 +917,7 @@ fn append_synthetic_pg_catalog_view_rows(
                         Value::Text(schemaname.into()),
                         Value::Text(viewname.into()),
                         Value::Text(view_owner.clone().into()),
-                        Value::Text(view.view_definition_sql.to_string().into()),
+                        Value::Text((*definition).into()),
                     ],
                 )
             }),
@@ -921,6 +928,17 @@ pub fn build_pg_rules_rows(
     namespaces: Vec<PgNamespaceRow>,
     classes: Vec<PgClassRow>,
     rewrites: Vec<PgRewriteRow>,
+) -> Vec<Vec<Value>> {
+    build_pg_rules_rows_with_definition_formatter(namespaces, classes, rewrites, |row, relation| {
+        format_stored_rule_definition(row, relation)
+    })
+}
+
+pub fn build_pg_rules_rows_with_definition_formatter(
+    namespaces: Vec<PgNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    rewrites: Vec<PgRewriteRow>,
+    mut format_definition: impl FnMut(&PgRewriteRow, &str) -> String,
 ) -> Vec<Vec<Value>> {
     let namespace_names = namespaces
         .into_iter()
@@ -950,11 +968,12 @@ pub fn build_pg_rules_rows(
                     Value::Text(schemaname.into()),
                     Value::Text(class.relname.clone().into()),
                     Value::Text(rulename.into()),
-                    Value::Text(format_stored_rule_definition(&row, &relation_name).into()),
+                    Value::Text(format_definition(&row, &relation_name).into()),
                 ],
             ))
         })
         .collect::<Vec<_>>();
+    rows.extend(synthetic_pg_catalog_rule_rows());
     rows.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
@@ -962,6 +981,37 @@ pub fn build_pg_rules_rows(
             .then_with(|| left.2.cmp(&right.2))
     });
     rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
+fn synthetic_pg_catalog_rule_rows() -> Vec<(String, String, String, Vec<Value>)> {
+    // :HACK: pg_settings is a synthetic catalog view in pgrust, so its
+    // PostgreSQL-compatible update rules need metadata rows even though they do
+    // not live in pg_rewrite.
+    [
+        (
+            "pg_settings_n",
+            "CREATE RULE pg_settings_n AS\n    ON UPDATE TO pg_catalog.pg_settings DO INSTEAD NOTHING;",
+        ),
+        (
+            "pg_settings_u",
+            "CREATE RULE pg_settings_u AS\n    ON UPDATE TO pg_catalog.pg_settings\n   WHERE (new.name = old.name) DO  SELECT set_config(old.name, new.setting, false) AS set_config;",
+        ),
+    ]
+    .into_iter()
+    .map(|(rulename, definition)| {
+        (
+            "pg_catalog".to_string(),
+            "pg_settings".to_string(),
+            rulename.to_string(),
+            vec![
+                Value::Text("pg_catalog".into()),
+                Value::Text("pg_settings".into()),
+                Value::Text(rulename.into()),
+                Value::Text(definition.into()),
+            ],
+        )
+    })
+    .collect()
 }
 
 pub fn build_pg_policies_rows(

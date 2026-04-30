@@ -11,10 +11,10 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
     AttrNumber, BoolExpr, BuiltinScalarFunction, CaseExpr, CaseWhen, ColumnDesc, FuncExpr,
-    JoinType, JsonRecordFunction, RowsFromItem, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO,
-    ScalarFunctionImpl, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
-    SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan, SqlJsonTableQuotes,
-    SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
+    JoinType, JsonRecordFunction, RULE_NEW_VAR, RULE_OLD_VAR, RowsFromItem, RowsFromSource,
+    SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SqlJsonTable, SqlJsonTableBehavior,
+    SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
+    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
     SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMIN_ATTR_NO, expr_sql_type_hint, user_attrno,
 };
 
@@ -339,17 +339,29 @@ fn expand_values_row_exprs<'a>(
 ) -> Result<Vec<ValuesCell<'a>>, ParseError> {
     let mut expanded = Vec::new();
     for expr in row {
-        if let SqlExpr::Column(name) = expr
-            && let Some(relation_name) = name.strip_suffix(".*")
-        {
+        if let Some(relation_name) = relation_row_star_name(expr) {
             let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
-                .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
+                .ok_or_else(|| ParseError::UnknownColumn(format!("{relation_name}.*")))?;
             expanded.extend(fields.into_iter().map(|(_, expr)| ValuesCell::Bound(expr)));
             continue;
         }
         expanded.push(ValuesCell::Raw(expr));
     }
     Ok(expanded)
+}
+
+fn relation_row_star_name(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Column(name) => name.strip_suffix(".*"),
+        SqlExpr::FieldSelect { expr, field } if field == "*" => {
+            if let SqlExpr::Column(name) = expr.as_ref() {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn resolve_common_values_type(left: SqlType, right: SqlType) -> Option<SqlType> {
@@ -608,19 +620,68 @@ pub(super) fn resolve_relation_row_expr_ref_with_outer(
     outer_scopes: &[BoundScope],
     name: &str,
 ) -> Option<ResolvedRelationRowExpr> {
+    if rule_pseudo_varno_for_name(name).is_some()
+        && let Some(resolved) = resolve_rule_relation_row_expr_in_outer(outer_scopes, name)
+    {
+        return Some(resolved);
+    }
     resolve_relation_row_expr_in_scope(scope, name).or_else(|| {
         outer_scopes.iter().enumerate().find_map(|(depth, scope)| {
             let resolved = resolve_relation_row_expr_in_scope(scope, name)?;
+            let is_rule_pseudo = scope_has_rule_pseudo_relation(scope, name);
             Some(ResolvedRelationRowExpr {
                 fields: resolved
                     .fields
                     .into_iter()
-                    .map(|(field, expr)| (field, raise_expr_varlevels(expr, depth + 1)))
+                    .map(|(field, expr)| {
+                        let expr = if is_rule_pseudo {
+                            expr
+                        } else {
+                            raise_expr_varlevels(expr, depth + 1)
+                        };
+                        (field, expr)
+                    })
                     .collect(),
                 relation_oid: resolved.relation_oid,
             })
         })
     })
+}
+
+fn resolve_rule_relation_row_expr_in_outer(
+    outer_scopes: &[BoundScope],
+    name: &str,
+) -> Option<ResolvedRelationRowExpr> {
+    outer_scopes.iter().find_map(|scope| {
+        if scope_has_rule_pseudo_relation(scope, name) {
+            resolve_relation_row_expr_in_scope(scope, name)
+        } else {
+            None
+        }
+    })
+}
+
+fn scope_has_rule_pseudo_relation(scope: &BoundScope, name: &str) -> bool {
+    let Some(varno) = rule_pseudo_varno_for_name(name) else {
+        return false;
+    };
+    scope.relations.iter().any(|relation| {
+        relation.system_varno == Some(varno)
+            && relation
+                .relation_names
+                .iter()
+                .any(|relation_name| relation_name_matches(relation_name, name))
+    })
+}
+
+fn rule_pseudo_varno_for_name(name: &str) -> Option<usize> {
+    if name.eq_ignore_ascii_case("old") {
+        Some(RULE_OLD_VAR)
+    } else if name.eq_ignore_ascii_case("new") {
+        Some(RULE_NEW_VAR)
+    } else {
+        None
+    }
 }
 
 pub(super) fn relation_row_reference_level(

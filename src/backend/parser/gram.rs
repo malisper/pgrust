@@ -199,6 +199,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_rule_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_add_column_with_fdw_options(&sql)? {
         return Ok(stmt);
     }
@@ -3217,6 +3220,23 @@ fn build_comment_on_event_trigger_statement(
         trigger_name,
         comment,
     })
+}
+
+fn try_parse_rule_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("alter rule ") {
+        return build_alter_rule_rename_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterRuleRename(stmt)));
+    }
+    if lowered.starts_with("alter table ")
+        && lowered.contains(" rule ")
+        && (lowered.contains(" enable ") || lowered.contains(" disable "))
+    {
+        return build_alter_table_rule_state_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTableRuleState(stmt)));
+    }
+    Ok(None)
 }
 
 fn try_parse_alter_table_trigger_state_statement(
@@ -10279,8 +10299,71 @@ fn parse_create_function_set_config(input: &str) -> Result<(AlterRoutineOption, 
     } else {
         rest
     };
-    let (value, rest) = take_next_word(rest)?;
+    let (value, rest) = take_create_function_set_value(rest);
     Ok((AlterRoutineOption::SetConfig { name, value }, rest))
+}
+
+fn take_create_function_set_value(input: &str) -> (String, &str) {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut previous_was_single_quote = false;
+    for (index, ch) in input.char_indices() {
+        if in_single_quote {
+            if ch == '\'' {
+                if previous_was_single_quote {
+                    previous_was_single_quote = false;
+                } else {
+                    previous_was_single_quote = true;
+                }
+            } else if previous_was_single_quote {
+                in_single_quote = false;
+                previous_was_single_quote = false;
+            }
+            continue;
+        }
+        previous_was_single_quote = false;
+        if in_double_quote {
+            if ch == '"' {
+                in_double_quote = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => in_single_quote = true,
+            '"' => in_double_quote = true,
+            ch if ch.is_whitespace() => {
+                let tail = input[index..].trim_start();
+                if create_function_clause_starts(tail) {
+                    return (input[..index].trim().to_string(), tail);
+                }
+            }
+            _ => {}
+        }
+    }
+    (input.trim().to_string(), "")
+}
+
+fn create_function_clause_starts(input: &str) -> bool {
+    [
+        "returns",
+        "language",
+        "cost",
+        "support",
+        "as",
+        "return",
+        "begin",
+        "strict",
+        "called",
+        "leakproof",
+        "security",
+        "immutable",
+        "stable",
+        "volatile",
+        "parallel",
+        "set",
+    ]
+    .into_iter()
+    .any(|keyword| keyword_at_start(input, keyword))
 }
 
 fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, ParseError> {
@@ -12062,6 +12145,129 @@ fn build_alter_trigger_rename_statement(
         schema_name,
         table_name,
         new_trigger_name,
+    })
+}
+
+fn build_alter_rule_rename_statement(sql: &str) -> Result<AlterRuleRenameStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "rule").trim_start();
+    let (rule_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), next) = parse_schema_qualified_name(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "rename") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "rename").trim_start();
+    if !keyword_at_start(rest, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "to").trim_start();
+    let (new_rule_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER RULE statement",
+            actual: rest.trim().into(),
+        });
+    }
+    let relation_name = match schema_name {
+        Some(schema_name) => format!("{schema_name}.{table_name}"),
+        None => table_name,
+    };
+    Ok(AlterRuleRenameStatement {
+        rule_name,
+        relation_name,
+        new_rule_name,
+    })
+}
+
+fn build_alter_table_rule_state_statement(
+    sql: &str,
+) -> Result<AlterTableRuleStateStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "table").trim_start();
+
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        rest = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(rest, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "EXISTS",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "exists").trim_start();
+        if_exists = true;
+    }
+
+    let mut only = false;
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+        only = true;
+    }
+
+    let ((schema_name, table_name), next) = parse_schema_qualified_name(rest)?;
+    rest = next.trim_start();
+    let table_name = match schema_name {
+        Some(schema_name) => format!("{schema_name}.{table_name}"),
+        None => table_name,
+    };
+
+    let mode = if keyword_at_start(rest, "enable") {
+        rest = consume_keyword(rest, "enable").trim_start();
+        if keyword_at_start(rest, "always") {
+            rest = consume_keyword(rest, "always").trim_start();
+            AlterTableTriggerMode::EnableAlways
+        } else if keyword_at_start(rest, "replica") {
+            rest = consume_keyword(rest, "replica").trim_start();
+            AlterTableTriggerMode::EnableReplica
+        } else {
+            AlterTableTriggerMode::EnableOrigin
+        }
+    } else if keyword_at_start(rest, "disable") {
+        rest = consume_keyword(rest, "disable").trim_start();
+        AlterTableTriggerMode::Disable
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ENABLE or DISABLE",
+            actual: rest.into(),
+        });
+    };
+
+    if !keyword_at_start(rest, "rule") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RULE",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "rule").trim_start();
+    let (rule_name, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE rule statement",
+            actual: rest.trim().into(),
+        });
+    }
+
+    Ok(AlterTableRuleStateStatement {
+        if_exists,
+        only,
+        table_name,
+        rule_name,
+        mode,
     })
 }
 
@@ -18745,6 +18951,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
         Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
         Rule::update_stmt => Ok(CteBody::Update(Box::new(build_update(pair)?))),
         Rule::merge_stmt => Ok(CteBody::Merge(Box::new(build_merge(pair)?))),
+        Rule::delete_stmt => Ok(CteBody::Delete(Box::new(build_delete(pair)?))),
         Rule::recursive_union_cte_body => {
             let all = contains_union_all(pair.as_str());
             let mut inner = pair.into_inner();
@@ -18768,7 +18975,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             })
         }
         _ => Err(ParseError::UnexpectedToken {
-            expected: "SELECT, VALUES, INSERT, UPDATE, or MERGE CTE body",
+            expected: "SELECT, VALUES, INSERT, UPDATE, DELETE, or MERGE CTE body",
             actual: pair.as_str().into(),
         }),
     }
@@ -20683,6 +20890,7 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
 }
 
 fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseError> {
+    let mut or_replace = false;
     let mut rule_name = None;
     let mut relation_name = None;
     let mut event = None;
@@ -20692,6 +20900,7 @@ fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseE
     let mut actions = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::create_or_replace_clause => or_replace = true,
             Rule::identifier if rule_name.is_none() => rule_name = Some(build_identifier(part)),
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_identifier(part));
@@ -20713,6 +20922,7 @@ fn build_create_rule(pair: Pair<'_, Rule>) -> Result<CreateRuleStatement, ParseE
         }
     }
     Ok(CreateRuleStatement {
+        or_replace,
         rule_name: rule_name.ok_or(ParseError::UnexpectedEof)?,
         relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
         event: event.ok_or(ParseError::UnexpectedEof)?,
@@ -20770,37 +20980,40 @@ fn build_rule_action_statement(pair: Pair<'_, Rule>) -> Result<RuleActionStateme
     } else {
         pair
     };
-    build_rule_action_statement_sql(inner.as_str())
+    let raw = inner.as_str();
+    let leading = raw.len().saturating_sub(raw.trim_start().len());
+    build_rule_action_statement_sql_with_position(raw, Some(inner.as_span().start() + leading + 1))
 }
 
 fn build_rule_action_statement_sql(sql: &str) -> Result<RuleActionStatement, ParseError> {
+    build_rule_action_statement_sql_with_position(sql, None)
+}
+
+fn build_rule_action_statement_sql_with_position(
+    sql: &str,
+    sql_position: Option<usize>,
+) -> Result<RuleActionStatement, ParseError> {
     let sql = sql.trim().trim_end_matches(';').trim().to_string();
     let statement = parse_statement(&sql)?;
     match &statement {
-        Statement::Insert(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
-            return Err(ParseError::FeatureNotSupported(
-                "WITH in rule actions".into(),
-            ));
-        }
-        Statement::Update(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
-            return Err(ParseError::FeatureNotSupported(
-                "WITH in rule actions".into(),
-            ));
-        }
-        Statement::Delete(stmt) if stmt.with_recursive || !stmt.with.is_empty() => {
-            return Err(ParseError::FeatureNotSupported(
-                "WITH in rule actions".into(),
-            ));
-        }
         Statement::Unsupported(_) => {
             return Err(ParseError::FeatureNotSupported(
                 "rule action statement".into(),
             ));
         }
-        Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_) => {}
+        Statement::Insert(_)
+        | Statement::Update(_)
+        | Statement::Delete(_)
+        | Statement::Select(_)
+        | Statement::Values(_)
+        | Statement::Notify(_) => {}
         _ => {}
     }
-    Ok(RuleActionStatement { statement, sql })
+    Ok(RuleActionStatement {
+        statement,
+        sql,
+        sql_position,
+    })
 }
 
 fn split_rule_action_list(list_sql: &str) -> Result<Vec<String>, ParseError> {
@@ -22960,6 +23173,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut table_name = None;
+    let mut target_alias = None;
     let mut only = false;
     let mut using = None;
     let mut where_clause = None;
@@ -22972,8 +23186,12 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
                 with_recursive = recursive;
                 with = ctes;
             }
-            Rule::only_clause => only = true,
-            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::delete_target => {
+                let (parsed_table_name, parsed_alias, parsed_only) = build_delete_target(part)?;
+                table_name = Some(parsed_table_name);
+                target_alias = parsed_alias;
+                only = parsed_only;
+            }
             Rule::from_item => using = Some(build_from_item(part)?),
             Rule::update_where_clause => match build_update_where_clause(part)? {
                 UpdateWhereClause::Expr(expr) => where_clause = Some(expr),
@@ -22987,12 +23205,38 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         with_recursive,
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        target_alias,
         only,
         using,
         where_clause,
         current_of,
         returning,
     })
+}
+
+fn build_delete_target(pair: Pair<'_, Rule>) -> Result<(String, Option<String>, bool), ParseError> {
+    let mut table_name = None;
+    let mut alias = None;
+    let mut only = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::only_clause => only = true,
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::delete_target_alias => {
+                let alias_pair = part.into_inner().find(|inner| {
+                    matches!(
+                        inner.as_rule(),
+                        Rule::delete_alias_identifier | Rule::identifier
+                    )
+                });
+                if let Some(alias_pair) = alias_pair {
+                    alias = Some(build_identifier(alias_pair));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((table_name.ok_or(ParseError::UnexpectedEof)?, alias, only))
 }
 
 enum UpdateWhereClause {

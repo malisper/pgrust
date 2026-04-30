@@ -818,6 +818,8 @@ pub enum BuiltinScalarFunction {
     PgEventTriggerTableRewriteOid,
     PgEventTriggerTableRewriteReason,
     PgGetFunctionArguments,
+    PgGetFunctionIdentityArguments,
+    PgGetFunctionArgDefault,
     PgGetFunctionDef,
     PgGetFunctionResult,
     PgGetExpr,

@@ -142,3 +142,46 @@ Remaining `rules` diffs are follow-up areas:
 - Unsupported/partial syntax and DDL forms remain: `ALTER RULE`, rule
   enable/disable, some rule action statement forms, `CREATE VIEW AS VALUES`,
   `EXPLAIN INSERT`, and selected catalog helper functions.
+
+Goal:
+Finish `rules` regression parity after the root-cause pass.
+
+Key decisions:
+- Implemented only behavior and deparse paths exercised by `rules`; kept broad
+  SQL compatibility beyond this regression out of scope.
+- Used PostgreSQL's `rules.out` as the expected reference and fixed the
+  remaining rule DDL/action, ruleutils, helper function, and SQL-visible error
+  position gaps in the relevant parser/analyzer/catalog/rewrite/executor paths.
+- Final four mismatches were one missing `FOR UPDATE OF old` cursor and three
+  ruleutils/function-body indentation diffs.
+
+Files touched:
+- Parser/analyzer and node metadata for rule action SQL positions and supported
+  rule action shapes.
+- Catalog/DDL paths for rule replacement, rename, enable/disable, pg_rewrite,
+  pg_rules/pg_views, and helper-function metadata.
+- Rewrite/view deparse paths for rule actions, values views, pg_get_viewdef,
+  pg_get_ruledef, and SQL-standard function bodies used by `rules`.
+- Executor/function paths for helper functions and SQL-visible deparse output.
+- `src/backend/tcop/postgres.rs` only for normal error-position inference for
+  `FOR UPDATE OF <target>` missing-relation errors.
+
+Tests run:
+- `cargo fmt`
+- `RUSTC_WRAPPER=/usr/bin/env PGRUST_TARGET_POOL_SIZE=16 PGRUST_TARGET_SLOT=14 env -u CARGO_TARGET_DIR scripts/cargo_isolated.sh check`
+- `RUSTC_WRAPPER=/usr/bin/env PGRUST_TARGET_POOL_SIZE=16 PGRUST_TARGET_SLOT=14 env -u CARGO_TARGET_DIR scripts/cargo_isolated.sh test --lib --quiet create_rule_rejects_unqualified_action_reference -- --nocapture`
+- `RUSTC_WRAPPER=/usr/bin/env PGRUST_TARGET_POOL_SIZE=16 PGRUST_TARGET_SLOT=14 env -u CARGO_TARGET_DIR scripts/cargo_isolated.sh test --lib --quiet pg_get_ruledef -- --nocapture`
+- `RUSTC_WRAPPER=/usr/bin/env PGRUST_TARGET_POOL_SIZE=16 PGRUST_TARGET_SLOT=14 env -u CARGO_TARGET_DIR scripts/cargo_isolated.sh test --lib --quiet pg_rules_exposes_user_rules_but_not_return_rules -- --nocapture`
+- `RUSTC_WRAPPER=/usr/bin/env PGRUST_TARGET_POOL_SIZE=16 PGRUST_TARGET_SLOT=14 env -u CARGO_TARGET_DIR scripts/cargo_isolated.sh test --lib --quiet pg_get_viewdef_renders_values_rows_and_set_operation_inputs -- --nocapture`
+- `RUSTC_WRAPPER=/usr/bin/env PGRUST_TARGET_POOL_SIZE=16 PGRUST_TARGET_SLOT=14 env -u CARGO_TARGET_DIR scripts/cargo_isolated.sh test --lib --quiet exec_error_position_points_at_missing_for_update_target -- --nocapture`
+- `CARGO_TARGET_DIR=/tmp/pgrust-target RUSTC_WRAPPER=/usr/bin/env cargo build --bin pgrust_server`
+- `CARGO_TARGET_DIR=/tmp/pgrust-target RUSTC_WRAPPER=/usr/bin/env RUST_BACKTRACE=full PGRUST_REGRESS_BASE_SETUP_TIMEOUT=600 scripts/run_regression.sh --test rules --skip-build --timeout 300 --port 57033`
+
+Final validation:
+- `rules` passes: 626/626 queries matched, 0 diffs.
+- Final results directory:
+  `/Volumes/OSCOO PSSD/pgrust/tmp//pgrust_regress_results.damascus-v4.DxW6SN`
+- Rebased onto `origin/perf-optimization` before PR creation.
+
+Remaining:
+- No remaining `rules` regression diffs.

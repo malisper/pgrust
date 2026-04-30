@@ -3670,33 +3670,6 @@ fn bind_insert_assignment_expr(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, None, local_ctes)
 }
 
-fn bind_insert_values_whole_row_star_rows(
-    rows: &[Vec<SqlExpr>],
-    scope: &BoundScope,
-    outer_scopes: &[BoundScope],
-) -> Result<Option<Vec<Vec<Expr>>>, ParseError> {
-    let mut relation_names = Vec::with_capacity(rows.len());
-    for row in rows {
-        let [expr] = row.as_slice() else {
-            return Ok(None);
-        };
-        let Some(name) = whole_row_star_relation_name(expr) else {
-            return Ok(None);
-        };
-        relation_names.push(name);
-    }
-
-    relation_names
-        .into_iter()
-        .map(|name| {
-            resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
-                .map(|fields| fields.into_iter().map(|(_, expr)| expr).collect())
-                .ok_or_else(|| ParseError::UnknownColumn(format!("{name}.*")))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
-}
-
 fn whole_row_star_relation_name(expr: &SqlExpr) -> Option<&str> {
     match expr {
         SqlExpr::Column(name) => name.strip_suffix(".*"),
@@ -3709,6 +3682,33 @@ fn whole_row_star_relation_name(expr: &SqlExpr) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+enum InsertValuesCell<'a> {
+    Raw(&'a SqlExpr),
+    Bound(Expr),
+}
+
+fn expand_insert_values_row_exprs<'a>(
+    row: &'a [SqlExpr],
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+) -> Result<Vec<InsertValuesCell<'a>>, ParseError> {
+    let mut expanded = Vec::new();
+    for expr in row {
+        if let Some(name) = whole_row_star_relation_name(expr) {
+            let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                .ok_or_else(|| ParseError::UnknownColumn(format!("{name}.*")))?;
+            expanded.extend(
+                fields
+                    .into_iter()
+                    .map(|(_, expr)| InsertValuesCell::Bound(expr)),
+            );
+        } else {
+            expanded.push(InsertValuesCell::Raw(expr));
+        }
+    }
+    Ok(expanded)
 }
 
 fn reject_invalid_domain_array_assignment(
@@ -4061,58 +4061,43 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
 
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
-            if stmt.columns.is_none()
-                && let Some(bound_rows) =
-                    bind_insert_values_whole_row_star_rows(rows, &expr_scope, outer_scopes)?
-            {
-                let target_columns = visible_assignment_targets(&entry.desc);
-                for row in &bound_rows {
-                    if target_columns.len() != row.len() {
-                        return Err(ParseError::InvalidInsertTargetCount {
-                            expected: target_columns.len(),
-                            actual: row.len(),
-                        });
-                    }
-                }
-                let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
-                    BoundInsertSource::ProjectSetValues(bound_rows)
-                } else {
-                    BoundInsertSource::Values(bound_rows)
-                };
-                (target_columns, source)
-            } else {
-                let target_columns = if let Some(columns) = &stmt.columns {
-                    columns
-                        .iter()
-                        .map(|column| {
-                            bind_assignment_target(column, &target_scope, catalog, &visible_ctes)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
-                    let visible_targets = visible_assignment_targets(&entry.desc);
-                    let width = rows.first().map(Vec::len).unwrap_or(0);
-                    if width > visible_targets.len() {
-                        return Err(ParseError::InvalidInsertTargetCount {
-                            expected: visible_targets.len(),
-                            actual: width,
-                        });
-                    }
-                    visible_targets.into_iter().take(width).collect()
-                };
-                for row in rows {
-                    if target_columns.len() != row.len() {
-                        return Err(ParseError::InvalidInsertTargetCount {
-                            expected: target_columns.len(),
-                            actual: row.len(),
-                        });
-                    }
-                }
-                let bound_rows = rows
+            let expanded_rows = rows
+                .iter()
+                .map(|row| expand_insert_values_row_exprs(row, &expr_scope, outer_scopes))
+                .collect::<Result<Vec<_>, _>>()?;
+            let target_columns = if let Some(columns) = &stmt.columns {
+                columns
                     .iter()
-                    .map(|row| {
-                        row.iter()
-                            .zip(target_columns.iter())
-                            .map(|(expr, target)| {
+                    .map(|column| {
+                        bind_assignment_target(column, &target_scope, catalog, &visible_ctes)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                let visible_targets = visible_assignment_targets(&entry.desc);
+                let width = expanded_rows.first().map(Vec::len).unwrap_or(0);
+                if width > visible_targets.len() {
+                    return Err(ParseError::InvalidInsertTargetCount {
+                        expected: visible_targets.len(),
+                        actual: width,
+                    });
+                }
+                visible_targets.into_iter().take(width).collect()
+            };
+            for row in &expanded_rows {
+                if target_columns.len() != row.len() {
+                    return Err(ParseError::InvalidInsertTargetCount {
+                        expected: target_columns.len(),
+                        actual: row.len(),
+                    });
+                }
+            }
+            let bound_rows = expanded_rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .zip(target_columns.iter())
+                        .map(|(cell, target)| match cell {
+                            InsertValuesCell::Raw(expr) => {
                                 ensure_generated_assignment_allowed(
                                     &entry.desc,
                                     target,
@@ -4143,17 +4128,42 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                                         )
                                     }
                                 }
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
-                    BoundInsertSource::ProjectSetValues(bound_rows)
-                } else {
-                    BoundInsertSource::Values(bound_rows)
-                };
-                (target_columns, source)
-            }
+                            }
+                            InsertValuesCell::Bound(expr) => {
+                                ensure_generated_assignment_allowed(
+                                    &entry.desc,
+                                    target,
+                                    Some(&SqlExpr::Const(Value::Null)),
+                                )?;
+                                ensure_identity_select_insert_allowed(
+                                    &entry.desc,
+                                    target,
+                                    stmt.overriding,
+                                )?;
+                                let source_type = expr_sql_type_hint(expr)
+                                    .unwrap_or(SqlType::new(SqlTypeKind::Text));
+                                reject_invalid_domain_array_assignment(
+                                    &entry.desc,
+                                    target,
+                                    source_type,
+                                    catalog,
+                                )?;
+                                Ok(coerce_bound_expr(
+                                    expr.clone(),
+                                    source_type,
+                                    target.target_sql_type,
+                                ))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
+                BoundInsertSource::ProjectSetValues(bound_rows)
+            } else {
+                BoundInsertSource::Values(bound_rows)
+            };
+            (target_columns, source)
         }
         InsertSource::DefaultValues => (
             visible_assignment_targets(&entry.desc),
@@ -4846,8 +4856,9 @@ pub(crate) fn bind_delete_with_outer_scopes(
     if stmt.using.is_some() {
         return bind_delete_using(stmt, catalog, outer_scopes, &local_ctes, &entry);
     }
+    let visible_target_name = stmt.target_alias.as_deref().unwrap_or(&stmt.table_name);
     let scope = scope_for_base_relation_with_generated(
-        &stmt.table_name,
+        visible_target_name,
         &entry.desc,
         Some(entry.relation_oid),
         catalog,
@@ -4920,7 +4931,10 @@ fn bind_delete_using(
     local_ctes: &[BoundCte],
     entry: &BoundRelation,
 ) -> Result<BoundDeleteStatement, ParseError> {
-    let target_relation_name = stmt.table_name.clone();
+    let target_relation_name = stmt
+        .target_alias
+        .clone()
+        .unwrap_or_else(|| stmt.table_name.clone());
     let target_scope = scope_for_base_relation_with_generated(
         &target_relation_name,
         &entry.desc,

@@ -2520,9 +2520,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
             BuiltinScalarFunction::ObjDescription => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetFunctionArguments
+            | BuiltinScalarFunction::PgGetFunctionIdentityArguments
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgFunctionIsVisible => args.len() == 1,
+            BuiltinScalarFunction::PgGetFunctionArgDefault => args.len() == 2,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetPartitionConstraintDef => args.len() == 1,
@@ -4261,6 +4263,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgGetFunctionArguments,
         ),
         (
+            "pg_get_function_identity_arguments",
+            BuiltinScalarFunction::PgGetFunctionIdentityArguments,
+        ),
+        (
+            "pg_get_function_arg_default",
+            BuiltinScalarFunction::PgGetFunctionArgDefault,
+        ),
+        (
             "pg_get_functiondef",
             BuiltinScalarFunction::PgGetFunctionDef,
         ),
@@ -4279,11 +4289,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
         ("pg_get_viewdef_name", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_viewdef_ext", BuiltinScalarFunction::PgGetViewDef),
         (
             "pg_get_viewdef_name_ext",
             BuiltinScalarFunction::PgGetViewDef,
         ),
-        ("pg_get_viewdef_ext", BuiltinScalarFunction::PgGetViewDef),
         ("pg_get_viewdef_wrap", BuiltinScalarFunction::PgGetViewDef),
         (
             "pg_get_statisticsobjdef",
@@ -4967,6 +4977,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgGetFunctionArguments,
         ),
         (
+            "pg_get_function_identity_arguments",
+            BuiltinScalarFunction::PgGetFunctionIdentityArguments,
+        ),
+        (
+            "pg_get_function_arg_default",
+            BuiltinScalarFunction::PgGetFunctionArgDefault,
+        ),
+        (
             "pg_get_functiondef",
             BuiltinScalarFunction::PgGetFunctionDef,
         ),
@@ -5465,6 +5483,8 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::ObjDescription,
             BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::PgGetFunctionArguments,
+            BuiltinScalarFunction::PgGetFunctionIdentityArguments,
+            BuiltinScalarFunction::PgGetFunctionArgDefault,
             BuiltinScalarFunction::PgGetFunctionDef,
             BuiltinScalarFunction::PgGetFunctionResult,
             BuiltinScalarFunction::PgGetExpr,
@@ -5738,6 +5758,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgIdentifyObjectAsAddress
             | BuiltinScalarFunction::PgGetObjectAddress
             | BuiltinScalarFunction::PgGetFunctionArguments
+            | BuiltinScalarFunction::PgGetFunctionIdentityArguments
+            | BuiltinScalarFunction::PgGetFunctionArgDefault
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgGetExpr

@@ -5,8 +5,8 @@ use crate::backend::executor::{
     execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
-    CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions,
-    PreparedExternalParam, SelectStatement, UpdateStatement,
+    CatalogLookup, CommonTableExpr, CteBody, DeleteStatement, FromItem, InsertSource,
+    InsertStatement, ParseOptions, PreparedExternalParam, SelectStatement, UpdateStatement,
     bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope,
     bound_cte_from_query_rows, resolve_raw_type_name, with_external_param_types,
 };
@@ -295,6 +295,7 @@ fn reject_restricted_views_in_cte_body(
             reject_restricted_view_access(&merge.target_table, catalog)?;
             reject_restricted_views_in_from_item(&merge.source, catalog)
         }
+        CteBody::Delete(delete) => reject_restricted_views_in_delete(delete, catalog),
         CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -352,6 +353,20 @@ fn reject_restricted_views_in_update(
     reject_restricted_view_access(&update.table_name, catalog)?;
     if let Some(from) = &update.from {
         reject_restricted_views_in_from_item(from, catalog)?;
+    }
+    Ok(())
+}
+
+fn reject_restricted_views_in_delete(
+    delete: &DeleteStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for cte in &delete.with {
+        reject_restricted_views_in_cte_body(&cte.body, catalog)?;
+    }
+    reject_restricted_view_access(&delete.table_name, catalog)?;
+    if let Some(using) = &delete.using {
+        reject_restricted_views_in_from_item(using, catalog)?;
     }
     Ok(())
 }
@@ -2901,6 +2916,18 @@ impl Database {
                 .execute_create_rule_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterRuleRename(ref alter_stmt) => self
+                .execute_alter_rule_rename_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableRuleState(ref alter_stmt) => self
+                .execute_alter_table_rule_state_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
                     configured_search_path,
                 ),
             Statement::CreateTableAs(ref create_stmt) => self

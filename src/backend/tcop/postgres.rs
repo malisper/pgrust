@@ -552,6 +552,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             {
                 return Some(position);
             }
+            if let Some(position) = for_update_missing_relation_position(sql, message) {
+                return Some(position);
+            }
             if detail.as_deref().is_some_and(|detail| {
                 detail.contains("cannot be referenced from this part of the query")
             }) && message.starts_with("column \"")
@@ -2087,6 +2090,25 @@ fn extract_missing_column_name(message: &str) -> Option<&str> {
     message
         .strip_prefix("column \"")?
         .strip_suffix("\" does not exist")
+}
+
+fn for_update_missing_relation_position(sql: &str, message: &str) -> Option<usize> {
+    let target = message
+        .strip_prefix("relation \"")?
+        .strip_suffix("\" in FOR UPDATE clause not found in FROM clause")?;
+    let lower = sql.to_ascii_lowercase();
+    [
+        "for update of",
+        "for no key update of",
+        "for share of",
+        "for key share of",
+    ]
+    .into_iter()
+    .filter_map(|phrase| lower.rfind(phrase).map(|index| index + phrase.len()))
+    .max()
+    .and_then(|start| {
+        find_identifier_in_segment(&sql[start..], target).map(|offset| start + offset + 1)
+    })
 }
 
 fn extract_at_or_near_token(message: &str) -> Option<&str> {
@@ -10873,6 +10895,7 @@ fn raw_cte_body_is_writable(body: &crate::backend::parser::CteBody) -> bool {
     match body {
         crate::backend::parser::CteBody::Insert(_)
         | crate::backend::parser::CteBody::Update(_)
+        | crate::backend::parser::CteBody::Delete(_)
         | crate::backend::parser::CteBody::Merge(_) => true,
         crate::backend::parser::CteBody::Select(select_stmt) => {
             raw_select_contains_writable_cte(select_stmt)
@@ -10933,6 +10956,9 @@ fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bo
                     .returning
                     .iter()
                     .any(|item| raw_expr_contains_pg_notify(&item.expr))
+        }
+        crate::backend::parser::CteBody::Delete(delete_stmt) => {
+            raw_delete_statement_contains_pg_notify(delete_stmt)
         }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
@@ -10998,6 +11024,24 @@ fn raw_update_statement_contains_pg_notify(
             .as_ref()
             .is_some_and(raw_expr_contains_pg_notify)
         || update_stmt
+            .returning
+            .iter()
+            .any(|item| raw_expr_contains_pg_notify(&item.expr))
+}
+
+fn raw_delete_statement_contains_pg_notify(
+    delete_stmt: &crate::backend::parser::DeleteStatement,
+) -> bool {
+    delete_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || delete_stmt
+            .using
+            .as_ref()
+            .is_some_and(raw_from_item_contains_pg_notify)
+        || delete_stmt
+            .where_clause
+            .as_ref()
+            .is_some_and(raw_expr_contains_pg_notify)
+        || delete_stmt
             .returning
             .iter()
             .any(|item| raw_expr_contains_pg_notify(&item.expr))
@@ -15650,6 +15694,22 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             });
             assert_eq!(exec_error_position(sql, &err), expected);
         }
+    }
+
+    #[test]
+    fn exec_error_position_points_at_missing_for_update_target() {
+        let sql = "create or replace rule r1 as on update to rules_base do instead\n  select * from rules_base where f1 = 11 for update of old;";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "relation \"old\" in FOR UPDATE clause not found in FROM clause".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P01",
+        });
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("old;").map(|index| index + 1)
+        );
     }
 
     #[test]

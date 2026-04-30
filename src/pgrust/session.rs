@@ -36,13 +36,13 @@ use crate::backend::parser::{
     AlterTableAddColumnStatement, CallStatement, CatalogLookup, CommonTableExpr,
     CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
     CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
-    CreateTableAsQuery, CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode,
-    DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource, InsertStatement,
-    OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
-    PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
-    SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement,
-    TransactionOptions, UpdateStatement, ValuesStatement, bind_delete, bind_insert,
-    bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes, bind_update,
+    CreateTableAsQuery, CreateTableAsStatement, CteBody, DeallocateStatement, DeleteStatement,
+    DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource,
+    InsertStatement, OrderByItem, ParseError, ParseOptions, PrepareStatement,
+    PreparedExternalParam, PreparedInsert, PreparedStatementQuery, RawTypeName, RawWindowFrame,
+    RawWindowFrameBound, RawWindowSpec, SelectItem, SelectStatement, SqlCallArgs, SqlExpr,
+    SqlFunctionArg, Statement, TransactionOptions, UpdateStatement, ValuesStatement, bind_delete,
+    bind_insert, bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes, bind_update,
     bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_rows, pg_plan_query_with_config,
     pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
@@ -3977,7 +3977,9 @@ impl Session {
 
     fn cte_body_has_writable_insert(body: &CteBody) -> bool {
         match body {
-            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Merge(_) => true,
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => {
+                true
+            }
             CteBody::Select(select) => Self::select_has_writable_ctes(select),
             CteBody::Values(values) => values
                 .with
@@ -4190,6 +4192,7 @@ impl Session {
             Statement::CreateAggregate(_) => Some("CREATE AGGREGATE"),
             Statement::CreateSchema(_) => Some("CREATE SCHEMA"),
             Statement::CreateView(_) => Some("CREATE VIEW"),
+            Statement::CreateRule(_) => Some("CREATE RULE"),
             Statement::CreateIndex(_) => Some("CREATE INDEX"),
             Statement::CreateOperatorClass(_) => Some("CREATE OPERATOR CLASS"),
             Statement::CreateOperatorFamily(_) => Some("CREATE OPERATOR FAMILY"),
@@ -4245,7 +4248,9 @@ impl Session {
             | Statement::AlterTableNotOf(_)
             | Statement::AlterTableAttachPartition(_)
             | Statement::AlterTableDetachPartition(_)
-            | Statement::AlterTableTriggerState(_) => Some("ALTER TABLE"),
+            | Statement::AlterTableTriggerState(_)
+            | Statement::AlterTableRuleState(_) => Some("ALTER TABLE"),
+            Statement::AlterRuleRename(_) => Some("ALTER RULE"),
             Statement::AlterPolicy(_) => Some("ALTER POLICY"),
             Statement::CommentOnTable(_)
             | Statement::CommentOnColumn(_)
@@ -8988,6 +8993,39 @@ impl Session {
         })
     }
 
+    fn substitute_delete_statement(
+        delete: &DeleteStatement,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<DeleteStatement, ExecError> {
+        Ok(DeleteStatement {
+            with_recursive: delete.with_recursive,
+            with: delete
+                .with
+                .iter()
+                .map(|cte| Self::substitute_common_table_expr(cte, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+            table_name: delete.table_name.clone(),
+            target_alias: delete.target_alias.clone(),
+            only: delete.only,
+            using: delete
+                .using
+                .as_ref()
+                .map(|using| Self::substitute_from_item(using, subst))
+                .transpose()?,
+            where_clause: delete
+                .where_clause
+                .as_ref()
+                .map(|expr| Self::substitute_sql_expr(expr, subst))
+                .transpose()?,
+            current_of: delete.current_of.clone(),
+            returning: delete
+                .returning
+                .iter()
+                .map(|target| Self::substitute_select_item(target, subst))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
     fn substitute_common_table_expr(
         cte: &CommonTableExpr,
         subst: &mut PreparedParamSubstitution<'_>,
@@ -9009,6 +9047,9 @@ impl Session {
                     CteBody::Update(Box::new(Self::substitute_update_statement(update, subst)?))
                 }
                 CteBody::Merge(merge) => CteBody::Merge(merge.clone()),
+                CteBody::Delete(delete) => {
+                    CteBody::Delete(Box::new(Self::substitute_delete_statement(delete, subst)?))
+                }
                 CteBody::RecursiveUnion {
                     all,
                     anchor,
@@ -9040,6 +9081,9 @@ impl Session {
                 CteBody::Update(Box::new(Self::substitute_update_statement(update, subst)?))
             }
             CteBody::Merge(merge) => CteBody::Merge(merge.clone()),
+            CteBody::Delete(delete) => {
+                CteBody::Delete(Box::new(Self::substitute_delete_statement(delete, subst)?))
+            }
             CteBody::RecursiveUnion {
                 all,
                 anchor,
@@ -14080,6 +14124,58 @@ impl Session {
                     db.execute_create_rule_stmt_in_transaction_with_search_path(
                         client_id,
                         create_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterRuleRename(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let relation = match catalog.lookup_any_relation(&alter_stmt.relation_name) {
+                        Some(relation) if matches!(relation.relkind, 'r' | 'v') => relation,
+                        Some(_) => {
+                            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                                name: alter_stmt.relation_name.clone(),
+                                expected: "table or view",
+                            }));
+                        }
+                        None => {
+                            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                                alter_stmt.relation_name.clone(),
+                            )));
+                        }
+                    };
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_rule_rename_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterTableRuleState(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    if let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) {
+                        self.lock_table_if_needed(
+                            db,
+                            crate::pgrust::database::relation_lock_tag(&relation),
+                            TableLockMode::AccessExclusive,
+                        )?;
+                    }
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_rule_state_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
                         xid,
                         cid,
                         search_path.as_deref(),

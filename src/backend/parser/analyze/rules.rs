@@ -6,6 +6,9 @@ pub(crate) enum BoundRuleAction {
     Insert(BoundInsertStatement),
     Update(BoundUpdateStatement),
     Delete(BoundDeleteStatement),
+    Select(PlannedStmt),
+    Values(PlannedStmt),
+    Notify(NotifyStatement),
 }
 
 fn scope_for_special_rule_tuple(
@@ -101,6 +104,15 @@ pub(crate) fn bind_rule_action_statement(
             catalog,
             &outer_scopes,
         )?)),
+        Statement::Select(stmt) => Ok(BoundRuleAction::Select(pg_plan_query_with_outer_scopes(
+            stmt,
+            catalog,
+            &outer_scopes,
+        )?)),
+        Statement::Values(stmt) => Ok(BoundRuleAction::Values(
+            pg_plan_values_query_with_outer_scopes(stmt, catalog, &outer_scopes)?,
+        )),
+        Statement::Notify(stmt) => Ok(BoundRuleAction::Notify(stmt.clone())),
         _ => Err(ParseError::FeatureNotSupported(
             "rule action statement".into(),
         )),
@@ -112,6 +124,7 @@ fn rule_action_returning_targets(action: &BoundRuleAction) -> &[TargetEntry] {
         BoundRuleAction::Insert(stmt) => &stmt.returning,
         BoundRuleAction::Update(stmt) => &stmt.returning,
         BoundRuleAction::Delete(stmt) => &stmt.returning,
+        BoundRuleAction::Select(_) | BoundRuleAction::Values(_) | BoundRuleAction::Notify(_) => &[],
     }
 }
 
@@ -143,6 +156,42 @@ fn validate_rule_action_returning_targets(
     Ok(())
 }
 
+fn rule_action_has_writable_cte(statement: &Statement) -> bool {
+    fn body_has_writable_cte(body: &CteBody) -> bool {
+        match body {
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => {
+                true
+            }
+            CteBody::Select(select) => select
+                .with
+                .iter()
+                .any(|cte| body_has_writable_cte(&cte.body)),
+            CteBody::Values(values) => values
+                .with
+                .iter()
+                .any(|cte| body_has_writable_cte(&cte.body)),
+            CteBody::RecursiveUnion {
+                anchor, recursive, ..
+            } => {
+                body_has_writable_cte(anchor)
+                    || recursive
+                        .with
+                        .iter()
+                        .any(|cte| body_has_writable_cte(&cte.body))
+            }
+        }
+    }
+    let ctes = match statement {
+        Statement::Insert(stmt) => &stmt.with,
+        Statement::Update(stmt) => &stmt.with,
+        Statement::Delete(stmt) => &stmt.with,
+        Statement::Select(stmt) => &stmt.with,
+        Statement::Values(stmt) => &stmt.with,
+        _ => return false,
+    };
+    ctes.iter().any(|cte| body_has_writable_cte(&cte.body))
+}
+
 pub(crate) fn validate_rule_definition(
     stmt: &CreateRuleStatement,
     relation_desc: &RelationDesc,
@@ -154,13 +203,14 @@ pub(crate) fn validate_rule_definition(
 
     let mut returning_count = 0usize;
     for action in &stmt.actions {
-        if !matches!(
-            action.statement,
-            Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
-        ) {
+        if rule_action_has_writable_cte(&action.statement) {
+            // :HACK: Rule actions are stored as SQL and rebound when fired.
+            // Writable CTEs need statement-level materialization that the rule
+            // binder does not own yet, but CREATE RULE must still accept them.
             continue;
         }
-        let bound = bind_rule_action_statement(&action.statement, relation_desc, catalog)?;
+        let bound = bind_rule_action_statement(&action.statement, relation_desc, catalog)
+            .map_err(|err| rule_action_bind_error(err, action))?;
         let returning = rule_action_returning_targets(&bound);
         if returning.is_empty() {
             continue;
@@ -185,4 +235,48 @@ pub(crate) fn validate_rule_definition(
         validate_rule_action_returning_targets(returning, relation_desc)?;
     }
     Ok(())
+}
+
+fn rule_action_bind_error(err: ParseError, action: &RuleActionStatement) -> ParseError {
+    let ParseError::UnknownColumn(name) = err.unpositioned() else {
+        return err;
+    };
+    if name.contains('.') {
+        return err;
+    }
+    let mut detailed = ParseError::DetailedError {
+        message: format!("column \"{name}\" does not exist"),
+        detail: Some(format!(
+            "There are columns named \"{name}\", but they are in tables that cannot be referenced from this part of the query."
+        )),
+        hint: Some("Try using a table-qualified name.".into()),
+        sqlstate: "42703",
+    };
+    if let Some(action_position) = action.sql_position
+        && let Some(offset) = rule_action_identifier_offset(&action.sql, name)
+    {
+        detailed = detailed.with_position(action_position + offset);
+    }
+    detailed
+}
+
+fn rule_action_identifier_offset(sql: &str, identifier: &str) -> Option<usize> {
+    let mut byte_start = None;
+    for (byte_index, ch) in sql.char_indices() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            byte_start.get_or_insert(byte_index);
+            continue;
+        }
+        if let Some(start) = byte_start.take()
+            && sql[start..byte_index].eq_ignore_ascii_case(identifier)
+        {
+            return Some(sql[..start].chars().count());
+        }
+    }
+    if let Some(start) = byte_start
+        && sql[start..].eq_ignore_ascii_case(identifier)
+    {
+        return Some(sql[..start].chars().count());
+    }
+    None
 }

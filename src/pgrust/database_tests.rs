@@ -15028,6 +15028,15 @@ fn nested_views_and_pg_views_work() {
 #[test]
 fn pg_views_includes_pg_policies_metadata() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_views where schemaname = 'pg_catalog'",
+        ),
+        vec![vec![Value::Int64(80)]]
+    );
+
     let rows = query_rows(
         &db,
         1,
@@ -15041,7 +15050,7 @@ fn pg_views_includes_pg_policies_metadata() {
     assert_eq!(rows[0][1], Value::Text("pg_policies".into()));
     assert_eq!(rows[0][2], Value::Text("postgres".into()));
     match &rows[0][3] {
-        Value::Text(definition) => assert!(definition.contains("FROM pg_catalog.pg_policy")),
+        Value::Text(definition) => assert!(definition.contains("FROM ((pg_policy pol")),
         other => panic!("expected pg_policies definition text, got {other:?}"),
     }
 }
@@ -20261,7 +20270,22 @@ fn create_rule_rejects_unqualified_action_reference() {
             "create rule rules_foorule as on insert to rules_foo where f1 < 100 do instead insert into rules_foo2 values (f1)",
         )
         .unwrap_err();
-    assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "f1"));
+    match err {
+        ExecError::Parse(ParseError::Positioned { source, .. }) => match source.as_ref() {
+            ParseError::DetailedError {
+                message,
+                detail: Some(detail),
+                hint: Some(hint),
+                sqlstate: "42703",
+            } => {
+                assert_eq!(message, "column \"f1\" does not exist");
+                assert!(detail.contains("cannot be referenced from this part of the query"));
+                assert_eq!(hint, "Try using a table-qualified name.");
+            }
+            other => panic!("expected detailed rule action column error, got {other:?}"),
+        },
+        other => panic!("expected positioned rule action column error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -21479,7 +21503,7 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select definition from pg_rules where tablename = 'item_view' and rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO public.item_view DO INSTEAD  INSERT INTO items (id)\n  VALUES (new.id);"
                 .into(),
         )]]
     );
@@ -21490,7 +21514,7 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD  INSERT INTO items (id)\n  VALUES (new.id);"
                 .into(),
         )]]
     );
@@ -21521,7 +21545,7 @@ fn pg_get_ruledef_formats_insert_rule_actions_with_casts() {
             "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_src_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2)"
+            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2);"
                 .into(),
         )]]
     );
@@ -21550,7 +21574,7 @@ fn pg_get_ruledef_formats_update_rule_actions_with_composite_fields() {
             "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_tab_del'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE rule_tab_del AS\n    ON DELETE TO rule_tab DO INSTEAD  UPDATE rule_tab SET d1.r = (rule_tab.d1).r - 1::double precision, d1.i = (rule_tab.d1).i + 1::double precision\n  WHERE (rule_tab.d1).i > 0::double precision"
+            "CREATE RULE rule_tab_del AS\n    ON DELETE TO rule_tab DO INSTEAD  UPDATE rule_tab SET d1.r = (rule_tab.d1).r - 1::double precision, d1.i = (rule_tab.d1).i + 1::double precision\n  WHERE (rule_tab.d1).i > 0::double precision;"
                 .into(),
         )]]
     );

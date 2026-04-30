@@ -11934,6 +11934,7 @@ fn parse_create_rule_single_action() {
     assert_eq!(
         stmt,
         Statement::CreateRule(CreateRuleStatement {
+            or_replace: false,
             rule_name: "r1".into(),
             relation_name: "people".into(),
             event: RuleEvent::Insert,
@@ -11959,6 +11960,7 @@ fn parse_create_rule_single_action() {
                     returning: vec![],
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
+                sql_position: Some(67),
             }],
         })
     );
@@ -12039,6 +12041,7 @@ fn parse_create_rule_instead_nothing() {
     assert_eq!(
         stmt,
         Statement::CreateRule(CreateRuleStatement {
+            or_replace: false,
             rule_name: "r1".into(),
             relation_name: "people".into(),
             event: RuleEvent::Delete,

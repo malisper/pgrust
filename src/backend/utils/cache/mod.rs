@@ -1,6 +1,7 @@
 pub mod catcache;
 pub mod inval;
 pub mod lsyscache;
+pub(crate) mod pg_catalog_view_definitions;
 pub mod plancache;
 pub mod relcache;
 pub mod syscache;

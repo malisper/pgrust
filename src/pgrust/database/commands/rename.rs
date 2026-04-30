@@ -471,6 +471,16 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        if catalog
+            .lookup_any_relation(&rename_stmt.table_name)
+            .is_some_and(|relation| relation.relkind == 'v')
+        {
+            return self.execute_alter_view_rename_column_stmt_with_search_path(
+                client_id,
+                rename_stmt,
+                configured_search_path,
+            );
+        }
         let Some(relation) = lookup_heap_relation_for_alter_table(
             &catalog,
             &rename_stmt.table_name,
@@ -522,6 +532,19 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        if catalog
+            .lookup_any_relation(&rename_stmt.table_name)
+            .is_some_and(|relation| relation.relkind == 'v')
+        {
+            return self.execute_alter_view_rename_column_stmt_in_transaction_with_search_path(
+                client_id,
+                rename_stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            );
+        }
         let Some(relation) = lookup_heap_relation_for_alter_table(
             &catalog,
             &rename_stmt.table_name,

@@ -654,6 +654,14 @@ fn execute_statement_with_source(
             expected: "CREATE RULE handled by database/session layer",
             actual: "CREATE RULE".into(),
         })),
+        Statement::AlterRuleRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER RULE handled by database/session layer",
+            actual: "ALTER RULE".into(),
+        })),
+        Statement::AlterTableRuleState(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TABLE handled by database/session layer",
+            actual: "ALTER TABLE".into(),
+        })),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
         Statement::DropIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP INDEX handled by database/session layer",
@@ -1106,6 +1114,14 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE RULE".into(),
+        })),
+        Statement::AlterRuleRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER RULE".into(),
+        })),
+        Statement::AlterTableRuleState(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER TABLE".into(),
         })),
         Statement::Cluster(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
