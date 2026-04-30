@@ -2194,6 +2194,9 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     if actual_type.is_array != target_type.is_array {
         return None;
     }
+    if same_type_ignoring_function_typmod(actual_type, target_type) {
+        return Some(0);
+    }
     if !target_type.is_array
         && target_type.kind == SqlTypeKind::Record
         && matches!(
@@ -2225,6 +2228,42 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
         return Some(2);
     }
     None
+}
+
+fn same_type_ignoring_function_typmod(actual: SqlType, target: SqlType) -> bool {
+    if actual.is_array != target.is_array {
+        return false;
+    }
+    if actual.is_array {
+        return same_type_ignoring_function_typmod(actual.element_type(), target.element_type());
+    }
+    if actual.kind != target.kind || target.typmod != SqlType::NO_TYPEMOD {
+        return false;
+    }
+    if actual.type_oid != 0 && target.type_oid != 0 && actual.type_oid != target.type_oid {
+        return false;
+    }
+    if actual.typrelid != target.typrelid
+        || actual.range_subtype_oid != target.range_subtype_oid
+        || actual.range_multitype_oid != target.range_multitype_oid
+        || actual.range_discrete != target.range_discrete
+        || actual.multirange_range_oid != target.multirange_range_oid
+    {
+        return false;
+    }
+    matches!(
+        actual.kind,
+        SqlTypeKind::Numeric
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Bit
+            | SqlTypeKind::VarBit
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
+            | SqlTypeKind::Interval
+    )
 }
 
 fn numeric_type_match_cost(actual: SqlTypeKind, target: SqlTypeKind) -> Option<usize> {
@@ -5037,6 +5076,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cbrt", BuiltinScalarFunction::Cbrt),
         ("dcbrt", BuiltinScalarFunction::Cbrt),
         ("power", BuiltinScalarFunction::Power),
+        ("pow", BuiltinScalarFunction::Power),
         ("dpow", BuiltinScalarFunction::Power),
         ("numeric_power", BuiltinScalarFunction::Power),
         ("exp", BuiltinScalarFunction::Exp),
