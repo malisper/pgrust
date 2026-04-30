@@ -38,12 +38,12 @@ use crate::backend::parser::{
     CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
     CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause, DeallocateStatement,
     DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource,
-    InsertStatement, OrderByItem, ParseError, ParseOptions, PrepareStatement,
-    PreparedExternalParam, PreparedInsert, PreparedStatementQuery, RawTypeName, RawWindowFrame,
-    RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem, SelectStatement, SqlCallArgs,
-    SqlExpr, SqlFunctionArg, SqlType, SqlTypeKind, Statement, TransactionOptions, UpdateStatement,
-    ValuesStatement, analyze_select_query_with_outer, bind_delete,
-    bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
+    InsertStatement, MergeAction, MergeInsertSource, MergeStatement, OrderByItem, ParseError,
+    ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert, PreparedStatementQuery,
+    RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem,
+    SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType, SqlTypeKind, Statement,
+    TransactionOptions, UpdateStatement, ValuesStatement, analyze_select_query_with_outer,
+    bind_delete, bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
     bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope, bind_update,
     bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_rows, cte_body_references_table,
     delete_statement_references_table, insert_statement_references_table,
@@ -9770,6 +9770,11 @@ impl Session {
                 Ok((!bound.returning.is_empty())
                     .then(|| Self::target_entries_to_query_columns(&bound.returning)))
             }
+            PreparedStatementQuery::Merge(merge) => {
+                let bound = plan_merge(merge, catalog)?;
+                Ok((!bound.returning.is_empty())
+                    .then(|| Self::target_entries_to_query_columns(&bound.returning)))
+            }
         })
         .map_err(ExecError::Parse)
     }
@@ -9803,6 +9808,9 @@ impl Session {
             }
             PreparedStatementQuery::Update(update) => {
                 Self::infer_update_prepared_parameter_types(update, catalog, &mut inferred)?;
+            }
+            PreparedStatementQuery::Merge(merge) => {
+                Self::infer_merge_prepared_parameter_types(merge, catalog, &mut inferred)?;
             }
         }
         Ok(inferred
@@ -9850,6 +9858,98 @@ impl Session {
         }
         if let Some(where_clause) = &update.where_clause {
             Self::infer_prepared_expr_parameter_types(where_clause, &columns, catalog, inferred)?;
+        }
+        Ok(())
+    }
+
+    fn infer_merge_prepared_parameter_types(
+        merge: &MergeStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let Some(relation) = catalog.lookup_any_relation(&merge.target_table) else {
+            return Ok(());
+        };
+        let mut columns = BTreeMap::new();
+        Self::insert_relation_desc_columns(&mut columns, None, &relation.desc);
+        let target_qualifier = merge
+            .target_alias
+            .as_deref()
+            .or_else(|| merge.target_table.rsplit('.').next());
+        Self::insert_relation_desc_columns(&mut columns, target_qualifier, &relation.desc);
+        Self::collect_prepared_from_item_columns(&merge.source, catalog, &mut columns);
+        Self::infer_prepared_expr_parameter_types(
+            &merge.join_condition,
+            &columns,
+            catalog,
+            inferred,
+        )?;
+        for clause in &merge.when_clauses {
+            if let Some(condition) = &clause.condition {
+                Self::infer_prepared_expr_parameter_types(condition, &columns, catalog, inferred)?;
+            }
+            match &clause.action {
+                MergeAction::DoNothing | MergeAction::Delete => {}
+                MergeAction::Update { assignments } => {
+                    for assignment in assignments {
+                        if let Some(column) = relation.desc.columns.iter().find(|column| {
+                            !column.dropped
+                                && column.name.eq_ignore_ascii_case(&assignment.target.column)
+                        }) {
+                            Self::infer_prepared_expr_against_type(
+                                &assignment.expr,
+                                column.sql_type,
+                                catalog,
+                                inferred,
+                            )?;
+                        }
+                    }
+                }
+                MergeAction::Insert {
+                    columns, source, ..
+                } => {
+                    let target_types = columns
+                        .as_ref()
+                        .map(|targets| {
+                            targets
+                                .iter()
+                                .filter_map(|target| {
+                                    relation
+                                        .desc
+                                        .columns
+                                        .iter()
+                                        .find(|column| {
+                                            !column.dropped
+                                                && column.name.eq_ignore_ascii_case(&target.column)
+                                        })
+                                        .map(|column| column.sql_type)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_else(|| {
+                            relation
+                                .desc
+                                .columns
+                                .iter()
+                                .filter(|column| !column.dropped)
+                                .map(|column| column.sql_type)
+                                .collect::<Vec<_>>()
+                        });
+                    if let MergeInsertSource::Values(values) = source {
+                        for (expr, target_type) in values.iter().zip(target_types.iter()) {
+                            Self::infer_prepared_expr_against_type(
+                                expr,
+                                *target_type,
+                                catalog,
+                                inferred,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        for target in &merge.returning {
+            Self::infer_prepared_expr_parameter_types(&target.expr, &columns, catalog, inferred)?;
         }
         Ok(())
     }
