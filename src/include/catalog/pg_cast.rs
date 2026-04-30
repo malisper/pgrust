@@ -115,23 +115,23 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
         ),
         cast_row(4106, INT4_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_0_00, OID_TYPE_OID, REGCLASS_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_0_00_1, REGCLASS_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_0_00_1, REGCLASS_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_0_0, OID_TYPE_OID, REGTYPE_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_0_0_1, REGTYPE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_0_0_1, REGTYPE_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_0, OID_TYPE_OID, REGROLE_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_0_1, REGROLE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_0_1, REGROLE_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_0_3, OID_TYPE_OID, REGNAMESPACE_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_0_4, REGNAMESPACE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_0_4, REGNAMESPACE_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_0_5, OID_TYPE_OID, REGPROC_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_0_6, REGPROC_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_0_6, REGPROC_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_1, OID_TYPE_OID, REGPROCEDURE_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_2, REGPROCEDURE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_2, REGPROCEDURE_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_2_2, OID_TYPE_OID, REGOPER_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_2_3, REGOPER_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_2_3, REGOPER_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_2_0, OID_TYPE_OID, REGOPERATOR_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_2_1, REGOPERATOR_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_2_1, REGOPERATOR_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_2_4, OID_TYPE_OID, REGCOLLATION_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4106_2_5, REGCOLLATION_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_2_5, REGCOLLATION_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
         cast_row(
             4107,
             INT8_TYPE_OID,
@@ -512,6 +512,13 @@ mod tests {
         assert!(rows.iter().any(|row| {
             row.castsource == OID_TYPE_OID
                 && row.casttarget == REGROLE_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'i'
+                && row.castmethod == 'b'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == REGCLASS_TYPE_OID
+                && row.casttarget == OID_TYPE_OID
                 && row.castfunc == 0
                 && row.castcontext == 'i'
                 && row.castmethod == 'b'

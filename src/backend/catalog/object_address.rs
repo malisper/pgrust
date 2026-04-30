@@ -380,11 +380,7 @@ pub fn get_object_address(
                 "extension \"{name}\" does not exist"
             )))
         }),
-        "event trigger" => one_name(names).and_then(|name| {
-            Err(undefined_object(format!(
-                "event trigger \"{name}\" does not exist"
-            )))
-        }),
+        "event trigger" => event_trigger_address(catalog, names, args),
         "access method" => access_method_address(catalog, names),
         "publication" => publication_address(catalog, names),
         "subscription" => subscription_address(state, names),
@@ -584,6 +580,25 @@ fn relation_address(
         objid: relation.relation_oid,
         objsubid: 0,
     })
+}
+
+fn event_trigger_address(
+    catalog: &dyn CatalogLookup,
+    names: &[String],
+    args: &[String],
+) -> Result<ObjectAddress, ObjectAddressError> {
+    let name = one_name(names)?;
+    exact_args(args, 0)?;
+    catalog
+        .event_trigger_rows()
+        .into_iter()
+        .find(|row| row.evtname.eq_ignore_ascii_case(name))
+        .map(|row| ObjectAddress {
+            classid: PG_EVENT_TRIGGER_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+        })
+        .ok_or_else(|| undefined_object(format!("event trigger \"{name}\" does not exist")))
 }
 
 fn column_address(
@@ -1792,6 +1807,12 @@ fn fill_identity(
                 identity.identity = Some(row.lanname);
             }
         }
+        PG_EVENT_TRIGGER_RELATION_OID => {
+            if let Some(row) = catalog.event_trigger_row_by_oid(address.objid) {
+                identity.name = Some(row.evtname.clone());
+                identity.identity = Some(row.evtname);
+            }
+        }
         PG_NAMESPACE_RELATION_OID => {
             if let Some(row) = catalog.namespace_row_by_oid(address.objid) {
                 identity.name = Some(row.nspname.clone());
@@ -2251,6 +2272,12 @@ fn fill_address_parts(
                 .map(|row| row.lanname),
             parts,
         ),
+        PG_EVENT_TRIGGER_RELATION_OID => set_one_name_part(
+            catalog
+                .event_trigger_row_by_oid(address.objid)
+                .map(|row| row.evtname),
+            parts,
+        ),
         PG_COLLATION_RELATION_OID => {
             if let Some(row) = catalog
                 .collation_rows()
@@ -2614,4 +2641,56 @@ fn quote_qualified_identifier(schema_name: &str, object_name: &str) -> String {
         quote_identifier(schema_name),
         quote_identifier(object_name)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::catalog::Catalog;
+
+    fn catalog_with_event_trigger() -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.event_triggers.push(PgEventTriggerRow {
+            oid: 70_001,
+            evtname: "start_rls_command".into(),
+            evtevent: "ddl_command_start".into(),
+            evtowner: BOOTSTRAP_SUPERUSER_OID,
+            evtfoid: 0,
+            evtenabled: 'O',
+            evttags: None,
+        });
+        catalog
+    }
+
+    #[test]
+    fn event_trigger_object_address_round_trips() {
+        let catalog = catalog_with_event_trigger();
+        let address = ObjectAddress {
+            classid: PG_EVENT_TRIGGER_RELATION_OID,
+            objid: 70_001,
+            objsubid: 0,
+        };
+
+        assert_eq!(
+            get_object_address(
+                &catalog,
+                None,
+                "event trigger",
+                &["start_rls_command".into()],
+                &[]
+            )
+            .unwrap(),
+            address
+        );
+
+        let parts = identify_object_as_address(&catalog, None, address);
+        assert_eq!(parts.objtype, "event trigger");
+        assert_eq!(parts.object_names, Some(vec!["start_rls_command".into()]));
+        assert_eq!(parts.object_args, Some(Vec::<String>::new()));
+
+        let identity = identify_object(&catalog, None, address);
+        assert_eq!(identity.schema, None);
+        assert_eq!(identity.name, Some("start_rls_command".into()));
+        assert_eq!(identity.identity, Some("start_rls_command".into()));
+    }
 }
