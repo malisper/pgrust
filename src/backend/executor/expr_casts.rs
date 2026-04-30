@@ -810,42 +810,40 @@ fn parse_numeric_input_value(
 fn parse_tid_text(
     text: &str,
 ) -> Result<crate::include::access::itemptr::ItemPointerData, ExecError> {
+    fn invalid_tid_text_error(text: &str) -> ExecError {
+        ExecError::DetailedError {
+            message: format!("invalid input syntax for type tid: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        }
+    }
+
+    fn parse_block_number(block: &str, text: &str) -> Result<u32, ExecError> {
+        let block = block.trim();
+        if let Ok(block_number) = block.parse::<u32>() {
+            return Ok(block_number);
+        }
+        let signed = block
+            .parse::<i64>()
+            .map_err(|_| invalid_tid_text_error(text))?;
+        let signed_i32 = i32::try_from(signed).map_err(|_| invalid_tid_text_error(text))?;
+        Ok(signed_i32 as u32)
+    }
+
     let trimmed = text.trim();
     let inner = trimmed
         .strip_prefix('(')
         .and_then(|rest| rest.strip_suffix(')'))
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("invalid input syntax for type tid: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        })?;
+        .ok_or_else(|| invalid_tid_text_error(text))?;
     let (block, offset) = inner
         .split_once(',')
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("invalid input syntax for type tid: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        })?;
-    let block_number = block
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| ExecError::DetailedError {
-            message: format!("invalid input syntax for type tid: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        })?;
+        .ok_or_else(|| invalid_tid_text_error(text))?;
+    let block_number = parse_block_number(block, text)?;
     let offset_number = offset
         .trim()
         .parse::<u16>()
-        .map_err(|_| ExecError::DetailedError {
-            message: format!("invalid input syntax for type tid: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        })?;
+        .map_err(|_| invalid_tid_text_error(text))?;
     Ok(crate::include::access::itemptr::ItemPointerData {
         block_number,
         offset_number,

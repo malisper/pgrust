@@ -1507,7 +1507,17 @@ pub(crate) fn eval_xml_expr(
                 match eval_expr(arg, slot, ctx)? {
                     Value::Null => {}
                     Value::Xml(text) => pieces.push(text.to_string()),
-                    other => pieces.push(render_xml_content_value(other, ctx)?),
+                    other => {
+                        match cast_value_with_config(
+                            other,
+                            SqlType::new(SqlTypeKind::Xml),
+                            &ctx.datetime_config,
+                        )? {
+                            Value::Null => {}
+                            Value::Xml(text) => pieces.push(text.to_string()),
+                            other => pieces.push(render_xml_content_value(other, ctx)?),
+                        }
+                    }
                 }
             }
             Ok(Value::Xml(CompactString::from_owned(concat_xml_texts(

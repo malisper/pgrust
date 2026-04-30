@@ -489,6 +489,8 @@ fn collect_rule_dependencies_from_query(
     catalog: &dyn CatalogLookup,
     deps: &mut crate::backend::catalog::store::RuleDependencies,
 ) {
+    deps.constraint_oids
+        .extend(query.constraint_deps.iter().copied());
     for rte in &query.rtable {
         for qual in &rte.security_quals {
             collect_expr_rule_dependencies(qual, query, catalog, deps);

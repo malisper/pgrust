@@ -50,9 +50,9 @@ pub fn pg_operator_desc() -> RelationDesc {
             column_desc("oprresult", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("oprcom", SqlType::new(SqlTypeKind::RegOperator), false),
             column_desc("oprnegate", SqlType::new(SqlTypeKind::RegOperator), false),
-            column_desc("oprcode", SqlType::new(SqlTypeKind::RegProcedure), false),
-            column_desc("oprrest", SqlType::new(SqlTypeKind::RegProcedure), false),
-            column_desc("oprjoin", SqlType::new(SqlTypeKind::RegProcedure), false),
+            column_desc("oprcode", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("oprrest", SqlType::new(SqlTypeKind::RegProc), false),
+            column_desc("oprjoin", SqlType::new(SqlTypeKind::RegProc), false),
         ],
     }
 }

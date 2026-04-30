@@ -138,7 +138,10 @@ fn collect_parent_expr_used_attrs(
 
 fn collect_expr_used_attrs(expr: &Expr, rtindex: usize, width: usize, used: &mut BTreeSet<usize>) {
     match expr {
-        Expr::Var(var) if var.varlevelsup == 0 && var.varno == rtindex => {
+        // LATERAL function arguments are bound against previous FROM items as
+        // one-level outer Vars, but they still consume attributes from this
+        // parent query's RTE for subquery-output pruning.
+        Expr::Var(var) if var.varlevelsup <= 1 && var.varno == rtindex => {
             if let Some(index) = attrno_index(var.varattno) {
                 used.insert(index);
             } else {

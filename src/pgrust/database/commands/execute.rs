@@ -1,7 +1,8 @@
 use super::super::*;
 use crate::backend::executor::{
-    ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot, cast_value,
-    eval_expr, execute_planned_stmt, execute_readonly_statement_with_config,
+    ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot,
+    cast_value_with_config, eval_expr, execute_planned_stmt,
+    execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
     CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions,
@@ -165,7 +166,7 @@ fn install_prepared_external_params(
     let mut slot = TupleSlot::empty(0);
     for binding in bindings {
         let value = eval_expr(&binding.expr, &mut slot, ctx)?;
-        let value = cast_value(value, binding.ty)?;
+        let value = cast_value_with_config(value, binding.ty, &ctx.datetime_config)?;
         ctx.expr_bindings
             .external_params
             .insert(binding.paramid, value);
