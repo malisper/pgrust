@@ -4,7 +4,8 @@ use super::alter_table_work_queue::{
 };
 use super::constraint::{find_constraint_row, validate_check_rows, validate_not_null_rows};
 use super::create::{
-    aggregate_signature_arg_oids, format_aggregate_signature, resolve_aggregate_proc_rows,
+    aggregate_signature_arg_oids, format_aggregate_signature, owned_sequence_dependency_kind,
+    resolve_aggregate_proc_rows,
 };
 use super::foreign_data_wrapper::format_fdw_options;
 use super::operator::{
@@ -1187,10 +1188,65 @@ impl Database {
                 sqlstate: "42809",
             });
         }
-        Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-            "ALTER TABLE SET LOGGED/UNLOGGED is only supported for partitioned-table diagnostics"
-                .into(),
-        )))
+        if relation.relkind != 'r' {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "ALTER TABLE SET LOGGED/UNLOGGED is only supported for ordinary tables".into(),
+            )));
+        }
+        let relpersistence = match alter_stmt.persistence {
+            TablePersistence::Permanent => 'p',
+            TablePersistence::Unlogged => 'u',
+            TablePersistence::Temporary => relation.relpersistence,
+        };
+        if relpersistence == relation.relpersistence {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            self.interrupt_state(client_id).as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let mut catalog_effects = Vec::new();
+        let result = (|| {
+            let effect = self
+                .catalog
+                .write()
+                .alter_relation_persistence_mvcc(relation.relation_oid, relpersistence, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            for sequence_oid in relation
+                .desc
+                .columns
+                .iter()
+                .filter_map(|column| column.default_sequence_oid)
+            {
+                let effect = self
+                    .catalog
+                    .write()
+                    .alter_relation_persistence_mvcc(sequence_oid, relpersistence, &ctx)
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
+            Ok(StatementResult::AffectedRows(0))
+        })();
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
     }
 
     pub(crate) fn execute_alter_table_set_tablespace_stmt_with_search_path(
@@ -3184,6 +3240,19 @@ impl Database {
             not_null_action,
             check_actions,
         } = plan;
+        if owned_sequence.as_ref().is_some_and(|sequence| {
+            sequence.kind == crate::backend::parser::OwnedSequenceKind::Identity
+        }) && relation.relkind != 'p'
+            && has_inheritance_children(&catalog, relation.relation_oid)
+        {
+            return Err(ExecError::DetailedError {
+                message: "cannot recursively add identity column to table that has child tables"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         if let Some(fdw_options) = &alter_stmt.fdw_options {
             column.fdw_options = format_fdw_options(fdw_options)?;
         }
@@ -3359,6 +3428,7 @@ impl Database {
                             target.relation.relation_oid,
                             created_sequence.column_index.saturating_add(1) as i32,
                         )),
+                        owned_sequence_dependency_kind(created_sequence.kind),
                         &sequence_dependency_ctx,
                     )
                     .map_err(map_catalog_error)?;

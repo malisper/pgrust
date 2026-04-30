@@ -1426,6 +1426,11 @@ pub(super) fn validate_alter_table_add_column(
         owned_sequence: owned_sequence.map(|(serial_kind, options)| OwnedSequenceSpec {
             column_index: relation_desc.columns.len(),
             column_name: column.name.clone(),
+            kind: if column.identity.is_some() {
+                crate::backend::parser::OwnedSequenceKind::Identity
+            } else {
+                crate::backend::parser::OwnedSequenceKind::Serial
+            },
             serial_kind,
             sql_type,
             options,
@@ -1440,9 +1445,11 @@ fn serial_kind_for_identity_sql_type(sql_type: SqlType) -> Result<SerialKind, Pa
         SqlTypeKind::Int2 if !sql_type.is_array => Ok(SerialKind::Small),
         SqlTypeKind::Int4 if !sql_type.is_array => Ok(SerialKind::Regular),
         SqlTypeKind::Int8 if !sql_type.is_array => Ok(SerialKind::Big),
-        _ => Err(ParseError::UnexpectedToken {
-            expected: "smallint, integer, or bigint identity column",
-            actual: format_sql_type_name(sql_type),
+        _ => Err(ParseError::DetailedError {
+            message: "identity column type must be smallint, integer, or bigint".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
         }),
     }
 }
@@ -1785,6 +1792,7 @@ fn literal_default_cast_input(expr: &SqlExpr) -> Option<Value> {
 pub(super) fn validate_alter_table_alter_column_default(
     catalog: &dyn CatalogLookup,
     desc: &RelationDesc,
+    relation_name: &str,
     column_name: &str,
     default_expr: Option<&SqlExpr>,
     default_expr_sql: Option<&str>,
@@ -1815,8 +1823,8 @@ pub(super) fn validate_alter_table_alter_column_default(
     if current_column.identity.is_some() {
         return Err(ExecError::DetailedError {
             message: format!(
-                "column \"{}\" of relation is an identity column",
-                current_column.name
+                "column \"{}\" of relation \"{}\" is an identity column",
+                current_column.name, relation_name
             ),
             detail: None,
             hint: None,
@@ -2266,6 +2274,20 @@ pub(super) fn validate_alter_table_alter_column_type(
             resolve_raw_type_name(ty, catalog).map_err(ExecError::Parse)?
         }
     };
+    if current_column.identity.is_some()
+        && (target_sql_type.is_array
+            || !matches!(
+                target_sql_type.kind,
+                SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+            ))
+    {
+        return Err(ExecError::DetailedError {
+            message: "identity column type must be smallint, integer, or bigint".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
 
     if let Some(default_sql) = current_column.default_expr.as_deref() {
         let default_expr =

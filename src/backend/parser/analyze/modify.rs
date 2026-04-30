@@ -3688,6 +3688,71 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
     })
 }
 
+fn normalize_auto_view_identity_values(
+    view_oid: u32,
+    view_desc: &RelationDesc,
+    target_columns: &[BoundAssignmentTarget],
+    overriding: Option<OverridingKind>,
+    source: BoundInsertSource,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundInsertSource, ParseError> {
+    let resolved = match resolve_auto_updatable_view_target(
+        view_oid,
+        view_desc,
+        ViewDmlEvent::Insert,
+        catalog,
+        &[],
+    ) {
+        Ok(resolved) => resolved,
+        Err(_) => return Ok(source),
+    };
+    let base_column_defaults =
+        bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])?;
+    let mut base_indexes = Vec::with_capacity(target_columns.len());
+    for target in target_columns {
+        let Ok(base_index) = map_auto_view_column_index(
+            view_desc,
+            &resolved.updatable_column_map,
+            &resolved.non_updatable_column_reasons,
+            target.column_index,
+        ) else {
+            return Ok(source);
+        };
+        base_indexes.push(base_index);
+    }
+
+    let normalize_row = |mut row: Vec<Expr>| -> Result<Vec<Expr>, ParseError> {
+        for (expr, base_index) in row.iter_mut().zip(base_indexes.iter().copied()) {
+            let column = &resolved.base_relation.desc.columns[base_index];
+            let Some(identity) = column.identity else {
+                continue;
+            };
+            if matches!(overriding, Some(OverridingKind::User)) {
+                *expr = base_column_defaults[base_index].clone();
+            } else if identity == ColumnIdentityKind::Always
+                && !matches!(overriding, Some(OverridingKind::System))
+            {
+                return Err(identity_insert_error(&column.name));
+            }
+        }
+        Ok(row)
+    };
+
+    match source {
+        BoundInsertSource::Values(rows) => Ok(BoundInsertSource::Values(
+            rows.into_iter()
+                .map(normalize_row)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        BoundInsertSource::ProjectSetValues(rows) => Ok(BoundInsertSource::ProjectSetValues(
+            rows.into_iter()
+                .map(normalize_row)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        other => Ok(other),
+    }
+}
+
 pub(crate) fn rewrite_bound_update_auto_view_target(
     stmt: BoundUpdateStatement,
     catalog: &dyn CatalogLookup,
@@ -4100,7 +4165,11 @@ fn bind_insert_column_defaults(
             }
             if let Some(sequence_oid) = column.default_sequence_oid {
                 let expr = Expr::builtin_func(
-                    BuiltinScalarFunction::NextVal,
+                    if column.identity.is_some() {
+                        BuiltinScalarFunction::IdentityNextVal
+                    } else {
+                        BuiltinScalarFunction::NextVal
+                    },
                     Some(SqlType::new(SqlTypeKind::Int8)),
                     false,
                     vec![Expr::Const(Value::Int64(i64::from(sequence_oid)))],
@@ -4766,6 +4835,18 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         }
     };
     let (target_columns, source) = source;
+    let source = if entry.relkind == 'v' {
+        normalize_auto_view_identity_values(
+            entry.relation_oid,
+            &entry.desc,
+            &target_columns,
+            stmt.overriding,
+            source,
+            catalog,
+        )?
+    } else {
+        source
+    };
     let mut on_conflict = stmt
         .on_conflict
         .as_ref()
