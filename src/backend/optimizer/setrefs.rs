@@ -7260,6 +7260,7 @@ fn set_lock_rows_references(
                         relation_oid: *relation_oid,
                         rel: *rel,
                         strength: row_mark.strength,
+                        nowait: row_mark.nowait,
                     },
                     _ => panic!("row mark must reference a base relation"),
                 }

@@ -768,6 +768,9 @@ fn execute_statement_with_source(
         Statement::Begin(_)
         | Statement::Commit(_)
         | Statement::Rollback(_)
+        | Statement::PrepareTransaction(_)
+        | Statement::CommitPrepared(_)
+        | Statement::RollbackPrepared(_)
         | Statement::Savepoint(_)
         | Statement::ReleaseSavepoint(_)
         | Statement::RollbackTo(_) => {

@@ -2850,6 +2850,22 @@ fn parse_transaction_alias_statements() {
 }
 
 #[test]
+fn parse_two_phase_transaction_statements() {
+    assert_eq!(
+        parse_statement("prepare transaction 'gx'").unwrap(),
+        Statement::PrepareTransaction("gx".into())
+    );
+    assert_eq!(
+        parse_statement("commit prepared 'gx'").unwrap(),
+        Statement::CommitPrepared("gx".into())
+    );
+    assert_eq!(
+        parse_statement("rollback prepared 'gx'").unwrap(),
+        Statement::RollbackPrepared("gx".into())
+    );
+}
+
+#[test]
 fn parse_transaction_characteristic_gucs() {
     assert_eq!(
         parse_statement("reset transaction_read_only").unwrap(),
@@ -13762,6 +13778,23 @@ fn parse_select_for_update_of_clause() {
             assert_eq!(locking_targets, vec!["people"]);
         }
         other => panic!("expected Select with FOR UPDATE OF, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_select_for_update_nowait_clause() {
+    match parse_statement("select * from people for update of people nowait").unwrap() {
+        Statement::Select(SelectStatement {
+            from: Some(FromItem::Table { name, only: false }),
+            locking_clause: Some(SelectLockingClause::ForUpdate),
+            locking_targets,
+            locking_nowait: true,
+            ..
+        }) => {
+            assert_eq!(name, "people");
+            assert_eq!(locking_targets, vec!["people"]);
+        }
+        other => panic!("expected Select with FOR UPDATE NOWAIT, got {:?}", other),
     }
 }
 

@@ -350,6 +350,7 @@ fn render_relation_expr_sql_with_options(
         limit_offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,

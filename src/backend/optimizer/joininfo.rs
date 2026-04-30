@@ -1003,6 +1003,7 @@ mod tests {
             set_operation: None,
             locking_clause: None,
             locking_targets: Vec::new(),
+            locking_nowait: false,
             row_marks: Vec::new(),
         }
     }
@@ -1094,6 +1095,7 @@ mod tests {
                 set_operation: None,
                 locking_clause: None,
                 locking_targets: Vec::new(),
+                locking_nowait: false,
                 row_marks: Vec::new(),
             }),
         }))

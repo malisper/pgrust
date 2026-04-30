@@ -55,10 +55,10 @@ use crate::backend::parser::{
     normalize_create_table_as_name, normalize_create_table_name, normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
-    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockSnapshotRow, RowLockManager,
-    RowLockSnapshotRow, TableLockManager, TableLockMode, TableLockSnapshotRow,
-    TransactionLockSnapshotRow, lock_relations_interruptible, lock_tables_interruptible,
-    unlock_relations,
+    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockPreparedEntry, AdvisoryLockSnapshotRow,
+    RowLockManager, RowLockPreparedEntry, RowLockSnapshotRow, TableLockManager, TableLockMode,
+    TableLockPreparedEntry, TableLockSnapshotRow, TransactionLockSnapshotRow,
+    lock_relations_interruptible, lock_tables_interruptible, unlock_relations,
 };
 use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
@@ -142,6 +142,7 @@ impl From<ControlFileError> for DatabaseError {
 }
 
 pub use crate::backend::storage::lmgr::TransactionWaiter;
+pub(crate) use crate::pgrust::session::ActiveTransaction;
 pub use crate::pgrust::session::{SelectGuard, Session};
 pub(crate) use async_notify::{
     AsyncListenAction, AsyncListenOp, AsyncNotifyRuntime, PendingNotification,
@@ -240,6 +241,290 @@ pub(crate) struct SessionPreparedStatementViewRow {
     pub custom_plans: i64,
 }
 
+pub(crate) const MAX_PREPARED_TRANSACTIONS: usize = 64;
+pub(crate) const MAX_PREPARED_GID_LEN: usize = 200;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PreparedTransactionViewRow {
+    pub transaction: TransactionId,
+    pub gid: String,
+    pub prepared_at: i64,
+    pub owner_name: String,
+    pub database_name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PreparedTransactionRecord {
+    pub gid: String,
+    pub xid: TransactionId,
+    pub subxids: Vec<TransactionId>,
+    pub prepared_at: i64,
+    pub owner_oid: u32,
+    pub owner_name: String,
+    pub db_oid: u32,
+    pub database_name: String,
+    pub prepared_client_id: ClientId,
+    pub advisory_scope_id: u64,
+    pub held_table_locks: Vec<TableLockPreparedEntry>,
+    pub row_locks: Vec<RowLockPreparedEntry>,
+    pub advisory_locks: Vec<AdvisoryLockPreparedEntry>,
+    pub catalog_effects: Vec<CatalogMutationEffect>,
+    pub prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
+    pub current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
+    pub sequence_effects: Vec<SequenceMutationEffect>,
+}
+
+pub(crate) struct PreparedTransactionEntry {
+    pub record: PreparedTransactionRecord,
+    pub runtime: Option<ActiveTransaction>,
+}
+
+pub(crate) struct PreparedTransactionManager {
+    data_dir: Option<PathBuf>,
+    entries: RwLock<BTreeMap<String, PreparedTransactionEntry>>,
+}
+
+impl PreparedTransactionManager {
+    pub(crate) fn new_ephemeral() -> Self {
+        Self {
+            data_dir: None,
+            entries: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    pub(crate) fn load(base_dir: &Path) -> Result<Self, DatabaseError> {
+        let data_dir = base_dir.join("pg_twophase");
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|err| DatabaseError::Catalog(CatalogError::Io(err.to_string())))?;
+        let mut entries = BTreeMap::new();
+        for entry in std::fs::read_dir(&data_dir)
+            .map_err(|err| DatabaseError::Catalog(CatalogError::Io(err.to_string())))?
+        {
+            let entry =
+                entry.map_err(|err| DatabaseError::Catalog(CatalogError::Io(err.to_string())))?;
+            if !entry
+                .file_type()
+                .map_err(|err| DatabaseError::Catalog(CatalogError::Io(err.to_string())))?
+                .is_file()
+            {
+                continue;
+            }
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.len() != 8 || u32::from_str_radix(name, 16).is_err() {
+                continue;
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|err| DatabaseError::Catalog(CatalogError::Io(err.to_string())))?;
+            let record = serde_json::from_slice::<PreparedTransactionRecord>(&bytes)
+                .map_err(|err| DatabaseError::Catalog(CatalogError::Io(err.to_string())))?;
+            entries.insert(
+                record.gid.clone(),
+                PreparedTransactionEntry {
+                    record,
+                    runtime: None,
+                },
+            );
+        }
+        Ok(Self {
+            data_dir: Some(data_dir),
+            entries: RwLock::new(entries),
+        })
+    }
+
+    pub(crate) fn prepared_xids(&self) -> std::collections::HashSet<TransactionId> {
+        self.entries
+            .read()
+            .values()
+            .flat_map(|entry| {
+                std::iter::once(entry.record.xid).chain(entry.record.subxids.iter().copied())
+            })
+            .collect()
+    }
+
+    pub(crate) fn rows(&self) -> Vec<PreparedTransactionViewRow> {
+        self.entries
+            .read()
+            .values()
+            .map(|entry| PreparedTransactionViewRow {
+                transaction: entry.record.xid,
+                gid: entry.record.gid.clone(),
+                prepared_at: entry.record.prepared_at,
+                owner_name: entry.record.owner_name.clone(),
+                database_name: entry.record.database_name.clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn records(&self) -> Vec<PreparedTransactionRecord> {
+        self.entries
+            .read()
+            .values()
+            .map(|entry| entry.record.clone())
+            .collect()
+    }
+
+    pub(crate) fn validate_gid_available(&self, gid: &str) -> Result<(), ExecError> {
+        if gid.len() >= MAX_PREPARED_GID_LEN {
+            return Err(ExecError::DetailedError {
+                message: format!("transaction identifier \"{gid}\" is too long"),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        let entries = self.entries.read();
+        if entries.contains_key(gid) {
+            return Err(ExecError::DetailedError {
+                message: format!("transaction identifier \"{gid}\" is already in use"),
+                detail: None,
+                hint: None,
+                sqlstate: "42710",
+            });
+        }
+        if entries.len() >= MAX_PREPARED_TRANSACTIONS {
+            return Err(ExecError::DetailedError {
+                message: "maximum number of prepared transactions reached".into(),
+                detail: None,
+                hint: Some(format!(
+                    "Increase \"max_prepared_transactions\" (currently {}).",
+                    MAX_PREPARED_TRANSACTIONS
+                )),
+                sqlstate: "53200",
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_lock_state(
+        &self,
+        txn_waiter: &TransactionWaiter,
+        table_locks: &TableLockManager,
+        row_locks: &RowLockManager,
+        advisory_locks: &AdvisoryLockManager,
+    ) {
+        for entry in self.entries.read().values() {
+            let record = &entry.record;
+            txn_waiter.register_holder(record.xid, record.prepared_client_id);
+            for xid in &record.subxids {
+                txn_waiter.register_holder(*xid, record.prepared_client_id);
+            }
+            table_locks
+                .restore_locks_for_client(record.prepared_client_id, &record.held_table_locks);
+            row_locks.restore_transaction_locks(
+                record.prepared_client_id,
+                record.advisory_scope_id,
+                &record.row_locks,
+            );
+            advisory_locks.restore_transaction_locks(
+                record.prepared_client_id,
+                record.advisory_scope_id,
+                &record.advisory_locks,
+            );
+        }
+    }
+
+    pub(crate) fn insert(&self, entry: PreparedTransactionEntry) -> Result<(), ExecError> {
+        let gid = entry.record.gid.clone();
+        self.validate_gid_available(&gid)?;
+        self.write_record(&entry.record)?;
+        self.entries.write().insert(gid, entry);
+        Ok(())
+    }
+
+    pub(crate) fn take(
+        &self,
+        gid: &str,
+        current_user_oid: u32,
+        is_superuser: bool,
+    ) -> Result<PreparedTransactionEntry, ExecError> {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries.remove(gid) else {
+            return Err(ExecError::DetailedError {
+                message: format!("prepared transaction with identifier \"{gid}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            });
+        };
+        if !is_superuser && entry.record.owner_oid != current_user_oid {
+            entries.insert(gid.to_string(), entry);
+            return Err(ExecError::DetailedError {
+                message: format!("permission denied to finish prepared transaction \"{gid}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        Ok(entry)
+    }
+
+    pub(crate) fn forget(&self, xid: TransactionId) -> Result<(), ExecError> {
+        let Some(data_dir) = &self.data_dir else {
+            return Ok(());
+        };
+        let path = data_dir.join(format!("{xid:08X}"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(ExecError::DetailedError {
+                message: format!("could not remove two-phase state file: {err}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58000",
+            }),
+        }
+    }
+
+    fn write_record(&self, record: &PreparedTransactionRecord) -> Result<(), ExecError> {
+        let Some(data_dir) = &self.data_dir else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(data_dir).map_err(|err| ExecError::DetailedError {
+            message: format!("could not create two-phase state directory: {err}"),
+            detail: None,
+            hint: None,
+            sqlstate: "58000",
+        })?;
+        let final_path = data_dir.join(format!("{:08X}", record.xid));
+        let temp_path = data_dir.join(format!("{:08X}.tmp", record.xid));
+        let bytes = serde_json::to_vec(record).map_err(|err| ExecError::DetailedError {
+            message: format!("could not serialize two-phase state: {err}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+        let mut file =
+            std::fs::File::create(&temp_path).map_err(|err| ExecError::DetailedError {
+                message: format!("could not create two-phase state file: {err}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58000",
+            })?;
+        std::io::Write::write_all(&mut file, &bytes).map_err(|err| ExecError::DetailedError {
+            message: format!("could not write two-phase state file: {err}"),
+            detail: None,
+            hint: None,
+            sqlstate: "58000",
+        })?;
+        file.sync_all().map_err(|err| ExecError::DetailedError {
+            message: format!("could not fsync two-phase state file: {err}"),
+            detail: None,
+            hint: None,
+            sqlstate: "58000",
+        })?;
+        std::fs::rename(&temp_path, &final_path).map_err(|err| ExecError::DetailedError {
+            message: format!("could not install two-phase state file: {err}"),
+            detail: None,
+            hint: None,
+            sqlstate: "58000",
+        })?;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct Database {
     pub(crate) cluster: Arc<ClusterShared>,
@@ -255,6 +540,7 @@ pub struct Database {
     pub shared_catalog: Arc<RwLock<CatalogStore>>,
     pub catalog: Arc<RwLock<CatalogStore>>,
     pub txn_waiter: Arc<TransactionWaiter>,
+    pub(crate) prepared_xacts: Arc<PreparedTransactionManager>,
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
     pub(crate) backend_cache_states: Arc<RwLock<HashMap<ClientId, BackendCacheState>>>,

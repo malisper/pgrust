@@ -10671,6 +10671,7 @@ fn execute_insert_project_set_row(
         limit_offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         row_marks: Vec::new(),
         has_target_srfs: true,
         recursive_union: None,

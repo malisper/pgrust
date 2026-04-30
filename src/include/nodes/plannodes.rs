@@ -144,6 +144,7 @@ pub struct PlanRowMark {
     pub relation_oid: u32,
     pub rel: RelFileLocator,
     pub strength: SelectLockingClause,
+    pub nowait: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

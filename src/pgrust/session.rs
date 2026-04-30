@@ -73,8 +73,8 @@ use crate::backend::utils::misc::stack_depth::{
     MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
 use crate::include::catalog::{
-    ANYARRAYOID, ANYELEMENTOID, ANYOID, CONSTRAINT_FOREIGN, INT4_TYPE_OID, NUMERIC_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID,
+    ANYARRAYOID, ANYELEMENTOID, ANYOID, BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_FOREIGN, INT4_TYPE_OID,
+    NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID,
     PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID,
     PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, PG_WRITE_SERVER_FILES_OID, PgProcRow,
     TEXT_TYPE_OID,
@@ -90,12 +90,12 @@ use crate::pgrust::database::commands::privilege::{
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::database::{
     AsyncListenAction, AsyncListenOp, Database, DynamicTypeSnapshot, PendingNotification,
-    SequenceMutationEffect, SessionCursorViewRow, SessionPreparedStatementViewRow,
-    SessionStatsState, SessionViewState, StatsFetchConsistency, TempMutationEffect,
-    TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
-    alter_table_validate_constraint_lock_requests, default_sequence_name_base,
-    delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,
-    merge_pending_notifications, merge_table_lock_requests,
+    PreparedTransactionEntry, PreparedTransactionRecord, SequenceMutationEffect,
+    SessionCursorViewRow, SessionPreparedStatementViewRow, SessionStatsState, SessionViewState,
+    StatsFetchConsistency, TempMutationEffect, TrackFunctionsSetting,
+    alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
+    default_sequence_name_base, delete_foreign_key_lock_requests, execute_set_constraints,
+    insert_foreign_key_lock_requests, merge_pending_notifications, merge_table_lock_requests,
     prepared_insert_foreign_key_lock_requests, queue_pending_notification,
     reject_relation_with_referencing_foreign_keys_except, relation_foreign_key_lock_requests,
     update_foreign_key_lock_requests, validate_deferred_constraints,
@@ -1476,34 +1476,34 @@ impl Drop for StatementLockScopeGuard {
     }
 }
 
-struct ActiveTransaction {
-    xid: Option<TransactionId>,
-    current_write_xid: Option<TransactionId>,
-    subxids: Vec<TransactionId>,
+pub(crate) struct ActiveTransaction {
+    pub(crate) xid: Option<TransactionId>,
+    pub(crate) current_write_xid: Option<TransactionId>,
+    pub(crate) subxids: Vec<TransactionId>,
     started_at_usecs: i64,
-    advisory_scope_id: u64,
-    failed: bool,
+    pub(crate) advisory_scope_id: u64,
+    pub(crate) failed: bool,
     auth_at_start: AuthState,
-    local_auth_active: bool,
-    held_table_locks: BTreeMap<RelFileLocator, TableLockMode>,
-    next_command_id: u32,
+    pub(crate) local_auth_active: bool,
+    pub(crate) held_table_locks: BTreeMap<RelFileLocator, TableLockMode>,
+    pub(crate) next_command_id: u32,
     isolation_level: crate::backend::parser::TransactionIsolationLevel,
     read_only: bool,
     deferrable: bool,
     snapshot_taken: bool,
     transaction_snapshot: Option<Snapshot>,
-    catalog_effects: Vec<CatalogMutationEffect>,
-    current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
-    prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
-    temp_effects: Vec<TempMutationEffect>,
-    sequence_effects: Vec<SequenceMutationEffect>,
+    pub(crate) catalog_effects: Vec<CatalogMutationEffect>,
+    pub(crate) current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
+    pub(crate) prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
+    pub(crate) temp_effects: Vec<TempMutationEffect>,
+    pub(crate) sequence_effects: Vec<SequenceMutationEffect>,
     deferred_foreign_keys: DeferredForeignKeyTracker,
-    async_listen_ops: Vec<AsyncListenOp>,
-    pending_async_notifications: Vec<PendingNotification>,
-    dynamic_type_snapshot: DynamicTypeSnapshot,
+    pub(crate) async_listen_ops: Vec<AsyncListenOp>,
+    pub(crate) pending_async_notifications: Vec<PendingNotification>,
+    pub(crate) dynamic_type_snapshot: DynamicTypeSnapshot,
     savepoints: Vec<SavepointState>,
-    guc_start_state: GucState,
-    guc_commit_state: GucState,
+    pub(crate) guc_start_state: GucState,
+    pub(crate) guc_commit_state: GucState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2379,6 +2379,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
         "max_parallel_workers_per_gather" => Some("2"),
+        "max_prepared_transactions" => Some("64"),
         _ => None,
     }
 }
@@ -4521,6 +4522,9 @@ impl Session {
                 | Statement::Begin(_)
                 | Statement::Commit(_)
                 | Statement::Rollback(_)
+                | Statement::PrepareTransaction(_)
+                | Statement::CommitPrepared(_)
+                | Statement::RollbackPrepared(_)
                 | Statement::Savepoint(_)
                 | Statement::ReleaseSavepoint(_)
                 | Statement::RollbackTo(_)
@@ -5629,6 +5633,350 @@ impl Session {
         Ok(())
     }
 
+    fn prepared_xact_client_id(xid: TransactionId) -> ClientId {
+        0x8000_0000 | xid
+    }
+
+    fn prepared_record_live_xids(record: &PreparedTransactionRecord) -> Vec<TransactionId> {
+        std::iter::once(record.xid)
+            .chain(record.subxids.iter().copied())
+            .collect()
+    }
+
+    fn wal_exec_error(action: &str, err: String) -> ExecError {
+        ExecError::DetailedError {
+            message: format!("could not {action}: {err}"),
+            detail: None,
+            hint: None,
+            sqlstate: "58000",
+        }
+    }
+
+    fn catalog_lookup_exec_error(err: crate::backend::catalog::CatalogError) -> ExecError {
+        ExecError::DetailedError {
+            message: format!("catalog lookup failed: {err:?}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }
+    }
+
+    fn current_user_is_superuser(&self, db: &Database) -> Result<bool, ExecError> {
+        let current_user_oid = self.current_user_oid();
+        if current_user_oid == BOOTSTRAP_SUPERUSER_OID {
+            return Ok(true);
+        }
+        let auth_catalog = db
+            .auth_catalog(self.client_id, self.catalog_txn_ctx())
+            .map_err(Self::catalog_lookup_exec_error)?;
+        Ok(auth_catalog
+            .role_by_oid(current_user_oid)
+            .is_some_and(|role| role.rolsuper))
+    }
+
+    fn role_name_for_oid(&self, db: &Database, oid: u32) -> Result<String, ExecError> {
+        let auth_catalog = db
+            .auth_catalog(self.client_id, self.catalog_txn_ctx())
+            .map_err(Self::catalog_lookup_exec_error)?;
+        Ok(auth_catalog
+            .role_by_oid(oid)
+            .map(|role| role.rolname.clone())
+            .unwrap_or_else(|| oid.to_string()))
+    }
+
+    fn unsupported_prepare_state(message: &'static str) -> ExecError {
+        ExecError::DetailedError {
+            message: message.into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }
+    }
+
+    fn apply_prepare_transaction(
+        &mut self,
+        db: &Database,
+        gid: &str,
+    ) -> Result<StatementResult, ExecError> {
+        if self.active_txn.is_none() {
+            return Err(ExecError::DetailedError {
+                message: "PREPARE TRANSACTION can only be used in transaction blocks".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25P01",
+            });
+        }
+        let result = self.apply_prepare_transaction_inner(db, gid);
+        if result.is_err() {
+            self.abort_active_transaction_after_failed_prepare(db);
+        }
+        result
+    }
+
+    fn abort_active_transaction_after_failed_prepare(&mut self, db: &Database) {
+        let Some(txn) = self.active_txn.take() else {
+            return;
+        };
+        let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
+        self.abort_taken_transaction(db, &txn);
+        for rel in held_locks {
+            db.table_locks.unlock_table(rel, self.client_id);
+        }
+        self.restore_guc_state(db, txn.guc_start_state);
+        self.portals.drop_transaction_portals(false);
+    }
+
+    fn apply_prepare_transaction_inner(
+        &mut self,
+        db: &Database,
+        gid: &str,
+    ) -> Result<StatementResult, ExecError> {
+        db.prepared_xacts.validate_gid_available(gid)?;
+        {
+            let txn = self.active_txn.as_ref().unwrap();
+            if txn.failed {
+                return Err(Self::unsupported_prepare_state(
+                    "cannot PREPARE a transaction that has failed",
+                ));
+            }
+            if !txn.temp_effects.is_empty() {
+                return Err(Self::unsupported_prepare_state(
+                    "cannot PREPARE a transaction that has operated on temporary objects",
+                ));
+            }
+            if !txn.async_listen_ops.is_empty() || !txn.pending_async_notifications.is_empty() {
+                return Err(Self::unsupported_prepare_state(
+                    "cannot PREPARE a transaction with LISTEN, UNLISTEN, or NOTIFY actions",
+                ));
+            }
+            if db
+                .advisory_locks
+                .has_session_and_transaction_lock_on_same_key(self.client_id, txn.advisory_scope_id)
+            {
+                return Err(Self::unsupported_prepare_state(
+                    "cannot PREPARE while holding both session-level and transaction-level locks on the same object",
+                ));
+            }
+        }
+
+        self.validate_constraints_for_active_txn(db, false)?;
+        let xid = self.ensure_top_xid(db);
+        db.prepared_xacts.validate_gid_available(gid)?;
+
+        let owner_oid = self.current_user_oid();
+        let owner_name = self.role_name_for_oid(db, owner_oid)?;
+        let database_name = db.current_database_name();
+        let prepared_at = crate::backend::utils::time::datetime::current_postgres_timestamp_usecs();
+        let (record, wal_data) = {
+            let txn = self.active_txn.as_ref().unwrap();
+            let prepared_client_id = Self::prepared_xact_client_id(xid);
+            let record = PreparedTransactionRecord {
+                gid: gid.to_string(),
+                xid,
+                subxids: txn.subxids.clone(),
+                prepared_at,
+                owner_oid,
+                owner_name,
+                db_oid: db.database_oid,
+                database_name,
+                prepared_client_id,
+                advisory_scope_id: txn.advisory_scope_id,
+                held_table_locks: txn
+                    .held_table_locks
+                    .iter()
+                    .map(
+                        |(rel, mode)| crate::backend::storage::lmgr::TableLockPreparedEntry {
+                            rel: *rel,
+                            mode: *mode,
+                        },
+                    )
+                    .collect(),
+                row_locks: db
+                    .row_locks
+                    .granted_transaction_locks(self.client_id, txn.advisory_scope_id),
+                advisory_locks: db
+                    .advisory_locks
+                    .granted_transaction_locks(self.client_id, txn.advisory_scope_id),
+                catalog_effects: txn.catalog_effects.clone(),
+                prior_cmd_catalog_invalidations: txn.prior_cmd_catalog_invalidations.clone(),
+                current_cmd_catalog_invalidations: txn.current_cmd_catalog_invalidations.clone(),
+                sequence_effects: txn.sequence_effects.clone(),
+            };
+            let wal_data = serde_json::to_vec(&record).map_err(|err| ExecError::DetailedError {
+                message: format!("could not serialize two-phase state: {err}"),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+            (record, wal_data)
+        };
+
+        let _checkpoint_guard = db.checkpoint_commit_guard();
+        db.pool
+            .write_wal_prepare(xid, &wal_data)
+            .map_err(|err| Self::wal_exec_error("write two-phase prepare WAL record", err))?;
+        db.pool
+            .flush_wal()
+            .map_err(|err| Self::wal_exec_error("flush two-phase prepare WAL record", err))?;
+
+        let txn = self.active_txn.take().unwrap();
+        let guc_commit_state = txn.guc_commit_state.clone();
+        let auth_at_start = txn.auth_at_start.clone();
+        let local_auth_active = txn.local_auth_active;
+        let live_xids = txn.live_xids();
+        let prepared_client_id = record.prepared_client_id;
+        db.table_locks
+            .transfer_all_for_client(self.client_id, prepared_client_id);
+        db.row_locks.transfer_transaction(
+            self.client_id,
+            record.advisory_scope_id,
+            prepared_client_id,
+            record.advisory_scope_id,
+        );
+        db.advisory_locks.transfer_transaction(
+            self.client_id,
+            record.advisory_scope_id,
+            prepared_client_id,
+            record.advisory_scope_id,
+        );
+        for xid in &live_xids {
+            db.txn_waiter.register_holder(*xid, prepared_client_id);
+        }
+        db.prepared_xacts.insert(PreparedTransactionEntry {
+            record,
+            runtime: Some(txn),
+        })?;
+        if local_auth_active && self.auth != auth_at_start {
+            self.auth = auth_at_start;
+            db.install_auth_state(self.client_id, self.auth.clone());
+            db.plan_cache.invalidate_all();
+        }
+        self.restore_guc_state(db, guc_commit_state);
+        crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
+            db,
+            self.client_id,
+        );
+        self.stats_state.write().commit_top_level_xact(&db.stats);
+        self.portals.drop_transaction_portals(true);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn apply_commit_prepared(
+        &mut self,
+        db: &Database,
+        gid: &str,
+    ) -> Result<StatementResult, ExecError> {
+        if self.active_txn.is_some() {
+            return Err(ExecError::DetailedError {
+                message: "COMMIT PREPARED cannot run inside a transaction block".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25001",
+            });
+        }
+        let entry = db.prepared_xacts.take(
+            gid,
+            self.current_user_oid(),
+            self.current_user_is_superuser(db)?,
+        )?;
+        let record = entry.record;
+        let live_xids = Self::prepared_record_live_xids(&record);
+        let _checkpoint_guard = db.checkpoint_commit_guard();
+        for xid in &live_xids {
+            db.pool
+                .write_wal_commit(*xid)
+                .map_err(|err| Self::wal_exec_error("write prepared commit WAL record", err))?;
+        }
+        db.pool
+            .flush_wal()
+            .map_err(|err| Self::wal_exec_error("flush prepared commit WAL record", err))?;
+        for xid in &live_xids {
+            db.txns.write().commit(*xid).map_err(|err| {
+                ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(err))
+            })?;
+        }
+        db.txns.write().flush_clog().map_err(|err| {
+            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(err))
+        })?;
+        for xid in &live_xids {
+            db.txn_waiter.unregister_holder(*xid);
+            db.commit_enum_labels_created_by(*xid);
+        }
+        db.txn_waiter.notify();
+        let mut invalidations = record.prior_cmd_catalog_invalidations.clone();
+        invalidations.extend(record.current_cmd_catalog_invalidations.clone());
+        db.finalize_committed_catalog_effects(
+            record.prepared_client_id,
+            &record.catalog_effects,
+            &invalidations,
+        );
+        db.finalize_committed_sequence_effects(&record.sequence_effects)?;
+        db.table_locks
+            .unlock_all_for_client(record.prepared_client_id);
+        db.row_locks
+            .unlock_all_transaction(record.prepared_client_id, record.advisory_scope_id);
+        db.advisory_locks
+            .unlock_all_transaction(record.prepared_client_id, record.advisory_scope_id);
+        db.prepared_xacts.forget(record.xid)?;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn apply_rollback_prepared(
+        &mut self,
+        db: &Database,
+        gid: &str,
+    ) -> Result<StatementResult, ExecError> {
+        if self.active_txn.is_some() {
+            return Err(ExecError::DetailedError {
+                message: "ROLLBACK PREPARED cannot run inside a transaction block".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25001",
+            });
+        }
+        let entry = db.prepared_xacts.take(
+            gid,
+            self.current_user_oid(),
+            self.current_user_is_superuser(db)?,
+        )?;
+        let record = entry.record;
+        let live_xids = Self::prepared_record_live_xids(&record);
+        let _checkpoint_guard = db.checkpoint_commit_guard();
+        for xid in &live_xids {
+            db.pool
+                .write_wal_abort(*xid)
+                .map_err(|err| Self::wal_exec_error("write prepared abort WAL record", err))?;
+        }
+        db.pool
+            .flush_wal()
+            .map_err(|err| Self::wal_exec_error("flush prepared abort WAL record", err))?;
+        for xid in &live_xids {
+            db.txns.write().abort(*xid).map_err(|err| {
+                ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(err))
+            })?;
+        }
+        db.txns.write().flush_clog().map_err(|err| {
+            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(err))
+        })?;
+        for xid in &live_xids {
+            db.txn_waiter.unregister_holder(*xid);
+        }
+        db.txn_waiter.notify();
+        if let Some(runtime) = entry.runtime.as_ref() {
+            db.restore_dynamic_type_snapshot(&runtime.dynamic_type_snapshot);
+        }
+        db.finalize_aborted_catalog_effects(&record.catalog_effects);
+        db.finalize_aborted_sequence_effects(&record.sequence_effects);
+        db.table_locks
+            .unlock_all_for_client(record.prepared_client_id);
+        db.row_locks
+            .unlock_all_transaction(record.prepared_client_id, record.advisory_scope_id);
+        db.advisory_locks
+            .unlock_all_transaction(record.prepared_client_id, record.advisory_scope_id);
+        db.prepared_xacts.forget(record.xid)?;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     fn finalize_taken_transaction(
         &mut self,
         db: &Database,
@@ -5926,7 +6274,12 @@ impl Session {
         if self.active_txn.is_some()
             && !matches!(
                 stmt,
-                Statement::Commit(_) | Statement::Rollback(_) | Statement::RollbackTo(_)
+                Statement::Commit(_)
+                    | Statement::Rollback(_)
+                    | Statement::RollbackTo(_)
+                    | Statement::PrepareTransaction(_)
+                    | Statement::CommitPrepared(_)
+                    | Statement::RollbackPrepared(_)
             )
         {
             if self.transaction_failed() {
@@ -5957,6 +6310,9 @@ impl Session {
                     | Statement::CopyTo(_)
                     | Statement::Prepare(_)
                     | Statement::Execute(_)
+                    | Statement::PrepareTransaction(_)
+                    | Statement::CommitPrepared(_)
+                    | Statement::RollbackPrepared(_)
             ) {
                 // Portal commands are session-level operations that may own executor state
                 // across statements, so route them through the outer session command match.
@@ -8314,6 +8670,9 @@ impl Session {
                 }
                 Ok(StatementResult::AffectedRows(0))
             }
+            Statement::PrepareTransaction(ref gid) => self.apply_prepare_transaction(db, gid),
+            Statement::CommitPrepared(ref gid) => self.apply_commit_prepared(db, gid),
+            Statement::RollbackPrepared(ref gid) => self.apply_rollback_prepared(db, gid),
             Statement::Savepoint(ref name) => {
                 let guc_effective_state = self.capture_guc_state();
                 let Some(txn) = self.active_txn.as_mut() else {
@@ -9332,6 +9691,7 @@ impl Session {
             offset: select.offset,
             locking_clause: select.locking_clause,
             locking_targets: select.locking_targets.clone(),
+            locking_nowait: select.locking_nowait,
             set_operation: select
                 .set_operation
                 .as_ref()
@@ -14849,6 +15209,9 @@ impl Session {
                 Statement::Begin(_)
                 | Statement::Commit(_)
                 | Statement::Rollback(_)
+                | Statement::PrepareTransaction(_)
+                | Statement::CommitPrepared(_)
+                | Statement::RollbackPrepared(_)
                 | Statement::Savepoint(_)
                 | Statement::ReleaseSavepoint(_)
                 | Statement::RollbackTo(_) => {

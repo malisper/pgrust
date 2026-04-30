@@ -274,6 +274,253 @@ fn ephemeral_database_executes_basic_sql() {
 }
 
 #[test]
+fn prepared_transaction_commit_and_rollback_control_visibility() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut writer = Session::new(1);
+    let mut observer = Session::new(2);
+
+    writer
+        .execute(&db, "create table two_pc_items (id int)")
+        .unwrap();
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "insert into two_pc_items values (1)")
+        .unwrap();
+    writer
+        .execute(&db, "prepare transaction 'commit-gid'")
+        .unwrap();
+
+    assert!(!writer.in_transaction());
+    assert_eq!(
+        session_query_rows(&mut observer, &db, "select count(*) from two_pc_items"),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut observer,
+            &db,
+            "select gid from pg_prepared_xacts order by gid"
+        ),
+        vec![vec![Value::Text("commit-gid".into())]]
+    );
+    observer
+        .execute(&db, "commit prepared 'commit-gid'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut observer, &db, "select count(*) from two_pc_items"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "insert into two_pc_items values (2)")
+        .unwrap();
+    writer
+        .execute(&db, "prepare transaction 'rollback-gid'")
+        .unwrap();
+    observer
+        .execute(&db, "rollback prepared 'rollback-gid'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut observer,
+            &db,
+            "select id from two_pc_items order by id"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn prepared_transaction_rejects_duplicate_gid_and_finish_inside_transaction() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut first = Session::new(1);
+    let mut second = Session::new(2);
+
+    first
+        .execute(&db, "create table two_pc_dups (id int)")
+        .unwrap();
+    first.execute(&db, "begin").unwrap();
+    first
+        .execute(&db, "insert into two_pc_dups values (1)")
+        .unwrap();
+    first
+        .execute(&db, "prepare transaction 'same-gid'")
+        .unwrap();
+
+    second.execute(&db, "begin").unwrap();
+    second
+        .execute(&db, "insert into two_pc_dups values (2)")
+        .unwrap();
+    let err = second
+        .execute(&db, "prepare transaction 'same-gid'")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(sqlstate, "42710");
+            assert!(message.contains("same-gid"));
+        }
+        other => panic!("expected duplicate prepared xact error, got {other:?}"),
+    }
+    second.execute(&db, "rollback").unwrap();
+
+    second.execute(&db, "begin").unwrap();
+    let err = second
+        .execute(&db, "commit prepared 'same-gid'")
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(sqlstate, "25001");
+            assert_eq!(
+                message,
+                "COMMIT PREPARED cannot run inside a transaction block"
+            );
+        }
+        other => panic!("expected active transaction error, got {other:?}"),
+    }
+    second.execute(&db, "rollback").unwrap();
+    second.execute(&db, "commit prepared 'same-gid'").unwrap();
+}
+
+#[test]
+fn durable_prepared_transaction_survives_reopen_then_finishes() {
+    let dir = temp_dir("durable_prepared_transaction_survives_reopen_then_finishes");
+    {
+        let db = Database::open(&dir, 32).expect("open durable database");
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table durable_two_pc (id int)")
+            .unwrap();
+        session.execute(&db, "begin").unwrap();
+        session
+            .execute(&db, "insert into durable_two_pc values (7)")
+            .unwrap();
+        session
+            .execute(&db, "prepare transaction 'durable-gid'")
+            .unwrap();
+        assert_eq!(
+            session_query_rows(&mut session, &db, "select gid from pg_prepared_xacts"),
+            vec![vec![Value::Text("durable-gid".into())]]
+        );
+    }
+    {
+        let db = Database::open(&dir, 32).expect("reopen durable database");
+        let mut session = Session::new(2);
+        assert_eq!(
+            session_query_rows(&mut session, &db, "select gid from pg_prepared_xacts"),
+            vec![vec![Value::Text("durable-gid".into())]]
+        );
+        session
+            .execute(&db, "commit prepared 'durable-gid'")
+            .unwrap();
+        assert_eq!(
+            session_query_rows(&mut session, &db, "select id from durable_two_pc"),
+            vec![vec![Value::Int32(7)]]
+        );
+    }
+}
+
+#[test]
+fn prepared_transaction_retains_drop_table_lock_until_finish() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut dropper = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    dropper
+        .execute(&db, "create table two_pc_drop_lock (id int)")
+        .unwrap();
+    dropper.execute(&db, "begin").unwrap();
+    dropper.execute(&db, "drop table two_pc_drop_lock").unwrap();
+    dropper
+        .execute(&db, "prepare transaction 'drop-lock-gid'")
+        .unwrap();
+
+    waiter.execute(&db, "begin").unwrap();
+    let err = waiter
+        .execute(
+            &db,
+            "lock table two_pc_drop_lock in access share mode nowait",
+        )
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(sqlstate, "55P03");
+            assert_eq!(
+                message,
+                "could not obtain lock on relation \"two_pc_drop_lock\""
+            );
+        }
+        other => panic!("expected lock-not-available error, got {other:?}"),
+    }
+    waiter.execute(&db, "rollback").unwrap();
+    waiter
+        .execute(&db, "commit prepared 'drop-lock-gid'")
+        .unwrap();
+
+    let err = waiter
+        .execute(&db, "select * from two_pc_drop_lock")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::TableDoesNotExist(_))
+            | ExecError::Parse(ParseError::UnknownTable(_))
+    ));
+}
+
+#[test]
+fn prepared_transaction_retains_row_lock_for_nowait() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut locker = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    locker
+        .execute(
+            &db,
+            "create table two_pc_row_lock (id int primary key, data text)",
+        )
+        .unwrap();
+    locker
+        .execute(&db, "insert into two_pc_row_lock values (1, 'held')")
+        .unwrap();
+    locker.execute(&db, "begin").unwrap();
+    locker
+        .execute(&db, "select * from two_pc_row_lock where id = 1 for share")
+        .unwrap();
+    locker
+        .execute(&db, "prepare transaction 'row-lock-gid'")
+        .unwrap();
+
+    let err = waiter
+        .execute(
+            &db,
+            "select * from two_pc_row_lock where id = 1 for update nowait",
+        )
+        .unwrap_err();
+    match err {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(sqlstate, "55P03");
+            assert_eq!(
+                message,
+                "could not obtain lock on row in relation \"two_pc_row_lock\""
+            );
+        }
+        other => panic!("expected row lock-not-available error, got {other:?}"),
+    }
+
+    waiter
+        .execute(&db, "rollback prepared 'row-lock-gid'")
+        .unwrap();
+}
+
+#[test]
 fn session_setseed_affects_following_random_statement() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

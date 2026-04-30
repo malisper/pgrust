@@ -11,13 +11,17 @@ use crate::backend::utils::misc::interrupts::{
 };
 use crate::include::nodes::datetime::TimestampTzADT;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum AdvisoryLockKey {
     BigInt(i64),
     TwoInt(i32, i32),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum AdvisoryLockMode {
     Shared,
     Exclusive,
@@ -39,17 +43,28 @@ impl AdvisoryLockMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum AdvisoryLockScope {
     Session,
     Transaction(u64),
     Statement(u64),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct AdvisoryLockOwner {
     pub client_id: ClientId,
     pub scope: AdvisoryLockScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdvisoryLockPreparedEntry {
+    pub key: AdvisoryLockKey,
+    pub mode: AdvisoryLockMode,
+    pub count: usize,
 }
 
 impl AdvisoryLockOwner {
@@ -241,6 +256,96 @@ impl AdvisoryLockManager {
 
     pub fn unlock_all_statement(&self, client_id: ClientId, scope_id: u64) {
         self.unlock_matching(|owner| owner == AdvisoryLockOwner::statement(client_id, scope_id));
+    }
+
+    pub fn transfer_transaction(
+        &self,
+        old_client_id: ClientId,
+        old_scope_id: u64,
+        new_client_id: ClientId,
+        new_scope_id: u64,
+    ) {
+        let old_owner = AdvisoryLockOwner::transaction(old_client_id, old_scope_id);
+        let new_owner = AdvisoryLockOwner::transaction(new_client_id, new_scope_id);
+        let mut state = self.state.lock();
+        let mut changed = false;
+        for key_state in state.keys.values_mut() {
+            for entry in &mut key_state.granted {
+                if entry.owner == old_owner {
+                    entry.owner = new_owner;
+                    changed = true;
+                }
+            }
+            for entry in &mut key_state.waiting {
+                if entry.owner == old_owner {
+                    entry.owner = new_owner;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.cv.notify_all();
+        }
+    }
+
+    pub fn granted_transaction_locks(
+        &self,
+        client_id: ClientId,
+        scope_id: u64,
+    ) -> Vec<AdvisoryLockPreparedEntry> {
+        let owner = AdvisoryLockOwner::transaction(client_id, scope_id);
+        let state = self.state.lock();
+        let mut rows = Vec::new();
+        for (key, key_state) in &state.keys {
+            for entry in &key_state.granted {
+                if entry.owner == owner {
+                    rows.push(AdvisoryLockPreparedEntry {
+                        key: *key,
+                        mode: entry.mode,
+                        count: entry.count,
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    pub fn restore_transaction_locks(
+        &self,
+        client_id: ClientId,
+        scope_id: u64,
+        locks: &[AdvisoryLockPreparedEntry],
+    ) {
+        let owner = AdvisoryLockOwner::transaction(client_id, scope_id);
+        let mut state = self.state.lock();
+        for lock in locks {
+            let key_state = state.keys.entry(lock.key).or_default();
+            for _ in 0..lock.count.max(1) {
+                grant_lock(key_state, owner, lock.mode);
+            }
+        }
+        self.cv.notify_all();
+    }
+
+    pub fn has_session_and_transaction_lock_on_same_key(
+        &self,
+        client_id: ClientId,
+        scope_id: u64,
+    ) -> bool {
+        let session_owner = AdvisoryLockOwner::session(client_id);
+        let transaction_owner = AdvisoryLockOwner::transaction(client_id, scope_id);
+        let state = self.state.lock();
+        state.keys.values().any(|key_state| {
+            let has_session = key_state
+                .granted
+                .iter()
+                .any(|entry| entry.owner == session_owner);
+            let has_transaction = key_state
+                .granted
+                .iter()
+                .any(|entry| entry.owner == transaction_owner);
+            has_session && has_transaction
+        })
     }
 
     pub fn snapshot(&self) -> Vec<AdvisoryLockSnapshotRow> {

@@ -28,18 +28,21 @@ fn prepare_query_tree_for_planning(query: Query, catalog: &dyn CatalogLookup) ->
 }
 
 pub(super) fn prepare_query_for_locking(query: Query) -> Result<Query, ParseError> {
-    prepare_query_for_locking_with_inherited(query, None)
+    prepare_query_for_locking_with_inherited(query, None, false)
 }
 
 fn prepare_query_for_locking_with_inherited(
     mut query: Query,
     inherited_lock: Option<SelectLockingClause>,
+    inherited_nowait: bool,
 ) -> Result<Query, ParseError> {
     let local_locking_targets = if query.locking_clause.is_some() {
         query.locking_targets.clone()
     } else {
         Vec::new()
     };
+    let effective_nowait =
+        inherited_nowait || (query.locking_clause.is_some() && query.locking_nowait);
     let effective_lock = match (query.locking_clause, inherited_lock) {
         (Some(local), Some(inherited)) => Some(local.strongest(inherited)),
         (Some(local), None) => Some(local),
@@ -54,7 +57,7 @@ fn prepare_query_for_locking_with_inherited(
     query.rtable = query
         .rtable
         .into_iter()
-        .map(|rte| prepare_rte_for_locking(rte, effective_lock))
+        .map(|rte| prepare_rte_for_locking(rte, effective_lock, effective_nowait))
         .collect::<Result<Vec<_>, _>>()?;
     query.target_list = query
         .target_list
@@ -103,15 +106,23 @@ fn prepare_query_for_locking_with_inherited(
                 &query.rtable,
                 &local_locking_targets,
                 strength,
+                effective_nowait,
                 &mut row_marks,
             )?;
         } else if let Some(jointree) = &query.jointree {
-            collect_query_row_marks(&query.rtable, jointree, strength, &mut row_marks);
+            collect_query_row_marks(
+                &query.rtable,
+                jointree,
+                strength,
+                effective_nowait,
+                &mut row_marks,
+            );
         }
         row_marks.sort_by_key(|mark| mark.rtindex);
         row_marks.dedup_by(|left, right| {
             if left.rtindex == right.rtindex {
                 left.strength = left.strength.strongest(right.strength);
+                left.nowait |= right.nowait;
                 true
             } else {
                 false
@@ -121,6 +132,7 @@ fn prepare_query_for_locking_with_inherited(
     }
     query.locking_clause = None;
     query.locking_targets.clear();
+    query.locking_nowait = false;
     Ok(query)
 }
 
@@ -228,6 +240,7 @@ fn collect_query_row_marks(
     rtable: &[RangeTblEntry],
     jointree: &JoinTreeNode,
     strength: SelectLockingClause,
+    nowait: bool,
     row_marks: &mut Vec<QueryRowMark>,
 ) {
     match jointree {
@@ -242,10 +255,12 @@ fn collect_query_row_marks(
                         .find(|row_mark| row_mark.rtindex == *rtindex)
                     {
                         existing.strength = existing.strength.strongest(strength);
+                        existing.nowait |= nowait;
                     } else {
                         row_marks.push(QueryRowMark {
                             rtindex: *rtindex,
                             strength,
+                            nowait,
                         });
                     }
                 }
@@ -259,8 +274,8 @@ fn collect_query_row_marks(
             }
         }
         JoinTreeNode::JoinExpr { left, right, .. } => {
-            collect_query_row_marks(rtable, left, strength, row_marks);
-            collect_query_row_marks(rtable, right, strength, row_marks);
+            collect_query_row_marks(rtable, left, strength, nowait, row_marks);
+            collect_query_row_marks(rtable, right, strength, nowait, row_marks);
         }
     }
 }
@@ -269,6 +284,7 @@ fn collect_query_row_marks_for_targets(
     rtable: &[RangeTblEntry],
     targets: &[String],
     strength: SelectLockingClause,
+    nowait: bool,
     row_marks: &mut Vec<QueryRowMark>,
 ) -> Result<(), ParseError> {
     for target in targets {
@@ -307,8 +323,13 @@ fn collect_query_row_marks_for_targets(
                     .find(|row_mark| row_mark.rtindex == rtindex)
                 {
                     existing.strength = existing.strength.strongest(strength);
+                    existing.nowait |= nowait;
                 } else {
-                    row_marks.push(QueryRowMark { rtindex, strength });
+                    row_marks.push(QueryRowMark {
+                        rtindex,
+                        strength,
+                        nowait,
+                    });
                 }
             }
             RangeTblEntryKind::Join { .. } => {
@@ -348,6 +369,7 @@ fn collect_query_row_marks_for_targets(
 fn prepare_rte_for_locking(
     rte: RangeTblEntry,
     inherited_lock: Option<SelectLockingClause>,
+    inherited_nowait: bool,
 ) -> Result<RangeTblEntry, ParseError> {
     Ok(RangeTblEntry {
         security_quals: rte
@@ -360,11 +382,14 @@ fn prepare_rte_for_locking(
                 query: Box::new(prepare_query_for_locking_with_inherited(
                     *query,
                     inherited_lock,
+                    inherited_nowait,
                 )?),
             },
             RangeTblEntryKind::Cte { cte_id, query } => RangeTblEntryKind::Cte {
                 cte_id,
-                query: Box::new(prepare_query_for_locking_with_inherited(*query, None)?),
+                query: Box::new(prepare_query_for_locking_with_inherited(
+                    *query, None, false,
+                )?),
             },
             RangeTblEntryKind::Values {
                 rows,
@@ -790,8 +815,12 @@ fn prepare_recursive_union_for_locking(
 ) -> Result<crate::include::nodes::parsenodes::RecursiveUnionQuery, ParseError> {
     Ok(crate::include::nodes::parsenodes::RecursiveUnionQuery {
         output_desc: recursive_union.output_desc,
-        anchor: prepare_query_for_locking_with_inherited(recursive_union.anchor, None)?,
-        recursive: prepare_query_for_locking_with_inherited(recursive_union.recursive, None)?,
+        anchor: prepare_query_for_locking_with_inherited(recursive_union.anchor, None, false)?,
+        recursive: prepare_query_for_locking_with_inherited(
+            recursive_union.recursive,
+            None,
+            false,
+        )?,
         distinct: recursive_union.distinct,
         recursive_references_worktable: recursive_union.recursive_references_worktable,
         worktable_id: recursive_union.worktable_id,
@@ -807,7 +836,7 @@ fn prepare_set_operation_for_locking(
         inputs: set_operation
             .inputs
             .into_iter()
-            .map(|query| prepare_query_for_locking_with_inherited(query, None))
+            .map(|query| prepare_query_for_locking_with_inherited(query, None, false))
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
@@ -886,6 +915,7 @@ fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
             subselect: Box::new(prepare_query_for_locking_with_inherited(
                 *sublink.subselect,
                 None,
+                false,
             )?),
             ..*sublink
         })),
@@ -1159,6 +1189,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
         locking_targets: query.locking_targets,
+        locking_nowait: query.locking_nowait,
         row_marks: query.row_marks,
         has_target_srfs: false,
         recursive_union: None,
@@ -1535,6 +1566,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         limit_offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,

@@ -1024,6 +1024,10 @@ pub(crate) fn default_pg_settings_rows() -> Vec<Vec<Value>> {
             ),
         ],
         vec![Value::Text("jit".into()), Value::Text("off".into())],
+        vec![
+            Value::Text("max_prepared_transactions".into()),
+            Value::Text("64".into()),
+        ],
     ]
 }
 
@@ -4274,6 +4278,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             offset: values.offset,
             locking_clause: None,
             locking_targets: Vec::new(),
+            locking_nowait: false,
             set_operation: None,
         }),
         CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => {
@@ -4303,6 +4308,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             offset: None,
             locking_clause: None,
             locking_targets: Vec::new(),
+            locking_nowait: false,
             set_operation: Some(Box::new(SetOperationStatement {
                 op: SetOperator::Union { all: *all },
                 inputs: vec![cte_body_as_select(anchor)?, (**recursive).clone()],
@@ -4458,6 +4464,7 @@ fn bind_ctes(
                         limit_offset: None,
                         locking_clause: None,
                         locking_targets: Vec::new(),
+                        locking_nowait: false,
                         row_marks: Vec::new(),
                         has_target_srfs: false,
                         recursive_union: None,
@@ -4558,6 +4565,7 @@ fn bind_ctes(
                         limit_offset: None,
                         locking_clause: None,
                         locking_targets: Vec::new(),
+                        locking_nowait: false,
                         row_marks: Vec::new(),
                         has_target_srfs: false,
                         recursive_union: Some(Box::new(RecursiveUnionQuery {
@@ -4865,6 +4873,7 @@ fn select_from_derived(
         offset: None,
         locking_clause: None,
         locking_targets: Vec::new(),
+        locking_nowait: false,
         set_operation: None,
     }
 }
@@ -6802,6 +6811,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             limit_offset: None,
             locking_clause: None,
             locking_targets: Vec::new(),
+            locking_nowait: false,
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -6853,6 +6863,7 @@ pub(crate) fn bound_cte_from_query_rows(
             limit_offset: None,
             locking_clause: None,
             locking_targets: Vec::new(),
+            locking_nowait: false,
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -6950,6 +6961,7 @@ fn bind_values_query_with_outer(
             limit_offset: stmt.offset,
             locking_clause: None,
             locking_targets: Vec::new(),
+            locking_nowait: false,
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -7860,6 +7872,7 @@ fn bind_select_query_with_outer(
                             limit_offset: stmt.offset,
                             locking_clause: stmt.locking_clause,
                             locking_targets: stmt.locking_targets.clone(),
+                            locking_nowait: stmt.locking_nowait,
                             row_marks: Vec::new(),
                             has_target_srfs,
                             recursive_union: None,
@@ -7967,6 +7980,7 @@ fn bind_select_query_with_outer(
                     limit_offset: stmt.offset,
                     locking_clause: stmt.locking_clause,
                     locking_targets: stmt.locking_targets.clone(),
+                    locking_nowait: stmt.locking_nowait,
                     row_marks: Vec::new(),
                     has_target_srfs,
                     recursive_union: None,
@@ -8208,6 +8222,7 @@ fn bind_set_operation_query_with_outer(
             limit_offset: stmt.offset,
             locking_clause: stmt.locking_clause,
             locking_targets: stmt.locking_targets.clone(),
+            locking_nowait: stmt.locking_nowait,
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
