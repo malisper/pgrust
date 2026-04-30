@@ -1140,6 +1140,7 @@ mod tests {
                 daticurules: None,
                 datcollversion: None,
                 datacl: None,
+                dathasloginevt: false,
             })
             .unwrap();
         assert_eq!(created.datname, "tenant");

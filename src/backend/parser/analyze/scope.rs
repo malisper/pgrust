@@ -5,7 +5,8 @@ use crate::backend::parser::parse_statement;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::{
-    ANYOID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PgPartitionedTableRow, PgProcRow,
+    ANYOID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PG_TYPE_RELATION_OID,
+    PgPartitionedTableRow, PgProcRow,
 };
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
@@ -750,6 +751,46 @@ fn scope_with_output_exprs(mut scope: BoundScope, output_exprs: &[Expr]) -> Boun
     scope
 }
 
+fn bind_relation_from_entry(
+    name: &str,
+    only: bool,
+    catalog: &dyn CatalogLookup,
+    entry: BoundRelation,
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S' | 't' | 'f') {
+        return Err(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table, view, materialized view, sequence, or TOAST table",
+        });
+    }
+    if entry.relkind == 'f' {
+        validate_foreign_table_scan_handler(catalog, entry.relation_oid)?;
+    }
+    let desc = entry.desc.clone();
+    let mut plan = AnalyzedFrom::relation(
+        name.to_string(),
+        entry.rel,
+        entry.relation_oid,
+        entry.relkind,
+        entry.relispopulated,
+        entry.toast,
+        !only && matches!(entry.relkind, 'r' | 'p'),
+        desc.clone(),
+    );
+    plan.output_exprs = generated_relation_output_exprs(&desc, catalog)?;
+    Ok((
+        plan,
+        scope_for_base_relation_with_generated(name, &desc, Some(entry.relation_oid), catalog)?,
+    ))
+}
+
+fn is_physical_pg_type_relation_name(name: &str) -> bool {
+    // :HACK: Dynamic type DDL is still exposed through the synthetic pg_type
+    // alias; qualified catalog references can use physical storage for indexed
+    // catalog joins.
+    name.eq_ignore_ascii_case("pg_catalog.pg_type")
+}
+
 pub(super) fn bind_from_item_with_ctes(
     stmt: &FromItem,
     catalog: &dyn CatalogLookup,
@@ -790,42 +831,18 @@ pub(super) fn bind_from_item_with_ctes(
                     ),
                 ));
             }
+            if is_physical_pg_type_relation_name(name)
+                && let Some(entry) = catalog.lookup_relation_by_oid(PG_TYPE_RELATION_OID)
+            {
+                return bind_relation_from_entry(name, *only, catalog, entry);
+            }
             if let Some(bound) = bind_builtin_system_view(name, catalog) {
                 return Ok(bound);
             }
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S' | 't' | 'f') {
-                return Err(ParseError::WrongObjectType {
-                    name: name.to_string(),
-                    expected: "table, view, materialized view, sequence, or TOAST table",
-                });
-            }
-            if entry.relkind == 'f' {
-                validate_foreign_table_scan_handler(catalog, entry.relation_oid)?;
-            }
-            let desc = entry.desc.clone();
-            let mut plan = AnalyzedFrom::relation(
-                name.clone(),
-                entry.rel,
-                entry.relation_oid,
-                entry.relkind,
-                entry.relispopulated,
-                entry.toast,
-                !*only && matches!(entry.relkind, 'r' | 'p'),
-                desc.clone(),
-            );
-            plan.output_exprs = generated_relation_output_exprs(&desc, catalog)?;
-            Ok((
-                plan,
-                scope_for_base_relation_with_generated(
-                    name,
-                    &desc,
-                    Some(entry.relation_oid),
-                    catalog,
-                )?,
-            ))
+            bind_relation_from_entry(name, *only, catalog, entry)
         }
         FromItem::Values { rows } => {
             bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer, ctes)
@@ -3534,7 +3551,7 @@ fn bind_function_from_item_with_ctes(
                 let alias_single_function_output = resolved_row_columns.is_none();
                 let output_columns = resolved_row_columns.unwrap_or_else(|| {
                     vec![QueryColumn {
-                        name: other.to_string(),
+                        name: resolved.proname.clone(),
                         sql_type: resolved.result_type,
                         wire_type_oid: None,
                     }]
@@ -3567,11 +3584,11 @@ fn bind_function_from_item_with_ctes(
                 let desc = RelationDesc {
                     columns: desc_columns,
                 };
-                let scope = scope_for_relation(Some(name), &desc);
+                let scope = scope_for_relation(Some(&resolved.proname), &desc);
                 Ok((
                     AnalyzedFrom::function(SetReturningCall::UserDefined {
                         proc_oid: resolved.proc_oid,
-                        function_name: name.to_string(),
+                        function_name: resolved.proname.clone(),
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
                         inlined_expr: None,
@@ -3890,7 +3907,7 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
     let alias_single_function_output = resolved_row_columns.is_none();
     let output_columns = resolved_row_columns.unwrap_or_else(|| {
         vec![QueryColumn {
-            name: name.to_string(),
+            name: resolved.proname.clone(),
             sql_type: resolved.result_type,
             wire_type_oid: None,
         }]
@@ -3919,11 +3936,11 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
     let desc = RelationDesc {
         columns: desc_columns,
     };
-    let scope = scope_for_relation(Some(name), &desc);
+    let scope = scope_for_relation(Some(&resolved.proname), &desc);
     Ok((
         AnalyzedFrom::function(SetReturningCall::UserDefined {
             proc_oid: resolved.proc_oid,
-            function_name: name.to_string(),
+            function_name: resolved.proname.clone(),
             func_variadic: resolved.func_variadic,
             args: bound_args,
             inlined_expr: None,
@@ -3972,14 +3989,14 @@ fn bind_single_row_function_from_item_with_ctes(
         let desc = RelationDesc {
             columns: desc_columns,
         };
-        let scope = scope_for_relation(Some(name), &desc);
+        let scope = scope_for_relation(Some(&resolved.proname), &desc);
         let alias_single_function_output = output_columns.len() == 1;
         let inlined_expr =
             try_inline_sql_scalar_function_scan_expr(resolved, &bound_args, catalog)?;
         return Ok((
             AnalyzedFrom::function(SetReturningCall::UserDefined {
                 proc_oid: resolved.proc_oid,
-                function_name: name.to_string(),
+                function_name: resolved.proname.clone(),
                 func_variadic: resolved.func_variadic,
                 args: bound_args,
                 inlined_expr: inlined_expr.map(Box::new),
@@ -4000,7 +4017,7 @@ fn bind_single_row_function_from_item_with_ctes(
         resolved,
     )?;
     let mut output_columns = vec![QueryColumn {
-        name: name.to_string(),
+        name: resolved.proname.clone(),
         sql_type: resolved.result_type,
         wire_type_oid: None,
     }];
@@ -4012,12 +4029,12 @@ fn bind_single_row_function_from_item_with_ctes(
     let desc = RelationDesc {
         columns: desc_columns,
     };
-    let scope = scope_for_relation(Some(name), &desc);
+    let scope = scope_for_relation(Some(&resolved.proname), &desc);
     let inlined_expr = try_inline_sql_scalar_function_scan_expr(resolved, &bound_args, catalog)?;
     Ok((
         AnalyzedFrom::function(SetReturningCall::UserDefined {
             proc_oid: resolved.proc_oid,
-            function_name: name.to_string(),
+            function_name: resolved.proname.clone(),
             func_variadic: resolved.func_variadic,
             args: bound_args,
             inlined_expr: inlined_expr.map(Box::new),
@@ -4031,7 +4048,7 @@ fn bind_single_row_function_from_item_with_ctes(
 
 #[allow(clippy::too_many_arguments)]
 fn try_inline_sql_set_function_from_item(
-    name: &str,
+    _name: &str,
     resolved: &ResolvedFunctionCall,
     bound_args: &[Expr],
     output_columns: Vec<QueryColumn>,
@@ -4056,7 +4073,7 @@ fn try_inline_sql_set_function_from_item(
     let has_target_function_call = stmt
         .targets
         .iter()
-        .any(|target| matches!(target.expr, SqlExpr::FuncCall { .. }));
+        .any(|target| matches!(&target.expr, SqlExpr::FuncCall { over: None, .. }));
     if has_target_function_call && !sql_function_target_only_body_can_inline(&stmt) {
         return Ok(None);
     }
@@ -4099,8 +4116,10 @@ fn try_inline_sql_set_function_from_item(
             output_columns,
         };
         let desc = plan.desc();
-        let scope =
-            scope_with_output_exprs(scope_for_relation(Some(name), &desc), &plan.output_exprs);
+        let scope = scope_with_output_exprs(
+            scope_for_relation(Some(&row.proname), &desc),
+            &plan.output_exprs,
+        );
         return Ok(Some((plan, scope, false)));
     }
     let preserve_body_names = query.set_operation.is_some() && !query.sort_clause.is_empty();
@@ -4129,7 +4148,10 @@ fn try_inline_sql_set_function_from_item(
         rte.eref.aliasname = "*SELECT*".into();
     }
     let desc = plan.desc();
-    let scope = scope_with_output_exprs(scope_for_relation(Some(name), &desc), &plan.output_exprs);
+    let scope = scope_with_output_exprs(
+        scope_for_relation(Some(&row.proname), &desc),
+        &plan.output_exprs,
+    );
     Ok(Some((plan, scope, false)))
 }
 

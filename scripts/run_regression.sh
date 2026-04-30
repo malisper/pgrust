@@ -2172,10 +2172,14 @@ sample_pgrust_peak_rss_kb() {
     while kill -0 "$pid" 2>/dev/null; do
         if [[ -r "/proc/$pid/status" ]]; then
             rss=$(awk '/^VmRSS:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null || echo 0)
-            if [[ -n "$rss" && "$rss" =~ ^[0-9]+$ && "$rss" -gt "$peak" ]]; then
-                peak="$rss"
-                printf '%d\n' "$peak" > "$out_file"
-            fi
+        elif command -v ps >/dev/null 2>&1; then
+            rss=$(ps -o rss= -p "$pid" 2>/dev/null | awk '{print $1; exit}' || echo 0)
+        else
+            rss=0
+        fi
+        if [[ -n "$rss" && "$rss" =~ ^[0-9]+$ && "$rss" -gt "$peak" ]]; then
+            peak="$rss"
+            printf '%d\n' "$peak" > "$out_file"
         fi
         sleep "$interval"
     done

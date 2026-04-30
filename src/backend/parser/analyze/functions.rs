@@ -212,7 +212,8 @@ fn resolved_function_call_for_candidate(
         srf_impl: builtin_srf_impl_for_proc_row(row),
         agg_impl: aggregate_func_for_proname(&row.proname),
         hypothetical_agg_impl: builtin_hypothetical_aggregate_function_for_proc_oid(row.oid),
-        window_impl: builtin_window_function_for_proc_oid(row.oid),
+        window_impl: builtin_window_function_for_proc_oid(row.oid)
+            .or_else(|| builtin_window_function_for_proc_row(row)),
         row_shape,
     })
 }
@@ -502,6 +503,23 @@ fn function_lookup_name_and_namespace<'a>(
     let Some((schema_name, base_name)) = name.rsplit_once('.') else {
         return Some((name, None));
     };
+    if schema_name.eq_ignore_ascii_case("pg_temp")
+        && let Some(namespace_oid) = catalog.search_path().into_iter().find_map(|schema| {
+            schema
+                .to_ascii_lowercase()
+                .starts_with("pg_temp_")
+                .then(|| {
+                    catalog
+                        .namespace_rows()
+                        .into_iter()
+                        .find(|row| row.nspname.eq_ignore_ascii_case(&schema))
+                        .map(|row| row.oid)
+                })
+                .flatten()
+        })
+    {
+        return Some((base_name, Some(namespace_oid)));
+    }
     let namespace_oid = catalog
         .namespace_rows()
         .into_iter()
@@ -1146,6 +1164,30 @@ fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
             .or_else(|| {
                 resolve_text_search_table_function(other).map(ResolvedSrfImpl::TextSearchTable)
             }),
+    }
+}
+
+fn builtin_window_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinWindowFunction> {
+    if row.prokind != 'w' {
+        return None;
+    }
+    match row.prosrc.to_ascii_lowercase().as_str() {
+        "window_row_number" => Some(BuiltinWindowFunction::RowNumber),
+        "window_rank" => Some(BuiltinWindowFunction::Rank),
+        "window_dense_rank" => Some(BuiltinWindowFunction::DenseRank),
+        "window_percent_rank" => Some(BuiltinWindowFunction::PercentRank),
+        "window_cume_dist" => Some(BuiltinWindowFunction::CumeDist),
+        "window_ntile" => Some(BuiltinWindowFunction::Ntile),
+        "window_lag" | "window_lag_with_offset" | "window_lag_with_offset_and_default" => {
+            Some(BuiltinWindowFunction::Lag)
+        }
+        "window_lead" | "window_lead_with_offset" | "window_lead_with_offset_and_default" => {
+            Some(BuiltinWindowFunction::Lead)
+        }
+        "window_first_value" => Some(BuiltinWindowFunction::FirstValue),
+        "window_last_value" => Some(BuiltinWindowFunction::LastValue),
+        "window_nth_value" => Some(BuiltinWindowFunction::NthValue),
+        _ => None,
     }
 }
 
@@ -2416,9 +2458,13 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgControlRecovery
             | BuiltinScalarFunction::PgControlInit
             | BuiltinScalarFunction::TestRelpath => args.is_empty(),
+            BuiltinScalarFunction::LastVal => args.is_empty(),
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
+            BuiltinScalarFunction::PgSequenceParameters
+            | BuiltinScalarFunction::PgSequenceLastValue
+            | BuiltinScalarFunction::PgGetSequenceData => args.len() == 1,
             BuiltinScalarFunction::PgGetAcl => args.len() == 3,
             BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
@@ -2578,6 +2624,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ToHex
             | BuiltinScalarFunction::QuoteIdent
             | BuiltinScalarFunction::QuoteLiteral
+            | BuiltinScalarFunction::QuoteNullable
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
             | BuiltinScalarFunction::TextToRegClass
@@ -4092,6 +4139,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("test_relpath", BuiltinScalarFunction::TestRelpath),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
+        ("lastval", BuiltinScalarFunction::LastVal),
         ("setval", BuiltinScalarFunction::SetVal),
         ("setval_oid", BuiltinScalarFunction::SetVal),
         ("setval_text", BuiltinScalarFunction::SetVal),
@@ -4100,6 +4148,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
+        ),
+        (
+            "pg_sequence_parameters",
+            BuiltinScalarFunction::PgSequenceParameters,
+        ),
+        (
+            "pg_sequence_last_value",
+            BuiltinScalarFunction::PgSequenceLastValue,
+        ),
+        (
+            "pg_get_sequence_data",
+            BuiltinScalarFunction::PgGetSequenceData,
         ),
         ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
         (
@@ -4723,6 +4783,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("chr", BuiltinScalarFunction::Chr),
         ("quote_ident", BuiltinScalarFunction::QuoteIdent),
         ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
+        ("quote_nullable", BuiltinScalarFunction::QuoteNullable),
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
@@ -5576,8 +5637,12 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgTsConfigIsVisible
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
+            | BuiltinScalarFunction::LastVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
+            | BuiltinScalarFunction::PgSequenceParameters
+            | BuiltinScalarFunction::PgSequenceLastValue
+            | BuiltinScalarFunction::PgGetSequenceData
             | BuiltinScalarFunction::PgGetAcl
             | BuiltinScalarFunction::MakeAclItem
             | BuiltinScalarFunction::PgGetUserById

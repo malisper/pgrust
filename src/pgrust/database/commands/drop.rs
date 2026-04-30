@@ -53,6 +53,34 @@ struct DropDomainColumnDependency {
     attnum: i16,
 }
 
+fn expand_drop_function_statement(drop_stmt: &DropFunctionStatement) -> Vec<DropFunctionStatement> {
+    let mut statements = Vec::with_capacity(1 + drop_stmt.additional_functions.len());
+    statements.push(DropFunctionStatement {
+        if_exists: drop_stmt.if_exists,
+        schema_name: drop_stmt.schema_name.clone(),
+        function_name: drop_stmt.function_name.clone(),
+        arg_list_specified: drop_stmt.arg_list_specified,
+        arg_types: drop_stmt.arg_types.clone(),
+        additional_functions: Vec::new(),
+        cascade: drop_stmt.cascade,
+    });
+    statements.extend(
+        drop_stmt
+            .additional_functions
+            .iter()
+            .map(|item| DropFunctionStatement {
+                if_exists: drop_stmt.if_exists,
+                schema_name: item.schema_name.clone(),
+                function_name: item.routine_name.clone(),
+                arg_list_specified: !item.arg_types.is_empty(),
+                arg_types: item.arg_types.clone(),
+                additional_functions: Vec::new(),
+                cascade: drop_stmt.cascade,
+            }),
+    );
+    statements
+}
+
 #[derive(Debug, Default)]
 struct DropDomainPlan {
     explicit_domain_names: BTreeSet<String>,
@@ -1001,7 +1029,9 @@ fn drop_table_direct_dependencies(
             continue;
         }
         match row.classid {
-            PG_CLASS_RELATION_OID if row.deptype == DEPENDENCY_NORMAL => {
+            PG_CLASS_RELATION_OID
+                if row.deptype == DEPENDENCY_NORMAL || row.deptype == DEPENDENCY_AUTO =>
+            {
                 if !relation_oids.insert(row.objid) {
                     continue;
                 }
@@ -1014,7 +1044,7 @@ fn drop_table_direct_dependencies(
                 deps.push(DropTableDependency::Relation {
                     relation_oid: row.objid,
                     relkind: class.relkind,
-                    is_partition: class.relispartition,
+                    is_partition: class.relispartition || row.deptype == DEPENDENCY_AUTO,
                     display_name: drop_table_display_relation_name(
                         ctx.catalog,
                         row.objid,
@@ -1104,6 +1134,40 @@ fn drop_table_direct_dependencies(
                 });
             }
             _ => {}
+        }
+    }
+
+    if let Some(relation) = ctx.catalog.relation_by_oid(relation_oid) {
+        for attnum in 1..=relation.desc.columns.len() as i32 {
+            for row in ctx.graph.dependents(ObjectAddress::new(
+                PG_CLASS_RELATION_OID,
+                relation_oid,
+                attnum,
+            )) {
+                if row.classid != PG_CLASS_RELATION_OID
+                    || row.objsubid != 0
+                    || row.deptype != DEPENDENCY_AUTO
+                    || !relation_oids.insert(row.objid)
+                {
+                    continue;
+                }
+                let Some(class) = ctx.catalog.class_row_by_oid(row.objid) else {
+                    continue;
+                };
+                if class.relkind != 'S' {
+                    continue;
+                }
+                deps.push(DropTableDependency::Relation {
+                    relation_oid: row.objid,
+                    relkind: class.relkind,
+                    is_partition: true,
+                    display_name: drop_table_display_relation_name(
+                        ctx.catalog,
+                        row.objid,
+                        ctx.search_path,
+                    ),
+                });
+            }
         }
     }
 
@@ -1557,16 +1621,19 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        self.execute_drop_function_stmt_in_transaction_with_kind(
-            client_id,
-            drop_stmt,
-            xid,
-            cid,
-            configured_search_path,
-            catalog_effects,
-            'f',
-            "function",
-        )
+        for item_stmt in expand_drop_function_statement(drop_stmt) {
+            self.execute_drop_function_stmt_in_transaction_with_kind(
+                client_id,
+                &item_stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+                'f',
+                "function",
+            )?;
+        }
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_drop_procedure_stmt_with_search_path(
@@ -1607,6 +1674,7 @@ impl Database {
                 function_name: procedure.routine_name.clone(),
                 arg_list_specified: false,
                 arg_types: procedure.arg_types.clone(),
+                additional_functions: Vec::new(),
                 cascade: drop_stmt.cascade,
             };
             self.execute_drop_function_stmt_in_transaction_with_kind(
@@ -1661,6 +1729,7 @@ impl Database {
                 function_name: routine.routine_name.clone(),
                 arg_list_specified: false,
                 arg_types: routine.arg_types.clone(),
+                additional_functions: Vec::new(),
                 cascade: drop_stmt.cascade,
             };
             self.execute_drop_function_stmt_in_transaction_with_kind(
@@ -2956,6 +3025,7 @@ impl Database {
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
         let mut dropped = 0usize;
+        let mut cascade_notice_groups = Vec::new();
         for schema_name in &drop_stmt.schema_names {
             let maybe_schema = catcache
                 .namespace_by_name(schema_name)
@@ -3227,24 +3297,25 @@ impl Database {
                     .into_iter()
                     .filter(|row| row.pronamespace == schema.oid)
                 {
+                    let signature = drop_proc_signature_text(&proc_row, &catalog);
                     tail_notices.push((
                         proc_row.oid,
                         format!(
                             "drop cascades to function {}",
-                            drop_proc_signature_text(&proc_row, &catalog)
+                            drop_schema_display_signature_name(
+                                &catcache,
+                                &visible_namespaces,
+                                proc_row.pronamespace,
+                                &signature
+                            )
                         ),
                     ));
                 }
                 tail_notices.sort_by_key(|(oid, _)| *oid);
                 notices.extend(tail_notices.into_iter().map(|(_, notice)| notice));
 
-                match notices.as_slice() {
-                    [] => {}
-                    [notice] => push_notice(notice.clone()),
-                    notices => push_notice_with_detail(
-                        format!("drop cascades to {} other objects", notices.len()),
-                        notices.join("\n"),
-                    ),
+                if !notices.is_empty() {
+                    cascade_notice_groups.push(notices);
                 }
             }
             let mut namespace_cid = cid;
@@ -3279,6 +3350,19 @@ impl Database {
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             dropped += 1;
+        }
+        let cascade_notices = cascade_notice_groups
+            .into_iter()
+            .rev()
+            .flatten()
+            .collect::<Vec<_>>();
+        match cascade_notices.as_slice() {
+            [] => {}
+            [notice] => push_notice(notice.clone()),
+            notices => push_notice_with_detail(
+                format!("drop cascades to {} other objects", notices.len()),
+                notices.join("\n"),
+            ),
         }
         Ok(StatementResult::AffectedRows(dropped))
     }

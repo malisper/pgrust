@@ -875,19 +875,17 @@ fn merge_partition_column_override(
         merged.column.default_expr = Some(default_expr.clone());
         merged.conflicting_parent_default = false;
     }
-    if override_
-        .constraints
-        .iter()
-        .any(|constraint| matches!(constraint, ColumnConstraint::PrimaryKey { .. }))
-    {
-        ensure_primary_key_constraint(&mut merged.column);
-    }
-    if override_
-        .constraints
-        .iter()
-        .any(|constraint| matches!(constraint, ColumnConstraint::Unique { .. }))
-    {
-        ensure_unique_constraint(&mut merged.column);
+    for constraint in &override_.constraints {
+        match constraint {
+            ColumnConstraint::Unique { .. } => ensure_unique_constraint(&mut merged.column),
+            ColumnConstraint::PrimaryKey { .. } => {
+                ensure_primary_key_constraint(&mut merged.column);
+                ensure_not_null_constraint(&mut merged.column);
+                merged.not_null_is_local = true;
+            }
+            ColumnConstraint::Check { .. } | ColumnConstraint::NotNull { .. } => {}
+            other => merged.column.constraints.push(other.clone()),
+        }
     }
     Ok(())
 }

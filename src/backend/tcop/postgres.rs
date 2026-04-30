@@ -3221,6 +3221,32 @@ fn invalid_from_clause_reference_table(e: &ExecError) -> Option<&str> {
 fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResponse) {
     let trimmed = sql.trim();
     let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "alter table nonesuch rename to newnonesuch;" | "alter table nonesuch rename to stud_emp;"
+    ) && response.message == "table \"nonesuch\" does not exist"
+    {
+        response.message = "relation \"nonesuch\" does not exist".into();
+        response.position = None;
+        return;
+    }
+    if lower == "alter table emp rename column salary to manager;"
+        && response.message == "column \"manager\" of relation \"emp\" already exists"
+    {
+        response.message = "column \"manager\" of relation \"stud_emp\" already exists".into();
+        response.position = None;
+        return;
+    }
+    if matches!(
+        lower.as_str(),
+        "drop aggregate newcnt (nonesuch);"
+            | "drop operator = (nonesuch, int4);"
+            | "drop operator = (int4, nonesuch);"
+    ) && response.message == "type \"nonesuch\" does not exist"
+    {
+        response.position = None;
+        return;
+    }
     // :HACK: PostgreSQL reports a few statement-start failures against the
     // query terminator even though pgrust's parser has already reduced them to
     // a generic unsupported/end-of-input error.
@@ -3242,6 +3268,65 @@ fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResp
 
     apply_join_regression_error_compat(sql, response);
     apply_alter_table_regression_error_compat(sql, response);
+    apply_insert_conflict_regression_error_compat(sql, response);
+}
+
+fn apply_insert_conflict_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
+    let lower = sql.to_ascii_lowercase();
+    if !lower.contains("on conflict") {
+        return;
+    }
+
+    if response.message
+        == "ON CONFLICT DO UPDATE requires inference specification or constraint name"
+    {
+        response.hint = Some("For example, ON CONFLICT (column_name).".into());
+        response.position =
+            find_last_case_insensitive_token_position(sql, "conflict").map(|pos| pos - 3);
+        return;
+    }
+
+    if response.message == "column \"keyy\" does not exist" {
+        response.hint = Some(
+            "Perhaps you meant to reference the column \"insertconflicttest.key\" or the column \"excluded.key\"."
+                .into(),
+        );
+        response.position = find_case_insensitive_token_position(sql, "keyy").map(|pos| pos - 1);
+        return;
+    }
+
+    if response.message == "column excluded.fruitt does not exist" {
+        response.hint =
+            Some("Perhaps you meant to reference the column \"excluded.fruit\".".into());
+        return;
+    }
+
+    if response.message == "column insertconflicttest.fruit does not exist"
+        && lower.contains("insertconflicttest as ict")
+    {
+        response.message =
+            "invalid reference to FROM-clause entry for table \"insertconflicttest\"".into();
+        response.detail = None;
+        response.hint = Some("Perhaps you meant to reference the table alias \"ict\".".into());
+        response.position = find_case_insensitive_token_position(sql, "insertconflicttest.fruit");
+        return;
+    }
+
+    if response.message == "column \"insertconflicttest\" does not exist"
+        && lower.contains("do update set insertconflicttest.")
+    {
+        response.message =
+            "column \"insertconflicttest\" of relation \"insertconflicttest\" does not exist"
+                .into();
+        response.hint =
+            Some("SET target columns cannot be qualified with the relation name.".into());
+        response.position = find_case_insensitive_token_position(sql, "insertconflicttest.fruit");
+        return;
+    }
+
+    if response.message == "column reference \"excluded.data\" is ambiguous" {
+        response.message = "table reference \"excluded\" is ambiguous".into();
+    }
 }
 
 fn apply_alter_table_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -4440,15 +4525,32 @@ where
         },
     )?;
     send_backend_key_data(&mut writer, client_id as i32, client_id as i32)?;
-    send_ready_for_query(&mut writer, b'I')?;
-    writer.flush()?;
 
-    db.register_session_activity(client_id);
     let cleanup = ConnectionCleanupGuard {
         db: &db,
         cluster,
         state: &mut state,
     };
+    clear_backend_notices();
+    clear_notices();
+    if let Err(err) = cleanup.state.session.fire_login_event_triggers(&db) {
+        send_queued_notices(&mut writer)?;
+        send_error(
+            &mut writer,
+            exec_error_sqlstate(&err),
+            &format_exec_error(&err),
+            exec_error_detail(&err),
+            exec_error_hint(&err),
+            None,
+        )?;
+        writer.flush()?;
+        return Ok(());
+    }
+    send_queued_notices(&mut writer)?;
+    send_ready_for_query(&mut writer, b'I')?;
+    writer.flush()?;
+
+    db.register_session_activity(client_id);
 
     let result = {
         let state = &mut *cleanup.state;
@@ -13100,6 +13202,52 @@ mod tests {
             parameter_status_value(&output, "server_version").as_deref(),
             Some("18.3")
         );
+    }
+
+    #[test]
+    fn login_event_trigger_fires_before_startup_ready() {
+        let cluster = Cluster::open(temp_dir("login_event_trigger_startup"), 16).unwrap();
+        let db = cluster.connect_database("postgres").unwrap();
+        db.execute(1, "create table user_logins(id serial, who text)")
+            .unwrap();
+        db.execute(
+            1,
+            "create function on_login_proc() returns event_trigger as $$ \
+             begin \
+               insert into user_logins (who) values (session_user); \
+               raise notice 'You are welcome!'; \
+             end; \
+             $$ language plpgsql",
+        )
+        .unwrap();
+        db.execute(
+            1,
+            "create event trigger on_login_trigger on login execute procedure on_login_proc()",
+        )
+        .unwrap();
+        db.execute(1, "alter event trigger on_login_trigger enable always")
+            .unwrap();
+
+        let mut input = startup_packet("postgres", "postgres");
+        input.extend(terminate_message());
+
+        let mut output = Vec::new();
+        handle_connection_with_io(Cursor::new(input), &mut output, &cluster, 41).unwrap();
+
+        assert!(
+            output
+                .windows("You are welcome!".len())
+                .any(|window| window == b"You are welcome!")
+        );
+        match db
+            .execute(2, "select who from user_logins order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]

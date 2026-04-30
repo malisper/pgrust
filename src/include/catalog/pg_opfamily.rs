@@ -58,15 +58,20 @@ pub const SPGIST_TEXT_FAMILY_OID: u32 = 4017;
 pub const BRIN_BYTEA_MINMAX_FAMILY_OID: u32 = 76100;
 pub const BRIN_CHAR_MINMAX_FAMILY_OID: u32 = 76101;
 pub const BRIN_INTEGER_MINMAX_FAMILY_OID: u32 = 76102;
+pub const BRIN_NUMERIC_MINMAX_FAMILY_OID: u32 = 4055;
 pub const BRIN_TEXT_MINMAX_FAMILY_OID: u32 = 76103;
 pub const BRIN_OID_MINMAX_FAMILY_OID: u32 = 76104;
+pub const BRIN_TID_MINMAX_FAMILY_OID: u32 = 4069;
 pub const BRIN_FLOAT_MINMAX_FAMILY_OID: u32 = 76105;
 pub const BRIN_BPCHAR_MINMAX_FAMILY_OID: u32 = 76106;
 pub const BRIN_TIME_MINMAX_FAMILY_OID: u32 = 76107;
 pub const BRIN_DATETIME_MINMAX_FAMILY_OID: u32 = 76108;
 pub const BRIN_TIMETZ_MINMAX_FAMILY_OID: u32 = 76109;
+pub const BRIN_INTERVAL_MINMAX_FAMILY_OID: u32 = 4078;
 pub const BRIN_BIT_MINMAX_FAMILY_OID: u32 = 76110;
 pub const BRIN_VARBIT_MINMAX_FAMILY_OID: u32 = 76111;
+pub const BRIN_UUID_MINMAX_FAMILY_OID: u32 = 4081;
+pub const BRIN_PG_LSN_MINMAX_FAMILY_OID: u32 = 4082;
 pub const BRIN_MACADDR_MINMAX_FAMILY_OID: u32 = 76114;
 pub const BRIN_MACADDR8_MINMAX_FAMILY_OID: u32 = 76115;
 pub const BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID: u32 = 76116;
@@ -74,6 +79,7 @@ pub const BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID: u32 = 76117;
 pub const BRIN_MACADDR_BLOOM_FAMILY_OID: u32 = 76118;
 pub const BRIN_MACADDR8_BLOOM_FAMILY_OID: u32 = 76119;
 pub const BRIN_TEXT_BLOOM_FAMILY_OID: u32 = 4573;
+pub const BRIN_NETWORK_MINMAX_FAMILY_OID: u32 = 4075;
 pub const BRIN_NETWORK_INCLUSION_FAMILY_OID: u32 = 4102;
 pub const BRIN_RANGE_INCLUSION_FAMILY_OID: u32 = 4103;
 pub const BRIN_BOX_INCLUSION_FAMILY_OID: u32 = 4104;
@@ -411,15 +417,20 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         brin_row(BRIN_BYTEA_MINMAX_FAMILY_OID, "bytea_minmax_ops"),
         brin_row(BRIN_CHAR_MINMAX_FAMILY_OID, "char_minmax_ops"),
         brin_row(BRIN_INTEGER_MINMAX_FAMILY_OID, "integer_minmax_ops"),
+        brin_row(BRIN_NUMERIC_MINMAX_FAMILY_OID, "numeric_minmax_ops"),
         brin_row(BRIN_TEXT_MINMAX_FAMILY_OID, "text_minmax_ops"),
         brin_row(BRIN_OID_MINMAX_FAMILY_OID, "oid_minmax_ops"),
+        brin_row(BRIN_TID_MINMAX_FAMILY_OID, "tid_minmax_ops"),
         brin_row(BRIN_FLOAT_MINMAX_FAMILY_OID, "float_minmax_ops"),
         brin_row(BRIN_BPCHAR_MINMAX_FAMILY_OID, "bpchar_minmax_ops"),
         brin_row(BRIN_TIME_MINMAX_FAMILY_OID, "time_minmax_ops"),
         brin_row(BRIN_DATETIME_MINMAX_FAMILY_OID, "datetime_minmax_ops"),
         brin_row(BRIN_TIMETZ_MINMAX_FAMILY_OID, "timetz_minmax_ops"),
+        brin_row(BRIN_INTERVAL_MINMAX_FAMILY_OID, "interval_minmax_ops"),
         brin_row(BRIN_BIT_MINMAX_FAMILY_OID, "bit_minmax_ops"),
         brin_row(BRIN_VARBIT_MINMAX_FAMILY_OID, "varbit_minmax_ops"),
+        brin_row(BRIN_UUID_MINMAX_FAMILY_OID, "uuid_minmax_ops"),
+        brin_row(BRIN_PG_LSN_MINMAX_FAMILY_OID, "pg_lsn_minmax_ops"),
         brin_row(BRIN_MACADDR_MINMAX_FAMILY_OID, "macaddr_minmax_ops"),
         brin_row(BRIN_MACADDR8_MINMAX_FAMILY_OID, "macaddr8_minmax_ops"),
         // :HACK: pgrust's BRIN runtime is still generic minmax-only; expose
@@ -435,6 +446,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         brin_row(BRIN_MACADDR_BLOOM_FAMILY_OID, "macaddr_bloom_ops"),
         brin_row(BRIN_MACADDR8_BLOOM_FAMILY_OID, "macaddr8_bloom_ops"),
         brin_row(BRIN_TEXT_BLOOM_FAMILY_OID, "text_bloom_ops"),
+        brin_row(BRIN_NETWORK_MINMAX_FAMILY_OID, "network_minmax_ops"),
         brin_row(BRIN_NETWORK_INCLUSION_FAMILY_OID, "network_inclusion_ops"),
         brin_row(BRIN_RANGE_INCLUSION_FAMILY_OID, "range_inclusion_ops"),
         brin_row(BRIN_BOX_INCLUSION_FAMILY_OID, "box_inclusion_ops"),

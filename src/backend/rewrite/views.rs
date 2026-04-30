@@ -1446,6 +1446,16 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
         SetReturningCall::PgLockStatus {
             with_ordinality, ..
         } => ("pg_lock_status".to_string(), Vec::new(), *with_ordinality),
+        SetReturningCall::PgSequences {
+            with_ordinality, ..
+        } => ("pg_sequences".to_string(), Vec::new(), *with_ordinality),
+        SetReturningCall::InformationSchemaSequences {
+            with_ordinality, ..
+        } => (
+            "information_schema.sequences".to_string(),
+            Vec::new(),
+            *with_ordinality,
+        ),
         SetReturningCall::TxidSnapshotXip {
             arg,
             with_ordinality,
@@ -3340,6 +3350,18 @@ fn system_column_name(attno: i32) -> Option<&'static str> {
 fn should_qualify_var(var: &Var, ctx: &ViewDeparseContext<'_>) -> bool {
     if var.varlevelsup > 0 || !ctx.outers.is_empty() || visible_source_count(ctx.query) > 1 {
         return true;
+    }
+    if let Some(rte) = ctx.query.rtable.get(var.varno.saturating_sub(1))
+        && matches!(rte.kind, RangeTblEntryKind::Function { .. })
+        && let Some(alias) = rte.alias.as_deref()
+        && let Some(column_index) = attrno_index(var.varattno)
+        && rte
+            .desc
+            .columns
+            .get(column_index)
+            .is_some_and(|column| column.name.eq_ignore_ascii_case(alias))
+    {
+        return false;
     }
     ctx.query
         .rtable

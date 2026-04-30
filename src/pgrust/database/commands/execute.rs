@@ -1884,6 +1884,12 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
+            Statement::CommentOnSequence(ref comment_stmt) => self
+                .execute_comment_on_sequence_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
             Statement::CommentOnColumn(ref comment_stmt) => self
                 .execute_comment_on_column_stmt_with_search_path(
                     client_id,

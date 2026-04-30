@@ -1239,6 +1239,8 @@ impl Database {
                         row.opcmethod == access_method.oid
                             && row.opcname.eq_ignore_ascii_case(opclass_lookup_name)
                             && (row.opcintype == type_oid
+                                || (row.opcintype == crate::include::catalog::INET_TYPE_OID
+                                    && type_oid == crate::include::catalog::CIDR_TYPE_OID)
                                 || (is_range_type && row.opcfamily == GIST_RANGE_FAMILY_OID)
                                 || (access_method.oid == BTREE_AM_OID
                                     && btree_opclass_accepts_type(row.opcintype, type_oid)))
@@ -1252,6 +1254,19 @@ impl Database {
                     access_method.oid,
                     type_oid,
                 )
+                .or_else(|| {
+                    (access_method.oid == crate::include::catalog::BRIN_AM_OID
+                        && matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Name))
+                    .then(|| {
+                        opclass_rows
+                            .iter()
+                            .find(|row| {
+                                row.oid == crate::include::catalog::TEXT_BRIN_MINMAX_OPCLASS_OID
+                            })
+                            .cloned()
+                    })
+                    .flatten()
+                })
                 .or_else(|| {
                     matches!(
                         sql_type.kind,
@@ -1327,7 +1342,7 @@ impl Database {
             if column.descending {
                 option |= 0x0001;
             }
-            if column.nulls_first.unwrap_or(false) {
+            if column.nulls_first.unwrap_or(column.descending) {
                 option |= 0x0002;
             }
             indoption.push(option);
@@ -1908,7 +1923,7 @@ impl Database {
                 CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                 _ => ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "index access method build",
-                    actual: "index build failed".into(),
+                    actual: format!("index build failed: {err:?}"),
                 }),
             });
             if let Err(err) = build_result {
