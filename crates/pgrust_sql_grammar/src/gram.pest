@@ -609,7 +609,7 @@ json_predicate_suffix = { kw_is ~ kw_not? ~ kw_json ~ json_predicate_type? ~ jso
 json_predicate_type = { kw_value | kw_scalar | kw_array | kw_object }
 in_expr_list_suffix = { kw_not? ~ kw_in ~ "(" ~ expr_list ~ ")" }
 in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ (select_stmt | values_stmt) ~ ")" }
-quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
+quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | values_stmt | expr) ~ ")" }
 quantified_comp_op = { "@@" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~*" | "~*" | "!~" | "~" }
 quantified_like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 quantified_similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }

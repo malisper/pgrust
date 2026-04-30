@@ -51,8 +51,8 @@ use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapAndState, BitmapHeapScanState, BitmapIndexScanState,
     BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
-    GatherState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState,
-    LockRowsState, MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState,
+    GatherState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LateralRightCacheEntry,
+    LimitState, LockRowsState, MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState,
     MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
     ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
     SlotKind, SubqueryScanState, SystemVarBinding, TidScanState, ToastRelationRef, TupleSlot,
@@ -64,7 +64,7 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType,
-    OUTER_VAR, OrderByEntry, ParamKind, RelationDesc, SELF_ITEM_POINTER_ATTR_NO,
+    OUTER_VAR, OpExprKind, OrderByEntry, ParamKind, RelationDesc, SELF_ITEM_POINTER_ATTR_NO,
     ScalarFunctionImpl, SetReturningCall, SubLinkType, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO,
     XMIN_ATTR_NO, attrno_index, is_special_varno,
 };
@@ -7348,6 +7348,7 @@ fn memoize_prepare_scan(
     }
 
     state.memoize_stats.misses += 1;
+    reset_plan_ctes(ctx, &state.input_plan);
     state.input = executor_start(state.input_plan.clone());
     let mut rows = Vec::new();
     while state.input.exec_proc_node(ctx)?.is_some() {
@@ -7899,23 +7900,23 @@ fn exec_lateral_join<'a>(
                         &mut state.current_left.as_mut().unwrap().slot,
                         ctx,
                     )?;
-                    if matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. })) {
-                        state.right.rescan(ctx)?;
+                    if let Some(rows) = prepare_indexed_lateral_right_rows(state, ctx)? {
+                        state.right_rows = Some(rows);
                     } else {
-                        state.right = super::executor_start(
-                            state
-                                .right_plan
-                                .as_ref()
-                                .expect("lateral right plan")
-                                .clone(),
-                        );
+                        if matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. })) {
+                            state.right.rescan(ctx)?;
+                        } else {
+                            let right_plan = state.right_plan.as_ref().expect("lateral right plan");
+                            reset_plan_ctes(ctx, right_plan);
+                            state.right = super::executor_start(right_plan.clone());
+                        }
+                        let mut rows = Vec::new();
+                        while state.right.exec_proc_node(ctx)?.is_some() {
+                            ctx.check_for_interrupts()?;
+                            rows.push(state.right.materialize_current_row()?);
+                        }
+                        state.right_rows = Some(rows);
                     }
-                    let mut rows = Vec::new();
-                    while state.right.exec_proc_node(ctx)?.is_some() {
-                        ctx.check_for_interrupts()?;
-                        rows.push(state.right.materialize_current_row()?);
-                    }
-                    state.right_rows = Some(rows);
                     state.right_matched = Some(vec![
                         false;
                         state
@@ -8060,6 +8061,222 @@ fn exec_lateral_join<'a>(
         state.right_rows = None;
         state.right_matched = None;
         state.current_left = None;
+    }
+}
+
+fn prepare_indexed_lateral_right_rows(
+    state: &mut NestedLoopJoinState,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<MaterializedRow>>, ExecError> {
+    if !matches!(
+        state.kind,
+        JoinType::Inner | JoinType::Left | JoinType::Semi | JoinType::Anti
+    ) || !matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. }))
+    {
+        return Ok(None);
+    }
+    let Some(cache_key) = lateral_right_cache_key(state, ctx) else {
+        return Ok(None);
+    };
+    let Some((left_key_expr, right_key_expr)) = lateral_join_hash_key_exprs(&state.join_qual)
+    else {
+        return Ok(None);
+    };
+    let left = state
+        .current_left
+        .as_ref()
+        .expect("lateral left row")
+        .clone();
+    let left_key = eval_lateral_join_key_expr(state, &left_key_expr, &left, None, ctx)?;
+    if matches!(left_key, Value::Null) {
+        return Ok(None);
+    }
+
+    if let Some(entry) = state.lateral_right_cache.get(&cache_key) {
+        return Ok(Some(lateral_right_cache_candidates(entry, &left_key)));
+    }
+
+    // :HACK: PostgreSQL pulls up simple LATERAL subquery projection expressions
+    // and can hash join on the non-lateral join key. Until pgrust has full
+    // PlaceHolderVar-style pull-up, cache Memoize-backed lateral rows by their
+    // parameter key and add a small hash table over the right-side join key.
+    state.right.rescan(ctx)?;
+    let mut rows = Vec::new();
+    while state.right.exec_proc_node(ctx)?.is_some() {
+        ctx.check_for_interrupts()?;
+        rows.push(state.right.materialize_current_row()?);
+    }
+    let hash_index = build_lateral_right_hash_index(state, &left, &right_key_expr, &rows, ctx)?;
+    state.lateral_right_cache.insert(
+        cache_key.clone(),
+        LateralRightCacheEntry { rows, hash_index },
+    );
+    let entry = state
+        .lateral_right_cache
+        .get(&cache_key)
+        .expect("inserted lateral right cache entry");
+    Ok(Some(lateral_right_cache_candidates(entry, &left_key)))
+}
+
+fn lateral_right_cache_key(
+    state: &NestedLoopJoinState,
+    ctx: &ExecutorContext,
+) -> Option<Vec<Value>> {
+    if state.nest_params.is_empty() {
+        return None;
+    }
+    state
+        .nest_params
+        .iter()
+        .map(|param| ctx.expr_bindings.exec_params.get(&param.paramid).cloned())
+        .collect()
+}
+
+fn lateral_right_cache_candidates(
+    entry: &LateralRightCacheEntry,
+    left_key: &Value,
+) -> Vec<MaterializedRow> {
+    entry
+        .hash_index
+        .get(left_key)
+        .map(|indexes| {
+            indexes
+                .iter()
+                .filter_map(|index| entry.rows.get(*index).cloned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn build_lateral_right_hash_index(
+    state: &mut NestedLoopJoinState,
+    left: &MaterializedRow,
+    right_key_expr: &Expr,
+    rows: &[MaterializedRow],
+    ctx: &mut ExecutorContext,
+) -> Result<HashMap<Value, Vec<usize>>, ExecError> {
+    let mut hash_index: HashMap<Value, Vec<usize>> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let key = eval_lateral_join_key_expr(state, right_key_expr, left, Some(row), ctx)?;
+        if matches!(key, Value::Null) {
+            continue;
+        }
+        hash_index.entry(key).or_default().push(index);
+    }
+    Ok(hash_index)
+}
+
+fn eval_lateral_join_key_expr(
+    state: &mut NestedLoopJoinState,
+    expr: &Expr,
+    left: &MaterializedRow,
+    right: Option<&MaterializedRow>,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let mut combined_values = left.slot.tts_values.clone();
+    let mut bindings = left.system_bindings.clone();
+    if let Some(right) = right {
+        combined_values.extend(right.slot.tts_values.iter().cloned());
+        bindings = merge_system_bindings(&bindings, &right.system_bindings);
+        set_inner_expr_bindings(ctx, right.slot.tts_values.clone(), &right.system_bindings);
+    } else {
+        clear_inner_expr_bindings(ctx);
+    }
+    state.slot.tts_values = combined_values;
+    state.slot.tts_nvalid = state.slot.tts_values.len();
+    state.slot.kind = SlotKind::Virtual;
+    state.slot.virtual_tid = None;
+    state.slot.decode_offset = 0;
+    state.current_bindings = bindings;
+    set_active_system_bindings(ctx, &state.current_bindings);
+    set_outer_expr_bindings(ctx, left.slot.tts_values.clone(), &left.system_bindings);
+    eval_expr(expr, &mut state.slot, ctx)
+}
+
+fn lateral_join_hash_key_exprs(join_qual: &[Expr]) -> Option<(Expr, Expr)> {
+    join_qual.iter().find_map(|expr| {
+        let Expr::Op(op) = expr else {
+            return None;
+        };
+        if op.op != OpExprKind::Eq || op.args.len() != 2 {
+            return None;
+        }
+        let left = &op.args[0];
+        let right = &op.args[1];
+        if expr_uses_executor_var(left, OUTER_VAR)
+            && !expr_uses_executor_var(left, INNER_VAR)
+            && expr_uses_executor_var(right, INNER_VAR)
+            && !expr_uses_executor_var(right, OUTER_VAR)
+        {
+            return Some((left.clone(), right.clone()));
+        }
+        if expr_uses_executor_var(right, OUTER_VAR)
+            && !expr_uses_executor_var(right, INNER_VAR)
+            && expr_uses_executor_var(left, INNER_VAR)
+            && !expr_uses_executor_var(left, OUTER_VAR)
+        {
+            return Some((right.clone(), left.clone()));
+        }
+        None
+    })
+}
+
+fn expr_uses_executor_var(expr: &Expr, varno: usize) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0 && var.varno == varno,
+        Expr::Op(op) => op.args.iter().any(|arg| expr_uses_executor_var(arg, varno)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_uses_executor_var(arg, varno)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_uses_executor_var(arg, varno)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_uses_executor_var(inner, varno),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_executor_var(left, varno) || expr_uses_executor_var(right, varno)
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(|arg| expr_uses_executor_var(arg, varno))
+                || case_expr.args.iter().any(|arm| {
+                    expr_uses_executor_var(&arm.expr, varno)
+                        || expr_uses_executor_var(&arm.result, varno)
+                })
+                || expr_uses_executor_var(&case_expr.defresult, varno)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_executor_var(&saop.left, varno) || expr_uses_executor_var(&saop.right, varno)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_uses_executor_var(expr, varno)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_uses_executor_var(expr, varno)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_executor_var(array, varno)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_uses_executor_var(expr, varno))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_uses_executor_var(expr, varno))
+                })
+        }
+        _ => false,
     }
 }
 
@@ -10253,6 +10470,7 @@ impl PlanNode for RecursiveUnionState {
                     return Ok(None);
                 }
                 self.worktable.borrow_mut().rows = std::mem::take(&mut self.intermediate_rows);
+                reset_worktable_dependent_ctes(ctx, &self.recursive_plan, self.worktable_id);
                 self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
             }
         }
@@ -10317,6 +10535,211 @@ impl PlanNode for RecursiveUnionState {
                 lines,
             );
         }
+    }
+}
+
+fn reset_worktable_dependent_ctes(ctx: &mut ExecutorContext, plan: &Plan, worktable_id: usize) {
+    let mut cte_ids = std::collections::BTreeSet::new();
+    collect_worktable_dependent_cte_ids(plan, worktable_id, &mut cte_ids);
+    for cte_id in cte_ids {
+        ctx.cte_tables.remove(&cte_id);
+        ctx.cte_producers.remove(&cte_id);
+    }
+}
+
+fn reset_plan_ctes(ctx: &mut ExecutorContext, plan: &Plan) {
+    let mut cte_ids = std::collections::BTreeSet::new();
+    collect_plan_cte_ids(plan, &mut cte_ids);
+    for cte_id in cte_ids {
+        ctx.cte_tables.remove(&cte_id);
+        ctx.cte_producers.remove(&cte_id);
+    }
+}
+
+fn collect_plan_cte_ids(plan: &Plan, cte_ids: &mut std::collections::BTreeSet<usize>) {
+    match plan {
+        Plan::CteScan {
+            cte_id, cte_plan, ..
+        } => {
+            cte_ids.insert(*cte_id);
+            collect_plan_cte_ids(cte_plan, cte_ids);
+        }
+        Plan::Projection { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. } => collect_plan_cte_ids(input, cte_ids),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            collect_plan_cte_ids(left, cte_ids);
+            collect_plan_cte_ids(right, cte_ids);
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => {
+            for child in children {
+                collect_plan_cte_ids(child, cte_ids);
+            }
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => collect_plan_cte_ids(bitmapqual, cte_ids),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_plan_cte_ids(anchor, cte_ids);
+            collect_plan_cte_ids(recursive, cte_ids);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => {}
+    }
+}
+
+fn collect_worktable_dependent_cte_ids(
+    plan: &Plan,
+    worktable_id: usize,
+    cte_ids: &mut std::collections::BTreeSet<usize>,
+) {
+    match plan {
+        Plan::CteScan {
+            cte_id, cte_plan, ..
+        } => {
+            if plan_contains_worktable_scan(cte_plan, worktable_id) {
+                cte_ids.insert(*cte_id);
+            }
+            collect_worktable_dependent_cte_ids(cte_plan, worktable_id, cte_ids);
+        }
+        Plan::Projection { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => {
+            collect_worktable_dependent_cte_ids(input, worktable_id, cte_ids)
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            collect_worktable_dependent_cte_ids(left, worktable_id, cte_ids);
+            collect_worktable_dependent_cte_ids(right, worktable_id, cte_ids);
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => {
+            for child in children {
+                collect_worktable_dependent_cte_ids(child, worktable_id, cte_ids);
+            }
+        }
+        Plan::SetOp { children, .. } => {
+            for child in children {
+                collect_worktable_dependent_cte_ids(child, worktable_id, cte_ids);
+            }
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            collect_worktable_dependent_cte_ids(bitmapqual, worktable_id, cte_ids);
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_worktable_dependent_cte_ids(anchor, worktable_id, cte_ids);
+            collect_worktable_dependent_cte_ids(recursive, worktable_id, cte_ids);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => {}
+    }
+}
+
+fn plan_contains_worktable_scan(plan: &Plan, worktable_id: usize) -> bool {
+    match plan {
+        Plan::WorkTableScan {
+            worktable_id: plan_worktable_id,
+            ..
+        } => *plan_worktable_id == worktable_id,
+        Plan::Projection { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains_worktable_scan(input, worktable_id),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_worktable_scan(left, worktable_id)
+                || plan_contains_worktable_scan(right, worktable_id)
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => children
+            .iter()
+            .any(|child| plan_contains_worktable_scan(child, worktable_id)),
+        Plan::SetOp { children, .. } => children
+            .iter()
+            .any(|child| plan_contains_worktable_scan(child, worktable_id)),
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            plan_contains_worktable_scan(bitmapqual, worktable_id)
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            plan_contains_worktable_scan(anchor, worktable_id)
+                || plan_contains_worktable_scan(recursive, worktable_id)
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. } => false,
     }
 }
 

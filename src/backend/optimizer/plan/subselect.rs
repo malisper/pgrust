@@ -225,6 +225,7 @@ fn lower_sublink_to_subplan(
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type: sublink.sublink_type,
         testexpr,
+        comparison: sublink.comparison,
         first_col_type,
         target_width,
         plan_id,
@@ -1005,6 +1006,7 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             target_width: subplan.target_width,
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
+            comparison: subplan.comparison,
             par_param: subplan.par_param,
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(

@@ -28317,6 +28317,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             is_all,
                             subquery: Box::new(build_select(rhs)?),
                         },
+                        Rule::values_stmt => SqlExpr::QuantifiedSubquery {
+                            left: Box::new(left),
+                            op,
+                            is_all,
+                            subquery: Box::new(wrap_values_as_select(build_values_statement(rhs)?)),
+                        },
                         Rule::expr => SqlExpr::QuantifiedArray {
                             left: Box::new(left),
                             op,
