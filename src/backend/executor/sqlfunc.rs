@@ -20,7 +20,7 @@ use crate::include::catalog::PgProcRow;
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
-    PG_LANGUAGE_SQL_OID, RECORD_TYPE_OID, builtin_multirange_name_for_sql_type,
+    PG_LANGUAGE_SQL_OID, RECORD_TYPE_OID, VOID_TYPE_OID, builtin_multirange_name_for_sql_type,
     builtin_range_name_for_sql_type, range_type_ref_for_multirange_sql_type,
     range_type_ref_for_sql_type,
 };
@@ -105,6 +105,7 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values_with_arg_type_oids
                 runtime_result_type,
                 ctx,
             ),
+            StatementResult::AffectedRows(_) if row.prorettype == VOID_TYPE_OID => Ok(Value::Null),
             other => Err(sql_function_runtime_error(
                 "LANGUAGE sql function did not produce a query result",
                 Some(format!("{other:?}")),
@@ -1509,6 +1510,23 @@ fn inline_sql_function_body(
             if name.is_empty() || index >= args.len() {
                 continue;
             }
+            if let Some(field_list) =
+                composite_field_list_sql(&args[index], catalog, datetime_config)?
+            {
+                let whole_record = parenthesized_sql_literal(
+                    &args[index],
+                    arg_type_oids.get(index).copied(),
+                    catalog,
+                    datetime_config,
+                )?;
+                sql = substitute_sql_fragment_outside_quotes(
+                    &sql,
+                    &format!("{}.{}.*", row.proname, name),
+                    &whole_record,
+                );
+                sql =
+                    substitute_sql_fragment_outside_quotes(&sql, &format!("{name}.*"), &field_list);
+            }
             let replacement = parenthesized_sql_literal(
                 &args[index],
                 arg_type_oids.get(index).copied(),
@@ -1519,6 +1537,99 @@ fn inline_sql_function_body(
         }
     }
     Ok(sql)
+}
+
+fn composite_field_list_sql(
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<Option<String>, ExecError> {
+    let Value::Record(record) = value else {
+        return Ok(None);
+    };
+    Ok(Some(
+        record
+            .fields
+            .iter()
+            .map(|field| render_sql_literal_with_catalog(field, catalog, datetime_config))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", "),
+    ))
+}
+
+fn substitute_sql_fragment_outside_quotes(input: &str, needle: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if in_single_quote {
+            out.push(ch);
+            if ch == '\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double_quote {
+            out.push(ch);
+            if ch == '"' {
+                if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                    out.push('"');
+                    i += 2;
+                    continue;
+                }
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single_quote = true;
+                out.push(ch);
+                i += 1;
+            }
+            '"' => {
+                in_double_quote = true;
+                out.push(ch);
+                i += 1;
+            }
+            _ if sql_fragment_matches_at(input, needle, i) => {
+                out.push_str(replacement);
+                i += needle.len();
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn sql_fragment_matches_at(input: &str, needle: &str, index: usize) -> bool {
+    let Some(candidate) = input.get(index..index.saturating_add(needle.len())) else {
+        return false;
+    };
+    if !candidate.eq_ignore_ascii_case(needle) {
+        return false;
+    }
+    let before = input[..index].chars().next_back();
+    let after = input[index + needle.len()..].chars().next();
+    !before.is_some_and(|ch| ch == '.' || is_sql_identifier_char(ch))
+        && !after.is_some_and(is_sql_identifier_char)
+}
+
+fn is_sql_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 fn effective_sql_function_arg_type_oids(

@@ -1877,7 +1877,7 @@ fn parse_record_literal_to_value(
     descriptor: RecordDescriptor,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let fields = parse_record_literal_fields(text)?;
+    let fields = super::expr_casts::parse_composite_literal_fields(text)?;
     if fields.len() != descriptor.fields.len() {
         return Err(ExecError::DetailedError {
             message: "malformed record literal".into(),
@@ -1907,48 +1907,6 @@ fn parse_record_literal_to_value(
     Ok(Value::Record(RecordValue::from_descriptor(
         descriptor, converted,
     )))
-}
-
-fn parse_record_literal_fields(text: &str) -> Result<Vec<Option<String>>, ExecError> {
-    let body = text
-        .strip_prefix('(')
-        .and_then(|rest| rest.strip_suffix(')'))
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "malformed record literal".into(),
-            detail: Some(format!("missing left parenthesis in \"{text}\"")),
-            hint: None,
-            sqlstate: "22P02",
-        })?;
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut quoted = false;
-    let mut escaped = false;
-    for ch in body.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if quoted => escaped = true,
-            '"' => quoted = !quoted,
-            ',' if !quoted => {
-                fields.push((!current.is_empty()).then(|| current.clone()));
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if quoted {
-        return Err(ExecError::DetailedError {
-            message: "malformed record literal".into(),
-            detail: Some(format!("unterminated quoted string in \"{text}\"")),
-            hint: None,
-            sqlstate: "22P02",
-        });
-    }
-    fields.push((!current.is_empty()).then_some(current));
-    Ok(fields)
 }
 
 fn expected_json_array_error(path: &JsonRecordPath, hint: Option<String>) -> ExecError {

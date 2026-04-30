@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datum::{RecordDescriptor, Value};
 use crate::include::nodes::primnodes::{SubLink, SubLinkType, TargetEntry};
 
 fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
@@ -128,6 +128,97 @@ fn bind_array_literal_elements_as_type(
         elements,
         array_type: target_array_type,
     }
+}
+
+fn validate_record_quantified_array_literal_types(
+    bound_left: &TypedExpr,
+    elements: &[SqlExpr],
+    bound_elements: &[TypedExpr],
+    op: SubqueryComparisonOp,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if !matches!(op, SubqueryComparisonOp::Eq | SubqueryComparisonOp::NotEq) {
+        return Ok(());
+    }
+    let left_type = expression_navigation_sql_type(bound_left.sql_type, catalog);
+    if !matches!(left_type.kind, SqlTypeKind::Composite) || left_type.typrelid == 0 {
+        return Ok(());
+    }
+    let Some(left_descriptor) = record_descriptor_for_sql_type(left_type, catalog) else {
+        return Ok(());
+    };
+    for (raw_element, bound_element) in elements.iter().zip(bound_elements) {
+        if !matches!(raw_element, SqlExpr::Row(_)) {
+            continue;
+        }
+        let Some(element_descriptor) =
+            record_descriptor_for_sql_type(bound_element.sql_type, catalog)
+        else {
+            continue;
+        };
+        if left_descriptor.fields.len() != element_descriptor.fields.len() {
+            return Err(ParseError::DetailedError {
+                message: "cannot compare record types with different numbers of columns".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        for (idx, (left_field, element_field)) in left_descriptor
+            .fields
+            .iter()
+            .zip(element_descriptor.fields.iter())
+            .enumerate()
+        {
+            if left_field.sql_type != element_field.sql_type {
+                return Err(ParseError::DetailedError {
+                    message: format!(
+                        "cannot compare dissimilar column types {} and {} at record column {}",
+                        sql_type_name(left_field.sql_type),
+                        sql_type_name(element_field.sql_type),
+                        idx + 1
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn record_descriptor_for_sql_type(
+    mut sql_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Option<RecordDescriptor> {
+    if !sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite)
+        && sql_type.typrelid == 0
+        && let Some(row) = catalog.type_by_oid(sql_type.type_oid)
+        && row.typrelid != 0
+    {
+        sql_type = sql_type.with_identity(row.oid, row.typrelid);
+    }
+    if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
+        let relation = catalog.lookup_relation_by_oid(sql_type.typrelid)?;
+        return Some(RecordDescriptor::named(
+            sql_type.type_oid,
+            sql_type.typrelid,
+            sql_type.typmod,
+            relation
+                .desc
+                .columns
+                .iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        ));
+    }
+    if matches!(sql_type.kind, SqlTypeKind::Record) && sql_type.typmod > 0 {
+        return lookup_anonymous_record_descriptor(sql_type.typmod);
+    }
+    None
 }
 
 fn bind_array_left_quantified_list_expr(
@@ -524,6 +615,13 @@ pub(super) fn bind_quantified_array_expr(
                     )
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?;
+            validate_record_quantified_array_literal_types(
+                &bound_left,
+                elements,
+                &bound_elements,
+                op,
+                catalog,
+            )?;
             if !regex_array_op
                 && let Some(expr) = bind_array_left_quantified_list_expr(
                     &bound_left,

@@ -473,14 +473,25 @@ fn update_explain_target_name(stmt: &UpdateStatement) -> String {
 }
 
 fn assignment_navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
-    let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
-        return sql_type;
-    };
-    if sql_type.is_array && !domain.sql_type.is_array {
-        SqlType::array_of(domain.sql_type)
+    let sql_type = if let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) {
+        if sql_type.is_array && !domain.sql_type.is_array {
+            SqlType::array_of(domain.sql_type)
+        } else {
+            domain.sql_type
+        }
     } else {
-        domain.sql_type
+        sql_type
+    };
+
+    if !sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite)
+        && sql_type.typrelid == 0
+        && let Some(row) = catalog.type_by_oid(sql_type.type_oid)
+        && row.typrelid != 0
+    {
+        return sql_type.with_identity(row.oid, row.typrelid);
     }
+    sql_type
 }
 
 fn resolve_assignment_field_type(

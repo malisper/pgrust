@@ -60,6 +60,52 @@ struct AddColumnTarget {
 
 const AUTOVACUUM_CLIENT_ID_BASE: ClientId = 0xFF00_0000;
 
+fn reject_composite_rowtype_non_null_default_dependency(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    column: &crate::include::nodes::parsenodes::ColumnDef,
+) -> Result<(), ExecError> {
+    if !column_default_is_non_null(column.default_expr.as_deref()) {
+        return Ok(());
+    }
+    let Some(type_row) = catalog
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typrelid == relation.relation_oid)
+    else {
+        return Ok(());
+    };
+    for class_row in catalog.class_rows() {
+        if class_row.oid == relation.relation_oid || !relkind_is_analyzable(class_row.relkind) {
+            continue;
+        }
+        let Some(dependent_relation) = catalog.lookup_relation_by_oid(class_row.oid) else {
+            continue;
+        };
+        if let Some(dependent_column) = dependent_relation.desc.columns.iter().find(|candidate| {
+            !candidate.dropped
+                && (catalog.type_oid_for_sql_type(candidate.sql_type) == Some(type_row.oid)
+                    || candidate.sql_type.type_oid == type_row.oid
+                    || candidate.sql_type.typrelid == relation.relation_oid)
+        }) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot alter table \"{}\" because column \"{}.{}\" uses its row type",
+                    type_row.typname, class_row.relname, dependent_column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn column_default_is_non_null(default_expr: Option<&str>) -> bool {
+    default_expr.is_some_and(|expr| !expr.trim().eq_ignore_ascii_case("null"))
+}
+
 #[derive(Debug, Clone)]
 struct AutovacuumTarget {
     relation_oid: u32,
@@ -3117,6 +3163,11 @@ impl Database {
             client_id,
             Some((xid, cid)),
             relation.relation_oid,
+        )?;
+        reject_composite_rowtype_non_null_default_dependency(
+            &catalog,
+            &relation,
+            &alter_stmt.column,
         )?;
         let table_name = relation_basename(&alter_stmt.table_name).to_string();
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
