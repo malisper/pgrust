@@ -28,7 +28,7 @@ use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
-    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
+    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PgOpclassRow, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
     builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::Value;
@@ -1146,16 +1146,15 @@ impl Database {
 
     fn validate_index_opclass_options(
         access_method_oid: u32,
-        opfamily_oid: u32,
+        opclass: &PgOpclassRow,
         column: &crate::backend::parser::IndexColumnDef,
     ) -> Result<(), ExecError> {
         if column.opclass_options.is_empty() {
             return Ok(());
         }
-        if access_method_oid != GIST_AM_OID || opfamily_oid != GIST_TSVECTOR_FAMILY_OID {
-            let option = &column.opclass_options[0];
+        if access_method_oid != GIST_AM_OID || opclass.opcfamily != GIST_TSVECTOR_FAMILY_OID {
             return Err(ExecError::DetailedError {
-                message: format!("unrecognized parameter \"{}\"", option.name),
+                message: format!("operator class {} has no options", opclass.opcname),
                 detail: None,
                 hint: None,
                 sqlstate: "22023",
@@ -1532,7 +1531,7 @@ impl Database {
                     type_name: type_name.clone(),
                 })
             })?;
-            Self::validate_index_opclass_options(access_method.oid, opclass.opcfamily, column)?;
+            Self::validate_index_opclass_options(access_method.oid, &opclass, column)?;
             indclass_options.push(
                 column
                     .opclass_options
