@@ -32,6 +32,7 @@ fn local_var(index: usize) -> Expr {
         varattno: user_attrno(index),
         varlevelsup: 0,
         vartype: crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+        collation_oid: None,
     })
 }
 
@@ -1708,6 +1709,7 @@ fn pg_column_compression_reports_compressed_heap_values() {
             vartype: crate::backend::parser::SqlType::new(
                 crate::backend::parser::SqlTypeKind::Text,
             ),
+            collation_oid: None,
         })],
     );
 
@@ -4633,6 +4635,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(2),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::SubPlan(Box::new(SubPlan {
                     sublink_type: SubLinkType::ExprSubLink,
@@ -4654,6 +4657,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(4),
                     varlevelsup: 0,
                     vartype: text,
+                    collation_oid: None,
                 })],
             ),
             Expr::binary_op(
@@ -4664,6 +4668,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: text,
+                    collation_oid: None,
                 }),
                 Expr::CurrentUser,
             ),
@@ -4709,6 +4714,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(1)),
             ),
@@ -4720,6 +4726,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(3)),
             ),
@@ -4745,12 +4752,14 @@ fn explain_expr_matches_postgres_filter_formatting() {
         varattno: user_attrno(0),
         varlevelsup: 0,
         vartype: int4,
+        collation_oid: None,
     });
     let b = Expr::Var(Var {
         varno: 1,
         varattno: user_attrno(1),
         varlevelsup: 0,
         vartype: text,
+        collation_oid: None,
     });
     let modulo = Expr::binary_op(
         OpExprKind::Mod,
@@ -4806,6 +4815,7 @@ fn explain_expr_matches_postgres_filter_formatting() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Jsonb),
+            collation_oid: None,
         }),
         Expr::Const(Value::JsonPath(r#"($."wait" == null)"#.into())),
     );
@@ -4823,6 +4833,7 @@ fn explain_expr_matches_postgres_filter_formatting() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: ts,
+            collation_oid: None,
         }),
         Expr::LocalTimestamp { precision: None },
     );
@@ -4901,6 +4912,7 @@ fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
             varattno: user_attrno(1),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Char),
+            collation_oid: None,
         }),
         Expr::ArrayLiteral {
             elements: vec![Expr::Const(Value::Text("ab".into()))],
@@ -4933,6 +4945,7 @@ fn explain_join_expr_renders_function_args_with_join_vars() {
                 varattno: user_attrno(2),
                 varlevelsup: 0,
                 vartype: text,
+                collation_oid: None,
             }),
             Expr::Const(Value::Int32(3)),
         ],
@@ -4972,6 +4985,7 @@ fn explain_expr_renders_varchar_scalar_array_with_nonconst_element() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: varchar,
+                collation_oid: None,
             })),
             text,
         )),
@@ -5024,6 +5038,7 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: polygon_ty,
+                collation_oid: None,
             }),
             Expr::Const(Value::Polygon(GeoPolygon {
                 bound_box: GeoBox {
@@ -5059,6 +5074,7 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: circle_ty,
+                collation_oid: None,
             }),
             Expr::Const(Value::Circle(GeoCircle {
                 center: GeoPoint { x: 500.0, y: 500.0 },
@@ -5092,6 +5108,7 @@ fn explain_sort_key_renders_box_coordinate_subscripts() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Box),
+                collation_oid: None,
             })],
         )],
     );
@@ -5156,6 +5173,7 @@ fn explain_const_false_and_scan_filter_uses_one_time_filter() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(1000)),
             ),
@@ -18083,6 +18101,93 @@ fn window_rows_range_and_groups_frames_are_respected() {
                         Value::Int32(1),
                         Value::Int32(4),
                     ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_groups_preceding_end_underflow_is_empty() {
+    let base = temp_dir("window_groups_preceding_end_underflow");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'x'),
+            (4, 'dave', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) over (order by note groups between 2 preceding and 1 preceding)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Null],
+                    vec![Value::Int32(2), Value::Null],
+                    vec![Value::Int32(3), Value::Null],
+                    vec![Value::Int32(4), Value::Int64(6)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_aggregate_filter_applies_to_rows_frames() {
+    let base = temp_dir("window_aggregate_filter_applies_to_rows_frames");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'yes'),
+            (2, 'bob', 'no'),
+            (3, 'carol', 'yes')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) filter (where note = 'yes')
+                    over (order by id rows between 1 preceding and current row)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(1)],
+                    vec![Value::Int32(2), Value::Int64(1)],
+                    vec![Value::Int32(3), Value::Int64(3)],
                 ]
             );
         }

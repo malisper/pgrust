@@ -373,6 +373,7 @@ fn partition_info_for_parent(
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),
@@ -585,6 +586,7 @@ fn translate_parent_column_to_child(
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: child_column.sql_type,
+                collation_oid: None,
             })
         })
         .unwrap_or(Expr::Const(Value::Null))

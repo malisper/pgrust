@@ -5420,8 +5420,6 @@ fn render_subquery_op(op: SubqueryComparisonOp) -> &'static str {
         SubqueryComparisonOp::NotILike => "NOT ILIKE",
         SubqueryComparisonOp::Similar => "SIMILAR TO",
         SubqueryComparisonOp::NotSimilar => "NOT SIMILAR TO",
-        SubqueryComparisonOp::RegexMatch => "~",
-        SubqueryComparisonOp::NotRegexMatch => "!~",
     }
 }
 
@@ -5770,6 +5768,28 @@ fn expr_output_name(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> Option<String>
         Expr::FieldSelect { field, .. } => Some(field.clone()),
         _ => None,
     }
+}
+
+fn render_join_merged_input_var(
+    ctx: &ViewDeparseContext<'_>,
+    join_rtindex: usize,
+    left_col: usize,
+) -> Option<String> {
+    let join_node = find_join_node(ctx.query.jointree.as_ref()?, join_rtindex)?;
+    let JoinTreeNode::JoinExpr { left, .. } = join_node else {
+        return None;
+    };
+    let left_rtindex = jointree_output_rtindex(left)?;
+    let rte = ctx.query.rtable.get(left_rtindex.checked_sub(1)?)?;
+    let sql_type = rte.desc.columns.get(left_col.checked_sub(1)?)?.sql_type;
+    let var = Var {
+        varno: left_rtindex,
+        varattno: user_attrno(left_col - 1),
+        varlevelsup: 0,
+        vartype: sql_type,
+        collation_oid: None,
+    };
+    var_name(&var, ctx)
 }
 
 fn find_join_node(node: &JoinTreeNode, rtindex: usize) -> Option<&JoinTreeNode> {

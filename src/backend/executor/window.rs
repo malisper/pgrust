@@ -271,6 +271,18 @@ fn move_group_end(
     offset: i64,
     following: bool,
 ) -> Result<usize, ExecError> {
+    if !following {
+        let mut start = peer_group_start_for_index(partition_rows, order_by, row_index)?;
+        let mut remaining = offset;
+        while remaining > 0 {
+            if start == 0 {
+                return Ok(0);
+            }
+            start = peer_group_start_for_index(partition_rows, order_by, start - 1)?;
+            remaining -= 1;
+        }
+        return peer_group_end_for_index(partition_rows, order_by, start);
+    }
     let start = move_group_start(partition_rows, order_by, row_index, offset, following)?;
     if start >= partition_rows.len() {
         Ok(partition_rows.len())
@@ -1092,7 +1104,8 @@ fn advance_window_moving_aggregate(
         .iter()
         .map(|arg| eval_expr(arg, &mut row.slot, ctx).map(|value| value.to_owned_value()))
         .collect::<Result<Vec<_>, _>>()?;
-    let contributed = values.iter().all(|value| !matches!(value, Value::Null));
+    let contributed = !runtime.moving_transition_is_strict()
+        || values.iter().all(|value| !matches!(value, Value::Null));
     runtime.moving_transition(state, &values, ctx)?;
     Ok(contributed)
 }
@@ -1101,6 +1114,7 @@ fn moving_window_row_contributes(
     ctx: &mut ExecutorContext,
     row: &mut MaterializedRow,
     aggref: &Aggref,
+    require_non_null_args: bool,
 ) -> Result<bool, ExecError> {
     set_active_system_bindings(ctx, &row.system_bindings);
     set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
@@ -1110,6 +1124,9 @@ fn moving_window_row_contributes(
             Value::Bool(false) | Value::Null => return Ok(false),
             other => return Err(ExecError::NonBoolQual(other)),
         }
+    }
+    if !require_non_null_args {
+        return Ok(true);
     }
     aggref
         .args
@@ -1808,19 +1825,29 @@ fn evaluate_moving_aggregate_window(
     let mut values = Vec::with_capacity(partition_rows.len());
     let mut current_start = 0usize;
     let mut current_end = 0usize;
-    let track_strict_contributors = runtime.moving_transition_is_strict();
-    let mut strict_contributors = 0usize;
+    let require_non_null_contributors = runtime.moving_transition_is_strict();
+    let track_contributors = require_non_null_contributors
+        || aggref
+            .aggfilter
+            .as_ref()
+            .is_some_and(|filter| !matches!(filter, Expr::Const(Value::Bool(true))));
+    let mut contributors = 0usize;
 
     for (target_start, target_end) in ranges {
         while current_start < target_start {
-            let outgoing_contributed = if track_strict_contributors {
-                moving_window_row_contributes(ctx, &mut partition_rows[current_start].row, aggref)?
+            let outgoing_contributed = if track_contributors {
+                moving_window_row_contributes(
+                    ctx,
+                    &mut partition_rows[current_start].row,
+                    aggref,
+                    require_non_null_contributors,
+                )?
             } else {
                 false
             };
-            if outgoing_contributed && strict_contributors <= 1 {
+            if outgoing_contributed && contributors <= 1 {
                 state = runtime.initialize_moving_state();
-                strict_contributors = 0;
+                contributors = 0;
                 current_start += 1;
                 current_end = current_start;
                 continue;
@@ -1834,11 +1861,11 @@ fn evaluate_moving_aggregate_window(
             )?;
             current_start += 1;
             if outgoing_contributed {
-                strict_contributors = strict_contributors.saturating_sub(1);
+                contributors = contributors.saturating_sub(1);
             }
             if !inverse_succeeded {
                 state = runtime.initialize_moving_state();
-                strict_contributors = 0;
+                contributors = 0;
                 current_start = target_start;
                 current_end = target_start;
                 break;
@@ -1852,8 +1879,8 @@ fn evaluate_moving_aggregate_window(
                 &mut partition_rows[current_end].row,
                 aggref,
             )?;
-            if track_strict_contributors && contributed {
-                strict_contributors += 1;
+            if track_contributors && contributed {
+                contributors += 1;
             }
             current_end += 1;
         }

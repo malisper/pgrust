@@ -74,6 +74,7 @@ pub(crate) fn generated_relation_output_exprs(
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: (column.collation_oid != 0).then_some(column.collation_oid),
                 }))
             }
         })

@@ -21,6 +21,7 @@ pub(crate) fn simple_var_key(expr: &Expr) -> Option<SimpleVarKey> {
             varattno,
             varlevelsup,
             vartype,
+            ..
         }) => Some(SimpleVarKey {
             varno: *varno,
             varattno: *varattno,

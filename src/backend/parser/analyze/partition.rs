@@ -418,6 +418,7 @@ pub(crate) fn lower_relation_partition_spec_uncached(
             varattno: user_attrno(column_index),
             varlevelsup: 0,
             vartype: column.sql_type,
+            collation_oid: None,
         }));
         key_types.push(column.sql_type);
         key_sqls.push(column.name.clone());

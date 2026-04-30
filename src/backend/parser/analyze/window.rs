@@ -104,6 +104,10 @@ pub(super) fn nested_window_error() -> ParseError {
     ParseError::WindowingError("window function calls cannot be nested".into())
 }
 
+fn window_definition_error() -> ParseError {
+    ParseError::WindowingError("window functions are not allowed in window definitions".into())
+}
+
 pub(super) fn window_not_allowed_error() -> ParseError {
     ParseError::WindowingError("window functions are not allowed in this context".into())
 }
@@ -320,7 +324,7 @@ pub(super) fn bind_window_spec(
         .iter()
         .map(|expr| {
             if expr_contains_window(expr) {
-                return Err(nested_window_error());
+                return Err(window_definition_error());
             }
             bind_expr(expr)
         })
@@ -350,7 +354,7 @@ pub(super) fn bind_window_spec(
         .iter()
         .map(|item| {
             if expr_contains_window(&item.expr) {
-                return Err(nested_window_error());
+                return Err(window_definition_error());
             }
             let bound_expr = bind_expr(&item.expr)?;
             build_bound_order_by_entry(item, bound_expr, 0, catalog)
@@ -388,7 +392,7 @@ fn bind_window_frame_bound(
         RawWindowFrameBound::UnboundedFollowing => WindowFrameBound::UnboundedFollowing,
         RawWindowFrameBound::OffsetPreceding(expr) => {
             if expr_contains_window(expr) {
-                return Err(nested_window_error());
+                return Err(window_definition_error());
             }
             let bound_expr = with_windows_disallowed(|| bind_expr(expr))?;
             WindowFrameBound::OffsetPreceding(bind_window_frame_offset(
@@ -397,7 +401,7 @@ fn bind_window_frame_bound(
         }
         RawWindowFrameBound::OffsetFollowing(expr) => {
             if expr_contains_window(expr) {
-                return Err(nested_window_error());
+                return Err(window_definition_error());
             }
             let bound_expr = with_windows_disallowed(|| bind_expr(expr))?;
             WindowFrameBound::OffsetFollowing(bind_window_frame_offset(
@@ -737,11 +741,16 @@ fn range_offset_target_type(
 }
 
 fn range_offset_pair_error(order_type: SqlType, offset_type: SqlType) -> ParseError {
-    ParseError::WindowingError(format!(
-        "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {} and offset type {}",
-        range_offset_error_type_name(order_type),
-        range_offset_error_type_name(offset_type)
-    ))
+    ParseError::DetailedError {
+        message: format!(
+            "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {} and offset type {}",
+            range_offset_error_type_name(order_type),
+            range_offset_error_type_name(offset_type)
+        ),
+        detail: None,
+        hint: Some("Cast the offset value to an appropriate type.".into()),
+        sqlstate: "42P20",
+    }
 }
 
 fn range_offset_error_type_name(sql_type: SqlType) -> String {

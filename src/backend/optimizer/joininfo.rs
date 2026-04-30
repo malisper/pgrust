@@ -985,6 +985,7 @@ mod tests {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype: SqlType::new(SqlTypeKind::Int4),
+                    collation_oid: None,
                 }),
                 SqlType::new(SqlTypeKind::Int4),
                 1,
@@ -1041,6 +1042,7 @@ mod tests {
             varattno: 1,
             varlevelsup,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     }
 

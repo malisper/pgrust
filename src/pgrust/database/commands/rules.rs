@@ -3233,11 +3233,16 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
             input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
             clause: substitute_rule_window_clause(clause, old_values, new_values),
+            run_condition: run_condition
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+            top_qual: top_qual.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
             output_columns,
         },
         Plan::FunctionScan {
