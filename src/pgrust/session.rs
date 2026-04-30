@@ -21060,6 +21060,106 @@ mod tests {
     }
 
     #[test]
+    fn writable_cte_insert_instead_select_rule_joins_original_source() {
+        let base = crate::pgrust::test_support::seeded_temp_dir(
+            "session",
+            "writable_cte_insert_select_rule",
+        );
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table y (i int4)").unwrap();
+        session
+            .execute(&db, "create table rule_rows (i int4)")
+            .unwrap();
+        session
+            .execute(&db, "insert into y values (10), (20), (30)")
+            .unwrap();
+        session
+            .execute(&db, "insert into rule_rows values (1), (2), (3)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule y_ins as on insert to y do instead select i from rule_rows",
+            )
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "with t as (delete from y returning *) insert into y select * from t",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select i from y").unwrap() {
+            StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_on_conflict_update_same_row_returns_no_outer_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_on_conflict");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table withz (k int4 unique, v text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into withz values (2, 'seed')")
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "with simpletup as (select 2 k, 'Green' v), \
+                 upsert_cte as ( \
+                   insert into withz values (2, 'Blue') on conflict (k) do \
+                   update set (k, v) = (select k, v from simpletup where simpletup.k = withz.k) \
+                   returning k, v \
+                 ) \
+                 insert into withz values (2, 'Red') on conflict (k) do \
+                 update set (k, v) = (select k, v from upsert_cte where upsert_cte.k = withz.k) \
+                 returning k, v",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select k, v from withz").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(2), Value::Text("Green".into())]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn domain_composite_array_insert_assignments_navigate_base_type() {
         let base =
             crate::pgrust::test_support::seeded_temp_dir("session", "domain_composite_assign");

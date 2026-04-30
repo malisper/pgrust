@@ -17451,6 +17451,20 @@ fn aggregate_rejects_nested_subquery_reference_to_local_cte() {
 }
 
 #[test]
+fn outer_level_aggregate_rejects_nested_cte_reference() {
+    let stmt = parse_select(
+        "select id, (with cte1(x,y) as (select 1,2)
+                    select count((select p.id from cte1))) as ss
+         from people p",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::OuterLevelAggregateNestedCte(name)) if name == "cte1"
+    ));
+}
+
+#[test]
 fn recursive_cte_allows_self_reference_inside_intermediate_setop_with() {
     let stmt = parse_select(
         "with recursive outermost(x) as (
