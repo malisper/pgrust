@@ -5656,6 +5656,22 @@ fn parse_alter_role_option_statement() {
 }
 
 #[test]
+fn parse_alter_role_set_config_statement() {
+    let stmt =
+        parse_statement("alter role regress_rol_lock1 set search_path = lock_schema1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterRole(AlterRoleStatement {
+            role_name: "regress_rol_lock1".into(),
+            action: AlterRoleAction::SetConfig {
+                name: "search_path".into(),
+                value: Some("lock_schema1".into()),
+            },
+        })
+    );
+}
+
+#[test]
 fn parse_alter_user_password_statement() {
     let stmt = parse_statement("alter user regress_priv_user2 password 'verysecret'").unwrap();
     assert_eq!(
@@ -11847,10 +11863,13 @@ fn parse_lock_table_statement_modes() {
     assert!(matches!(
         stmt,
         Statement::LockTable(LockTableStatement {
-            table_names,
+            targets,
             mode: LockTableMode::AccessExclusive,
             nowait: false,
-        }) if table_names == vec!["atest1"]
+        }) if targets.len() == 1
+            && targets[0].name == "atest1"
+            && !targets[0].only
+            && !targets[0].recurse
     ));
 
     let stmt =
@@ -11858,10 +11877,31 @@ fn parse_lock_table_statement_modes() {
     assert!(matches!(
         stmt,
         Statement::LockTable(LockTableStatement {
-            table_names,
+            targets,
             mode: LockTableMode::AccessShare,
             nowait: true,
-        }) if table_names == vec!["public.atest1", "atest2"]
+        }) if targets.iter().map(|target| target.name.as_str()).collect::<Vec<_>>()
+            == vec!["public.atest1", "atest2"]
+    ));
+
+    let stmt = parse_statement("lock table lock_tbl1 * in access exclusive mode").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::LockTable(LockTableStatement { targets, mode: LockTableMode::AccessExclusive, .. })
+            if targets.len() == 1
+                && targets[0].name == "lock_tbl1"
+                && !targets[0].only
+                && targets[0].recurse
+    ));
+
+    let stmt = parse_statement("lock table only lock_tbl1").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::LockTable(LockTableStatement { targets, .. })
+            if targets.len() == 1
+                && targets[0].name == "lock_tbl1"
+                && targets[0].only
+                && !targets[0].recurse
     ));
 
     for (sql, expected_mode) in [

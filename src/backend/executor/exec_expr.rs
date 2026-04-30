@@ -13816,6 +13816,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgRustTestInt44In => eval_pg_rust_test_int44in(&values),
         BuiltinScalarFunction::PgRustTestInt44Out => eval_pg_rust_test_int44out(&values),
         BuiltinScalarFunction::PgRustTestPtInWidget => eval_pg_rust_test_pt_in_widget(&values),
+        BuiltinScalarFunction::PgRustTestAtomicOps => Ok(Value::Bool(true)),
         BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => {
             eval_pg_rust_is_catalog_text_unique_index_oid(&values)
         }

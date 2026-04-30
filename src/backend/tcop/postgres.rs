@@ -11852,25 +11852,15 @@ fn send_queued_notices_with_sql(stream: &mut impl Write, sql: Option<&str>) -> i
         let position = notice.position.or_else(|| {
             sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message, *occurrence))
         });
-        if notice.hint.is_some() {
-            send_notice_with_hint(
-                stream,
-                notice.severity,
-                notice.sqlstate,
-                &notice.message,
-                notice.hint.as_deref(),
-                position,
-            )?;
-        } else {
-            send_notice_with_severity(
-                stream,
-                notice.severity,
-                notice.sqlstate,
-                &notice.message,
-                notice.detail.as_deref(),
-                position,
-            )?;
-        }
+        send_notice_with_fields(
+            stream,
+            notice.severity,
+            notice.sqlstate,
+            &notice.message,
+            notice.detail.as_deref(),
+            notice.hint.as_deref(),
+            position,
+        )?;
     }
     send_plpgsql_notices(stream, &take_notices())
 }
