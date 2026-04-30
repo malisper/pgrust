@@ -97,6 +97,10 @@ impl Database {
         self.event_trigger_may_fire(client_id, txn_ctx, "table_rewrite", tag)
     }
 
+    pub(crate) fn current_database_has_login_event_triggers(&self) -> Result<bool, ExecError> {
+        Ok(self.current_database_row()?.dathasloginevt)
+    }
+
     fn fire_event_triggers_with_context(
         &self,
         ctx: &mut ExecutorContext,
@@ -185,6 +189,7 @@ impl Database {
         )?;
         validate_event_trigger_event(&stmt.event_name)?;
         let tags = normalize_event_trigger_when_clauses(stmt)?;
+        let event_name = stmt.event_name.to_ascii_lowercase();
         let function = resolve_event_trigger_function(
             self,
             client_id,
@@ -210,7 +215,7 @@ impl Database {
         let row = PgEventTriggerRow {
             oid: 0,
             evtname: stmt.trigger_name.to_ascii_lowercase(),
-            evtevent: stmt.event_name.to_ascii_lowercase(),
+            evtevent: event_name.clone(),
             evtowner: current_role.oid,
             evtfoid: function.oid,
             evtenabled: EVENT_TRIGGER_ENABLED_ORIGIN,
@@ -225,6 +230,14 @@ impl Database {
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
         catalog_effects.push(effect);
+        if event_name == "login" {
+            self.set_current_database_has_login_event_triggers(
+                client_id,
+                xid,
+                cid,
+                catalog_effects,
+            )?;
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -268,6 +281,8 @@ impl Database {
         let mut row =
             lookup_event_trigger_row(self, client_id, Some((xid, cid)), &stmt.trigger_name)?;
         row.evtenabled = event_trigger_enabled_char(stmt.mode);
+        let enables_login =
+            row.evtevent.eq_ignore_ascii_case("login") && row.evtenabled != EVENT_TRIGGER_DISABLED;
         let ctx = catalog_write_context(self, client_id, xid, cid);
         let (_oid, effect) = self
             .catalog
@@ -277,6 +292,14 @@ impl Database {
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
         catalog_effects.push(effect);
+        if enables_login {
+            self.set_current_database_has_login_event_triggers(
+                client_id,
+                xid,
+                cid,
+                catalog_effects,
+            )?;
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -522,6 +545,46 @@ impl Database {
     }
 }
 
+impl Database {
+    fn current_database_row(&self) -> Result<crate::include::catalog::PgDatabaseRow, ExecError> {
+        self.shared_catalog
+            .read()
+            .catcache()
+            .map_err(map_catalog_error)?
+            .database_rows()
+            .into_iter()
+            .find(|row| row.oid == self.database_oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("database with oid {} does not exist", self.database_oid),
+                detail: None,
+                hint: None,
+                sqlstate: "3D000",
+            })
+    }
+
+    fn set_current_database_has_login_event_triggers(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let mut row = self.current_database_row()?;
+        if row.dathasloginevt {
+            return Ok(());
+        }
+        row.dathasloginevt = true;
+        let ctx = catalog_write_context(self, client_id, xid, cid);
+        let effect = self
+            .shared_catalog
+            .write()
+            .replace_database_row_mvcc(row, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(())
+    }
+}
+
 fn catalog_write_context(
     db: &Database,
     client_id: ClientId,
@@ -659,7 +722,7 @@ fn event_triggers_guc_enabled(gucs: &std::collections::HashMap<String, String>) 
 
 fn validate_event_trigger_event(event_name: &str) -> Result<(), ExecError> {
     match event_name.to_ascii_lowercase().as_str() {
-        "ddl_command_start" | "ddl_command_end" | "sql_drop" | "table_rewrite" => Ok(()),
+        "ddl_command_start" | "ddl_command_end" | "sql_drop" | "login" | "table_rewrite" => Ok(()),
         _ => Err(ExecError::DetailedError {
             message: format!("unrecognized event name \"{}\"", event_name),
             detail: None,
@@ -672,6 +735,7 @@ fn validate_event_trigger_event(event_name: &str) -> Result<(), ExecError> {
 fn normalize_event_trigger_when_clauses(
     stmt: &CreateEventTriggerStatement,
 ) -> Result<Option<Vec<String>>, ExecError> {
+    let is_login_event = stmt.event_name.eq_ignore_ascii_case("login");
     let mut saw_tag = false;
     let mut tags = Vec::new();
     for clause in &stmt.when_clauses {
@@ -693,9 +757,19 @@ fn normalize_event_trigger_when_clauses(
         }
         saw_tag = true;
         for value in &clause.values {
-            validate_event_trigger_tag(value)?;
+            if !is_login_event {
+                validate_event_trigger_tag(value)?;
+            }
             tags.push(value.to_ascii_uppercase());
         }
+    }
+    if is_login_event && saw_tag {
+        return Err(ExecError::DetailedError {
+            message: "tag filtering is not supported for login event triggers".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
     if tags.is_empty() {
         Ok(None)
@@ -885,4 +959,118 @@ fn function_search_path_namespace_oids(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::backend::executor::{ExecError, StatementResult, Value};
+    use crate::pgrust::database::Database;
+    use std::path::PathBuf;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "pgrust_event_trigger_{label}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    fn create_login_event_trigger_function(db: &Database, name: &str) {
+        db.execute(
+            1,
+            &format!(
+                "create function {name}() returns event_trigger as $$ begin end; $$ language plpgsql"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn query_rows(db: &Database, sql: &str) -> Vec<Vec<Value>> {
+        match db.execute(1, sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_event_trigger_create_sets_event_and_database_flag() {
+        let db = Database::open(temp_dir("login_create_sets_flag"), 16).unwrap();
+        create_login_event_trigger_function(&db, "login_proc");
+
+        db.execute(
+            1,
+            "create event trigger login_et on login execute procedure login_proc()",
+        )
+        .unwrap();
+
+        assert_eq!(
+            query_rows(
+                &db,
+                "select evtevent from pg_event_trigger where evtname = 'login_et'"
+            ),
+            vec![vec![Value::Text("login".into())]]
+        );
+        assert_eq!(
+            query_rows(
+                &db,
+                "select dathasloginevt from pg_database where datname = 'postgres'"
+            ),
+            vec![vec![Value::Bool(true)]]
+        );
+    }
+
+    #[test]
+    fn login_event_trigger_tag_filter_is_not_supported() {
+        let db = Database::open(temp_dir("login_tag_filter"), 16).unwrap();
+        create_login_event_trigger_function(&db, "login_tag_proc");
+
+        let err = db
+            .execute(
+                1,
+                "create event trigger login_tag_et on login when tag in ('create table') execute procedure login_tag_proc()",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "tag filtering is not supported for login event triggers"
+                );
+                assert_eq!(sqlstate, "0A000");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_event_trigger_enable_sets_database_flag() {
+        let db = Database::open(temp_dir("login_enable_sets_flag"), 16).unwrap();
+        create_login_event_trigger_function(&db, "login_enable_proc");
+
+        db.execute(
+            1,
+            "create event trigger login_enable_et on login execute procedure login_enable_proc()",
+        )
+        .unwrap();
+        db.execute(1, "alter event trigger login_enable_et disable")
+            .unwrap();
+        db.execute(
+            1,
+            "update pg_database set dathasloginevt = false where datname = 'postgres'",
+        )
+        .unwrap();
+        db.execute(1, "alter event trigger login_enable_et enable always")
+            .unwrap();
+
+        assert_eq!(
+            query_rows(
+                &db,
+                "select dathasloginevt from pg_database where datname = 'postgres'"
+            ),
+            vec![vec![Value::Bool(true)]]
+        );
+    }
 }

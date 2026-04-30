@@ -2335,6 +2335,18 @@ pub(super) fn eval_quote_literal_function(values: &[Value]) -> Result<Value, Exe
     ))))
 }
 
+pub(super) fn eval_quote_nullable_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Text("NULL".into()));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Text("NULL".into()));
+    }
+    Ok(Value::Text(CompactString::from_owned(quote_literal_text(
+        &value_output_text(value)?,
+    ))))
+}
+
 pub(super) fn eval_quote_ident_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
         return Ok(Value::Null);

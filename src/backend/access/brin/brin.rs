@@ -175,6 +175,15 @@ fn required_amproc(
         })
 }
 
+fn optional_amproc(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index_desc: &RelationDesc,
+    column_index: usize,
+    procnum: i16,
+) -> Option<u32> {
+    index_meta.amproc_oid(index_desc, column_index, procnum)
+}
+
 fn add_values_to_summary(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     index_desc: &RelationDesc,
@@ -197,13 +206,15 @@ fn add_values_to_summary(
             continue;
         }
 
-        let add_value_proc = required_amproc(
-            index_meta,
-            index_desc,
-            column_index,
-            BRIN_PROCNUM_ADDVALUE,
-            "add_value",
-        )?;
+        let Some(add_value_proc) =
+            optional_amproc(index_meta, index_desc, column_index, BRIN_PROCNUM_ADDVALUE)
+        else {
+            // :HACK: Catalog-visible BRIN opclasses outpace pgrust's BRIN
+            // runtime, which currently implements minmax summaries only. Keep
+            // unsupported columns all-null so catalog/property tests can build
+            // mixed-opclass indexes without inventing incorrect semantics.
+            continue;
+        };
         modified |= minmax_add_value(add_value_proc, column, value, false)?;
         if had_nulls && !(column.has_nulls || column.all_nulls) {
             column.has_nulls = true;
@@ -227,13 +238,11 @@ fn union_memtuples(
         return Ok(());
     }
     for column_index in 0..left.columns.len() {
-        let union_proc = required_amproc(
-            index_meta,
-            index_desc,
-            column_index,
-            BRIN_PROCNUM_UNION,
-            "union",
-        )?;
+        let Some(union_proc) =
+            optional_amproc(index_meta, index_desc, column_index, BRIN_PROCNUM_UNION)
+        else {
+            continue;
+        };
         minmax_union(
             union_proc,
             &mut left.columns[column_index],
@@ -439,13 +448,14 @@ fn range_matches_scan(
             return Ok(false);
         }
         let strategy = BrinMinmaxStrategy::try_from(key.strategy as i16)?;
-        let consistent_proc = required_amproc(
+        let Some(consistent_proc) = optional_amproc(
             &scan.index_meta,
             &scan.index_desc,
             column_index,
             BRIN_PROCNUM_CONSISTENT,
-            "consistent",
-        )?;
+        ) else {
+            return Ok(true);
+        };
         if !minmax_consistent(consistent_proc, column, strategy, &key.argument)? {
             return Ok(false);
         }

@@ -39,10 +39,21 @@ pub(crate) struct CustomAggregateRuntime {
     pub(crate) transfn_strict: bool,
     pub(crate) finalfn_oid: Option<u32>,
     pub(crate) finalfn_strict: bool,
+    pub(crate) mtransfn_oid: Option<u32>,
+    pub(crate) mtransfn_strict: bool,
+    pub(crate) minvtransfn_oid: Option<u32>,
+    pub(crate) minvtransfn_strict: bool,
+    pub(crate) mfinalfn_oid: Option<u32>,
+    pub(crate) mfinalfn_strict: bool,
     pub(crate) transtype: SqlType,
+    pub(crate) mtranstype: SqlType,
     pub(crate) transfn_arg_types: Vec<SqlType>,
     pub(crate) finalfn_arg_types: Vec<SqlType>,
+    pub(crate) mtransfn_arg_types: Vec<SqlType>,
+    pub(crate) minvtransfn_arg_types: Vec<SqlType>,
+    pub(crate) mfinalfn_arg_types: Vec<SqlType>,
     pub(crate) init_value: Option<Value>,
+    pub(crate) minit_value: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +77,7 @@ pub(crate) enum NumericAccum {
     Float(f64),
     Numeric(NumericValue),
     NumericSum(NumericSumAccum),
+    Interval(IntervalValue),
 }
 
 #[derive(Debug, Clone)]
@@ -541,7 +553,18 @@ impl AccumState {
             (AggFunc::Sum, _, _) => |state, values| {
                 if let AccumState::Sum { sum, result_type } = state {
                     let value = values.first().unwrap_or(&Value::Null);
-                    *sum = accumulate_sum_value(sum.take(), *result_type, value);
+                    if let Value::Interval(next) = value {
+                        *sum = Some(match sum.take() {
+                            Some(NumericAccum::Interval(current)) => NumericAccum::Interval(
+                                current
+                                    .checked_add(*next)
+                                    .ok_or_else(interval_avg_out_of_range)?,
+                            ),
+                            _ => NumericAccum::Interval(*next),
+                        });
+                    } else {
+                        *sum = accumulate_sum_value(sum.take(), *result_type, value);
+                    }
                 }
                 Ok(())
             },
@@ -882,6 +905,7 @@ impl AccumState {
                 Some(NumericAccum::NumericSum(v)) => {
                     Value::Numeric(format_numeric_result(v.to_numeric(), *result_type))
                 }
+                Some(NumericAccum::Interval(v)) => Value::Interval(*v),
                 None => Value::Null,
             },
             AccumState::Avg {
@@ -927,6 +951,7 @@ impl AccumState {
                                 .unwrap_or(sum);
                             Value::Numeric(format_numeric_result(avg, *result_type))
                         }
+                        Some(NumericAccum::Interval(_)) => Value::Null,
                         None => Value::Null,
                     }
                 }
@@ -1137,6 +1162,37 @@ impl AggregateRuntime {
         }
     }
 
+    pub(crate) fn supports_moving_transition(&self) -> bool {
+        matches!(
+            self,
+            AggregateRuntime::Custom(CustomAggregateRuntime {
+                mtransfn_oid: Some(_),
+                minvtransfn_oid: Some(_),
+                ..
+            })
+        )
+    }
+
+    pub(crate) fn moving_transition_is_strict(&self) -> bool {
+        matches!(
+            self,
+            AggregateRuntime::Custom(CustomAggregateRuntime {
+                mtransfn_strict: true,
+                minvtransfn_strict: true,
+                ..
+            })
+        )
+    }
+
+    pub(crate) fn initialize_moving_state(&self) -> AccumState {
+        match self {
+            AggregateRuntime::Custom(custom) => {
+                AccumState::custom(custom.minit_value.clone().unwrap_or(Value::Null))
+            }
+            _ => AccumState::Hypothetical,
+        }
+    }
+
     pub(crate) fn transition(
         &self,
         state: &mut AccumState,
@@ -1146,35 +1202,79 @@ impl AggregateRuntime {
         match self {
             AggregateRuntime::Builtin { transition, .. } => transition(state, arg_values),
             AggregateRuntime::Hypothetical { .. } | AggregateRuntime::OrderedSet { .. } => Ok(()),
+            AggregateRuntime::Custom(custom) => custom_transition(
+                state,
+                arg_values,
+                ctx,
+                CustomTransitionCall {
+                    proc_oid: custom.transfn_oid,
+                    strict: custom.transfn_strict,
+                    init_from_first_arg: true,
+                    state_type: custom.transtype,
+                    arg_types: &custom.transfn_arg_types,
+                },
+            ),
+        }
+    }
+
+    pub(crate) fn moving_transition(
+        &self,
+        state: &mut AccumState,
+        arg_values: &[Value],
+        ctx: &mut crate::backend::executor::ExecutorContext,
+    ) -> Result<(), ExecError> {
+        match self {
             AggregateRuntime::Custom(custom) => {
-                let mut call_args = Vec::with_capacity(arg_values.len() + 1);
-                let current_state = match state {
-                    AccumState::Custom { value } => value.clone(),
-                    other => {
-                        return Err(ExecError::DetailedError {
-                            message: "custom aggregate state shape mismatch".into(),
-                            detail: Some(format!("{other:?}")),
-                            hint: None,
-                            sqlstate: "XX000",
-                        });
-                    }
-                };
-                call_args.push(current_state);
-                call_args.extend(arg_values.iter().cloned());
-                if custom.transfn_strict
-                    && call_args.iter().any(|value| matches!(value, Value::Null))
-                {
+                let Some(proc_oid) = custom.mtransfn_oid else {
                     return Ok(());
-                }
-                let value = execute_scalar_function_value_call_with_arg_types(
-                    custom.transfn_oid,
-                    &call_args,
-                    Some(&custom.transfn_arg_types),
+                };
+                custom_transition(
+                    state,
+                    arg_values,
                     ctx,
-                )?;
-                *state = AccumState::custom(super::cast_value(value, custom.transtype)?);
-                Ok(())
+                    CustomTransitionCall {
+                        proc_oid,
+                        strict: custom.mtransfn_strict,
+                        init_from_first_arg: true,
+                        state_type: custom.mtranstype,
+                        arg_types: &custom.mtransfn_arg_types,
+                    },
+                )
             }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn moving_inverse(
+        &self,
+        state: &mut AccumState,
+        arg_values: &[Value],
+        ctx: &mut crate::backend::executor::ExecutorContext,
+    ) -> Result<bool, ExecError> {
+        match self {
+            AggregateRuntime::Custom(custom) => {
+                let Some(proc_oid) = custom.minvtransfn_oid else {
+                    return Ok(false);
+                };
+                let value = custom_transition_value(
+                    state,
+                    arg_values,
+                    ctx,
+                    CustomTransitionCall {
+                        proc_oid,
+                        strict: custom.minvtransfn_strict,
+                        init_from_first_arg: false,
+                        state_type: custom.mtranstype,
+                        arg_types: &custom.minvtransfn_arg_types,
+                    },
+                )?;
+                if matches!(value, Value::Null) {
+                    return Ok(false);
+                }
+                *state = AccumState::custom(super::cast_value(value, custom.mtranstype)?);
+                Ok(true)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -1375,6 +1475,107 @@ impl AggregateRuntime {
             }
         }
     }
+
+    pub(crate) fn finalize_moving(
+        &self,
+        state: &AccumState,
+        ctx: &mut crate::backend::executor::ExecutorContext,
+    ) -> Result<Value, ExecError> {
+        match self {
+            AggregateRuntime::Custom(custom) => {
+                let state_value = match state {
+                    AccumState::Custom { value } => value.clone(),
+                    other => {
+                        return Err(ExecError::DetailedError {
+                            message: "custom aggregate state shape mismatch".into(),
+                            detail: Some(format!("{other:?}")),
+                            hint: None,
+                            sqlstate: "XX000",
+                        });
+                    }
+                };
+                if let Some(finalfn_oid) = custom.mfinalfn_oid {
+                    if custom.mfinalfn_strict && matches!(state_value, Value::Null) {
+                        return Ok(Value::Null);
+                    }
+                    execute_scalar_function_value_call_with_arg_types(
+                        finalfn_oid,
+                        &[state_value],
+                        Some(&custom.mfinalfn_arg_types),
+                        ctx,
+                    )
+                } else {
+                    Ok(state_value)
+                }
+            }
+            _ => Ok(state.finalize()),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CustomTransitionCall<'a> {
+    proc_oid: u32,
+    strict: bool,
+    init_from_first_arg: bool,
+    state_type: SqlType,
+    arg_types: &'a [SqlType],
+}
+
+fn custom_transition(
+    state: &mut AccumState,
+    arg_values: &[Value],
+    ctx: &mut crate::backend::executor::ExecutorContext,
+    call: CustomTransitionCall<'_>,
+) -> Result<(), ExecError> {
+    let value = custom_transition_value(state, arg_values, ctx, call)?;
+    *state = AccumState::custom(super::cast_value(value, call.state_type)?);
+    Ok(())
+}
+
+fn custom_transition_value(
+    state: &AccumState,
+    arg_values: &[Value],
+    ctx: &mut crate::backend::executor::ExecutorContext,
+    call: CustomTransitionCall<'_>,
+) -> Result<Value, ExecError> {
+    let current_state = match state {
+        AccumState::Custom { value } => value.clone(),
+        other => {
+            return Err(ExecError::DetailedError {
+                message: "custom aggregate state shape mismatch".into(),
+                detail: Some(format!("{other:?}")),
+                hint: None,
+                sqlstate: "XX000",
+            });
+        }
+    };
+    if call.strict && matches!(current_state, Value::Null) {
+        if arg_values.iter().any(|value| matches!(value, Value::Null)) {
+            return Ok(Value::Null);
+        }
+        if call.init_from_first_arg
+            && let [first] = arg_values
+        {
+            return super::cast_value(first.clone(), call.state_type);
+        }
+        return Ok(Value::Null);
+    }
+    let mut call_args = Vec::with_capacity(arg_values.len() + 1);
+    call_args.push(current_state);
+    call_args.extend(arg_values.iter().cloned());
+    if call.strict && call_args.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(match state {
+            AccumState::Custom { value } => value.clone(),
+            _ => Value::Null,
+        });
+    }
+    execute_scalar_function_value_call_with_arg_types(
+        call.proc_oid,
+        &call_args,
+        Some(call.arg_types),
+        ctx,
+    )
 }
 
 fn finalize_hypothetical_aggregate(
@@ -1967,7 +2168,7 @@ fn accumulate_value(
             }
             Some(NumericAccum::Int(cur)) => NumericAccum::Float(cur as f64 + *v),
             Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v),
-            None => {
+            Some(NumericAccum::Interval(_)) | None => {
                 if matches!(result_type.kind, SqlTypeKind::Numeric) {
                     NumericAccum::Numeric(
                         parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero),
@@ -1993,7 +2194,7 @@ fn accumulate_value(
                         parse_numeric_text(&cur.to_string()).unwrap_or_else(NumericValue::zero);
                     NumericAccum::Numeric(left.add(&parsed))
                 }
-                None => NumericAccum::Numeric(parsed),
+                Some(NumericAccum::Interval(_)) | None => NumericAccum::Numeric(parsed),
             })
         }
         _ => sum,
@@ -2009,6 +2210,7 @@ fn numeric_accum_to_value(sum: Option<&NumericAccum>, result_type: SqlType) -> V
         Some(NumericAccum::Float(value)) => Value::Float64(*value),
         Some(NumericAccum::Numeric(value)) => Value::Numeric(value.clone()),
         Some(NumericAccum::NumericSum(value)) => Value::Numeric(value.to_numeric()),
+        Some(NumericAccum::Interval(value)) => Value::Interval(*value),
         None => Value::Null,
     }
 }
@@ -2036,7 +2238,7 @@ fn accumulate_sum_value(
             }
             Some(NumericAccum::Int(cur)) => NumericAccum::Float(cur as f64 + *v),
             Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v),
-            None => {
+            Some(NumericAccum::Interval(_)) | None => {
                 if matches!(result_type.kind, SqlTypeKind::Numeric) {
                     let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
                     NumericAccum::NumericSum(NumericSumAccum::new(&rhs))
@@ -2066,7 +2268,9 @@ fn accumulate_sum_value(
                 accum.add_numeric(v);
                 NumericAccum::NumericSum(accum)
             }
-            None => NumericAccum::NumericSum(NumericSumAccum::new(v)),
+            Some(NumericAccum::Interval(_)) | None => {
+                NumericAccum::NumericSum(NumericSumAccum::new(v))
+            }
         }),
         _ => sum,
     }
@@ -2184,7 +2388,7 @@ fn accumulate_integral(
         }
         Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + value),
         Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + value as f64),
-        None => {
+        Some(NumericAccum::Interval(_)) | None => {
             if matches!(result_type.kind, SqlTypeKind::Numeric) {
                 NumericAccum::Numeric(NumericValue::from_i64(value))
             } else {

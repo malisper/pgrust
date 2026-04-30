@@ -12,7 +12,8 @@ use crate::backend::parser::{
 };
 use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, PUBLIC_NAMESPACE_OID, PgInheritsRow,
+    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
+    PgInheritsRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{
@@ -2270,6 +2271,19 @@ fn contains_exec_param_for_tests(expr: &Expr) -> bool {
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
             contains_exec_param_for_tests(inner)
         }
+        Expr::ArraySubscript { array, subscripts } => {
+            contains_exec_param_for_tests(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(contains_exec_param_for_tests)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(contains_exec_param_for_tests)
+                })
+        }
         _ => false,
     }
 }
@@ -4417,6 +4431,64 @@ fn unused_lateral_subquery_output_does_not_parameterize_join() {
             }
         )),
         "unused lateral output should be pruned before join planning: {:#?}",
+        planned.plan_tree
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
+fn planner_uses_runtime_index_key_for_array_subscript_join() {
+    fn contains_array_subscript_exec_param(expr: &Expr) -> bool {
+        match expr {
+            Expr::ArraySubscript { .. } => contains_exec_param_for_tests(expr),
+            Expr::Op(op) => op.args.iter().any(contains_array_subscript_exec_param),
+            Expr::Func(func) => func.args.iter().any(contains_array_subscript_exec_param),
+            Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+                contains_array_subscript_exec_param(inner)
+            }
+            _ => false,
+        }
+    }
+
+    let catalog = Catalog::default();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select t0.typname \
+         from pg_proc p \
+         left join pg_catalog.pg_type t0 on t0.oid = p.proargtypes[0] \
+         where p.proname = 'has_database_privilege'",
+        &catalog,
+        PlannerConfig {
+            enable_hashjoin: false,
+            enable_mergejoin: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| match plan {
+            Plan::IndexOnlyScan {
+                relation_oid, keys, ..
+            }
+            | Plan::IndexScan {
+                relation_oid, keys, ..
+            } if *relation_oid == PG_TYPE_RELATION_OID => keys.iter().any(|key| {
+                matches!(
+                    &key.argument,
+                    IndexScanKeyArgument::Runtime(expr)
+                        if contains_array_subscript_exec_param(expr)
+                )
+            }),
+            _ => false,
+        }),
+        "expected pg_type lookup to use runtime array-subscript index key: {:#?}",
+        planned.plan_tree
+    );
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Memoize { .. }
+        )),
+        "expected runtime pg_type lookup to be memoized: {:#?}",
         planned.plan_tree
     );
     validate_planned_stmt_for_tests(&planned);

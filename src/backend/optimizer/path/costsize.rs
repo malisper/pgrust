@@ -5324,7 +5324,9 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             expr_uses_immediate_outer_columns(relid)
         }
-        SetReturningCall::PgLockStatus { .. } => false,
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => false,
         SetReturningCall::TxidSnapshotXip { arg, .. } => expr_uses_immediate_outer_columns(arg),
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
@@ -9337,6 +9339,19 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
         Expr::Func(func) => func.args.iter().all(runtime_index_argument_expr),
         Expr::Op(op) => op.args.iter().all(runtime_index_argument_expr),
         Expr::ArrayLiteral { elements, .. } => elements.iter().all(runtime_index_argument_expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            runtime_index_argument_expr(array)
+                && subscripts.iter().all(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_none_or(runtime_index_argument_expr)
+                        && subscript
+                            .upper
+                            .as_ref()
+                            .is_none_or(runtime_index_argument_expr)
+                })
+        }
         _ => false,
     }
 }
@@ -9356,6 +9371,19 @@ fn expr_contains_runtime_input(expr: &Expr) -> bool {
             expr_contains_runtime_input(&saop.left) || expr_contains_runtime_input(&saop.right)
         }
         Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_runtime_input),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_runtime_input(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_runtime_input)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_runtime_input)
+                })
+        }
         _ => false,
     }
 }

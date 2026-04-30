@@ -744,6 +744,7 @@ pub enum BuiltinScalarFunction {
     ParseIdent,
     QuoteIdent,
     QuoteLiteral,
+    QuoteNullable,
     Replace,
     SplitPart,
     Translate,
@@ -789,8 +790,12 @@ pub enum BuiltinScalarFunction {
     Timezone,
     NextVal,
     CurrVal,
+    LastVal,
     SetVal,
     PgGetSerialSequence,
+    PgSequenceParameters,
+    PgSequenceLastValue,
+    PgGetSequenceData,
     PgGetAcl,
     MakeAclItem,
     TxidCurrent,
@@ -1472,6 +1477,14 @@ pub enum SetReturningCall {
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
+    PgSequences {
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
+    InformationSchemaSequences {
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
     TxidSnapshotXip {
         func_oid: u32,
         func_variadic: bool,
@@ -1536,6 +1549,8 @@ impl SetReturningCall {
             | SetReturningCall::PartitionTree { output_columns, .. }
             | SetReturningCall::PartitionAncestors { output_columns, .. }
             | SetReturningCall::PgLockStatus { output_columns, .. }
+            | SetReturningCall::PgSequences { output_columns, .. }
+            | SetReturningCall::InformationSchemaSequences { output_columns, .. }
             | SetReturningCall::TxidSnapshotXip { output_columns, .. }
             | SetReturningCall::TextSearchTableFunction { output_columns, .. }
             | SetReturningCall::UserDefined { output_columns, .. } => output_columns,
@@ -1596,6 +1611,14 @@ impl SetReturningCall {
                 output_columns: existing,
                 ..
             }
+            | SetReturningCall::PgSequences {
+                output_columns: existing,
+                ..
+            }
+            | SetReturningCall::InformationSchemaSequences {
+                output_columns: existing,
+                ..
+            }
             | SetReturningCall::TxidSnapshotXip {
                 output_columns: existing,
                 ..
@@ -1646,6 +1669,12 @@ impl SetReturningCall {
                 with_ordinality, ..
             }
             | SetReturningCall::PgLockStatus {
+                with_ordinality, ..
+            }
+            | SetReturningCall::PgSequences {
+                with_ordinality, ..
+            }
+            | SetReturningCall::InformationSchemaSequences {
                 with_ordinality, ..
             }
             | SetReturningCall::TxidSnapshotXip {
@@ -1766,6 +1795,20 @@ impl SetReturningCall {
             } => SetReturningCall::PgLockStatus {
                 func_oid,
                 func_variadic,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::PgSequences {
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::PgSequences {
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::InformationSchemaSequences {
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::InformationSchemaSequences {
                 output_columns,
                 with_ordinality,
             },
@@ -2007,6 +2050,20 @@ impl SetReturningCall {
             } => SetReturningCall::PgLockStatus {
                 func_oid,
                 func_variadic,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::PgSequences {
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::PgSequences {
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::InformationSchemaSequences {
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::InformationSchemaSequences {
                 output_columns,
                 with_ordinality,
             },
@@ -3275,7 +3332,9 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
         }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
-        SetReturningCall::PgLockStatus { .. } => Vec::new(),
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => Vec::new(),
         SetReturningCall::TxidSnapshotXip { arg, .. } => vec![arg],
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }

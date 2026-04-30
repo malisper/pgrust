@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundOnConflictClause {
     pub arbiter_indexes: Vec<BoundIndexRelation>,
+    pub arbiter_exclusion_constraints: Vec<BoundExclusionConstraint>,
     pub arbiter_temporal_constraints: Vec<BoundTemporalConstraint>,
     pub action: BoundOnConflictAction,
 }
@@ -31,19 +32,17 @@ pub(super) fn bind_on_conflict_clause(
     catalog: &dyn CatalogLookup,
     local_ctes: &[BoundCte],
 ) -> Result<BoundOnConflictClause, ParseError> {
-    let arbiters = resolve_arbiters(clause, relation_name, relation_oid, desc, catalog)?;
-    let action = match clause.action {
-        OnConflictAction::Nothing => BoundOnConflictAction::Nothing,
+    match clause.action {
+        OnConflictAction::Nothing => {
+            let arbiters = resolve_arbiters(clause, relation_name, relation_oid, desc, catalog)?;
+            Ok(BoundOnConflictClause {
+                arbiter_indexes: arbiters.indexes,
+                arbiter_exclusion_constraints: arbiters.exclusion_constraints,
+                arbiter_temporal_constraints: arbiters.temporal_constraints,
+                action: BoundOnConflictAction::Nothing,
+            })
+        }
         OnConflictAction::Update => {
-            if !arbiters.temporal_constraints.is_empty() {
-                return Err(ParseError::DetailedError {
-                    message: "ON CONFLICT DO UPDATE not supported with exclusion constraints"
-                        .into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "0A000",
-                });
-            }
             if clause.target.is_none() {
                 return Err(ParseError::UnexpectedToken {
                     expected: "ON CONFLICT inference specification or constraint name",
@@ -118,23 +117,36 @@ pub(super) fn bind_on_conflict_clause(
                     ))
                 })
                 .transpose()?;
-            BoundOnConflictAction::Update {
-                assignments,
-                predicate,
-                conflict_visibility_checks: Vec::new(),
-                update_write_checks: Vec::new(),
+            let arbiters = resolve_arbiters(clause, relation_name, relation_oid, desc, catalog)?;
+            if !arbiters.temporal_constraints.is_empty()
+                || !arbiters.exclusion_constraints.is_empty()
+            {
+                return Err(ParseError::DetailedError {
+                    message: "ON CONFLICT DO UPDATE not supported with exclusion constraints"
+                        .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
             }
+            Ok(BoundOnConflictClause {
+                arbiter_indexes: arbiters.indexes,
+                arbiter_exclusion_constraints: arbiters.exclusion_constraints,
+                arbiter_temporal_constraints: arbiters.temporal_constraints,
+                action: BoundOnConflictAction::Update {
+                    assignments,
+                    predicate,
+                    conflict_visibility_checks: Vec::new(),
+                    update_write_checks: Vec::new(),
+                },
+            })
         }
-    };
-    Ok(BoundOnConflictClause {
-        arbiter_indexes: arbiters.indexes,
-        arbiter_temporal_constraints: arbiters.temporal_constraints,
-        action,
-    })
+    }
 }
 
 pub(super) struct BoundOnConflictArbiters {
     pub(super) indexes: Vec<BoundIndexRelation>,
+    pub(super) exclusion_constraints: Vec<BoundExclusionConstraint>,
     pub(super) temporal_constraints: Vec<BoundTemporalConstraint>,
 }
 
@@ -153,6 +165,7 @@ pub(super) fn resolve_arbiters(
                 temporal_constraints_for_relation(relation_oid, desc, catalog)?;
             Ok(BoundOnConflictArbiters {
                 indexes,
+                exclusion_constraints: Vec::new(),
                 temporal_constraints,
             })
         }
@@ -197,6 +210,7 @@ pub(super) fn resolve_arbiters(
             reject_unsupported_arbiter_indexes(&matches)?;
             Ok(BoundOnConflictArbiters {
                 indexes: matches,
+                exclusion_constraints: Vec::new(),
                 temporal_constraints: Vec::new(),
             })
         }
@@ -218,9 +232,19 @@ pub(super) fn resolve_arbiters(
                     actual: "constraint in ON CONFLICT clause has no associated index".into(),
                 });
             }
+            if row.contype == crate::include::catalog::CONSTRAINT_EXCLUSION {
+                return Ok(BoundOnConflictArbiters {
+                    indexes: Vec::new(),
+                    exclusion_constraints: vec![super::constraints::bind_exclusion_constraint(
+                        row, desc, catalog,
+                    )?],
+                    temporal_constraints: Vec::new(),
+                });
+            }
             if row.conperiod {
                 return Ok(BoundOnConflictArbiters {
                     indexes: Vec::new(),
+                    exclusion_constraints: Vec::new(),
                     temporal_constraints: vec![super::constraints::bind_temporal_constraint(
                         row, desc,
                     )?],
@@ -248,6 +272,7 @@ pub(super) fn resolve_arbiters(
             reject_unsupported_arbiter_indexes(std::slice::from_ref(&index))?;
             Ok(BoundOnConflictArbiters {
                 indexes: vec![index],
+                exclusion_constraints: Vec::new(),
                 temporal_constraints: Vec::new(),
             })
         }

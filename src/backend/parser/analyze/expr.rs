@@ -1967,15 +1967,19 @@ fn bind_window_agg_call(
         direct_args: Vec::new(),
         args: coerced_args.clone(),
         aggorder: bound_order_by,
-        aggfilter: bound_filter,
+        aggfilter: bound_filter.clone(),
         agglevelsup: 0,
         aggno: 0,
     });
+    let mut window_args = coerced_args.clone();
+    if let Some(filter) = bound_filter.clone() {
+        window_args.push(filter);
+    }
     Ok(register_window_expr(
         &state,
         spec,
         kind,
-        coerced_args,
+        window_args,
         aggregate_sql_type(func, arg_types.first().copied()),
         false,
     ))
@@ -2078,15 +2082,19 @@ fn bind_resolved_custom_window_agg_call(
         direct_args: Vec::new(),
         args: coerced_args.clone(),
         aggorder: Vec::new(),
-        aggfilter: bound_filter,
+        aggfilter: bound_filter.clone(),
         agglevelsup: 0,
         aggno: 0,
     });
+    let mut window_args = coerced_args.clone();
+    if let Some(filter) = bound_filter.clone() {
+        window_args.push(filter);
+    }
     Ok(register_window_expr(
         &state,
         spec,
         kind,
-        coerced_args,
+        window_args,
         resolved.result_type,
         false,
     ))
@@ -2449,7 +2457,16 @@ fn bind_window_func_call(
         resolution_types[0] = common_type;
         resolution_types[2] = common_type;
     }
-    let resolved = resolve_function_call(catalog, name, &resolution_types, func_variadic)?;
+    let normalized = resolve_function_call_with_arg_defaults(
+        catalog,
+        name,
+        args,
+        &resolution_types,
+        func_variadic,
+    )?;
+    let resolved = normalized.resolved;
+    let call_args = normalized.args;
+    let call_actual_types = normalized.actual_types;
     if resolved.proretset || !matches!(resolved.prokind, 'w' | 'a') {
         return Err(ParseError::DetailedError {
             message: format!(
@@ -2465,17 +2482,12 @@ fn bind_window_func_call(
     })?;
     if let Some(window_impl) = resolved.window_impl {
         let ignore_nulls = window_ignore_nulls_for_builtin(window_impl, null_treatment)?;
-        if args.iter().any(|arg| arg.name.is_some()) {
-            return Err(ParseError::FeatureNotSupported(
-                "named arguments are not supported for window functions".into(),
-            ));
-        }
-        let bound_args = args
+        let bound_args = call_args
             .iter()
             .map(|arg| {
                 with_windows_disallowed(|| {
                     bind_expr_with_outer_and_ctes(
-                        &arg.value,
+                        arg,
                         scope,
                         catalog,
                         outer_scopes,
@@ -2490,7 +2502,7 @@ fn bind_window_func_call(
         }
         let coerced_args = bound_args
             .into_iter()
-            .zip(actual_types.iter().copied())
+            .zip(call_actual_types.iter().copied())
             .zip(resolved.declared_arg_types.iter().copied())
             .map(|((arg, actual_type), declared_type)| {
                 coerce_bound_expr(arg, actual_type, declared_type)

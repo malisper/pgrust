@@ -5521,6 +5521,62 @@ fn ts_rewrite_replaces_tsquery_subtrees() {
 }
 
 #[test]
+fn ts_rewrite_query_text_applies_rewrite_rows() {
+    let db = Database::open_ephemeral(64).unwrap();
+    db.execute(
+        1,
+        "create table test_tsquery(keyword tsquery, sample tsquery)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_tsquery values \
+         ('moscow', 'moskva | moscow'), \
+         ('new <-> york', 'big <-> apple | nyc')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_rewrite('moscow & hotel', 'select keyword, sample from test_tsquery')::text"
+        ),
+        vec![vec![Value::Text(
+            "'hotel' & ( 'moskva' | 'moscow' )".into()
+        )]]
+    );
+}
+
+#[test]
+fn gist_tsquery_index_scan_rechecks_lossy_matches() {
+    let db = Database::open_ephemeral(64).unwrap();
+    db.execute(1, "create table test_tsquery(keyword tsquery)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into test_tsquery values \
+         ('new <-> york'), ('moscow'), ('foo & bar & qq')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index qq on test_tsquery using gist (keyword tsquery_ops)",
+    )
+    .unwrap();
+    db.execute(1, "set enable_seqscan to off").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select keyword::text from test_tsquery where keyword @> 'new' order by keyword::text"
+        ),
+        vec![vec![Value::Text("'new' <-> 'york'".into())]]
+    );
+}
+
+#[test]
 fn ts_headline_handles_empty_and_basic_queries() {
     let db = Database::open_ephemeral(64).unwrap();
 
@@ -22801,7 +22857,7 @@ fn alter_table_add_column_serial_backfills_existing_rows_and_keeps_sequence_adva
     );
     assert_eq!(
         query_rows(&db, 1, "select pg_get_serial_sequence('items', 'id')"),
-        vec![vec![Value::Text("items_id_seq".into())]]
+        vec![vec![Value::Text("public.items_id_seq".into())]]
     );
 
     db.execute(1, "insert into items values ('manual', 10)")
@@ -32759,7 +32815,7 @@ fn create_table_serial_creates_sequence_defaults_and_persists_state() {
         .unwrap();
     assert_eq!(
         query_rows(&db, 1, "select pg_get_serial_sequence('items', 'id')"),
-        vec![vec![Value::Text("items_id_seq".into())]]
+        vec![vec![Value::Text("public.items_id_seq".into())]]
     );
 
     db.execute(1, "insert into items (note) values ('a'), ('b')")
@@ -32784,7 +32840,7 @@ fn create_table_serial_creates_sequence_defaults_and_persists_state() {
             1,
             "select last_value, log_cnt, is_called from items_id_seq"
         ),
-        vec![vec![Value::Int64(3), Value::Int64(0), Value::Bool(true)]]
+        vec![vec![Value::Int64(3), Value::Int64(32), Value::Bool(true)]]
     );
 
     drop(db);
@@ -32795,7 +32851,7 @@ fn create_table_serial_creates_sequence_defaults_and_persists_state() {
             1,
             "select last_value, log_cnt, is_called from items_id_seq",
         ),
-        vec![vec![Value::Int64(3), Value::Int64(0), Value::Bool(true)]]
+        vec![vec![Value::Int64(3), Value::Int64(32), Value::Bool(true)]]
     );
 }
 
@@ -32839,7 +32895,7 @@ fn create_table_serial_is_visible_inside_same_transaction_before_commit() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Int64(2), Value::Int64(0), Value::Bool(true)]]
+                vec![vec![Value::Int64(2), Value::Int64(32), Value::Bool(true)]]
             );
         }
         other => panic!("expected query, got {:?}", other),
@@ -32879,7 +32935,7 @@ fn create_table_serial_is_visible_inside_same_transaction_before_commit() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Int64(2), Value::Int64(0), Value::Bool(true)]]
+                vec![vec![Value::Int64(2), Value::Int64(32), Value::Bool(true)]]
             );
         }
         other => panic!("expected query, got {:?}", other),
@@ -51073,19 +51129,19 @@ fn pg_get_viewdef_renders_window_functions_and_function_rtes() {
 
     assert!(sql.contains("generate_series(1, 10) i(i)"), "{sql}");
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)"),
+        sql.contains("sum(i) OVER (ORDER BY i ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)"),
         "{sql}"
     );
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)"),
+        sql.contains("sum(i) OVER (ORDER BY i ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)"),
         "{sql}"
     );
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE TIES)"),
+        sql.contains("sum(i) OVER (ORDER BY i ROWS UNBOUNDED PRECEDING EXCLUDE TIES)"),
         "{sql}"
     );
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING)"),
+        sql.contains("sum(i) OVER (ORDER BY i ROWS UNBOUNDED PRECEDING)"),
         "{sql}"
     );
     assert!(!sql.contains("WindowFunc"), "{sql}");
@@ -51147,7 +51203,7 @@ fn create_or_replace_temp_window_view_keeps_rewrite_rule() {
     let Value::Text(sql) = &def[0][0] else {
         panic!("expected text view definition, got {def:?}");
     };
-    assert!(sql.contains("min(i.i) OVER (ORDER BY i.i RANGE BETWEEN"));
+    assert!(sql.contains("min(i) OVER (ORDER BY i RANGE BETWEEN"));
     assert!(sql.contains("generate_series(now(),"));
     assert!(!sql.contains("missing rewrite rule"));
 }

@@ -39,10 +39,15 @@ pub(crate) fn tsquery_phrase(left: TsQuery, right: TsQuery, distance: u16) -> Ts
 }
 
 pub(crate) fn tsquery_rewrite(query: TsQuery, target: TsQuery, substitute: TsQuery) -> TsQuery {
-    let substitute = (!tsquery_node_is_empty(&substitute.root)).then_some(substitute.root);
+    let substitute = (!tsquery_node_is_empty(&substitute.root))
+        .then(|| canonicalize_rewrite_substitute_node(substitute.root));
     rewrite_tsquery_node(query.root, &target.root, substitute.as_ref())
         .unwrap_or_else(empty_tsquery_node)
         .into()
+}
+
+pub(crate) fn canonicalize_tsquery_rewrite_result(query: TsQuery) -> TsQuery {
+    canonicalize_rewrite_result_node(query.root).into()
 }
 
 pub(crate) fn tsquery_contains(left: &TsQuery, right: &TsQuery) -> bool {
@@ -190,6 +195,124 @@ fn rebuild_bool_node(op: BoolOp, nodes: Vec<TsQueryNode>) -> Option<TsQueryNode>
         };
     }
     Some(root)
+}
+
+fn canonicalize_rewrite_substitute_node(node: TsQueryNode) -> TsQueryNode {
+    match node {
+        TsQueryNode::And(_, _) => {
+            let mut children = Vec::new();
+            flatten_bool_node(node, BoolOp::And, &mut children);
+            children = children
+                .into_iter()
+                .map(canonicalize_rewrite_substitute_node)
+                .collect();
+            if !(children.len() == 2 && children.iter().all(matches_operand_node)) {
+                children.sort_by(rewrite_and_order);
+            }
+            rebuild_bool_node(BoolOp::And, children).unwrap_or_else(empty_tsquery_node)
+        }
+        TsQueryNode::Or(_, _) => {
+            let mut children = Vec::new();
+            flatten_bool_node(node, BoolOp::Or, &mut children);
+            children = children
+                .into_iter()
+                .map(canonicalize_rewrite_substitute_node)
+                .collect();
+            if children.iter().any(|child| !matches_operand_node(child)) {
+                children.reverse();
+            }
+            rebuild_bool_node(BoolOp::Or, children).unwrap_or_else(empty_tsquery_node)
+        }
+        TsQueryNode::Not(inner) => {
+            TsQueryNode::Not(Box::new(canonicalize_rewrite_substitute_node(*inner)))
+        }
+        TsQueryNode::Phrase {
+            left,
+            right,
+            distance,
+        } => TsQueryNode::Phrase {
+            left: Box::new(canonicalize_rewrite_substitute_node(*left)),
+            right: Box::new(canonicalize_rewrite_substitute_node(*right)),
+            distance,
+        },
+        TsQueryNode::Operand(_) => node,
+    }
+}
+
+fn canonicalize_rewrite_result_node(node: TsQueryNode) -> TsQueryNode {
+    match node {
+        TsQueryNode::And(_, _) => {
+            let mut children = Vec::new();
+            flatten_bool_node(node, BoolOp::And, &mut children);
+            children = children
+                .into_iter()
+                .map(canonicalize_rewrite_result_node)
+                .collect();
+            children.sort_by(rewrite_and_order);
+            rebuild_bool_node(BoolOp::And, children).unwrap_or_else(empty_tsquery_node)
+        }
+        TsQueryNode::Or(_, _) => {
+            let mut children = Vec::new();
+            flatten_bool_node(node, BoolOp::Or, &mut children);
+            children = children
+                .into_iter()
+                .map(canonicalize_rewrite_result_node)
+                .collect();
+            rebuild_bool_node(BoolOp::Or, children).unwrap_or_else(empty_tsquery_node)
+        }
+        TsQueryNode::Not(inner) => {
+            TsQueryNode::Not(Box::new(canonicalize_rewrite_result_node(*inner)))
+        }
+        TsQueryNode::Phrase {
+            left,
+            right,
+            distance,
+        } => TsQueryNode::Phrase {
+            left: Box::new(canonicalize_rewrite_result_node(*left)),
+            right: Box::new(canonicalize_rewrite_result_node(*right)),
+            distance,
+        },
+        TsQueryNode::Operand(_) => node,
+    }
+}
+
+fn rewrite_and_order(left: &TsQueryNode, right: &TsQueryNode) -> Ordering {
+    rewrite_node_class(left)
+        .cmp(&rewrite_node_class(right))
+        .then_with(|| rewrite_node_key(left).cmp(&rewrite_node_key(right)))
+}
+
+fn rewrite_node_class(node: &TsQueryNode) -> u8 {
+    match node {
+        TsQueryNode::Operand(_) => 0,
+        TsQueryNode::Or(_, _) => 1,
+        TsQueryNode::Phrase { .. } => 2,
+        TsQueryNode::And(_, _) => 3,
+        TsQueryNode::Not(_) => 4,
+    }
+}
+
+fn matches_operand_node(node: &TsQueryNode) -> bool {
+    matches!(node, TsQueryNode::Operand(_))
+}
+
+fn rewrite_node_key(node: &TsQueryNode) -> Vec<String> {
+    let mut values = Vec::new();
+    collect_rewrite_node_key(node, &mut values);
+    values
+}
+
+fn collect_rewrite_node_key(node: &TsQueryNode, out: &mut Vec<String>) {
+    match node {
+        TsQueryNode::Operand(operand) => out.push(operand.lexeme.to_string()),
+        TsQueryNode::Not(inner) => collect_rewrite_node_key(inner, out),
+        TsQueryNode::And(left, right)
+        | TsQueryNode::Or(left, right)
+        | TsQueryNode::Phrase { left, right, .. } => {
+            collect_rewrite_node_key(left, out);
+            collect_rewrite_node_key(right, out);
+        }
+    }
 }
 
 pub(crate) fn tsquery_contained_by(left: &TsQuery, right: &TsQuery) -> bool {

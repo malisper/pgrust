@@ -762,7 +762,7 @@ impl Database {
         let visible_type_rows = self
             .lazy_catalog_lookup(client_id, Some((xid, next_cid)), None)
             .type_rows();
-        let effect = self
+        let (dropped_entries, effect) = self
             .catalog
             .write()
             .drop_relation_by_oid_mvcc_with_extra_type_rows(
@@ -770,8 +770,7 @@ impl Database {
                 &ctx,
                 &visible_type_rows,
             )
-            .map_err(map_catalog_error)?
-            .1;
+            .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         temp_effects.push(TempMutationEffect::Drop {
@@ -779,6 +778,36 @@ impl Database {
             entry: removed.entry.clone(),
             on_commit: removed.on_commit,
         });
+        let mut cascaded_temp_drops = Vec::new();
+        {
+            let mut namespaces = self.temp_relations.write();
+            if let Some(namespace) = namespaces.get_mut(&temp_backend_id) {
+                for dropped_entry in &dropped_entries {
+                    if dropped_entry.relation_oid == removed.entry.relation_oid {
+                        continue;
+                    }
+                    let Some(name) = namespace.tables.iter().find_map(|(name, temp_entry)| {
+                        (temp_entry.entry.relation_oid == dropped_entry.relation_oid)
+                            .then(|| name.clone())
+                    }) else {
+                        continue;
+                    };
+                    if let Some(temp_entry) = namespace.tables.remove(&name) {
+                        cascaded_temp_drops.push((name, temp_entry));
+                    }
+                }
+                if !cascaded_temp_drops.is_empty() {
+                    namespace.generation = namespace.generation.saturating_add(1);
+                }
+            }
+        }
+        temp_effects.extend(cascaded_temp_drops.into_iter().map(|(name, temp_entry)| {
+            TempMutationEffect::Drop {
+                name,
+                entry: temp_entry.entry,
+                on_commit: temp_entry.on_commit,
+            }
+        }));
         self.invalidate_backend_cache_state(client_id);
         Ok(removed.entry)
     }

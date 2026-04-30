@@ -396,7 +396,10 @@ fn parse_drop_and_comment_on_subscription() {
 fn parse_set_session_authorization_string_literal() {
     assert!(matches!(
         parse_statement("set session authorization 'tenant'").unwrap(),
-        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement { role_name })
+        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
+            role_name,
+            is_local: false,
+        })
             if role_name == "tenant"
     ));
 }
@@ -3392,6 +3395,16 @@ fn parse_create_index_with_method_and_ordering() {
 }
 
 #[test]
+fn parse_create_index_desc_leaves_nulls_default_unspecified() {
+    let stmt = parse_statement("create index fooindex on foo (f1 desc)").unwrap();
+    let Statement::CreateIndex(stmt) = stmt else {
+        panic!("expected create index statement");
+    };
+    assert_eq!(stmt.columns[0].descending, true);
+    assert_eq!(stmt.columns[0].nulls_first, None);
+}
+
+#[test]
 fn parse_create_index_with_if_not_exists_and_opclass() {
     let stmt = parse_statement(
         "create index if not exists onek_unique1 on onek using btree(unique1 int4_ops)",
@@ -5557,6 +5570,7 @@ fn parse_set_session_authorization_statement() {
         stmt,
         Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
             role_name: "regress_tenant".into(),
+            is_local: false,
         })
     );
 }
@@ -6615,6 +6629,7 @@ fn parse_create_function_statement_with_returns_table() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
             link_symbol: None,
@@ -6660,6 +6675,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
             link_symbol: None,
@@ -7024,6 +7040,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
             link_symbol: None,
@@ -7069,6 +7086,7 @@ fn parse_create_function_statement_with_variadic_arg() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "sql".into(),
             body: " select $1[1] ".into(),
             link_symbol: None,
@@ -7137,6 +7155,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             security_definer: false,
             volatility: FunctionVolatility::Stable,
             parallel: FunctionParallel::Safe,
+            window: false,
             language: "c".into(),
             body: "regress".into(),
             link_symbol: Some("binary_coercible".into()),
@@ -7205,6 +7224,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             security_definer: false,
             volatility: FunctionVolatility::Immutable,
             parallel: FunctionParallel::Safe,
+            window: false,
             language: "sql".into(),
             body: "select substr(encode(sha256($1), 'hex'), 1, 32)".into(),
             link_symbol: None,
@@ -7271,6 +7291,7 @@ fn parse_create_function_statement_with_cost_clause() {
             security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
+            window: false,
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
             link_symbol: None,
@@ -7303,6 +7324,26 @@ fn parse_create_function_statement_with_support_clause() {
 }
 
 #[test]
+fn parse_create_function_statement_with_window_clause() {
+    let stmt = parse_statement(
+        "create function nth_value_def(val anyelement, n integer = 1) returns anyelement language internal window immutable strict as 'window_nth_value'",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            function_name,
+            window: true,
+            language,
+            body,
+            ..
+        }) if function_name == "nth_value_def"
+            && language == "internal"
+            && body == "window_nth_value"
+    ));
+}
+
+#[test]
 fn parse_drop_function_statement_with_signature() {
     let stmt = parse_statement("drop function public.p2text(p2)").unwrap();
     assert_eq!(
@@ -7313,6 +7354,7 @@ fn parse_drop_function_statement_with_signature() {
             function_name: "p2text".into(),
             arg_list_specified: true,
             arg_types: vec!["p2".into()],
+            additional_functions: Vec::new(),
             cascade: false,
         })
     );
@@ -7329,7 +7371,29 @@ fn parse_drop_function_statement_without_signature() {
             function_name: "p2text".into(),
             arg_list_specified: false,
             arg_types: vec![],
+            additional_functions: Vec::new(),
             cascade: true,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_function_statement_with_multiple_names() {
+    let stmt = parse_statement("drop function f1, public.f2(int4) restrict").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropFunction(DropFunctionStatement {
+            if_exists: false,
+            schema_name: None,
+            function_name: "f1".into(),
+            arg_list_specified: false,
+            arg_types: vec![],
+            additional_functions: vec![DropRoutineItem {
+                schema_name: Some("public".into()),
+                routine_name: "f2".into(),
+                arg_types: vec!["int4".into()],
+            }],
+            cascade: false,
         })
     );
 }
@@ -12209,7 +12273,7 @@ fn bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let catalog = catalog_with_people_partial_unique_index();
-            let stmt = match parse_statement("delete from people where id = 1").unwrap() {
+            let stmt = match parse_statement("delete from people where id = 0").unwrap() {
                 Statement::Delete(stmt) => stmt,
                 other => panic!("expected delete statement, got {other:?}"),
             };
@@ -12418,7 +12482,7 @@ fn bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weak
             let weaker_stmt = people_insert_with_on_conflict(
                 Some(inference_target_with_predicate(
                     &["id"],
-                    parse_expr("id > 1").unwrap(),
+                    parse_expr("id >= 0").unwrap(),
                 )),
                 OnConflictAction::Nothing,
                 vec![],
@@ -17763,6 +17827,45 @@ fn analyze_json_each_uses_pg_proc_out_metadata_for_output_columns() {
             ("payload".into(), SqlType::new(SqlTypeKind::Json)),
         ]
     );
+}
+
+#[test]
+fn analyze_alias_for_scalar_record_out_function_exposes_out_columns() {
+    let stmt = parse_select(
+        "select b.type, b.object_names, b.object_args \
+         from pg_identify_object_as_address(1::oid, 2::oid, 0) as b",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("type".into(), SqlType::new(SqlTypeKind::Text)),
+            (
+                "object_names".into(),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            ),
+            (
+                "object_args".into(),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            ),
+        ]
+    );
+}
+
+#[test]
+fn analyze_lateral_scalar_record_out_function_can_feed_next_lateral_item() {
+    let stmt = parse_select(
+        "select b.type, b.object_names, b.object_args \
+         from pg_event_trigger as e, \
+         lateral pg_identify_object_as_address('pg_event_trigger'::regclass, e.oid, 0) as b, \
+         lateral pg_get_object_address(b.type, b.object_names, b.object_args) as a",
+    )
+    .unwrap();
+
+    analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
 }
 
 #[test]

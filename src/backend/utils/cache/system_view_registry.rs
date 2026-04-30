@@ -13,6 +13,7 @@ pub enum SyntheticSystemViewKind {
     PgIndexes,
     PgPolicies,
     PgPublicationTables,
+    PgSequences,
     PgRules,
     PgStats,
     PgStatsExt,
@@ -38,6 +39,7 @@ pub enum SyntheticSystemViewKind {
     PgLocks,
     InformationSchemaTables,
     InformationSchemaViews,
+    InformationSchemaSequences,
     InformationSchemaColumns,
     InformationSchemaColumnColumnUsage,
     InformationSchemaColumnDomainUsage,
@@ -135,6 +137,7 @@ const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
 const PG_POLICIES_ALIASES: &[&str] = &["pg_policies", "pg_catalog.pg_policies"];
 const PG_PUBLICATION_TABLES_ALIASES: &[&str] =
     &["pg_publication_tables", "pg_catalog.pg_publication_tables"];
+const PG_SEQUENCES_ALIASES: &[&str] = &["pg_sequences", "pg_catalog.pg_sequences"];
 const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
 const PG_STATS_ALIASES: &[&str] = &["pg_stats", "pg_catalog.pg_stats"];
 const PG_STATS_EXT_ALIASES: &[&str] = &["pg_stats_ext", "pg_catalog.pg_stats_ext"];
@@ -175,6 +178,7 @@ const PG_STAT_PROGRESS_COPY_ALIASES: &[&str] =
 const PG_LOCKS_ALIASES: &[&str] = &["pg_locks", "pg_catalog.pg_locks"];
 const INFORMATION_SCHEMA_TABLES_ALIASES: &[&str] = &["information_schema.tables"];
 const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
+const INFORMATION_SCHEMA_SEQUENCES_ALIASES: &[&str] = &["information_schema.sequences"];
 const INFORMATION_SCHEMA_COLUMNS_ALIASES: &[&str] = &["information_schema.columns"];
 const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES: &[&str] =
     &["information_schema.column_column_usage"];
@@ -1015,7 +1019,36 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 52] = [
+const PG_SEQUENCES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("schemaname"),
+    SyntheticSystemViewColumn::text("sequencename"),
+    SyntheticSystemViewColumn::text("sequenceowner"),
+    SyntheticSystemViewColumn::text("data_type"),
+    SyntheticSystemViewColumn::new("start_value", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("min_value", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("max_value", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("increment_by", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("cycle", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("cache_size", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("last_value", SqlType::new(SqlTypeKind::Int8)),
+];
+
+const INFORMATION_SCHEMA_SEQUENCES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("sequence_catalog"),
+    SyntheticSystemViewColumn::text("sequence_schema"),
+    SyntheticSystemViewColumn::text("sequence_name"),
+    SyntheticSystemViewColumn::text("data_type"),
+    SyntheticSystemViewColumn::new("numeric_precision", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_precision_radix", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_scale", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("start_value"),
+    SyntheticSystemViewColumn::text("minimum_value"),
+    SyntheticSystemViewColumn::text("maximum_value"),
+    SyntheticSystemViewColumn::text("increment"),
+    SyntheticSystemViewColumn::text("cycle_option"),
+];
+
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 54] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -1085,6 +1118,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 52] = [
         aliases: PG_PUBLICATION_TABLES_ALIASES,
         columns: PG_PUBLICATION_TABLES_COLUMNS,
         view_definition_sql: PG_PUBLICATION_TABLES_DEFINITION_SQL,
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgSequences,
+        canonical_name: "pg_catalog.pg_sequences",
+        aliases: PG_SEQUENCES_ALIASES,
+        columns: PG_SEQUENCES_COLUMNS,
+        view_definition_sql: "",
     },
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgRules,
@@ -1259,6 +1299,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 52] = [
         canonical_name: "information_schema.views",
         aliases: INFORMATION_SCHEMA_VIEWS_ALIASES,
         columns: INFORMATION_SCHEMA_VIEWS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaSequences,
+        canonical_name: "information_schema.sequences",
+        aliases: INFORMATION_SCHEMA_SEQUENCES_ALIASES,
+        columns: INFORMATION_SCHEMA_SEQUENCES_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

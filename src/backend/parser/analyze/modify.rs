@@ -22,6 +22,7 @@ use crate::include::nodes::primnodes::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundInsertStatement {
     pub relation_name: String,
+    pub target_alias: Option<String>,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub relkind: char,
@@ -982,6 +983,39 @@ fn scope_with_returning_pseudo_rows(scope: BoundScope, desc: &RelationDesc) -> B
         returning_pseudo_output_exprs(desc, OUTER_VAR),
         returning_pseudo_output_exprs(desc, INNER_VAR),
     )
+}
+
+fn scope_with_hidden_invalid_relation(
+    mut scope: BoundScope,
+    relation_name: &str,
+    desc: &RelationDesc,
+) -> BoundScope {
+    scope.desc.columns.extend(desc.columns.iter().cloned());
+    scope.output_exprs.extend(std::iter::repeat_n(
+        Expr::Const(Value::Null),
+        desc.columns.len(),
+    ));
+    scope
+        .columns
+        .extend(desc.columns.iter().map(|column| ScopeColumn {
+            output_name: column.name.clone(),
+            hidden: true,
+            qualified_only: true,
+            relation_names: Vec::new(),
+            hidden_invalid_relation_names: vec![relation_name.to_string()],
+            hidden_missing_relation_names: Vec::new(),
+            source_relation_oid: None,
+            source_attno: None,
+            source_columns: Vec::new(),
+        }));
+    scope.relations.push(ScopeRelation {
+        relation_names: Vec::new(),
+        hidden_invalid_relation_names: vec![relation_name.to_string()],
+        hidden_missing_relation_names: Vec::new(),
+        system_varno: None,
+        relation_oid: None,
+    });
+    scope
 }
 
 fn scope_with_returning_pseudo_row_exprs(
@@ -2777,14 +2811,14 @@ fn scope_for_pseudo_relation(relation_name: &str, desc: &RelationDesc, varno: us
 fn bind_auto_view_on_conflict_clause(
     clause: &crate::include::nodes::parsenodes::OnConflictClause,
     view_relation_name: &str,
-    base_relation_name: &str,
+    _base_relation_name: &str,
     view_desc: &RelationDesc,
     resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundOnConflictClause, ViewDmlRewriteError> {
     let arbiters = super::on_conflict::resolve_arbiters(
         clause,
-        base_relation_name,
+        view_relation_name,
         resolved.base_relation.relation_oid,
         &resolved.base_relation.desc,
         catalog,
@@ -2795,7 +2829,9 @@ fn bind_auto_view_on_conflict_clause(
             BoundOnConflictAction::Nothing
         }
         crate::include::nodes::parsenodes::OnConflictAction::Update => {
-            if !arbiters.temporal_constraints.is_empty() {
+            if !arbiters.temporal_constraints.is_empty()
+                || !arbiters.exclusion_constraints.is_empty()
+            {
                 return Err(ViewDmlRewriteError::UnsupportedViewShape(
                     ParseError::DetailedError {
                         message: "ON CONFLICT DO UPDATE not supported with exclusion constraints"
@@ -2935,6 +2971,7 @@ fn bind_auto_view_on_conflict_clause(
     };
     Ok(BoundOnConflictClause {
         arbiter_indexes: arbiters.indexes,
+        arbiter_exclusion_constraints: arbiters.exclusion_constraints,
         arbiter_temporal_constraints: arbiters.temporal_constraints,
         action,
     })
@@ -3001,7 +3038,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
     let on_conflict = match stmt.raw_on_conflict.as_ref() {
         Some(clause) => Some(bind_auto_view_on_conflict_clause(
             clause,
-            &stmt.relation_name,
+            stmt.target_alias.as_deref().unwrap_or(&stmt.relation_name),
             &relation_name,
             &stmt.desc,
             &resolved,
@@ -3020,6 +3057,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
 
     Ok(BoundInsertStatement {
         relation_name: relation_name.clone(),
+        target_alias: stmt.target_alias.clone(),
         rel: resolved.base_relation.rel,
         relation_oid: resolved.base_relation.relation_oid,
         relkind: resolved.base_relation.relkind,
@@ -3904,11 +3942,6 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
     let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
-    if entry.relkind == 'p' && stmt.on_conflict.is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "INSERT ... ON CONFLICT on partitioned tables".into(),
-        ));
-    }
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &visible_ctes)?;
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
@@ -3927,7 +3960,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         catalog,
     )?;
     let expr_scope = empty_scope();
-    let returning_scope = scope_with_returning_pseudo_rows(target_scope.clone(), &entry.desc);
+    let mut returning_scope = scope_with_returning_pseudo_rows(target_scope.clone(), &entry.desc);
+    if stmt.on_conflict.is_some() {
+        returning_scope =
+            scope_with_hidden_invalid_relation(returning_scope, "excluded", &entry.desc);
+    }
     let returning = bind_returning_targets(
         &stmt.returning,
         &returning_scope,
@@ -4181,6 +4218,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
 
     Ok(BoundInsertStatement {
         relation_name: stmt.table_name.clone(),
+        target_alias: stmt.table_alias.clone(),
         rel: entry.rel,
         relation_oid: entry.relation_oid,
         relkind: entry.relkind,
