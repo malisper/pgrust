@@ -3031,9 +3031,22 @@ fn render_index_scan_key(
 }
 
 fn expression_index_key_needs_parens(expr: &str) -> bool {
-    [" || ", " + ", " - ", " * ", " / ", " % ", " = "]
-        .iter()
-        .any(|operator| expr.contains(operator))
+    let mut depth = 0usize;
+    for (idx, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0
+            && [" || ", " + ", " - ", " * ", " / ", " % ", " = "]
+                .iter()
+                .any(|operator| expr[idx..].starts_with(operator))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn render_index_display_expr(expr: &Expr, column_names: &[String]) -> String {

@@ -1,5 +1,5 @@
 use super::exec_expr::{
-    eval_native_builtin_scalar_value_call, eval_string_to_table_rows, normalize_array_value,
+    eval_native_builtin_scalar_typed_value_call, eval_string_to_table_rows, normalize_array_value,
 };
 use super::expr_date::add_interval_to_local_timestamp;
 use super::expr_json::{
@@ -27,8 +27,8 @@ use crate::backend::utils::time::datetime::{
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::include::catalog::{
     BOOL_TYPE_OID, DEPENDENCY_INTERNAL, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID,
-    PG_CLASS_RELATION_OID, REGTYPE_TYPE_OID, TEXT_TYPE_OID, VOID_TYPE_OID,
-    builtin_scalar_function_for_proc_oid, builtin_scalar_function_for_proc_row,
+    PG_CLASS_RELATION_OID, REGTYPE_TYPE_OID, SYSTEM_CATALOG_FOREIGN_KEYS, TEXT_TYPE_OID,
+    VOID_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_scalar_function_for_proc_row,
 };
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
@@ -565,9 +565,17 @@ fn execute_native_set_returning_function(
         "pg_event_trigger_ddl_commands" => Some(eval_pg_event_trigger_ddl_commands()),
         "pg_event_trigger_dropped_objects" => Some(eval_pg_event_trigger_dropped_objects()),
         "pg_stats_ext_mcvlist_items" => Some(eval_pg_mcv_list_items(&values)?),
+        "pg_get_catalog_foreign_keys" => Some(eval_pg_get_catalog_foreign_keys()),
         _ => {
             if let Some(func) = builtin_scalar_function_for_proc_row(row) {
-                let value = eval_native_builtin_scalar_value_call(func, &values, false, ctx)?;
+                let arg_types = args.iter().map(expr_sql_type_hint).collect::<Vec<_>>();
+                let value = eval_native_builtin_scalar_typed_value_call(
+                    func,
+                    &values,
+                    Some(&arg_types),
+                    false,
+                    ctx,
+                )?;
                 Some(match value {
                     Value::Record(record) => vec![TupleSlot::virtual_row(record.fields)],
                     other => vec![TupleSlot::virtual_row(vec![other])],
@@ -578,6 +586,36 @@ fn execute_native_set_returning_function(
         }
     };
     Ok(rows)
+}
+
+fn eval_pg_get_catalog_foreign_keys() -> Vec<TupleSlot> {
+    SYSTEM_CATALOG_FOREIGN_KEYS
+        .iter()
+        .map(|row| {
+            let fk_columns = row
+                .fk_columns
+                .iter()
+                .map(|column| Value::Text((*column).into()))
+                .collect();
+            let pk_columns = row
+                .pk_columns
+                .iter()
+                .map(|column| Value::Text((*column).into()))
+                .collect();
+            TupleSlot::virtual_row(vec![
+                Value::Int32(row.fk_table_oid as i32),
+                Value::PgArray(
+                    ArrayValue::from_1d(fk_columns).with_element_type_oid(TEXT_TYPE_OID),
+                ),
+                Value::Int32(row.pk_table_oid as i32),
+                Value::PgArray(
+                    ArrayValue::from_1d(pk_columns).with_element_type_oid(TEXT_TYPE_OID),
+                ),
+                Value::Bool(row.is_array),
+                Value::Bool(row.is_opt),
+            ])
+        })
+        .collect()
 }
 
 fn eval_pg_stat_get_backend_io(values: &[Value], ctx: &ExecutorContext) -> Vec<TupleSlot> {

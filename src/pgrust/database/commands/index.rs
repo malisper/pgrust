@@ -1935,6 +1935,7 @@ impl Database {
             .and_then(|meta| meta.indpred.as_deref())
             .is_some_and(|predicate| !predicate.trim().is_empty());
         if has_expression_keys
+            && access_method_oid != BTREE_AM_OID
             && access_method_oid != GIST_AM_OID
             && access_method_oid != SPGIST_AM_OID
         {

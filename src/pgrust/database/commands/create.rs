@@ -5193,7 +5193,10 @@ impl Database {
                 sqlstate: "42501",
             });
         }
-        if language_row.oid == PG_LANGUAGE_SQL_OID && check_function_bodies_enabled(gucs) {
+        if proc_kind != 'p'
+            && language_row.oid == PG_LANGUAGE_SQL_OID
+            && check_function_bodies_enabled(gucs)
+        {
             let validation_result = validate_sql_function_body_on_create(
                 create_stmt,
                 &catalog,

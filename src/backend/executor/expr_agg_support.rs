@@ -1,8 +1,8 @@
 use super::agg::{AccumState, AggregateRuntime, CustomAggregateRuntime};
 use super::exec_expr::append_array_value;
 use super::exec_expr::{
-    eval_pg_describe_object, eval_pg_get_object_address, eval_pg_identify_object,
-    eval_pg_identify_object_as_address,
+    ensure_builtin_side_effects_allowed, eval_pg_describe_object, eval_pg_get_object_address,
+    eval_pg_identify_object, eval_pg_identify_object_as_address,
 };
 use super::expr_casts::cast_value;
 use super::expr_math::eval_abs_function;
@@ -12,7 +12,7 @@ use super::sqlfunc::{
     execute_user_defined_sql_scalar_function_values,
     execute_user_defined_sql_scalar_function_values_with_arg_type_oids,
 };
-use super::{ExecError, ExecutorContext};
+use super::{ExecError, ExecutorContext, TypedFunctionArg};
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BPCHAR_HASH_OPCLASS_OID, INT8_TYPE_OID, PG_LANGUAGE_SQL_OID,
@@ -280,6 +280,15 @@ pub(crate) fn execute_scalar_function_value_call_with_arg_types(
             }
             _ => {}
         }
+        if matches!(
+            func,
+            BuiltinScalarFunction::PgRestoreRelationStats
+                | BuiltinScalarFunction::PgClearRelationStats
+                | BuiltinScalarFunction::PgRestoreAttributeStats
+                | BuiltinScalarFunction::PgClearAttributeStats
+        ) {
+            return execute_stats_import_value_call(func, arg_values, arg_types, ctx);
+        }
         return execute_builtin_scalar_function_value_call(func, arg_values);
     }
 
@@ -330,6 +339,59 @@ pub(crate) fn execute_scalar_function_value_call_with_arg_types(
             ),
             None => execute_user_defined_scalar_function_values(proc_oid, arg_values, ctx),
         },
+    }
+}
+
+fn execute_stats_import_value_call(
+    func: BuiltinScalarFunction,
+    arg_values: &[Value],
+    arg_types: Option<&[SqlType]>,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    ensure_builtin_side_effects_allowed(func, ctx)?;
+    let runtime = ctx
+        .stats_import_runtime
+        .clone()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("{func:?} requires database executor context"),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let typed_args = arg_values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| TypedFunctionArg {
+            value: value.clone(),
+            sql_type: arg_types.and_then(|types| types.get(idx)).copied(),
+        })
+        .collect::<Vec<_>>();
+    match func {
+        BuiltinScalarFunction::PgRestoreRelationStats => {
+            runtime.pg_restore_relation_stats(ctx, typed_args)
+        }
+        BuiltinScalarFunction::PgClearRelationStats => {
+            let [schemaname, relname] = arg_values else {
+                return malformed_aggregate_support_call("pg_clear_relation_stats");
+            };
+            runtime.pg_clear_relation_stats(ctx, schemaname.clone(), relname.clone())
+        }
+        BuiltinScalarFunction::PgRestoreAttributeStats => {
+            runtime.pg_restore_attribute_stats(ctx, typed_args)
+        }
+        BuiltinScalarFunction::PgClearAttributeStats => {
+            let [schemaname, relname, attname, inherited] = arg_values else {
+                return malformed_aggregate_support_call("pg_clear_attribute_stats");
+            };
+            runtime.pg_clear_attribute_stats(
+                ctx,
+                schemaname.clone(),
+                relname.clone(),
+                attname.clone(),
+                inherited.clone(),
+            )
+        }
+        _ => unreachable!(),
     }
 }
 

@@ -1815,6 +1815,39 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             )
         },
         PgProcRow {
+            procost: 10.0,
+            prorows: 250.0,
+            proallargtypes: Some(vec![
+                REGCLASS_TYPE_OID,
+                TEXT_ARRAY_TYPE_OID,
+                REGCLASS_TYPE_OID,
+                TEXT_ARRAY_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+            ]),
+            proargmodes: Some(vec![b'o'; 6]),
+            proargnames: Some(vec![
+                "fktable".into(),
+                "fkcols".into(),
+                "pktable".into(),
+                "pkcols".into(),
+                "is_array".into(),
+                "is_opt".into(),
+            ]),
+            ..proc_row(
+                6159,
+                "pg_get_catalog_foreign_keys",
+                RECORD_TYPE_OID,
+                "",
+                "pg_get_catalog_foreign_keys",
+                0,
+                true,
+                false,
+                'f',
+                's',
+            )
+        },
+        PgProcRow {
             prorows: 100.0,
             proallargtypes: Some(vec![
                 OID_TYPE_OID,

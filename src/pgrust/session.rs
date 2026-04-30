@@ -3282,14 +3282,27 @@ impl Session {
         xid: TransactionId,
         cid: CommandId,
     ) -> Result<StatementResult, ExecError> {
-        // :HACK: PL/pgSQL DO currently binds static SQL before its body can
-        // refresh the transaction catalog snapshot. Use the committed catalog
-        // view so anonymous blocks can see relations created by earlier
-        // regression statements in the same session.
+        // :HACK: PL/pgSQL DO still binds static SQL before its body can refresh
+        // catalog state. Install the current transaction snapshot for compile
+        // so anonymous blocks see same-transaction DDL from earlier statements.
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
-        let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
-        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+        let snapshot = self.snapshot_for_command(db, xid, cid)?;
+        if snapshot.current_xid != INVALID_TRANSACTION_ID {
+            crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+                db,
+                self.client_id,
+                snapshot.current_xid,
+                snapshot.clone(),
+            );
+        }
+        let clear_compile_snapshot_override = self
+            .active_txn
+            .as_ref()
+            .is_none_or(|txn| !txn.isolation_level.uses_transaction_snapshot());
+        let txn_ctx =
+            (snapshot.current_xid != INVALID_TRANSACTION_ID).then_some((snapshot.current_xid, cid));
+        let catalog = db.lazy_catalog_lookup(self.client_id, txn_ctx, search_path.as_deref());
         let deferred_foreign_keys = self
             .active_txn
             .as_ref()
@@ -3308,6 +3321,12 @@ impl Session {
         // PL executor can stream DML more efficiently.
         let _statement_timeout_guard = ctx.interrupts.statement_interrupt_guard(None);
         let result = execute_do_with_context(do_stmt, &catalog, &mut ctx);
+        if clear_compile_snapshot_override {
+            crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
+                db,
+                self.client_id,
+            );
+        }
         if let Some(xid) = ctx.transaction_xid() {
             self.note_context_xid(xid);
         }
@@ -16909,7 +16928,7 @@ impl Session {
                         ));
                     }
 
-                    let _copy_progress = options.progress.map(|progress| {
+                    let copy_progress_guard = options.progress.map(|progress| {
                         crate::backend::utils::cache::system_views::install_copy_progress(
                             crate::backend::utils::cache::system_views::CopyProgressSnapshot {
                                 pid: self.client_id as i32,
@@ -16929,6 +16948,12 @@ impl Session {
                             },
                         )
                     });
+                    if copy_progress_guard.is_some() {
+                        // :HACK: pg_stat_progress_copy is currently materialized while planning
+                        // PL/pgSQL trigger queries. Recompile cached trigger plans so progress
+                        // reads see the current COPY snapshot until the view is runtime-backed.
+                        self.plpgsql_function_cache.write().clear();
+                    }
                     let copy_error_context = |row_index: usize, err: &ExecError| {
                         copy_row_error_context(
                             table_name,
