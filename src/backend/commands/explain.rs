@@ -2500,7 +2500,7 @@ fn verbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String
             if matches!(
                 input.as_ref(),
                 Plan::Result { .. } | Plan::Append { .. } | Plan::MergeAppend { .. }
-            ) =>
+            ) || plan_is_limit_result(input) =>
         {
             Some("Result".into())
         }
@@ -3246,7 +3246,17 @@ fn projection_targets_are_verbose_scan_projection(
     };
     ctx.scan_output_override.is_some()
         || targets.len() > scan.column_names().len()
-        || !projection_targets_are_explain_passthrough(input, targets)
+        || !projection_targets_are_identity_for_input(input, targets)
+}
+
+fn projection_targets_are_identity_for_input(input: &Plan, targets: &[TargetEntry]) -> bool {
+    let input_names = input.column_names();
+    targets.len() == input_names.len()
+        && targets.iter().enumerate().all(|(index, target)| {
+            !target.resjunk
+                && target.input_resno == Some(index + 1)
+                && target.name == input_names[index]
+        })
 }
 
 fn render_verbose_scan_projection_target(
@@ -3295,7 +3305,7 @@ fn verbose_scan_projection_output_names(input: &Plan) -> Vec<String> {
             relation_name,
             desc,
             ..
-        } => qualified_scan_output_exprs(relation_name, desc),
+        } => qualified_base_scan_output_exprs(relation_name, desc),
         Plan::FunctionScan {
             call, table_alias, ..
         } => verbose_function_scan_output_exprs(call, table_alias.as_deref()),
@@ -4203,15 +4213,16 @@ fn explain_plan_children_with_context(
             );
             lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
         }
-        Plan::Append { desc, .. } | Plan::MergeAppend { desc, .. } => {
+        Plan::Append { desc, children, .. } | Plan::MergeAppend { desc, children, .. } => {
             let mut values_seen = 0usize;
             let mut functions_seen = BTreeMap::<String, usize>::new();
             let mut relations_seen = BTreeMap::<String, usize>::new();
             let child_indent = indent + 1;
-            let children = direct_plan_children(plan);
-            let inherited_parent_qualifier = append_parent_qualifier(&children);
+            let direct_children = direct_plan_children(plan);
+            let inherited_parent_qualifier = append_parent_qualifier(&direct_children);
             let reserve_append_parent_alias = !ctx.preserve_partition_child_aliases;
-            for (append_index, child) in children.into_iter().enumerate() {
+            let raw_setop_constants = append_children_are_constant_results(children);
+            for (append_index, child) in direct_children.into_iter().enumerate() {
                 let mut child_ctx = context_for_sibling_scan(
                     ctx,
                     child,
@@ -4230,6 +4241,11 @@ fn explain_plan_children_with_context(
                         child_ctx.scan_output_override =
                             Some(append_child_output_exprs(desc, &alias));
                     }
+                }
+                if raw_setop_constants {
+                    // :HACK: PostgreSQL prints raw constant expressions for
+                    // set-op child Result nodes after parent output coercion.
+                    child_ctx.setop_raw_numeric_outputs = true;
                 }
                 format_explain_plan_with_subplans_inner(
                     child,
@@ -5118,6 +5134,13 @@ fn verbose_display_output_exprs(
         {
             vec![format!("({qualifier}.*).{field}")]
         }
+        Plan::Projection { input, .. }
+            if !for_parent_ref
+                && plan_is_limit_result(input)
+                && let Some((qualifier, field)) = &ctx.whole_row_field_output =>
+        {
+            vec![format!("({qualifier}.*).{field}")]
+        }
         Plan::Projection { input, targets, .. }
             if !for_parent_ref
                 && matches!(
@@ -5158,6 +5181,10 @@ fn plan_is_constant_result(plan: &Plan) -> bool {
         Plan::Projection { input, .. } => plan_is_constant_result(input),
         _ => false,
     }
+}
+
+fn plan_is_limit_result(plan: &Plan) -> bool {
+    matches!(plan, Plan::Limit { input, .. } if matches!(input.as_ref(), Plan::Result { .. }))
 }
 
 fn append_first_child_output(input: &Plan, ctx: &VerboseExplainContext) -> Option<Vec<String>> {
@@ -6678,6 +6705,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
             Vec::new()
         }
+        Plan::Projection { input, .. } if plan_is_limit_result(input) => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
