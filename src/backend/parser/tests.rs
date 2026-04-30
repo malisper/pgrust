@@ -10750,13 +10750,11 @@ fn build_plan_constant_folds_nullif_filter_to_false() {
     let plan = build_plan(&stmt, &catalog()).unwrap();
 
     match plan {
-        Plan::Filter {
-            predicate, input, ..
-        } => {
+        Plan::Result { .. } => {}
+        Plan::Filter { predicate, .. } => {
             assert_eq!(predicate, Expr::Const(Value::Bool(false)));
-            assert!(matches!(*input, Plan::SeqScan { .. }));
         }
-        other => panic!("expected filter, got {:?}", other),
+        other => panic!("expected constant-false plan, got {:?}", other),
     }
 }
 

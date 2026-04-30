@@ -2026,11 +2026,8 @@ fn push_nonverbose_plan_details(
                 }));
             let right_names = plan_join_output_exprs(right, &right_ctx, true);
             if !join_qual.is_empty() {
-                let rendered = join_qual
-                    .iter()
-                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let rendered =
+                    render_verbose_join_expr_list(join_qual, &left_names, &right_names, ctx);
                 lines.push(format!("{prefix}Join Filter: {rendered}"));
             }
             if !qual.is_empty() {
@@ -2093,11 +2090,8 @@ fn push_nonverbose_plan_details(
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
-                let rendered = join_qual
-                    .iter()
-                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let rendered =
+                    render_verbose_join_expr_list(join_qual, &left_names, &right_names, ctx);
                 lines.push(format!("{prefix}Join Filter: {rendered}"));
             }
             if !qual.is_empty() {
@@ -2149,11 +2143,8 @@ fn push_nonverbose_plan_details(
                 lines.push(format!("{prefix}Merge Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
-                let rendered = join_qual
-                    .iter()
-                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let rendered =
+                    render_verbose_join_expr_list(join_qual, &left_names, &right_names, ctx);
                 lines.push(format!("{prefix}Join Filter: {rendered}"));
             }
             if !qual.is_empty() {
@@ -3705,11 +3696,7 @@ fn push_verbose_join_qual_details(
     lines: &mut Vec<String>,
 ) {
     if !join_qual.is_empty() {
-        let rendered = join_qual
-            .iter()
-            .map(|expr| render_verbose_join_expr(expr, left_names, right_names, ctx))
-            .collect::<Vec<_>>()
-            .join(" AND ");
+        let rendered = render_verbose_join_expr_list(join_qual, left_names, right_names, ctx);
         lines.push(format!("{prefix}Join Filter: {rendered}"));
     }
     if !qual.is_empty() {
@@ -4492,11 +4479,8 @@ fn push_verbose_plan_details(
                 }));
             let right_names = plan_join_output_exprs(right, &right_ctx, true);
             if !join_qual.is_empty() {
-                let rendered = join_qual
-                    .iter()
-                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let rendered =
+                    render_verbose_join_expr_list(join_qual, &left_names, &right_names, ctx);
                 lines.push(format!("{prefix}Join Filter: {rendered}"));
             }
             if !qual.is_empty() {
@@ -4534,11 +4518,8 @@ fn push_verbose_plan_details(
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
-                let rendered = join_qual
-                    .iter()
-                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let rendered =
+                    render_verbose_join_expr_list(join_qual, &left_names, &right_names, ctx);
                 lines.push(format!("{prefix}Join Filter: {rendered}"));
             }
             if !qual.is_empty() {
@@ -4584,11 +4565,8 @@ fn push_verbose_plan_details(
                 lines.push(format!("{prefix}Merge Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
-                let rendered = join_qual
-                    .iter()
-                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let rendered =
+                    render_verbose_join_expr_list(join_qual, &left_names, &right_names, ctx);
                 lines.push(format!("{prefix}Join Filter: {rendered}"));
             }
             if !qual.is_empty() {
@@ -6694,11 +6672,11 @@ fn render_verbose_join_expr(
             render_verbose_join_expr(right, left_names, right_names, ctx)
         ),
         Expr::IsNull(inner) => format!(
-            "{} IS NULL",
+            "({} IS NULL)",
             render_verbose_join_expr(inner, left_names, right_names, ctx)
         ),
         Expr::IsNotNull(inner) => format!(
-            "{} IS NOT NULL",
+            "({} IS NOT NULL)",
             render_verbose_join_expr(inner, left_names, right_names, ctx)
         ),
         Expr::Func(func)
@@ -6766,6 +6744,24 @@ fn field_select_projected_value<'a>(inner: &'a Expr, field: &str) -> Option<&'a 
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(field))
         .map(|(_, value)| value)
+}
+
+fn render_verbose_join_expr_list(
+    exprs: &[Expr],
+    left_names: &[String],
+    right_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = exprs
+        .iter()
+        .map(|expr| render_verbose_join_expr(expr, left_names, right_names, ctx))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    if exprs.len() > 1 {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
 }
 
 fn render_verbose_expr(

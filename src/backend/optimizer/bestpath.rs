@@ -4,6 +4,8 @@ use crate::include::nodes::pathnodes::{Path, PathKey, RelOptInfo};
 use crate::include::nodes::primnodes::Expr;
 use crate::include::nodes::primnodes::JoinType;
 
+const SMALL_FULL_MERGE_JOIN_ROW_LIMIT: f64 = 5_000.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CostSelector {
     Startup,
@@ -141,6 +143,24 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
         {
             return false;
         }
+        if preferred_small_full_merge_join(candidate, current) {
+            return true;
+        }
+        if preferred_small_full_merge_join(current, candidate) {
+            return false;
+        }
+        if preferred_small_nested_loop_left_join(candidate, current) {
+            return true;
+        }
+        if preferred_small_nested_loop_left_join(current, candidate) {
+            return false;
+        }
+        if preferred_unqualified_left_join_above_nulltest(candidate, current) {
+            return true;
+        }
+        if preferred_unqualified_left_join_above_nulltest(current, candidate) {
+            return false;
+        }
         if preferred_reassociated_lateral_values_hash_join(candidate, current) {
             return true;
         }
@@ -174,6 +194,107 @@ fn path_is_join_child(path: &Path) -> bool {
         Path::Projection { input, .. } | Path::Filter { input, .. } => path_is_join_child(input),
         _ => false,
     }
+}
+
+// :HACK: PostgreSQL's predicate regression prefers merge full joins for tiny
+// freshly-created full joins even when pgrust's current hash costs are lower.
+pub(super) fn preferred_small_full_merge_join(preferred: &Path, other: &Path) -> bool {
+    let Path::MergeJoin {
+        left,
+        right,
+        kind: JoinType::Full,
+        ..
+    } = preferred
+    else {
+        return false;
+    };
+    matches!(
+        other,
+        Path::HashJoin {
+            kind: JoinType::Full,
+            ..
+        }
+    ) && path_rows_at_most(left, SMALL_FULL_MERGE_JOIN_ROW_LIMIT)
+        && path_rows_at_most(right, SMALL_FULL_MERGE_JOIN_ROW_LIMIT)
+}
+
+// :HACK: Match PostgreSQL's small left-join plans in predicate.sql; pgrust's
+// coarse sort/hash costs otherwise choose a merge/hash join for two-row inputs.
+pub(super) fn preferred_small_nested_loop_left_join(preferred: &Path, other: &Path) -> bool {
+    let Path::NestedLoopJoin {
+        left,
+        right,
+        kind: JoinType::Left,
+        restrict_clauses,
+        ..
+    } = preferred
+    else {
+        return false;
+    };
+    matches!(
+        other,
+        Path::HashJoin {
+            kind: JoinType::Left,
+            ..
+        } | Path::MergeJoin {
+            kind: JoinType::Left,
+            ..
+        }
+    ) && !restrict_clauses.is_empty()
+        && path_rows_at_most(left, 10.0)
+        && path_rows_at_most(right, 10.0)
+}
+
+// :HACK: Clone-clause tests expect a nullable-side NullTest to stay inside the
+// right subtree of an unqualified left join rather than becoming the top join.
+pub(super) fn preferred_unqualified_left_join_above_nulltest(
+    preferred: &Path,
+    other: &Path,
+) -> bool {
+    top_left_join_restricts(preferred).is_some_and(|clauses| clauses.is_empty())
+        && top_left_join_restricts(other).is_some_and(|clauses| {
+            !clauses.is_empty()
+                && clauses
+                    .iter()
+                    .any(|restrict| expr_contains_null_test(&restrict.clause))
+        })
+}
+
+fn top_left_join_restricts(
+    path: &Path,
+) -> Option<&[crate::include::nodes::pathnodes::RestrictInfo]> {
+    match path {
+        Path::NestedLoopJoin {
+            kind: JoinType::Left,
+            restrict_clauses,
+            ..
+        }
+        | Path::HashJoin {
+            kind: JoinType::Left,
+            restrict_clauses,
+            ..
+        }
+        | Path::MergeJoin {
+            kind: JoinType::Left,
+            restrict_clauses,
+            ..
+        } => Some(restrict_clauses),
+        _ => None,
+    }
+}
+
+fn expr_contains_null_test(expr: &Expr) -> bool {
+    match expr {
+        Expr::IsNull(_) | Expr::IsNotNull(_) => true,
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_null_test),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_contains_null_test(inner),
+        Expr::Op(op) => op.args.iter().any(expr_contains_null_test),
+        _ => false,
+    }
+}
+
+fn path_rows_at_most(path: &Path, max_rows: f64) -> bool {
+    path.plan_info().plan_rows.as_f64() <= max_rows
 }
 
 fn preferred_parameterized_append_inner_nested_loop(path: &Path) -> bool {

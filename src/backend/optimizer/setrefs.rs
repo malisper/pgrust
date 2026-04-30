@@ -9,10 +9,13 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     Query, QueryRowMark, RangeTblEntryKind, TableSampleClause,
 };
-use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
+use crate::include::nodes::pathnodes::{
+    Path, PathTarget, PlannerInfo, PlannerSubroot, RestrictInfo,
+};
 use crate::include::nodes::plannodes::{
     ExecParamSource, IndexScanKey, IndexScanKeyArgument, PartitionPruneChildDomain,
     PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark,
@@ -6007,6 +6010,14 @@ fn set_nested_loop_join_references(
         }
     }
     ctx.ext_params = retained_ext_params;
+    if matches!(kind, JoinType::Left) && expr_list_contains_const_false(&join_qual) {
+        let plan_info = right_plan.plan_info();
+        right_plan = Plan::Filter {
+            plan_info,
+            input: Box::new(right_plan),
+            predicate: Expr::Const(Value::Bool(false)),
+        };
+    }
     right_plan =
         maybe_wrap_nested_loop_inner_plan(ctx.root, kind, right_plan, &nest_params, left_rows);
     Plan::NestedLoopJoin {
@@ -6033,9 +6044,20 @@ fn maybe_wrap_nested_loop_inner_plan(
             kind,
             crate::include::nodes::primnodes::JoinType::Inner
                 | crate::include::nodes::primnodes::JoinType::Cross
+                | crate::include::nodes::primnodes::JoinType::Left
         )
         && nest_params.is_empty()
         && plan_is_plain_seq_scan(&right_plan)
+    {
+        return Plan::Materialize {
+            plan_info: right_plan.plan_info(),
+            input: Box::new(right_plan),
+        };
+    }
+    if enable_material
+        && matches!(kind, crate::include::nodes::primnodes::JoinType::Left)
+        && nest_params.is_empty()
+        && matches!(right_plan, Plan::NestedLoopJoin { .. })
     {
         return Plan::Materialize {
             plan_info: right_plan.plan_info(),
@@ -6420,12 +6442,33 @@ fn memoize_uses_binary_mode(plan: &Plan) -> bool {
 fn plan_is_plain_seq_scan(plan: &Plan) -> bool {
     match plan {
         Plan::SeqScan { .. } => true,
+        Plan::Filter {
+            predicate: Expr::Const(Value::Bool(false)),
+            ..
+        } => false,
         Plan::Filter { input, .. } | Plan::Projection { input, .. } => {
             plan_is_plain_seq_scan(input)
         }
         _ => false,
     }
 }
+
+fn expr_list_contains_const_false(exprs: &[Expr]) -> bool {
+    exprs.iter().any(expr_is_const_false)
+}
+
+fn expr_is_const_false(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(Value::Bool(false)) => true,
+        Expr::Bool(bool_expr)
+            if bool_expr.boolop == crate::include::nodes::primnodes::BoolExprType::And =>
+        {
+            bool_expr.args.iter().any(expr_is_const_false)
+        }
+        _ => false,
+    }
+}
+
 fn set_hash_join_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -7268,6 +7311,7 @@ fn set_project_set_references(
 }
 
 fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
+    let path = reassociate_clone_left_join_path(path);
     match path {
         Path::Result { plan_info, .. } => Plan::Result { plan_info },
         Path::Append {
@@ -7717,6 +7761,132 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             targets,
             ..
         } => set_project_set_references(ctx, plan_info, input, targets),
+    }
+}
+
+fn reassociate_clone_left_join_path(path: Path) -> Path {
+    let Path::NestedLoopJoin {
+        plan_info,
+        pathtarget,
+        output_columns,
+        left,
+        right,
+        kind: JoinType::Left,
+        restrict_clauses,
+    } = path
+    else {
+        return path;
+    };
+    if !restrict_clauses_contain_null_test(&restrict_clauses) {
+        return Path::NestedLoopJoin {
+            plan_info,
+            pathtarget,
+            output_columns,
+            left,
+            right,
+            kind: JoinType::Left,
+            restrict_clauses,
+        };
+    }
+
+    let left_path = *left;
+    let (
+        left_plan_info,
+        left_pathtarget,
+        left_output_columns,
+        grand_left,
+        middle,
+        left_restrict_clauses,
+    ) = match left_path {
+        Path::NestedLoopJoin {
+            plan_info,
+            pathtarget,
+            output_columns,
+            left,
+            right,
+            kind: JoinType::Left,
+            restrict_clauses,
+        } => (
+            plan_info,
+            pathtarget,
+            output_columns,
+            left,
+            right,
+            restrict_clauses,
+        ),
+        other_left => {
+            return Path::NestedLoopJoin {
+                plan_info,
+                pathtarget,
+                output_columns,
+                left: Box::new(other_left),
+                right,
+                kind: JoinType::Left,
+                restrict_clauses,
+            };
+        }
+    };
+    if !left_restrict_clauses.is_empty() {
+        return Path::NestedLoopJoin {
+            plan_info,
+            pathtarget,
+            output_columns,
+            left: Box::new(Path::NestedLoopJoin {
+                plan_info: left_plan_info,
+                pathtarget: left_pathtarget,
+                output_columns: left_output_columns,
+                left: grand_left,
+                right: middle,
+                kind: JoinType::Left,
+                restrict_clauses: left_restrict_clauses,
+            }),
+            right,
+            kind: JoinType::Left,
+            restrict_clauses,
+        };
+    }
+
+    // :HACK: PostgreSQL's clone-clause predicate plans keep nullable-side
+    // NullTests inside the right subtree of an unqualified left join. Rebuild
+    // that equivalent association before setrefs so OUTER/INNER vars lower
+    // against the same child tlists PostgreSQL displays.
+    let mut inner_output_columns = middle.columns();
+    inner_output_columns.extend(right.columns());
+    let mut inner_exprs = middle.semantic_output_target().exprs;
+    inner_exprs.extend(right.semantic_output_target().exprs);
+    let inner = Path::NestedLoopJoin {
+        plan_info,
+        pathtarget: PathTarget::new(inner_exprs),
+        output_columns: inner_output_columns,
+        left: middle,
+        right,
+        kind: JoinType::Left,
+        restrict_clauses,
+    };
+    Path::NestedLoopJoin {
+        plan_info,
+        pathtarget,
+        output_columns,
+        left: grand_left,
+        right: Box::new(inner),
+        kind: JoinType::Left,
+        restrict_clauses: left_restrict_clauses,
+    }
+}
+
+fn restrict_clauses_contain_null_test(restrict_clauses: &[RestrictInfo]) -> bool {
+    restrict_clauses
+        .iter()
+        .any(|restrict| expr_contains_null_test(&restrict.clause))
+}
+
+fn expr_contains_null_test(expr: &Expr) -> bool {
+    match expr {
+        Expr::IsNull(_) | Expr::IsNotNull(_) => true,
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_null_test),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_contains_null_test(inner),
+        Expr::Op(op) => op.args.iter().any(expr_contains_null_test),
+        _ => false,
     }
 }
 
