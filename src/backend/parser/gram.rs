@@ -1301,10 +1301,11 @@ fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<State
     }
     let query = match parse_statement_with_options_inner(query_sql.clone(), options)? {
         Statement::Select(select) => PreparedStatementQuery::Select(select),
+        Statement::Insert(insert) => PreparedStatementQuery::Insert(insert),
         Statement::Update(update) => PreparedStatementQuery::Update(update),
         other => {
             return Err(ParseError::UnexpectedToken {
-                expected: "SELECT or UPDATE",
+                expected: "SELECT, INSERT, or UPDATE",
                 actual: format!("{other:?}"),
             });
         }
@@ -17245,10 +17246,11 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
                     ParseOptions::default(),
                 ) {
                     Ok(Statement::Select(select)) => Some(PreparedStatementQuery::Select(select)),
+                    Ok(Statement::Insert(insert)) => Some(PreparedStatementQuery::Insert(insert)),
                     Ok(Statement::Update(update)) => Some(PreparedStatementQuery::Update(update)),
                     Ok(statement) => {
                         return Err(ParseError::UnexpectedToken {
-                            expected: "prepared SELECT or UPDATE statement",
+                            expected: "prepared SELECT, INSERT, or UPDATE statement",
                             actual: format!("{statement:?}"),
                         });
                     }

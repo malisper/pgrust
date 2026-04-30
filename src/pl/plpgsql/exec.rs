@@ -25,7 +25,8 @@ use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint}
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
     Catalog, CatalogLookup, ParseError, PreparedExternalParam, SqlType, SqlTypeKind, Statement,
-    TriggerLevel, TriggerTiming, bind_scalar_expr_in_named_slot_scope, parse_statement,
+    TriggerLevel, TriggerTiming, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_statement,
     pg_plan_query_with_outer_scopes_and_ctes_config,
     pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
     with_external_param_types,
@@ -59,9 +60,9 @@ use super::compile::{
     CompiledAssignIndirection, CompiledBlock, CompiledCursorOpenSource, CompiledExceptionHandler,
     CompiledExpr, CompiledForQuerySource, CompiledForQueryTarget, CompiledFunction,
     CompiledIndirectAssignTarget, CompiledSelectIntoTarget, CompiledStmt, CompiledStrictParam,
-    DeclaredCursorParam, FunctionReturnContract, QueryCompareOp, TriggerReturnedRow,
-    compile_event_trigger_function_from_proc, compile_function_from_proc,
-    compile_trigger_function_from_proc,
+    DeclaredCursorParam, FunctionReturnContract, QueryCompareOp, RuntimeSqlScope,
+    TriggerReturnedRow, compile_event_trigger_function_from_proc, compile_function_from_proc,
+    compile_trigger_function_from_proc, runtime_sql_bound_scope,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,7 +310,7 @@ fn with_context_frame<T>(
             function_name: compiled_context_name(compiled),
             line,
             action,
-        })
+        });
     });
     let result = f();
     CONTEXT_STACK.with(|stack| {
@@ -1875,6 +1876,7 @@ fn exec_do_stmt(
             "SET is only supported inside CREATE FUNCTION".into(),
         ))),
         CompiledStmt::Return { .. }
+        | CompiledStmt::ReturnRuntimeQuery { .. }
         | CompiledStmt::ReturnSelect { .. }
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
@@ -1898,6 +1900,8 @@ fn exec_do_stmt(
         | CompiledStmt::ExecUpdate { .. }
         | CompiledStmt::ExecDeleteInto { .. }
         | CompiledStmt::ExecDelete { .. }
+        | CompiledStmt::RuntimeSql { .. }
+        | CompiledStmt::RuntimeSelectInto { .. }
         | CompiledStmt::CreateTableAs { .. }
         | CompiledStmt::CreateTable { .. }
         | CompiledStmt::ExecSql { .. } => Err(ExecError::Parse(ParseError::FeatureNotSupported(
@@ -2414,6 +2418,14 @@ fn exec_function_stmt(
         CompiledStmt::Return { expr, .. } => {
             exec_function_return(expr.as_ref(), compiled, expected_record_shape, state, ctx)
         }
+        CompiledStmt::ReturnRuntimeQuery { sql, scope, .. } => exec_function_return_runtime_query(
+            sql,
+            scope,
+            compiled,
+            expected_record_shape,
+            state,
+            ctx,
+        ),
         CompiledStmt::ReturnSelect { plan, sql, .. } => {
             exec_function_return_select(plan, sql, compiled, expected_record_shape, state, ctx)
         }
@@ -2473,7 +2485,7 @@ fn exec_function_stmt(
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::ExecSql { sql } => {
-            let result = execute_dynamic_sql_statement(sql, false, compiled, state, ctx)?;
+            let result = execute_dynamic_sql_statement(sql, false, None, compiled, state, ctx)?;
             state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
             Ok(FunctionControl::Continue)
         }
@@ -2556,6 +2568,29 @@ fn exec_function_stmt(
         }
         CompiledStmt::ExecDelete { stmt } => {
             exec_function_delete(stmt, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::RuntimeSql { sql, scope } => {
+            exec_function_runtime_sql(sql, scope, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::RuntimeSelectInto {
+            sql,
+            scope,
+            targets,
+            strict,
+            strict_params,
+        } => {
+            exec_function_runtime_select_into(
+                sql,
+                scope,
+                targets,
+                *strict,
+                strict_params,
+                compiled,
+                state,
+                ctx,
+            )?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::CreateTableAs { stmt } => {
@@ -2744,7 +2779,7 @@ fn exec_function_return_select(
     };
     let result = if compiled.provolatile == 'v' {
         statement_result_to_query_result(
-            execute_dynamic_sql_statement(sql, true, compiled, state, ctx)?,
+            execute_dynamic_sql_statement(sql, true, None, compiled, state, ctx)?,
             "RETURN query did not produce rows",
         )
     } else {
@@ -2915,6 +2950,105 @@ fn exec_function_select_into(
         state,
         ctx,
     )
+}
+
+fn exec_function_runtime_select_into(
+    sql: &str,
+    scope: &RuntimeSqlScope,
+    targets: &[CompiledSelectIntoTarget],
+    strict: bool,
+    strict_params: &[CompiledStrictParam],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let result = execute_dynamic_sql_statement(sql, true, Some(scope), compiled, state, ctx)?;
+    let StatementResult::Query { columns, rows, .. } = result else {
+        return Err(select_into_no_tuples_error());
+    };
+    let strict_detail =
+        strict_param_detail_if_enabled(strict_params, compiled, state, ctx).map(|detail| detail);
+    assign_query_rows_into_targets(
+        &rows,
+        &columns,
+        targets,
+        strict,
+        strict_detail.as_deref(),
+        false,
+        true,
+        compiled,
+        state,
+        ctx,
+    )
+}
+
+fn exec_function_runtime_sql(
+    sql: &str,
+    scope: &RuntimeSqlScope,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let result = execute_dynamic_sql_statement(sql, false, Some(scope), compiled, state, ctx)?;
+    state.values[compiled.found_slot] = match result {
+        StatementResult::Query { rows, .. } => Value::Bool(!rows.is_empty()),
+        StatementResult::AffectedRows(rows) => Value::Bool(rows != 0),
+    };
+    Ok(())
+}
+
+fn exec_function_return_runtime_query(
+    sql: &str,
+    scope: &RuntimeSqlScope,
+    compiled: &CompiledFunction,
+    expected_record_shape: Option<&[QueryColumn]>,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionControl, ExecError> {
+    let result = execute_dynamic_sql_statement(sql, true, Some(scope), compiled, state, ctx)?;
+    let StatementResult::Query { columns, rows, .. } = result else {
+        return Err(function_runtime_error(
+            "RETURN query did not produce rows",
+            None,
+            "XX000",
+        ));
+    };
+    match &compiled.return_contract {
+        FunctionReturnContract::Scalar {
+            ty, setof: false, ..
+        } => {
+            let value = rows
+                .first()
+                .and_then(|row| row.first())
+                .cloned()
+                .unwrap_or(Value::Null);
+            let source_type = columns.first().map(|column| column.sql_type);
+            state.scalar_return = Some(
+                cast_function_value(value, source_type, *ty, ctx)
+                    .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?,
+            );
+            Ok(FunctionControl::Return)
+        }
+        FunctionReturnContract::FixedRow { setof: false, .. } => {
+            state.rows.clear();
+            let row = rows.first().cloned().unwrap_or_default();
+            state.rows.push(coerce_function_result_row(
+                row,
+                &compiled.return_contract,
+                expected_record_shape,
+                ctx,
+            )?);
+            Ok(FunctionControl::Return)
+        }
+        FunctionReturnContract::AnonymousRecord { setof: false } => {
+            state.rows.clear();
+            state.rows.push(TupleSlot::virtual_row(
+                rows.first().cloned().unwrap_or_default(),
+            ));
+            Ok(FunctionControl::Return)
+        }
+        _ => exec_function_return(None, compiled, expected_record_shape, state, ctx),
+    }
 }
 
 fn function_query_row_values(rows: &[FunctionQueryRow]) -> Vec<Vec<Value>> {
@@ -3177,6 +3311,11 @@ fn execute_for_query_source(
     match source {
         CompiledForQuerySource::Static { plan } => {
             execute_function_query_result(plan, compiled, state, ctx)
+        }
+        CompiledForQuerySource::Runtime { sql, scope } => {
+            let result =
+                execute_dynamic_sql_statement(sql, true, Some(scope), compiled, state, ctx)?;
+            statement_result_to_query_result(result, "FOR query did not produce rows")
         }
         CompiledForQuerySource::NoTuples { sql } => Err(with_sql_statement_context(
             select_into_no_tuples_error(),
@@ -3499,6 +3638,15 @@ fn exec_function_create_table_as(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    exec_dynamic_create_table_as(stmt, ctx)?;
+    state.values[compiled.found_slot] = Value::Bool(false);
+    Ok(())
+}
+
+fn exec_dynamic_create_table_as(
+    stmt: &crate::backend::parser::CreateTableAsStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
     let db = ctx.database.clone().ok_or_else(|| {
         function_runtime_error(
             "PL/pgSQL CREATE TABLE AS requires database execution context",
@@ -3525,8 +3673,8 @@ fn exec_function_create_table_as(
         .saturating_sub(effect_start)
         .max(1);
     advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
-    state.values[compiled.found_slot] = Value::Bool(false);
-    Ok(())
+    refresh_plpgsql_executor_catalog(&db, xid, ctx);
+    Ok(StatementResult::AffectedRows(0))
 }
 
 fn exec_dynamic_create_table(
@@ -3565,6 +3713,44 @@ fn exec_dynamic_create_table(
             .saturating_sub(effect_start)
             .max(1);
         advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+        refresh_plpgsql_executor_catalog(&db, xid, ctx);
+    }
+    result
+}
+
+fn exec_dynamic_create_view(
+    stmt: &crate::backend::parser::CreateViewStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let db = ctx.database.clone().ok_or_else(|| {
+        function_runtime_error(
+            "PL/pgSQL CREATE VIEW requires database execution context",
+            None,
+            "0A000",
+        )
+    })?;
+    let xid = ctx.ensure_write_xid()?;
+    db.fire_event_triggers_in_executor_context(ctx, "ddl_command_start", "CREATE VIEW")?;
+    let cid = ctx.next_command_id;
+    let effect_start = ctx.catalog_effects.len();
+    let result = db.execute_create_view_stmt_in_transaction_with_search_path(
+        ctx.client_id,
+        stmt,
+        xid,
+        cid,
+        None,
+        &mut ctx.catalog_effects,
+        &mut ctx.temp_effects,
+    );
+    if result.is_ok() {
+        db.fire_event_triggers_in_executor_context(ctx, "ddl_command_end", "CREATE VIEW")?;
+        let consumed_catalog_cids = ctx
+            .catalog_effects
+            .len()
+            .saturating_sub(effect_start)
+            .max(1);
+        advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+        refresh_plpgsql_executor_catalog(&db, xid, ctx);
     }
     result
 }
@@ -3610,6 +3796,7 @@ fn exec_function_comment_on_function(
         .saturating_sub(effect_start)
         .max(1);
     advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+    refresh_plpgsql_executor_catalog(&db, xid, ctx);
     Ok(())
 }
 
@@ -3642,6 +3829,7 @@ fn exec_function_drop_index(
             .saturating_sub(effect_start)
             .max(1);
         advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+        refresh_plpgsql_executor_catalog(&db, xid, ctx);
     }
     result
 }
@@ -3713,6 +3901,7 @@ fn exec_function_drop_table(
             .saturating_sub(effect_start)
             .max(1);
         advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+        refresh_plpgsql_executor_catalog(&db, xid, ctx);
     }
     result
 }
@@ -3943,6 +4132,20 @@ fn advance_plpgsql_command_id_by(ctx: &mut ExecutorContext, count: CommandId) {
     ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
 }
 
+fn refresh_plpgsql_executor_catalog(
+    db: &crate::pgrust::database::Database,
+    xid: TransactionId,
+    ctx: &mut ExecutorContext,
+) {
+    let search_path = plpgsql_configured_search_path(ctx);
+    let catalog = db.lazy_catalog_lookup(
+        ctx.client_id,
+        Some((xid, ctx.next_command_id)),
+        search_path.as_deref(),
+    );
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(catalog));
+}
+
 fn plpgsql_configured_search_path(ctx: &ExecutorContext) -> Option<Vec<String>> {
     let value = ctx.gucs.get("search_path")?;
     if value.trim().eq_ignore_ascii_case("default") {
@@ -4051,7 +4254,7 @@ fn execute_dynamic_for_query(
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionQueryResult, ExecError> {
     let sql = eval_dynamic_sql(sql_expr, using_exprs, state, ctx)?;
-    let result = execute_dynamic_sql_statement(&sql, true, compiled, state, ctx)?;
+    let result = execute_dynamic_sql_statement(&sql, true, None, compiled, state, ctx)?;
     statement_result_to_query_result(result, "PL/pgSQL EXECUTE did not produce rows")
 }
 
@@ -4099,7 +4302,7 @@ fn execute_dynamic_statement(
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     let sql = eval_dynamic_sql(sql_expr, using_exprs, state, ctx)?;
-    execute_dynamic_sql_statement(&sql, false, compiled, state, ctx)
+    execute_dynamic_sql_statement(&sql, false, None, compiled, state, ctx)
 }
 
 fn eval_dynamic_sql(
@@ -4142,6 +4345,7 @@ fn eval_dynamic_sql(
 fn execute_dynamic_sql_statement(
     sql: &str,
     must_return_tuples: bool,
+    runtime_scope: Option<&RuntimeSqlScope>,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
@@ -4155,133 +4359,146 @@ fn execute_dynamic_sql_statement(
         )
     })?;
     let planner_config = planner_config_from_executor_gucs(&ctx.gucs);
+    let outer_scopes = runtime_scope
+        .map(runtime_sql_bound_scope)
+        .into_iter()
+        .collect::<Vec<_>>();
 
-    let result = execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
-        let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
-        let (stmt, external_params) = resolve_dynamic_prepared_statement(stmt)?;
-        let external_bindings = bind_dynamic_external_params(&external_params, catalog.as_ref())?;
-        let external_types = dynamic_external_types(&external_bindings);
-        install_dynamic_external_params(&external_bindings, ctx)?;
-        with_external_param_types(&external_types, || match stmt {
-            crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
-                pg_plan_query_with_outer_scopes_and_ctes_config(
-                    &stmt,
+    let result = execute_function_query_with_bindings(
+        compiled,
+        state,
+        ctx,
+        runtime_scope.is_some(),
+        |ctx| {
+            let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
+            let (stmt, external_params) = resolve_dynamic_prepared_statement(stmt)?;
+            let external_bindings =
+                bind_dynamic_external_params(&external_params, catalog.as_ref())?;
+            let external_types = dynamic_external_types(&external_bindings);
+            install_dynamic_external_params(&external_bindings, ctx)?;
+            with_external_param_types(&external_types, || match stmt {
+                crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
+                    pg_plan_query_with_outer_scopes_and_ctes_config(
+                        &stmt,
+                        catalog.as_ref(),
+                        &outer_scopes,
+                        &compiled.local_ctes,
+                        planner_config,
+                    )
+                    .map_err(ExecError::Parse)?,
+                    ctx,
+                ),
+                crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
+                    pg_plan_values_query_with_outer_scopes_and_ctes_config(
+                        &stmt,
+                        catalog.as_ref(),
+                        &outer_scopes,
+                        &compiled.local_ctes,
+                        planner_config,
+                    )
+                    .map_err(ExecError::Parse)?,
+                    ctx,
+                ),
+                crate::backend::parser::Statement::CreateTableAs(_) if must_return_tuples => {
+                    Err(select_into_no_tuples_error())
+                }
+                crate::backend::parser::Statement::Unsupported(unsupported)
+                    if must_return_tuples
+                        && unsupported.feature == "SELECT form"
+                        && unsupported.sql.to_ascii_lowercase().contains(" into ") =>
+                {
+                    Err(select_into_no_tuples_error())
+                }
+                crate::backend::parser::Statement::Insert(stmt) => {
+                    let xid = ctx.ensure_write_xid()?;
+                    let cid = ctx.next_command_id;
+                    let stmt =
+                        bind_insert_with_outer_scopes(&stmt, catalog.as_ref(), &outer_scopes)
+                            .map_err(ExecError::Parse)?;
+                    let result = execute_insert(stmt, catalog.as_ref(), ctx, xid, cid);
+                    if result.is_ok() {
+                        advance_plpgsql_command_id(ctx);
+                    }
+                    result
+                }
+                crate::backend::parser::Statement::Update(stmt) => {
+                    let xid = ctx.ensure_write_xid()?;
+                    let cid = ctx.next_command_id;
+                    let stmt =
+                        bind_update_with_outer_scopes(&stmt, catalog.as_ref(), &outer_scopes)
+                            .map_err(ExecError::Parse)?;
+                    let stmt = bind_update_current_of(&stmt, compiled, state)?;
+                    let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
+                    if result.is_ok() {
+                        advance_plpgsql_command_id(ctx);
+                    }
+                    result
+                }
+                crate::backend::parser::Statement::Delete(stmt) => {
+                    let xid = ctx.ensure_write_xid()?;
+                    let stmt =
+                        bind_delete_with_outer_scopes(&stmt, catalog.as_ref(), &outer_scopes)
+                            .map_err(ExecError::Parse)?;
+                    let stmt = bind_delete_current_of(&stmt, compiled, state)?;
+                    let result = execute_delete(stmt, catalog.as_ref(), ctx, xid);
+                    if result.is_ok() {
+                        advance_plpgsql_command_id(ctx);
+                    }
+                    result
+                }
+                crate::backend::parser::Statement::CreateTable(stmt) => {
+                    exec_dynamic_create_table(&stmt, ctx)
+                }
+                crate::backend::parser::Statement::CreateView(stmt) => {
+                    exec_dynamic_create_view(&stmt, ctx)
+                }
+                crate::backend::parser::Statement::CreateTableAs(stmt) => {
+                    exec_dynamic_create_table_as(&stmt, ctx)
+                }
+                crate::backend::parser::Statement::Analyze(stmt) => {
+                    exec_dynamic_analyze(&stmt, ctx)
+                }
+                crate::backend::parser::Statement::DropIndex(stmt) => {
+                    exec_function_drop_index(&stmt, ctx)
+                }
+                crate::backend::parser::Statement::DropTable(stmt) => {
+                    exec_function_drop_table(&stmt, catalog.as_ref(), ctx)
+                }
+                crate::backend::parser::Statement::AlterTableAttachPartition(stmt)
+                    if ctx.trigger_depth > 0 =>
+                {
+                    Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot ALTER TABLE \"{}\" because it is being used by active queries in this session",
+                            stmt.parent_table
+                                .rsplit('.')
+                                .next()
+                                .unwrap_or(&stmt.parent_table)
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "55006",
+                    })
+                }
+                crate::backend::parser::Statement::Set(stmt)
+                    if stmt.name.eq_ignore_ascii_case("jit") =>
+                {
+                    // :HACK: pgrust has no JIT subsystem; PL/pgSQL regression
+                    // helpers use SET LOCAL jit=0 only to stabilize EXPLAIN.
+                    Ok(crate::backend::executor::StatementResult::AffectedRows(0))
+                }
+                crate::backend::parser::Statement::Do(stmt) => {
+                    super::execute_do_with_context_preserving_notices(&stmt, catalog.as_ref(), ctx)
+                }
+                other => execute_readonly_statement_with_config(
+                    other,
                     catalog.as_ref(),
-                    &[],
-                    &compiled.local_ctes,
+                    ctx,
                     planner_config,
-                )
-                .map_err(ExecError::Parse)?,
-                ctx,
-            ),
-            crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
-                pg_plan_values_query_with_outer_scopes_and_ctes_config(
-                    &stmt,
-                    catalog.as_ref(),
-                    &[],
-                    &compiled.local_ctes,
-                    planner_config,
-                )
-                .map_err(ExecError::Parse)?,
-                ctx,
-            ),
-            crate::backend::parser::Statement::CreateTableAs(_) if must_return_tuples => {
-                Err(select_into_no_tuples_error())
-            }
-            crate::backend::parser::Statement::Unsupported(unsupported)
-                if must_return_tuples
-                    && unsupported.feature == "SELECT form"
-                    && unsupported.sql.to_ascii_lowercase().contains(" into ") =>
-            {
-                Err(select_into_no_tuples_error())
-            }
-            crate::backend::parser::Statement::Insert(stmt) => {
-                let xid = ctx.ensure_write_xid()?;
-                let cid = ctx.next_command_id;
-                let stmt = crate::backend::parser::bind_insert_with_outer_scopes(
-                    &stmt,
-                    catalog.as_ref(),
-                    &[],
-                )
-                .map_err(ExecError::Parse)?;
-                let result = execute_insert(stmt, catalog.as_ref(), ctx, xid, cid);
-                if result.is_ok() {
-                    advance_plpgsql_command_id(ctx);
-                }
-                result
-            }
-            crate::backend::parser::Statement::Update(stmt) => {
-                let xid = ctx.ensure_write_xid()?;
-                let cid = ctx.next_command_id;
-                let stmt = crate::backend::parser::bind_update_with_outer_scopes(
-                    &stmt,
-                    catalog.as_ref(),
-                    &[],
-                )
-                .map_err(ExecError::Parse)?;
-                let stmt = bind_update_current_of(&stmt, compiled, state)?;
-                let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
-                if result.is_ok() {
-                    advance_plpgsql_command_id(ctx);
-                }
-                result
-            }
-            crate::backend::parser::Statement::Delete(stmt) => {
-                let xid = ctx.ensure_write_xid()?;
-                let stmt = crate::backend::parser::bind_delete_with_outer_scopes(
-                    &stmt,
-                    catalog.as_ref(),
-                    &[],
-                )
-                .map_err(ExecError::Parse)?;
-                let stmt = bind_delete_current_of(&stmt, compiled, state)?;
-                let result = execute_delete(stmt, catalog.as_ref(), ctx, xid);
-                if result.is_ok() {
-                    advance_plpgsql_command_id(ctx);
-                }
-                result
-            }
-            crate::backend::parser::Statement::CreateTable(stmt) => {
-                exec_dynamic_create_table(&stmt, ctx)
-            }
-            crate::backend::parser::Statement::Analyze(stmt) => exec_dynamic_analyze(&stmt, ctx),
-            crate::backend::parser::Statement::DropIndex(stmt) => {
-                exec_function_drop_index(&stmt, ctx)
-            }
-            crate::backend::parser::Statement::DropTable(stmt) => {
-                exec_function_drop_table(&stmt, catalog.as_ref(), ctx)
-            }
-            crate::backend::parser::Statement::AlterTableAttachPartition(stmt)
-                if ctx.trigger_depth > 0 =>
-            {
-                Err(ExecError::DetailedError {
-                    message: format!(
-                        "cannot ALTER TABLE \"{}\" because it is being used by active queries in this session",
-                        stmt.parent_table
-                            .rsplit('.')
-                            .next()
-                            .unwrap_or(&stmt.parent_table)
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "55006",
-                })
-            }
-            crate::backend::parser::Statement::Set(stmt)
-                if stmt.name.eq_ignore_ascii_case("jit") =>
-            {
-                // :HACK: pgrust has no JIT subsystem; PL/pgSQL regression
-                // helpers use SET LOCAL jit=0 only to stabilize EXPLAIN.
-                Ok(crate::backend::executor::StatementResult::AffectedRows(0))
-            }
-            crate::backend::parser::Statement::Do(stmt) => {
-                super::execute_do_with_context_preserving_notices(&stmt, catalog.as_ref(), ctx)
-            }
-            other => {
-                execute_readonly_statement_with_config(other, catalog.as_ref(), ctx, planner_config)
-            }
-        })
-    });
+                ),
+            })
+        },
+    );
     result.map_err(|err| with_sql_statement_context(err, Some(sql)))
 }
 
@@ -7271,6 +7488,7 @@ fn stmt_context_line(stmt: &CompiledStmt) -> usize {
         | CompiledStmt::AssignSubscript { line, .. }
         | CompiledStmt::AssignIndirect { line, .. }
         | CompiledStmt::Return { line, .. }
+        | CompiledStmt::ReturnRuntimeQuery { line, .. }
         | CompiledStmt::ReturnSelect { line, .. } => *line,
         _ => 1,
     }
@@ -7295,7 +7513,9 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::Reraise => "RAISE",
         CompiledStmt::Assert { .. } => "ASSERT",
         CompiledStmt::Continue => "CONTINUE",
-        CompiledStmt::Return { .. } | CompiledStmt::ReturnSelect { .. } => "RETURN",
+        CompiledStmt::Return { .. }
+        | CompiledStmt::ReturnRuntimeQuery { .. }
+        | CompiledStmt::ReturnSelect { .. } => "RETURN",
         CompiledStmt::ReturnNext { .. } => "RETURN NEXT",
         CompiledStmt::ReturnQuery { .. } => "RETURN QUERY",
         CompiledStmt::ReturnTriggerRow { .. }
@@ -7319,6 +7539,8 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         | CompiledStmt::ExecUpdate { .. }
         | CompiledStmt::ExecDeleteInto { .. }
         | CompiledStmt::ExecDelete { .. }
+        | CompiledStmt::RuntimeSql { .. }
+        | CompiledStmt::RuntimeSelectInto { .. }
         | CompiledStmt::CreateTableAs { .. }
         | CompiledStmt::CreateTable { .. }
         | CompiledStmt::ExecSql { .. } => "SQL statement",
