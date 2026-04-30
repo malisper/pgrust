@@ -1721,7 +1721,10 @@ fn array_storage_element_type(sql_type: SqlType) -> SqlType {
     if sql_type.type_oid != 0
         && !matches!(
             element_type.kind,
-            SqlTypeKind::Composite | SqlTypeKind::Record | SqlTypeKind::Enum
+            SqlTypeKind::Composite
+                | SqlTypeKind::Record
+                | SqlTypeKind::Enum
+                | SqlTypeKind::Multirange
         )
     {
         element_type.type_oid = 0;

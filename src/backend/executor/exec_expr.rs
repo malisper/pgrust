@@ -8982,8 +8982,15 @@ pub fn eval_expr(
             let element_type = array_cast_type.element_type();
             let mut values = Vec::with_capacity(elements.len());
             let mut has_nested_arrays = false;
+            let mut value_element_type_oid = 0;
             for expr in elements {
                 let value = eval_expr(expr, slot, ctx)?;
+                if value_element_type_oid == 0 {
+                    value_element_type_oid = value
+                        .sql_type_hint()
+                        .and_then(concrete_array_literal_element_type_oid)
+                        .unwrap_or(0);
+                }
                 if matches!(value, Value::Array(_) | Value::PgArray(_)) {
                     has_nested_arrays = true;
                     values.push(cast_array_literal_value(value, array_cast_type, ctx)?);
@@ -8991,19 +8998,26 @@ pub fn eval_expr(
                     values.push(cast_array_literal_value(value, element_type, ctx)?);
                 }
             }
-            let result = if has_nested_arrays {
-                let array = ArrayValue::from_nested_values(values, vec![1]).map_err(|details| {
+            let mut element_type_oid = array_literal_element_type_oid(element_type, &values);
+            if element_type_oid == 0 {
+                element_type_oid = value_element_type_oid;
+            }
+            let mut array = if has_nested_arrays {
+                ArrayValue::from_nested_values(values, vec![1]).map_err(|details| {
                     ExecError::DetailedError {
                         message: "malformed array literal".into(),
                         detail: Some(details),
                         hint: None,
                         sqlstate: "22P02",
                     }
-                })?;
-                Value::PgArray(array)
+                })?
             } else {
-                Value::PgArray(ArrayValue::from_1d(values))
+                ArrayValue::from_1d(values)
             };
+            if element_type_oid != 0 {
+                array = array.with_element_type_oid(element_type_oid);
+            }
+            let result = Value::PgArray(array);
             enforce_domain_constraints_for_value(result, *array_type, ctx)
         }
         Expr::SubPlan(subplan) => match subplan.sublink_type {
@@ -9400,8 +9414,15 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             let element_type = array_type.element_type();
             let mut values = Vec::with_capacity(elements.len());
             let mut has_nested_arrays = false;
+            let mut value_element_type_oid = 0;
             for expr in elements {
                 let value = eval_plpgsql_expr(expr, slot)?;
+                if value_element_type_oid == 0 {
+                    value_element_type_oid = value
+                        .sql_type_hint()
+                        .and_then(concrete_array_literal_element_type_oid)
+                        .unwrap_or(0);
+                }
                 if matches!(value, Value::Array(_) | Value::PgArray(_)) {
                     has_nested_arrays = true;
                     values.push(cast_value(value, *array_type)?);
@@ -9409,19 +9430,26 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                     values.push(cast_value(value, element_type)?);
                 }
             }
-            if has_nested_arrays {
-                let array = ArrayValue::from_nested_values(values, vec![1]).map_err(|details| {
+            let mut element_type_oid = array_literal_element_type_oid(element_type, &values);
+            if element_type_oid == 0 {
+                element_type_oid = value_element_type_oid;
+            }
+            let mut array = if has_nested_arrays {
+                ArrayValue::from_nested_values(values, vec![1]).map_err(|details| {
                     ExecError::DetailedError {
                         message: "malformed array literal".into(),
                         detail: Some(details),
                         hint: None,
                         sqlstate: "22P02",
                     }
-                })?;
-                Ok(Value::PgArray(array))
+                })?
             } else {
-                Ok(Value::PgArray(ArrayValue::from_1d(values)))
+                ArrayValue::from_1d(values)
+            };
+            if element_type_oid != 0 {
+                array = array.with_element_type_oid(element_type_oid);
             }
+            Ok(Value::PgArray(array))
         }
         Expr::ArraySubscript { array, subscripts } => {
             let value = eval_plpgsql_expr(array, slot)?;
@@ -9472,6 +9500,25 @@ fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
             hint: None,
             sqlstate: "42703",
         })
+}
+
+fn array_literal_element_type_oid(element_type: SqlType, values: &[Value]) -> u32 {
+    concrete_array_literal_element_type_oid(element_type)
+        .or_else(|| {
+            values
+                .iter()
+                .filter_map(Value::sql_type_hint)
+                .find_map(concrete_array_literal_element_type_oid)
+        })
+        .unwrap_or(0)
+}
+
+fn concrete_array_literal_element_type_oid(sql_type: SqlType) -> Option<u32> {
+    if !sql_type.is_multirange() {
+        return None;
+    }
+    let oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
+    (oid != 0).then_some(oid)
 }
 
 fn cast_array_literal_value(

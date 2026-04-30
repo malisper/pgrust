@@ -1184,14 +1184,27 @@ pub fn index_opclass_is_implicit_for_definition(
     if am_oid == BTREE_AM_OID && default_btree_opclass_oid(type_oid) == Some(opclass_oid) {
         return true;
     }
+    if am_oid == GIST_AM_OID
+        && opclass_oid == RANGE_GIST_OPCLASS_OID
+        && (sql_type.is_multirange() || multirange_type_ref_for_sql_type(sql_type).is_some())
+    {
+        // :HACK: temporal GiST planning can currently retain the range
+        // opclass OID for multirange keys. PostgreSQL treats the compatible
+        // multirange opclass as implicit in pg_get_indexdef output.
+        return true;
+    }
     // :HACK: PostgreSQL temporal/exclusion GiST indexes use btree_gist default
     // opclasses for scalar equality columns. pgrust currently stores the
     // matching btree opclass OID as the executor stand-in, so hide it from
     // pg_get_indexdef/psql output the same way PostgreSQL hides an implicit
     // default GiST opclass.
-    am_oid == GIST_AM_OID
+    if am_oid == GIST_AM_OID
         && indisexclusion
         && default_btree_opclass_oid(type_oid) == Some(opclass_oid)
+    {
+        return true;
+    }
+    false
 }
 
 pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
