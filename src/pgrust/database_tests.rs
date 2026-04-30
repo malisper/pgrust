@@ -5521,6 +5521,62 @@ fn ts_rewrite_replaces_tsquery_subtrees() {
 }
 
 #[test]
+fn ts_rewrite_query_text_applies_rewrite_rows() {
+    let db = Database::open_ephemeral(64).unwrap();
+    db.execute(
+        1,
+        "create table test_tsquery(keyword tsquery, sample tsquery)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into test_tsquery values \
+         ('moscow', 'moskva | moscow'), \
+         ('new <-> york', 'big <-> apple | nyc')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ts_rewrite('moscow & hotel', 'select keyword, sample from test_tsquery')::text"
+        ),
+        vec![vec![Value::Text(
+            "'hotel' & ( 'moskva' | 'moscow' )".into()
+        )]]
+    );
+}
+
+#[test]
+fn gist_tsquery_index_scan_rechecks_lossy_matches() {
+    let db = Database::open_ephemeral(64).unwrap();
+    db.execute(1, "create table test_tsquery(keyword tsquery)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into test_tsquery values \
+         ('new <-> york'), ('moscow'), ('foo & bar & qq')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index qq on test_tsquery using gist (keyword tsquery_ops)",
+    )
+    .unwrap();
+    db.execute(1, "set enable_seqscan to off").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select keyword::text from test_tsquery where keyword @> 'new' order by keyword::text"
+        ),
+        vec![vec![Value::Text("'new' <-> 'york'".into())]]
+    );
+}
+
+#[test]
 fn ts_headline_handles_empty_and_basic_queries() {
     let db = Database::open_ephemeral(64).unwrap();
 

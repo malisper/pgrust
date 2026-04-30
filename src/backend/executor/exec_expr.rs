@@ -124,7 +124,10 @@ use super::pg_regex::{
     eval_similar, eval_similar_substring, eval_sql_regex_substring,
 };
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
-use super::{ExecError, ExecutorContext, TypedFunctionArg, exec_next, executor_start};
+use super::{
+    ExecError, ExecutorContext, TypedFunctionArg, exec_next, execute_readonly_statement,
+    executor_start,
+};
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::object_address::{
@@ -139,8 +142,8 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
     PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
-    bind_relation_expr, deserialize_partition_bound, parse_type_name, partition_value_to_value,
-    relation_partition_spec, resolve_raw_type_name,
+    bind_relation_expr, deserialize_partition_bound, parse_statement, parse_type_name,
+    partition_value_to_value, relation_partition_spec, resolve_raw_type_name,
 };
 use crate::backend::rewrite::{
     format_stored_rule_definition_with_catalog, format_view_definition, render_relation_expr_sql,
@@ -9255,15 +9258,93 @@ fn tsquery_is_empty(query: &crate::include::nodes::tsearch::TsQuery) -> bool {
     crate::backend::executor::render_tsquery_text(query).is_empty()
 }
 
-fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
+fn ts_rewrite_query_result_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "ts_rewrite query must return two tsquery columns".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn eval_ts_rewrite_query_text(
+    query: crate::include::nodes::tsearch::TsQuery,
+    sql: &str,
+    ctx: &mut ExecutorContext,
+) -> Result<crate::include::nodes::tsearch::TsQuery, ExecError> {
+    if tsquery_is_empty(&query) {
+        return Ok(query);
+    }
+    let catalog = ctx
+        .catalog
+        .clone()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "ts_rewrite query requires executor catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let stmt = parse_statement(sql).map_err(ExecError::Parse)?;
+    let result = execute_readonly_statement(stmt, catalog.as_ref(), ctx)?;
+    let super::StatementResult::Query { columns, rows, .. } = result else {
+        return Err(ts_rewrite_query_result_error());
+    };
+    if columns.len() != 2
+        || columns
+            .iter()
+            .any(|column| column.sql_type.kind != SqlTypeKind::TsQuery || column.sql_type.is_array)
+    {
+        return Err(ts_rewrite_query_result_error());
+    }
+
+    let mut rewritten = query;
+    for row in rows {
+        match row.as_slice() {
+            [Value::TsQuery(target), Value::TsQuery(substitute)] => {
+                if tsquery_is_empty(target) {
+                    continue;
+                }
+                rewritten = crate::backend::executor::tsquery_rewrite(
+                    rewritten,
+                    target.clone(),
+                    substitute.clone(),
+                );
+                if tsquery_is_empty(&rewritten) {
+                    break;
+                }
+            }
+            [Value::Null, _] | [_, Value::Null] => {}
+            _ => return Err(ts_rewrite_query_result_error()),
+        }
+    }
+    Ok(crate::backend::executor::canonicalize_tsquery_rewrite_result(rewritten))
+}
+
+fn eval_ts_headline_values(
+    values: &[Value],
+    default_config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
     if values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
     }
-    let (document, query) = match values {
-        [document, Value::TsQuery(query)] => (document.as_text(), query),
-        [document, Value::TsQuery(query), _options] => (document.as_text(), query),
-        [_config, document, Value::TsQuery(query)] => (document.as_text(), query),
-        [_config, document, Value::TsQuery(query), _options] => (document.as_text(), query),
+    let (config_name, document, query, options) = match values {
+        [document, Value::TsQuery(query)] => (default_config_name, document.as_text(), query, None),
+        [document, Value::TsQuery(query), options] => (
+            default_config_name,
+            document.as_text(),
+            query,
+            options.as_text(),
+        ),
+        [config, document, Value::TsQuery(query)] => {
+            (config.as_text(), document.as_text(), query, None)
+        }
+        [config, document, Value::TsQuery(query), options] => (
+            config.as_text(),
+            document.as_text(),
+            query,
+            options.as_text(),
+        ),
         _ => {
             return Err(ExecError::TypeMismatch {
                 op: "ts_headline",
@@ -9277,75 +9358,8 @@ fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
         left: values.first().cloned().unwrap_or(Value::Null),
         right: values.get(1).cloned().unwrap_or(Value::Null),
     })?;
-    if tsquery_is_empty(query) {
-        return Ok(Value::Text(document.into()));
-    }
-    let lexemes = tsquery_lexemes_for_headline(&query.root);
-    if lexemes.is_empty() {
-        return Ok(Value::Text(document.into()));
-    }
-    Ok(Value::Text(
-        highlight_headline_text(document, &lexemes).into(),
-    ))
-}
-
-fn tsquery_lexemes_for_headline(node: &crate::include::nodes::tsearch::TsQueryNode) -> Vec<String> {
-    use crate::include::nodes::tsearch::TsQueryNode;
-
-    let mut lexemes = Vec::new();
-    fn collect(node: &TsQueryNode, lexemes: &mut Vec<String>) {
-        match node {
-            TsQueryNode::Operand(operand) if !operand.lexeme.as_str().is_empty() => {
-                lexemes.push(operand.lexeme.as_str().to_ascii_lowercase());
-            }
-            TsQueryNode::Operand(_) => {}
-            TsQueryNode::Not(inner) => collect(inner, lexemes),
-            TsQueryNode::And(left, right) | TsQueryNode::Or(left, right) => {
-                collect(left, lexemes);
-                collect(right, lexemes);
-            }
-            TsQueryNode::Phrase { left, right, .. } => {
-                collect(left, lexemes);
-                collect(right, lexemes);
-            }
-        }
-    }
-    collect(node, &mut lexemes);
-    lexemes.sort();
-    lexemes.dedup();
-    lexemes
-}
-
-fn highlight_headline_text(document: &str, lexemes: &[String]) -> String {
-    let mut out = String::with_capacity(document.len());
-    let mut token = String::new();
-    for ch in document.chars() {
-        if ch.is_alphanumeric() || ch == '_' {
-            token.push(ch);
-            continue;
-        }
-        flush_headline_token(&mut out, &mut token, lexemes);
-        out.push(ch);
-    }
-    flush_headline_token(&mut out, &mut token, lexemes);
-    out
-}
-
-fn flush_headline_token(out: &mut String, token: &mut String, lexemes: &[String]) {
-    if token.is_empty() {
-        return;
-    }
-    let lower = token.to_ascii_lowercase();
-    if lexemes.iter().any(|lexeme| {
-        lower == *lexeme || lower.starts_with(lexeme) || lexeme.starts_with(lower.as_str())
-    }) {
-        out.push_str("<b>");
-        out.push_str(token);
-        out.push_str("</b>");
-    } else {
-        out.push_str(token);
-    }
-    token.clear();
+    crate::backend::executor::ts_headline(config_name, document, query, options, catalog)
+        .map(|headline| Value::Text(headline.into()))
 }
 
 fn eval_plpgsql_builtin_function(
@@ -10149,7 +10163,7 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
 fn eval_text_search_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
-    ctx: Option<&ExecutorContext>,
+    mut ctx: Option<&mut ExecutorContext>,
 ) -> Result<Value, ExecError> {
     fn arg_text(
         values: &[Value],
@@ -10295,14 +10309,44 @@ fn eval_text_search_builtin_function(
             actual: format!("{op}: {message}"),
         })
     };
+
+    if matches!(func, BuiltinScalarFunction::TsRewrite) {
+        if values.iter().any(|value| matches!(value, Value::Null)) {
+            return Ok(Value::Null);
+        }
+        let query = arg_tsquery(values, 0, "ts_rewrite")?.clone();
+        return match values.len() {
+            2 => {
+                let sql = arg_text(values, 1, "ts_rewrite")?.unwrap_or_default();
+                let ctx = ctx.as_deref_mut().ok_or_else(|| ExecError::DetailedError {
+                    message: "ts_rewrite query requires executor context".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                })?;
+                eval_ts_rewrite_query_text(query, &sql, ctx).map(Value::TsQuery)
+            }
+            3 => Ok(Value::TsQuery(crate::backend::executor::tsquery_rewrite(
+                query,
+                arg_tsquery(values, 1, "ts_rewrite")?.clone(),
+                arg_tsquery(values, 2, "ts_rewrite")?.clone(),
+            ))),
+            _ => Err(ExecError::TypeMismatch {
+                op: "ts_rewrite",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        };
+    }
+
     let default_config_name = || {
-        ctx.and_then(|ctx| {
+        ctx.as_deref().and_then(|ctx| {
             ctx.gucs
                 .get("default_text_search_config")
                 .map(String::as_str)
         })
     };
-    let catalog = catalog_lookup(ctx);
+    let catalog = catalog_lookup(ctx.as_deref());
     let arg_config_name =
         |values: &[Value], index: usize, op: &'static str| -> Result<Option<String>, ExecError> {
             let Some(value) = values.get(index) else {
@@ -10340,7 +10384,9 @@ fn eval_text_search_builtin_function(
         BuiltinScalarFunction::TsMatch => {
             eval_ts_match_values(values, default_config_name(), catalog)
         }
-        BuiltinScalarFunction::TsHeadline => eval_ts_headline_values(values),
+        BuiltinScalarFunction::TsHeadline => {
+            eval_ts_headline_values(values, default_config_name(), catalog)
+        }
         BuiltinScalarFunction::ToTsVector => {
             if let [Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(default_config_name(), &values[0], None, catalog);
@@ -10569,16 +10615,7 @@ fn eval_text_search_builtin_function(
                 arg_tsquery(values, 0, "numnode")?,
             )))
         }
-        BuiltinScalarFunction::TsRewrite => {
-            if values.iter().any(|value| matches!(value, Value::Null)) {
-                return Ok(Value::Null);
-            }
-            Ok(Value::TsQuery(crate::backend::executor::tsquery_rewrite(
-                arg_tsquery(values, 0, "ts_rewrite")?.clone(),
-                arg_tsquery(values, 1, "ts_rewrite")?.clone(),
-                arg_tsquery(values, 2, "ts_rewrite")?.clone(),
-            )))
-        }
+        BuiltinScalarFunction::TsRewrite => unreachable!("handled before catalog lookup"),
         BuiltinScalarFunction::TsVectorStrip => {
             if values.iter().any(|value| matches!(value, Value::Null)) {
                 return Ok(Value::Null);
