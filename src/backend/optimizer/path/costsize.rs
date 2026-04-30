@@ -2854,6 +2854,7 @@ fn build_join_paths_internal(
         && path_relids(&left).len() == 1
         && path_relids(&right).len() == 1;
     let allow_swapped_orientation = matches!(kind, JoinType::Inner)
+        && !query_is_merge_input(root)
         && !right_depends_on_left
         && (!right_uses_immediate_outer || !lateral_orientation_locked)
         || allow_base_cross_swap;
@@ -3117,6 +3118,17 @@ fn small_window_inner_join_prefers_merge(
         && matches!(kind, JoinType::Inner)
         && left.plan_info().plan_rows.as_f64() <= 2_000.0
         && right.plan_info().plan_rows.as_f64() <= 2_000.0
+}
+
+fn query_is_merge_input(root: Option<&PlannerInfo>) -> bool {
+    // :HACK: MERGE lowers to a SELECT-like hidden input query today. Keep this
+    // check local to the planner shim until MERGE has an explicit command tag.
+    root.is_some_and(|root| {
+        root.parse
+            .target_list
+            .iter()
+            .any(|target| target.name == "__merge_source_present")
+    })
 }
 
 fn reassociate_lateral_values_index_join(

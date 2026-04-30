@@ -170,7 +170,7 @@ fn base_restrict_expr_order_respects_security_levels_and_leakproof() {
     assert!(!rel.baserestrictinfo[1].leakproof);
     assert!(rel.baserestrictinfo[2].leakproof);
     assert_eq!(
-        super::path::ordered_base_restrict_exprs(&rel),
+        super::path::ordered_base_restrict_exprs(&rel, &catalog),
         vec![cheap_leakproof, expensive_security, cheap_nonleakproof]
     );
 }

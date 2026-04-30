@@ -6,7 +6,7 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
-    Expr, RelationDesc, Var, attrno_index, is_system_attr, set_returning_call_exprs, user_attrno,
+    Expr, RelationDesc, Var, attrno_index, is_system_attr, user_attrno,
 };
 
 use super::views::{
@@ -55,6 +55,12 @@ impl NonUpdatableViewColumnReason {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NonUpdatableViewColumn {
+    pub(crate) relation_name: String,
+    pub(crate) reason: NonUpdatableViewColumnReason,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewDmlEvent {
     Insert,
@@ -85,8 +91,11 @@ pub(crate) struct ResolvedAutoViewTarget {
     pub(crate) base_inh: bool,
     pub(crate) visible_output_exprs: Vec<Expr>,
     pub(crate) combined_predicate: Option<Expr>,
+    pub(crate) has_security_barrier: bool,
     pub(crate) updatable_column_map: Vec<Option<usize>>,
-    pub(crate) non_updatable_column_reasons: Vec<Option<NonUpdatableViewColumnReason>>,
+    pub(crate) non_updatable_column_reasons: Vec<Option<NonUpdatableViewColumn>>,
+    pub(crate) local_updatable_column_map: Vec<Option<usize>>,
+    pub(crate) local_non_updatable_column_reasons: Vec<Option<NonUpdatableViewColumn>>,
     pub(crate) privilege_contexts: Vec<ViewPrivilegeContext>,
     pub(crate) all_view_predicates: Vec<ViewCheck>,
     pub(crate) view_check_options: Vec<ViewCheck>,
@@ -117,6 +126,7 @@ pub(crate) enum ViewDmlRewriteError {
     RecursiveView(String),
     DeferredFeature(String),
     NonUpdatableColumn {
+        relation_name: String,
         column_name: String,
         reason: NonUpdatableViewColumnReason,
     },
@@ -136,6 +146,22 @@ fn view_check_as_user_oid(catalog: &dyn CatalogLookup, view_oid: u32) -> Option<
         })
     });
     (!security_invoker).then_some(class_row.relowner)
+}
+
+fn relation_has_security_barrier(catalog: &dyn CatalogLookup, relation_oid: u32) -> bool {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .and_then(|row| row.reloptions)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                let (name, value) = option
+                    .split_once('=')
+                    .map(|(name, value)| (name, value))
+                    .unwrap_or((option.as_str(), "true"));
+                name.eq_ignore_ascii_case("security_barrier")
+                    && matches!(value.to_ascii_lowercase().as_str(), "true" | "on")
+            })
+        })
 }
 
 fn compose_column_maps(
@@ -188,12 +214,21 @@ pub(crate) fn resolve_auto_updatable_view_target(
             display_name,
         );
     }
+    if !expanded_views.is_empty() && relation_has_instead_row_trigger(catalog, relation_oid, event)
+    {
+        return resolved_rule_updatable_view_target(
+            relation_oid,
+            relation_desc,
+            catalog,
+            display_name,
+        );
+    }
 
-    let select = load_view_return_select(relation_oid, None, catalog, expanded_views)
-        .map_err(|err| map_parse_error(err, &display_name))?;
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, expanded_views)
         .map_err(|err| map_parse_error(err, &display_name))?;
-    let mut analyzed = analyze_simple_view_query(&select, &query, relation_desc, &display_name)?;
+    let raw_select = load_view_return_select(relation_oid, None, catalog, expanded_views).ok();
+    let mut analyzed =
+        analyze_simple_view_query(raw_select.as_ref(), &query, relation_desc, &display_name)?;
     let Some(base_relation) = catalog
         .lookup_relation_by_oid(analyzed.base_relation_oid)
         .or_else(|| catalog.relation_by_oid(analyzed.base_relation_oid))
@@ -227,13 +262,18 @@ pub(crate) fn resolve_auto_updatable_view_target(
                 expr: predicate,
             });
         }
+        let local_non_updatable_column_reasons =
+            non_updatable_column_infos(&display_name, &analyzed.non_updatable_column_reasons);
         return Ok(ResolvedAutoViewTarget {
             base_relation: base_relation.clone(),
             base_inh: analyzed.base_inh,
             visible_output_exprs: analyzed.output_exprs,
             combined_predicate: query.where_qual.clone(),
+            has_security_barrier: relation_has_security_barrier(catalog, relation_oid),
             updatable_column_map: analyzed.updatable_column_map.clone(),
-            non_updatable_column_reasons: analyzed.non_updatable_column_reasons,
+            non_updatable_column_reasons: local_non_updatable_column_reasons.clone(),
+            local_updatable_column_map: analyzed.updatable_column_map.clone(),
+            local_non_updatable_column_reasons,
             privilege_contexts: vec![ViewPrivilegeContext {
                 relation: base_relation,
                 check_as_user_oid: view_check_as_user_oid(catalog, relation_oid),
@@ -264,8 +304,11 @@ pub(crate) fn resolve_auto_updatable_view_target(
         base_inh,
         visible_output_exprs: nested_visible_output_exprs,
         combined_predicate: nested_combined_predicate,
+        has_security_barrier: nested_has_security_barrier,
         updatable_column_map: nested_updatable_column_map,
         non_updatable_column_reasons: nested_non_updatable_column_reasons,
+        local_updatable_column_map: _,
+        local_non_updatable_column_reasons: _,
         privilege_contexts: nested_privilege_contexts,
         all_view_predicates: nested_all_view_predicates,
         view_check_options: nested_view_check_options,
@@ -289,7 +332,9 @@ pub(crate) fn resolve_auto_updatable_view_target(
         )
     });
     let current_view_name = display_name.clone();
-    let combined_predicate = and_predicates(local_predicate.clone(), nested_combined_predicate);
+    let combined_predicate = and_predicates(nested_combined_predicate, local_predicate.clone());
+    let has_security_barrier =
+        nested_has_security_barrier || relation_has_security_barrier(catalog, relation_oid);
     let local_view_check = combined_predicate
         .as_ref()
         .and_then(|_| query.where_qual.as_ref())
@@ -302,6 +347,8 @@ pub(crate) fn resolve_auto_updatable_view_target(
             ),
         });
     let current_updatable_column_map = analyzed.updatable_column_map.clone();
+    let current_non_updatable_column_reasons =
+        non_updatable_column_infos(&display_name, &analyzed.non_updatable_column_reasons);
     let mut updatable_column_map = Vec::with_capacity(current_updatable_column_map.len());
     let mut non_updatable_column_reasons =
         Vec::with_capacity(analyzed.non_updatable_column_reasons.len());
@@ -309,14 +356,14 @@ pub(crate) fn resolve_auto_updatable_view_target(
         .iter()
         .copied()
         .into_iter()
-        .zip(analyzed.non_updatable_column_reasons.into_iter())
+        .zip(current_non_updatable_column_reasons.iter().cloned())
     {
         match column {
             Some(index) => {
                 let nested_column = nested_updatable_column_map.get(index).copied().flatten();
                 let nested_reason = nested_non_updatable_column_reasons
                     .get(index)
-                    .copied()
+                    .cloned()
                     .flatten();
                 updatable_column_map.push(nested_column);
                 non_updatable_column_reasons.push(if nested_column.is_some() {
@@ -358,8 +405,11 @@ pub(crate) fn resolve_auto_updatable_view_target(
         base_inh,
         visible_output_exprs: output_exprs,
         combined_predicate,
+        has_security_barrier,
         updatable_column_map,
         non_updatable_column_reasons,
+        local_updatable_column_map: current_updatable_column_map,
+        local_non_updatable_column_reasons: current_non_updatable_column_reasons,
         privilege_contexts,
         all_view_predicates,
         view_check_options,
@@ -382,7 +432,9 @@ fn combine_view_checks(
                 checks.push(predicate.clone());
             }
         }
-    } else if let Some(local_check) = local_check {
+    } else if matches!(check_option, ViewCheckOption::Local)
+        && let Some(local_check) = local_check
+    {
         if !checks
             .iter()
             .any(|check| check.view_name == local_check.view_name)
@@ -480,12 +532,12 @@ struct SimpleViewAnalysis {
 }
 
 fn analyze_simple_view_query(
-    raw_select: &SelectStatement,
+    raw_select: Option<&SelectStatement>,
     query: &Query,
     relation_desc: &RelationDesc,
     display_name: &str,
 ) -> Result<SimpleViewAnalysis, ViewDmlRewriteError> {
-    if raw_select.distinct {
+    if query.distinct {
         return Err(unsupported_view(display_name, DISTINCT_DETAIL));
     }
     if !query.group_by.is_empty() {
@@ -494,10 +546,10 @@ fn analyze_simple_view_query(
     if query.having_qual.is_some() {
         return Err(unsupported_view(display_name, HAVING_DETAIL));
     }
-    if raw_select.set_operation.is_some() || query.recursive_union.is_some() {
+    if query.set_operation.is_some() || query.recursive_union.is_some() {
         return Err(unsupported_view(display_name, SET_OPERATION_DETAIL));
     }
-    if !raw_select.with.is_empty() {
+    if raw_select.is_some_and(|select| !select.with.is_empty()) {
         return Err(unsupported_view(display_name, WITH_DETAIL));
     }
     if query.limit_count.is_some() || query.limit_offset.is_some() {
@@ -567,10 +619,6 @@ fn analyze_simple_view_query(
                     .push(Some(NonUpdatableViewColumnReason::NotBaseRelationColumn));
             }
         }
-    }
-
-    if query.where_qual.as_ref().is_some_and(expr_contains_sublink) {
-        return Err(unsupported_view(display_name, SINGLE_RELATION_DETAIL));
     }
 
     Ok(SimpleViewAnalysis {
@@ -718,8 +766,11 @@ fn resolved_rule_updatable_view_target(
         base_inh: false,
         visible_output_exprs,
         combined_predicate: None,
+        has_security_barrier: relation_has_security_barrier(catalog, relation_oid),
         updatable_column_map: updatable_column_map.clone(),
-        non_updatable_column_reasons,
+        non_updatable_column_reasons: non_updatable_column_reasons.clone(),
+        local_updatable_column_map: updatable_column_map.clone(),
+        local_non_updatable_column_reasons: non_updatable_column_reasons,
         privilege_contexts: vec![ViewPrivilegeContext {
             relation: base_relation,
             check_as_user_oid: view_check_as_user_oid(catalog, relation_oid),
@@ -754,6 +805,22 @@ pub(crate) fn classify_view_dml_rules(
     classification
 }
 
+fn relation_has_instead_row_trigger(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    event: ViewDmlEvent,
+) -> bool {
+    let required_bits = match event {
+        ViewDmlEvent::Update => 81,
+        ViewDmlEvent::Delete => 73,
+        ViewDmlEvent::Insert => 69,
+    };
+    catalog
+        .trigger_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| row.tgtype & required_bits == required_bits)
+}
+
 fn relation_display_name(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
     catalog
         .class_row_by_oid(relation_oid)
@@ -763,6 +830,21 @@ fn relation_display_name(catalog: &dyn CatalogLookup, relation_oid: u32) -> Stri
 
 fn unsupported(detail: &str) -> ViewDmlRewriteError {
     ViewDmlRewriteError::UnsupportedViewShape(detail.into())
+}
+
+fn non_updatable_column_infos(
+    relation_name: &str,
+    reasons: &[Option<NonUpdatableViewColumnReason>],
+) -> Vec<Option<NonUpdatableViewColumn>> {
+    reasons
+        .iter()
+        .map(|reason| {
+            reason.map(|reason| NonUpdatableViewColumn {
+                relation_name: relation_name.into(),
+                reason,
+            })
+        })
+        .collect()
 }
 
 fn unsupported_view(relation_name: &str, detail: &str) -> ViewDmlRewriteError {

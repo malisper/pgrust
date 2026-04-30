@@ -16,8 +16,9 @@ pub(crate) use rules::{
     split_stored_rule_action_sql,
 };
 pub(crate) use view_dml::{
-    NonUpdatableViewColumnReason, ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError,
-    ViewPrivilegeContext, classify_view_dml_rules, resolve_auto_updatable_view_target,
+    NonUpdatableViewColumn, NonUpdatableViewColumnReason, ResolvedAutoViewTarget, ViewDmlEvent,
+    ViewDmlRewriteError, ViewPrivilegeContext, classify_view_dml_rules,
+    resolve_auto_updatable_view_target,
 };
 pub(crate) use views::{
     format_view_definition, format_view_definition_unpretty, has_stored_view_query,
@@ -208,6 +209,22 @@ pub(crate) fn relation_has_security_invoker(
                     .map(|(name, value)| (name, value))
                     .unwrap_or((option.as_str(), "true"));
                 name.eq_ignore_ascii_case("security_invoker")
+                    && matches!(value.to_ascii_lowercase().as_str(), "true" | "on")
+            })
+        })
+}
+
+fn relation_has_security_barrier(catalog: &dyn CatalogLookup, relation_oid: u32) -> bool {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .and_then(|row| row.reloptions)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                let (name, value) = option
+                    .split_once('=')
+                    .map(|(name, value)| (name, value))
+                    .unwrap_or((option.as_str(), "true"));
+                name.eq_ignore_ascii_case("security_barrier")
                     && matches!(value.to_ascii_lowercase().as_str(), "true" | "on")
             })
         })
@@ -831,6 +848,9 @@ fn rewrite_rte(
             let class_row = catalog
                 .class_row_by_oid(relation_oid)
                 .ok_or_else(|| ParseError::UnknownTable(relation_oid.to_string()))?;
+            if relation_has_security_barrier(catalog, relation_oid) {
+                analyzed.depends_on_row_security = true;
+            }
             apply_view_permission_context(
                 &mut analyzed,
                 class_row.relowner,

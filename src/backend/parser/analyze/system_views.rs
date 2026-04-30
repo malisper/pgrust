@@ -1822,11 +1822,11 @@ fn describe_view_updatability_inner(
         });
     }
 
-    let raw_select = load_view_return_select(relation_oid, None, catalog, expanded_views)?;
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, expanded_views)?;
+    let raw_select = load_view_return_select(relation_oid, None, catalog, expanded_views).ok();
     let auto = describe_auto_updatable_view_shape(
         relation_oid,
-        &raw_select,
+        raw_select.as_ref(),
         &query,
         relation_desc,
         catalog,
@@ -1867,7 +1867,7 @@ fn describe_view_updatability_inner(
 
 fn describe_auto_updatable_view_shape(
     current_relation_oid: u32,
-    raw_select: &SelectStatement,
+    raw_select: Option<&SelectStatement>,
     query: &Query,
     relation_desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
@@ -1878,18 +1878,17 @@ fn describe_auto_updatable_view_shape(
         ..ViewUpdatability::default()
     };
 
-    if raw_select.distinct
+    if query.distinct
         || !query.group_by.is_empty()
         || query.having_qual.is_some()
-        || raw_select.set_operation.is_some()
+        || query.set_operation.is_some()
         || query.recursive_union.is_some()
-        || !raw_select.with.is_empty()
+        || raw_select.is_some_and(|select| !select.with.is_empty())
         || query.limit_count.is_some()
         || query.limit_offset.is_some()
         || !query.accumulators.is_empty()
         || !query.window_clauses.is_empty()
         || query.has_target_srfs
-        || query.where_qual.as_ref().is_some_and(expr_contains_sublink)
     {
         return result;
     }

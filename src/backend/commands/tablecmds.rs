@@ -71,7 +71,7 @@ use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
     remap_partition_row_to_child_layout, remap_partition_row_to_parent_layout,
 };
-use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
+use super::trigger::{RuntimeTriggers, TriggerTransitionCapture, relation_has_instead_row_trigger};
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
@@ -2852,24 +2852,43 @@ fn explain_delete_rule_lines(
         for rule in rules {
             saw_instead |= rule.is_instead;
             for action in rule.actions {
-                let BoundRuleAction::Delete(action) = action else {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "EXPLAIN rule action".into(),
-                    )));
-                };
-                let action = finalize_bound_delete_stmt(action, catalog);
-                for action_target in &action.targets {
-                    if !lines.is_empty() {
-                        lines.push(String::new());
+                match action {
+                    BoundRuleAction::Delete(action) => {
+                        let action = finalize_bound_delete_stmt(action, catalog);
+                        for action_target in &action.targets {
+                            if !lines.is_empty() {
+                                lines.push(String::new());
+                            }
+                            explain_rule_delete_action_lines(
+                                target,
+                                action_target,
+                                show_costs,
+                                verbose,
+                                &mut lines,
+                            );
+                        }
                     }
-                    explain_rule_delete_action_lines(
-                        target,
-                        action_target,
-                        show_costs,
-                        verbose,
-                        &mut lines,
-                    );
-                }
+                    BoundRuleAction::Update(action) => {
+                        let action = finalize_bound_update_stmt(action, catalog);
+                        for action_target in &action.targets {
+                            if !lines.is_empty() {
+                                lines.push(String::new());
+                            }
+                            explain_rule_update_action_lines(
+                                target,
+                                action_target,
+                                show_costs,
+                                verbose,
+                                &mut lines,
+                            );
+                        }
+                    }
+                    _ => {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                            "EXPLAIN rule action".into(),
+                        )));
+                    }
+                };
             }
         }
         if !saw_instead {
@@ -3082,6 +3101,164 @@ fn explain_rule_delete_action_lines(
         8,
         lines,
     );
+}
+
+fn explain_rule_update_action_lines(
+    event_target: &BoundDeleteTarget,
+    action_target: &BoundUpdateTarget,
+    show_costs: bool,
+    verbose: bool,
+    lines: &mut Vec<String>,
+) {
+    let action_target = update_target_with_rule_explain_scan_keys(action_target, event_target);
+    let event_alias = rule_action_event_alias(event_target, &action_target.relation_name);
+    let update_alias = event_alias.as_deref();
+    push_explain_line(
+        &format!(
+            "Update on {}{}",
+            explain_update_target_name(&action_target.relation_name, verbose),
+            update_alias
+                .map(|alias| format!(" {alias}"))
+                .unwrap_or_default()
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    push_explain_line(
+        "  ->  Nested Loop",
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    push_delete_single_target_scan(event_target, update_alias, show_costs, 8, lines);
+    let event_filter = event_target
+        .predicate
+        .as_ref()
+        .and_then(|expr| scan_filter_without_delete_index_quals(event_target, expr));
+    push_update_single_target_scan_with_filter(
+        &action_target,
+        None,
+        event_filter.as_ref(),
+        show_costs,
+        8,
+        lines,
+    );
+}
+
+fn update_target_with_rule_explain_scan_keys(
+    action_target: &BoundUpdateTarget,
+    event_target: &BoundDeleteTarget,
+) -> BoundUpdateTarget {
+    let mut target = action_target.clone();
+    if let Some(predicate) = target.predicate.as_ref() {
+        let predicate = substitute_old_constants_for_explain(predicate, event_target);
+        if let Some(row_source) =
+            explain_index_row_source_for_predicate(&predicate, &target.indexes)
+        {
+            target.row_source = row_source;
+        }
+    }
+    target
+}
+
+fn explain_index_row_source_for_predicate(
+    predicate: &Expr,
+    indexes: &[BoundIndexRelation],
+) -> Option<BoundModifyRowSource> {
+    let equalities = flatten_and_exprs(predicate)
+        .into_iter()
+        .filter_map(|clause| {
+            let comparison = comparison_to_nonnull_const(&clause)?;
+            if !matches!(comparison.kind, ConstComparisonKind::Eq) {
+                return None;
+            }
+            let expr = comparison.expr;
+            let Expr::Var(var) = expr else {
+                return None;
+            };
+            if var.varlevelsup != 0 {
+                return None;
+            }
+            Some((attrno_index(var.varattno)?, comparison.value))
+        })
+        .collect::<Vec<_>>();
+
+    for index in indexes.iter().filter(|index| {
+        index.index_meta.indisvalid
+            && index.index_meta.indisready
+            && index.index_meta.am_oid == BTREE_AM_OID
+            && !index.index_meta.indkey.is_empty()
+    }) {
+        let Some(heap_attno) = index
+            .index_meta
+            .indkey
+            .first()
+            .and_then(|attno| usize::try_from(*attno).ok())
+            .and_then(|attno| attno.checked_sub(1))
+        else {
+            continue;
+        };
+        let Some((_, value)) = equalities
+            .iter()
+            .find(|(column_index, _)| *column_index == heap_attno)
+        else {
+            continue;
+        };
+        return Some(BoundModifyRowSource::Index {
+            index: index.clone(),
+            keys: vec![crate::include::access::scankey::ScanKeyData {
+                attribute_number: 1,
+                strategy: 3,
+                argument: value.clone(),
+            }],
+        });
+    }
+    None
+}
+
+fn rule_action_event_alias(
+    event_target: &BoundDeleteTarget,
+    action_relation_name: &str,
+) -> Option<String> {
+    (event_target.relation_name == action_relation_name)
+        .then(|| format!("{}_1", action_relation_name.trim_matches('"')))
+}
+
+fn push_update_single_target_scan_with_filter(
+    target: &BoundUpdateTarget,
+    alias: Option<&str>,
+    filter: Option<&Expr>,
+    show_costs: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "{}->  {}",
+            " ".repeat(indent),
+            explain_update_scan_label(target, alias)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    let detail_prefix = " ".repeat(indent + 6);
+    if let Some(index_cond) = explain_update_index_cond(target) {
+        lines.push(format!("{detail_prefix}Index Cond: {index_cond}"));
+    }
+    if let Some(predicate) = filter {
+        let column_names = target
+            .desc
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        lines.push(format!(
+            "{detail_prefix}Filter: {}",
+            crate::backend::executor::render_explain_expr(predicate, &column_names)
+        ));
+    }
 }
 
 fn delete_explain_subplan_without_target_filter(plan: &Plan) -> &Plan {
@@ -3461,6 +3638,62 @@ fn delete_target_filter_expr(expr: &Expr) -> Option<Expr> {
         }
         other => Some(other.clone()),
     }
+}
+
+fn scan_filter_without_delete_index_quals(target: &BoundDeleteTarget, expr: &Expr) -> Option<Expr> {
+    let filter = delete_target_filter_expr(expr)?;
+    let clauses = flatten_and_exprs(&filter)
+        .into_iter()
+        .filter(|clause| !delete_clause_matches_index_scan_key(target, clause))
+        .collect::<Vec<_>>();
+    match clauses.as_slice() {
+        [] => None,
+        [single] => Some(single.clone()),
+        _ => Some(Expr::Bool(Box::new(BoolExpr {
+            boolop: BoolExprType::And,
+            args: clauses,
+        }))),
+    }
+}
+
+fn delete_clause_matches_index_scan_key(target: &BoundDeleteTarget, clause: &Expr) -> bool {
+    let Some(comparison) = comparison_to_nonnull_const(clause) else {
+        return false;
+    };
+    if !matches!(comparison.kind, ConstComparisonKind::Eq) {
+        return false;
+    };
+    let expr = comparison.expr;
+    let Expr::Var(var) = expr else {
+        return false;
+    };
+    if var.varlevelsup != 0 {
+        return false;
+    }
+    let Some(column_index) = attrno_index(var.varattno) else {
+        return false;
+    };
+    let BoundModifyRowSource::Index { index, keys } = &target.row_source else {
+        return false;
+    };
+    keys.iter().any(|key| {
+        let Some(index_attno) = usize::try_from(key.attribute_number)
+            .ok()
+            .and_then(|attno| attno.checked_sub(1))
+        else {
+            return false;
+        };
+        let Some(heap_attno) = index
+            .index_meta
+            .indkey
+            .get(index_attno)
+            .and_then(|attno| usize::try_from(*attno).ok())
+            .and_then(|attno| attno.checked_sub(1))
+        else {
+            return false;
+        };
+        heap_attno == column_index && key.strategy == 3 && key.argument == comparison.value
+    })
 }
 
 fn explain_insert_target_name(
@@ -10366,6 +10599,12 @@ fn execute_insert_rows_with_routing(
                 .iter()
                 .zip(result_rel_info.rows.iter())
             {
+                let leaf_write_checks = remap_partition_write_checks(
+                    rls_write_checks,
+                    desc,
+                    &result_rel_info.relation.desc,
+                    1,
+                );
                 let leaf_inserted_rows = execute_insert_rows(
                     &result_rel_info.relation_name,
                     relation_name,
@@ -10375,7 +10614,7 @@ fn execute_insert_rows_with_routing(
                     result_rel_info.toast_index.as_ref(),
                     &result_rel_info.relation.desc,
                     &result_rel_info.relation_constraints,
-                    rls_write_checks,
+                    &leaf_write_checks,
                     &result_rel_info.indexes,
                     std::slice::from_ref(leaf_input_row),
                     None,
@@ -11349,6 +11588,514 @@ impl MergeRuntimeTriggers {
     }
 }
 
+fn merge_action_mutates(action: &BoundMergeAction) -> bool {
+    !matches!(action, BoundMergeAction::DoNothing)
+}
+
+fn merge_uses_full_join_input(stmt: &BoundMergeStatement) -> bool {
+    let has_not_matched_by_source = stmt.when_clauses.iter().any(|clause| {
+        matches!(
+            clause.match_kind,
+            crate::backend::parser::MergeMatchKind::NotMatchedBySource
+        ) && merge_action_mutates(&clause.action)
+    });
+    let has_not_matched_by_target = stmt.when_clauses.iter().any(|clause| {
+        matches!(
+            clause.match_kind,
+            crate::backend::parser::MergeMatchKind::NotMatchedByTarget
+        ) && merge_action_mutates(&clause.action)
+    });
+    has_not_matched_by_source && has_not_matched_by_target
+}
+
+fn merge_row_has_target(stmt: &BoundMergeStatement, row_values: &[Value]) -> bool {
+    row_values
+        .get(stmt.target_ctid_index)
+        .is_some_and(|value| !matches!(value, Value::Null))
+}
+
+fn order_full_merge_input_rows(stmt: &BoundMergeStatement, rows: &mut Vec<Vec<Value>>) {
+    if !merge_uses_full_join_input(stmt) {
+        return;
+    }
+    let mut target_rows = Vec::with_capacity(rows.len());
+    let mut source_only_rows = Vec::new();
+    for row in rows.drain(..) {
+        if merge_row_has_target(stmt, &row) {
+            target_rows.push(row);
+        } else {
+            source_only_rows.push(row);
+        }
+    }
+    target_rows.extend(source_only_rows);
+    *rows = target_rows;
+}
+
+fn merge_view_action_error_message(relation_name: &str, event: ViewDmlEvent) -> String {
+    match event {
+        ViewDmlEvent::Insert => format!("cannot insert into view \"{}\"", relation_name),
+        ViewDmlEvent::Update => format!("cannot update view \"{}\"", relation_name),
+        ViewDmlEvent::Delete => format!("cannot delete from view \"{}\"", relation_name),
+    }
+}
+
+fn merge_view_action_hint(event: ViewDmlEvent) -> String {
+    match event {
+        ViewDmlEvent::Insert => {
+            "To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT trigger."
+        }
+        ViewDmlEvent::Update => {
+            "To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger."
+        }
+        ViewDmlEvent::Delete => {
+            "To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger."
+        }
+    }
+    .into()
+}
+
+fn merge_trigger_operation(event: ViewDmlEvent) -> TriggerOperation {
+    match event {
+        ViewDmlEvent::Insert => TriggerOperation::Insert,
+        ViewDmlEvent::Update => TriggerOperation::Update,
+        ViewDmlEvent::Delete => TriggerOperation::Delete,
+    }
+}
+
+fn merge_view_executor_relation_name(
+    stmt: &BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    catalog
+        .class_row_by_oid(stmt.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| stmt.relation_name.clone())
+}
+
+fn original_merge_view_has_instead_trigger(
+    stmt: &BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let Some(original) = catalog.lookup_any_relation(&stmt.relation_name) else {
+        return false;
+    };
+    [
+        ViewDmlEvent::Insert,
+        ViewDmlEvent::Update,
+        ViewDmlEvent::Delete,
+    ]
+    .into_iter()
+    .any(|event| {
+        relation_has_instead_row_trigger(
+            catalog,
+            original.relation_oid,
+            merge_trigger_operation(event),
+        )
+    })
+}
+
+fn merge_view_missing_trigger_error(
+    stmt: &BoundMergeStatement,
+    event: ViewDmlEvent,
+    catalog: &dyn CatalogLookup,
+) -> ExecError {
+    if original_merge_view_has_instead_trigger(stmt, catalog) {
+        return ExecError::DetailedError {
+            message: format!("cannot merge into view \"{}\"", stmt.relation_name),
+            detail: Some(
+                "MERGE is not supported for views with INSTEAD OF triggers for some actions but not all."
+                    .into(),
+            ),
+            hint: Some(
+                "To enable merging into the view, either provide a full set of INSTEAD OF triggers or drop the existing INSTEAD OF triggers."
+                    .into(),
+            ),
+            sqlstate: "0A000",
+        };
+    }
+    let relation_name = merge_view_executor_relation_name(stmt, catalog);
+    let detail =
+        resolve_auto_updatable_view_target(stmt.relation_oid, &stmt.desc, event, catalog, &[])
+            .err()
+            .map(|err| err.detail())
+            .unwrap_or_else(|| {
+                "MERGE execution for INSTEAD OF trigger views is not supported.".into()
+            });
+    ExecError::DetailedError {
+        message: merge_view_action_error_message(&relation_name, event),
+        detail: Some(detail),
+        hint: Some(merge_view_action_hint(event)),
+        sqlstate: "55000",
+    }
+}
+
+fn merge_update_modified_attnums(stmt: &BoundMergeStatement) -> Vec<i16> {
+    let mut attnums = BTreeSet::new();
+    for clause in &stmt.when_clauses {
+        if let BoundMergeAction::Update { assignments } = &clause.action {
+            attnums.extend(modified_attnums_for_update(assignments));
+        }
+    }
+    attnums.into_iter().collect()
+}
+
+fn load_merge_view_triggers(
+    stmt: &BoundMergeStatement,
+    event: ViewDmlEvent,
+    modified_attnums: &[i16],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<RuntimeTriggers, ExecError> {
+    let trigger_event = merge_trigger_operation(event);
+    let relation_name = merge_view_executor_relation_name(stmt, catalog);
+    let triggers = RuntimeTriggers::load(
+        catalog,
+        stmt.relation_oid,
+        &relation_name,
+        &stmt.desc,
+        trigger_event,
+        modified_attnums,
+        ctx.session_replication_role,
+    )?;
+    if !triggers.has_instead_row_triggers() {
+        return Err(merge_view_missing_trigger_error(stmt, event, catalog));
+    }
+    Ok(triggers)
+}
+
+fn execute_merge_insert_trigger_action(
+    stmt: &BoundMergeStatement,
+    triggers: &RuntimeTriggers,
+    target_columns: &[BoundAssignmentTarget],
+    values: Option<&[Expr]>,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    let mut row_values = vec![Value::Null; stmt.desc.columns.len()];
+    let mut default_slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
+    for (column_index, expr) in stmt.column_defaults.iter().enumerate() {
+        row_values[column_index] = eval_expr(expr, &mut default_slot, ctx)?;
+    }
+    if let Some(values) = values {
+        for (target, expr) in target_columns.iter().zip(values.iter()) {
+            let value = eval_expr(expr, slot, ctx)?;
+            apply_assignment_target(&stmt.desc, &mut row_values, target, value, slot, ctx)?;
+        }
+    }
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_insert_write_checks,
+        &row_values,
+        ctx,
+    )?;
+    triggers.instead_row_insert(row_values, ctx)
+}
+
+fn execute_merge_update_trigger_action(
+    stmt: &BoundMergeStatement,
+    triggers: &RuntimeTriggers,
+    target_values: &[Value],
+    assignments: &[BoundAssignment],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_update_visibility_checks,
+        target_values,
+        ctx,
+    )?;
+    let mut updated_values = target_values.to_vec();
+    for assignment in assignments {
+        let value = eval_expr(&assignment.expr, slot, ctx)?;
+        apply_assignment_target(
+            &stmt.desc,
+            &mut updated_values,
+            &BoundAssignmentTarget {
+                column_index: assignment.column_index,
+                subscripts: assignment.subscripts.clone(),
+                field_path: assignment.field_path.clone(),
+                indirection: assignment.indirection.clone(),
+                target_sql_type: assignment.target_sql_type,
+            },
+            value,
+            slot,
+            ctx,
+        )?;
+    }
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_update_write_checks,
+        &updated_values,
+        ctx,
+    )?;
+    triggers.instead_row_update(target_values, updated_values, ctx)
+}
+
+fn execute_merge_delete_trigger_action(
+    stmt: &BoundMergeStatement,
+    triggers: &RuntimeTriggers,
+    target_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_delete_visibility_checks,
+        target_values,
+        ctx,
+    )?;
+    triggers.instead_row_delete(target_values.to_vec(), ctx)
+}
+
+fn execute_merge_on_instead_trigger_view(
+    stmt: BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let needs_insert = stmt
+        .when_clauses
+        .iter()
+        .any(|clause| matches!(clause.action, BoundMergeAction::Insert { .. }));
+    let needs_update = stmt
+        .when_clauses
+        .iter()
+        .any(|clause| matches!(clause.action, BoundMergeAction::Update { .. }));
+    let needs_delete = stmt
+        .when_clauses
+        .iter()
+        .any(|clause| matches!(clause.action, BoundMergeAction::Delete));
+    let insert_triggers = if needs_insert {
+        Some(load_merge_view_triggers(
+            &stmt,
+            ViewDmlEvent::Insert,
+            &[],
+            catalog,
+            ctx,
+        )?)
+    } else {
+        None
+    };
+    let update_attnums = merge_update_modified_attnums(&stmt);
+    let update_triggers = if needs_update {
+        Some(load_merge_view_triggers(
+            &stmt,
+            ViewDmlEvent::Update,
+            &update_attnums,
+            catalog,
+            ctx,
+        )?)
+    } else {
+        None
+    };
+    let delete_triggers = if needs_delete {
+        Some(load_merge_view_triggers(
+            &stmt,
+            ViewDmlEvent::Delete,
+            &[],
+            catalog,
+            ctx,
+        )?)
+    } else {
+        None
+    };
+
+    if let Some(triggers) = &insert_triggers {
+        triggers.before_statement(ctx)?;
+    }
+    if let Some(triggers) = &update_triggers {
+        triggers.before_statement(ctx)?;
+    }
+    if let Some(triggers) = &delete_triggers {
+        triggers.before_statement(ctx)?;
+    }
+
+    let mut state = executor_start(stmt.input_plan.plan_tree.clone());
+    let mut affected_rows = 0usize;
+    let mut returned_rows = Vec::new();
+    let mut matched_target_rows = HashSet::new();
+    let mut input_rows = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+        Value::materialize_all(&mut row_values);
+        input_rows.push(row_values);
+    }
+    order_full_merge_input_rows(&stmt, &mut input_rows);
+
+    for row_values in input_rows {
+        ctx.check_for_interrupts()?;
+        let target_tid = row_values
+            .get(stmt.target_ctid_index)
+            .ok_or(ExecError::DetailedError {
+                message: "merge input row is missing target ctid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(parse_tid_text)?;
+        let target_tableoid = if target_tid.is_some() {
+            Some(
+                row_values
+                    .get(stmt.target_tableoid_index)
+                    .ok_or(ExecError::DetailedError {
+                        message: "merge input row is missing target tableoid marker".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    })
+                    .and_then(parse_update_tableoid)?,
+            )
+        } else {
+            None
+        };
+        let source_present = row_values
+            .get(stmt.source_present_index)
+            .ok_or(ExecError::DetailedError {
+                message: "merge input row is missing source-present marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(merge_source_present)?;
+        if source_present
+            && let Some(target_tid) = target_tid
+            && !matched_target_rows
+                .insert((target_tableoid.unwrap_or(stmt.relation_oid), target_tid))
+        {
+            return Err(ExecError::DetailedError {
+                message: "MERGE command cannot affect row a second time".into(),
+                detail: None,
+                hint: Some(
+                    "Ensure that not more than one source row matches any one target row.".into(),
+                ),
+                sqlstate: "21000",
+            });
+        }
+
+        let target_matched = target_tid.is_some();
+        let visible_values = row_values[..stmt.visible_column_count].to_vec();
+        let target_values = visible_values[..stmt.desc.columns.len()].to_vec();
+        let source_values = visible_values[stmt.desc.columns.len()..].to_vec();
+        let mut eval_slot = TupleSlot::virtual_row(visible_values);
+
+        for clause in &stmt.when_clauses {
+            let matches = match clause.match_kind {
+                crate::backend::parser::MergeMatchKind::Matched => target_matched && source_present,
+                crate::backend::parser::MergeMatchKind::NotMatchedBySource => {
+                    target_matched && !source_present
+                }
+                crate::backend::parser::MergeMatchKind::NotMatchedByTarget => {
+                    !target_matched && source_present
+                }
+            };
+            if !matches || !merge_condition_matches(clause.condition.as_ref(), &mut eval_slot, ctx)?
+            {
+                continue;
+            }
+            let action_output = match &clause.action {
+                BoundMergeAction::DoNothing => None,
+                BoundMergeAction::Delete => {
+                    let triggers = delete_triggers.as_ref().ok_or_else(|| {
+                        merge_view_missing_trigger_error(&stmt, ViewDmlEvent::Delete, catalog)
+                    })?;
+                    execute_merge_delete_trigger_action(&stmt, triggers, &target_values, ctx)?.map(
+                        |returned_row| MergeActionOutput {
+                            action: "DELETE",
+                            old_values: Some(returned_row.clone()),
+                            new_values: None,
+                            target_values: returned_row,
+                        },
+                    )
+                }
+                BoundMergeAction::Update { assignments } => {
+                    let triggers = update_triggers.as_ref().ok_or_else(|| {
+                        merge_view_missing_trigger_error(&stmt, ViewDmlEvent::Update, catalog)
+                    })?;
+                    execute_merge_update_trigger_action(
+                        &stmt,
+                        triggers,
+                        &target_values,
+                        assignments,
+                        &mut eval_slot,
+                        ctx,
+                    )?
+                    .map(|returned_row| MergeActionOutput {
+                        action: "UPDATE",
+                        old_values: Some(target_values.clone()),
+                        new_values: Some(returned_row.clone()),
+                        target_values: returned_row,
+                    })
+                }
+                BoundMergeAction::Insert {
+                    target_columns,
+                    values,
+                } => {
+                    let triggers = insert_triggers.as_ref().ok_or_else(|| {
+                        merge_view_missing_trigger_error(&stmt, ViewDmlEvent::Insert, catalog)
+                    })?;
+                    execute_merge_insert_trigger_action(
+                        &stmt,
+                        triggers,
+                        target_columns,
+                        values.as_deref(),
+                        &mut eval_slot,
+                        ctx,
+                    )?
+                    .map(|returned_row| MergeActionOutput {
+                        action: "INSERT",
+                        old_values: None,
+                        new_values: Some(returned_row.clone()),
+                        target_values: returned_row,
+                    })
+                }
+            };
+            if let Some(action_output) = action_output {
+                affected_rows += 1;
+                if !stmt.returning.is_empty() {
+                    let mut returning_values = action_output.target_values.clone();
+                    returning_values.extend(source_values.iter().cloned());
+                    returning_values.push(Value::Text(action_output.action.into()));
+                    let row = project_returning_row_with_old_new(
+                        &stmt.returning,
+                        &returning_values,
+                        None,
+                        None,
+                        action_output.old_values.as_deref(),
+                        action_output.new_values.as_deref(),
+                        ctx,
+                    )?;
+                    capture_copy_to_dml_returning_row(row.clone());
+                    returned_rows.push(row);
+                }
+            }
+            break;
+        }
+    }
+
+    if let Some(triggers) = &delete_triggers {
+        triggers.after_statement(None, ctx)?;
+    }
+    if let Some(triggers) = &update_triggers {
+        triggers.after_statement(None, ctx)?;
+    }
+    if let Some(triggers) = &insert_triggers {
+        triggers.after_statement(None, ctx)?;
+    }
+
+    if stmt.returning.is_empty() {
+        Ok(StatementResult::AffectedRows(affected_rows))
+    } else {
+        Ok(build_returning_result(
+            returning_result_columns(&stmt.returning),
+            returned_rows,
+        ))
+    }
+}
+
 fn execute_merge_insert_action(
     stmt: &BoundMergeStatement,
     catalog: &dyn CatalogLookup,
@@ -11360,6 +12107,17 @@ fn execute_merge_insert_action(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<Option<Vec<Value>>, ExecError> {
+    if catalog
+        .class_row_by_oid(stmt.relation_oid)
+        .is_some_and(|row| row.relkind == 'v')
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("cannot merge into view \"{}\"", stmt.relation_name),
+            detail: Some("MERGE execution for INSTEAD OF trigger views is not supported.".into()),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
     let mut row_values = vec![Value::Null; stmt.desc.columns.len()];
     let mut default_slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
     let mut targeted = vec![false; stmt.desc.columns.len()];
@@ -11478,6 +12236,52 @@ fn execute_merge_update_row(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<Option<Vec<Value>>, ExecError> {
+    let target_relation = target_tableoid.and_then(|oid| catalog.relation_by_oid(oid));
+    if target_relation
+        .as_ref()
+        .is_some_and(|relation| relation.relkind == 'v')
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("cannot merge into view \"{}\"", stmt.relation_name),
+            detail: Some("MERGE execution for INSTEAD OF trigger views is not supported.".into()),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    let target_rel = target_relation
+        .as_ref()
+        .map(|relation| relation.rel)
+        .unwrap_or(stmt.rel);
+    let target_desc = target_relation
+        .as_ref()
+        .map(|relation| &relation.desc)
+        .unwrap_or(&stmt.desc);
+    let target_toast = target_relation
+        .as_ref()
+        .and_then(|relation| relation.toast)
+        .or(stmt.toast);
+    let target_toast_index = target_relation
+        .as_ref()
+        .map(|relation| first_toast_index_for_relation(catalog, relation.toast))
+        .unwrap_or_else(|| stmt.toast_index.clone());
+    let target_relation_oid = target_tableoid.unwrap_or(stmt.relation_oid);
+    let target_indexes = target_relation
+        .as_ref()
+        .map(|_| catalog.index_relations_for_heap(target_relation_oid))
+        .unwrap_or_else(|| stmt.indexes.clone());
+    let target_constraints = target_relation
+        .as_ref()
+        .map(|_| {
+            bind_relation_constraints(
+                Some(&stmt.relation_name),
+                target_relation_oid,
+                target_desc,
+                catalog,
+            )
+            .map_err(ExecError::Parse)
+        })
+        .transpose()?
+        .unwrap_or_else(|| stmt.relation_constraints.clone());
     crate::backend::executor::enforce_row_security_write_checks_with_tid(
         &stmt.relation_name,
         &stmt.desc,
@@ -11513,165 +12317,89 @@ fn execute_merge_update_row(
     };
     capture_copy_to_dml_notices();
     materialize_generated_columns(&stmt.desc, &mut updated_values, ctx)?;
-    if let Some(target_tableoid) = target_tableoid
-        && target_tableoid != stmt.relation_oid
-    {
-        return execute_merge_update_child_row(
-            stmt,
-            catalog,
-            target_tableoid,
-            target_tid,
-            original_values,
-            &updated_values,
-            ctx,
-            xid,
-            cid,
-        );
-    }
-    if let Some(catalog) = ctx.catalog.as_deref() {
-        let namespace_oid = catalog
-            .class_row_by_oid(stmt.relation_oid)
-            .map(|row| row.relnamespace)
-            .unwrap_or(0);
-        enforce_publication_replica_identity(
-            &stmt.relation_name,
-            stmt.relation_oid,
-            namespace_oid,
-            &stmt.desc,
-            &stmt.indexes,
-            catalog,
-            PublicationDmlAction::Update,
-            true,
-        )?;
-    }
-    let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, target_tid)?;
-    crate::backend::executor::enforce_row_security_write_checks(
+    let target_is_child_layout = target_relation
+        .as_ref()
+        .is_some_and(|relation| relation.relation_oid != stmt.relation_oid);
+    let write_old_values = if target_is_child_layout {
+        remap_partition_row_to_child_layout(original_values, &stmt.desc, target_desc)?
+    } else {
+        original_values.to_vec()
+    };
+    let write_values = if target_is_child_layout {
+        remap_partition_row_to_child_layout(&updated_values, &stmt.desc, target_desc)?
+    } else {
+        updated_values
+    };
+    let write_checks = if target_is_child_layout {
+        remap_partition_write_checks(&stmt.merge_update_write_checks, &stmt.desc, target_desc, 1)
+    } else {
+        stmt.merge_update_write_checks.clone()
+    };
+    let referenced_by_foreign_keys = if target_is_child_layout {
+        bind_referenced_by_foreign_keys(target_relation_oid, target_desc, catalog)
+            .map_err(ExecError::Parse)?
+    } else {
+        stmt.referenced_by_foreign_keys.clone()
+    };
+    let partition_update_root_oid = catalog
+        .class_row_by_oid(stmt.relation_oid)
+        .and_then(|row| (row.relkind == 'p').then_some(stmt.relation_oid));
+    match write_updated_row(
         &stmt.relation_name,
-        &stmt.desc,
-        &stmt.merge_update_write_checks,
-        &updated_values,
-        ctx,
-    )?;
-    crate::backend::executor::enforce_relation_constraints(
-        &stmt.relation_name,
-        &stmt.desc,
-        &stmt.relation_constraints,
-        &updated_values,
-        ctx,
-    )?;
-    enforce_temporal_constraints_for_write(
-        &stmt.relation_name,
-        stmt.rel,
-        stmt.toast,
-        &stmt.desc,
-        &stmt.relation_constraints,
-        &updated_values,
-        Some(target_tid),
-        ctx,
-    )?;
-    enforce_exclusion_constraints_for_write(
-        &stmt.relation_name,
-        stmt.rel,
-        stmt.toast,
-        &stmt.desc,
-        &stmt.relation_constraints,
-        &updated_values,
-        Some(target_tid),
-        ctx,
-    )?;
-    crate::backend::executor::enforce_outbound_foreign_keys(
-        &stmt.relation_name,
-        &stmt.relation_constraints.foreign_keys,
-        Some(original_values),
-        &updated_values,
-        ctx,
-    )?;
-    apply_inbound_foreign_key_actions_on_update(
-        &stmt.relation_name,
-        &stmt.referenced_by_foreign_keys,
-        original_values,
-        &updated_values,
-        ForeignKeyActionPhase::BeforeParentWrite,
-        ctx,
-        xid,
-        cid,
-        None,
-    )?;
-    let (replacement, toasted) = toast_tuple_for_write(
-        &stmt.desc,
-        &updated_values,
-        stmt.toast,
-        stmt.toast_index.as_ref(),
-        ctx,
-        xid,
-        cid,
-    )?;
-    match heap_update_with_waiter(
-        &*ctx.pool,
-        ctx.client_id,
-        stmt.rel,
-        &ctx.txns,
-        xid,
-        cid,
+        target_rel,
+        target_relation_oid,
+        partition_update_root_oid,
+        partition_update_root_oid.is_some(),
+        target_toast,
+        target_toast_index.as_ref(),
+        target_desc,
+        &target_constraints,
+        &write_checks,
+        target_is_child_layout.then_some(&stmt.desc),
+        if target_is_child_layout {
+            &stmt.merge_update_write_checks
+        } else {
+            &[]
+        },
+        returning_contains_transaction_system_var(&stmt.returning),
+        &referenced_by_foreign_keys,
+        &target_indexes,
         target_tid,
-        &replacement,
+        &write_old_values,
+        &write_values,
+        ctx,
+        xid,
+        cid,
         None,
-    ) {
-        Ok(new_tid) => {
-            if let Some(toast) = stmt.toast {
-                delete_external_from_tuple(ctx, toast, &stmt.desc, &old_tuple, xid)?;
-            }
-            maintain_indexes_for_row_with_old_tid(
-                stmt.rel,
-                &stmt.desc,
-                &stmt.indexes,
-                &updated_values,
-                new_tid,
-                Some(target_tid),
-                ctx,
-            )?;
-            let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
-                &stmt.relation_name,
-                &stmt.referenced_by_foreign_keys,
-                original_values,
-                &updated_values,
-                ForeignKeyActionPhase::AfterParentWrite,
-                ctx,
-                xid,
-                cid,
-                None,
-            )?;
-            validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
-            let pending_no_action_checks = collect_no_action_checks_on_update(
-                &stmt.relation_name,
-                &stmt.referenced_by_foreign_keys,
-                original_values,
-                &updated_values,
-                ctx,
-            )?;
-            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
+    )? {
+        WriteUpdatedRowResult::Updated(_new_tid, write_info, no_action_checks, outbound_checks) => {
+            validate_pending_outbound_foreign_key_checks(outbound_checks, ctx)?;
+            validate_pending_no_action_checks(no_action_checks, ctx)?;
             ctx.session_stats
                 .write()
-                .note_relation_update(stmt.relation_oid);
-            Ok(Some(updated_values))
+                .note_relation_update(write_info.relation_oid);
+            let values = if write_info.desc == stmt.desc {
+                write_info.values
+            } else {
+                remap_partition_row_to_parent_layout(
+                    &write_info.values,
+                    &write_info.desc,
+                    &stmt.desc,
+                )?
+            };
+            Ok(Some(values))
         }
-        Err(HeapError::TupleUpdated(_, _)) => {
-            cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+        WriteUpdatedRowResult::TupleUpdated(_) => {
             if ctx.uses_transaction_snapshot() {
                 return Err(serialization_failure_due_to_concurrent_update());
             }
             Ok(None)
         }
-        Err(HeapError::TupleAlreadyModified(_)) => {
-            cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+        WriteUpdatedRowResult::AlreadyModified => {
             if ctx.uses_transaction_snapshot() {
                 return Err(serialization_failure_due_to_concurrent_delete());
             }
             Ok(None)
-        }
-        Err(err) => {
-            cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
-            Err(err.into())
         }
     }
 }
@@ -11885,6 +12613,17 @@ fn execute_merge_delete_row(
             .as_deref()
             .and_then(|catalog| catalog.relation_by_oid(oid))
     });
+    if target_relation
+        .as_ref()
+        .is_some_and(|relation| relation.relkind == 'v')
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("cannot merge into view \"{}\"", stmt.relation_name),
+            detail: Some("MERGE execution for INSTEAD OF trigger views is not supported.".into()),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
     let target_rel = target_relation
         .as_ref()
         .map(|relation| relation.rel)
@@ -12059,6 +12798,7 @@ fn run_merge(
         input_rows.push(row_values);
     }
     let input_row_count = input_rows.len();
+    order_full_merge_input_rows(stmt, &mut input_rows);
 
     for row_values in input_rows {
         ctx.check_for_interrupts()?;
@@ -12277,6 +13017,15 @@ pub(crate) fn execute_merge(
     }
     let stmt = finalize_bound_merge(stmt, catalog);
     check_merge_privileges(&stmt, &stmt.input_plan, ctx)?;
+    if catalog
+        .class_row_by_oid(stmt.relation_oid)
+        .is_some_and(|row| row.relkind == 'v')
+    {
+        let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.input_plan.subplans.clone());
+        let result = execute_merge_on_instead_trigger_view(stmt, catalog, ctx);
+        ctx.subplans = saved_subplans;
+        return result;
+    }
     enforce_merge_publication_replica_identity(&stmt, catalog)?;
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.input_plan.subplans.clone());
     let result = (|| {
@@ -12482,8 +13231,32 @@ pub(crate) fn materialize_insert_rows(
                 crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
             let planned = planner(query, catalog).map_err(ExecError::Parse)?;
             check_planned_stmt_select_privileges(&planned, ctx)?;
+            let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
+            let saved_exec_params = match (|| {
+                if planned.ext_params.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let mut param_slot = ctx
+                    .expr_bindings
+                    .outer_tuple
+                    .clone()
+                    .map(TupleSlot::virtual_row)
+                    .unwrap_or_else(|| TupleSlot::empty(0));
+                let mut saved = Vec::with_capacity(planned.ext_params.len());
+                for param in &planned.ext_params {
+                    let value = eval_expr(&param.expr, &mut param_slot, ctx)?;
+                    let old = ctx.expr_bindings.exec_params.insert(param.paramid, value);
+                    saved.push((param.paramid, old));
+                }
+                Ok(saved)
+            })() {
+                Ok(saved) => saved,
+                Err(err) => {
+                    ctx.subplans = saved_subplans;
+                    return Err(err);
+                }
+            };
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
-                let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
                 let mut state = executor_start(planned.plan_tree.clone());
                 let mut rows = Vec::new();
                 while let Some(slot) = state.exec_proc_node(ctx)? {
@@ -12504,9 +13277,16 @@ pub(crate) fn materialize_insert_rows(
                     enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                     rows.push(values);
                 }
-                ctx.subplans = saved_subplans;
                 Ok(rows)
             })();
+            for (paramid, old) in saved_exec_params {
+                if let Some(value) = old {
+                    ctx.expr_bindings.exec_params.insert(paramid, value);
+                } else {
+                    ctx.expr_bindings.exec_params.remove(&paramid);
+                }
+            }
+            ctx.subplans = saved_subplans;
             result
         }
     }
