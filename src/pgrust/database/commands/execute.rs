@@ -1093,6 +1093,10 @@ impl Database {
         let object_kind = oa_token_after(&tokens, &["on"])
             .ok_or_else(|| oa_unsupported_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
         let objtype = oa_default_acl_objtype(&object_kind)?;
+        let is_grant = tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("grant"));
+        let grantee_name = oa_token_after(&tokens, &["to"]);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let role = if let Some(role_name) = role_name {
             catalog
@@ -1135,13 +1139,24 @@ impl Database {
                     })
             })
             .transpose()?;
-        self.object_addresses.write().upsert_default_acl(
-            role.oid,
-            role.rolname,
-            namespace.as_ref().map(|row| row.oid),
-            namespace.map(|row| row.nspname),
-            objtype,
-        );
+        let namespace_oid = namespace.as_ref().map(|row| row.oid);
+        let namespace_name = namespace.map(|row| row.nspname);
+        let mut object_addresses = self.object_addresses.write();
+        if is_grant
+            && grantee_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&role.rolname))
+        {
+            object_addresses.remove_default_acl(role.oid, namespace_oid, objtype);
+        } else {
+            object_addresses.upsert_default_acl(
+                role.oid,
+                role.rolname,
+                namespace_oid,
+                namespace_name,
+                objtype,
+            );
+        }
         Ok(())
     }
 

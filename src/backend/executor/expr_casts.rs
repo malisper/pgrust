@@ -3279,6 +3279,60 @@ fn validate_composite_text_input(
     }
 }
 
+fn soft_composite_input_error_info(
+    text: &str,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<Option<InputErrorInfo>, ExecError> {
+    let Some(catalog) = catalog else {
+        return Err(unsupported_record_input());
+    };
+    let Some(composite_type) = composite_input_base_type(ty, catalog) else {
+        return Err(unsupported_record_input());
+    };
+    let relation = catalog
+        .relation_by_oid(composite_type.typrelid)
+        .or_else(|| catalog.lookup_relation_by_oid(composite_type.typrelid))
+        .ok_or_else(unsupported_record_input)?;
+    let fields = match parse_composite_literal_fields(text) {
+        Ok(fields) => fields,
+        Err(err) => return Ok(Some(input_error_info(err, text))),
+    };
+    let columns = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .collect::<Vec<_>>();
+    if fields.len() != columns.len() {
+        return Ok(Some(input_error_info(
+            record_field_count_error(text, fields.len(), columns.len()),
+            text,
+        )));
+    }
+
+    for (column, raw) in columns.into_iter().zip(fields) {
+        let Some(raw) = raw else {
+            continue;
+        };
+        match cast_value_with_source_type_catalog_and_config(
+            Value::Text(raw.clone().into()),
+            Some(SqlType::new(SqlTypeKind::Text)),
+            column.sql_type,
+            Some(catalog),
+            config,
+        ) {
+            Ok(_) => {}
+            Err(err) if uses_user_defined_input_function(column.sql_type, Some(catalog)) => {
+                return Err(err);
+            }
+            Err(err) => return Ok(Some(input_error_info(err, &raw))),
+        }
+    }
+    Ok(None)
+}
+
 fn composite_input_base_type(ty: SqlType, catalog: &dyn CatalogLookup) -> Option<SqlType> {
     if ty.is_array {
         return None;
@@ -4019,10 +4073,7 @@ pub(crate) fn soft_input_error_info_with_catalog_and_config(
         return Ok(None);
     }
     if !ty.is_array && matches!(ty.kind, SqlTypeKind::Composite) && ty.typrelid != 0 {
-        return match validate_composite_text_input(text, ty, catalog, config) {
-            Ok(()) => Ok(None),
-            Err(err) => Ok(Some(input_error_info(err, text))),
-        };
+        return soft_composite_input_error_info(text, ty, catalog, config);
     }
     if !ty.is_array
         && matches!(

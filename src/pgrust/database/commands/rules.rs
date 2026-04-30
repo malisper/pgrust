@@ -3354,6 +3354,49 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
             row_marks,
         },
+        Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond,
+            filter,
+        } => Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond: crate::include::nodes::plannodes::TidScanCond {
+                sources: tid_cond
+                    .sources
+                    .into_iter()
+                    .map(|source| match source {
+                        crate::include::nodes::plannodes::TidScanSource::Scalar(expr) => {
+                            crate::include::nodes::plannodes::TidScanSource::Scalar(
+                                substitute_rule_expr(expr, old_values, new_values),
+                            )
+                        }
+                        crate::include::nodes::plannodes::TidScanSource::Array(expr) => {
+                            crate::include::nodes::plannodes::TidScanSource::Array(
+                                substitute_rule_expr(expr, old_values, new_values),
+                            )
+                        }
+                    })
+                    .collect(),
+                display_expr: substitute_rule_expr(tid_cond.display_expr, old_values, new_values),
+            },
+            filter: filter.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        },
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => plan,
     }
 }

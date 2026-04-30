@@ -1940,6 +1940,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         } => append_with_join_children(left).or_else(|| append_with_join_children(right)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -1966,6 +1967,7 @@ fn child_relation_names(plan: &Plan) -> Vec<String> {
 fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
     match plan {
         Plan::SeqScan { relation_name, .. }
+        | Plan::TidScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. } => names.push(
             relation_name
@@ -2384,6 +2386,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -2575,6 +2578,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         } => find_aggregate_plan(left).or_else(|| find_aggregate_plan(right)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -2860,6 +2864,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         }
         Plan::Result { .. }
         | Plan::IndexOnlyScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
@@ -2875,6 +2880,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
     here + match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -4930,6 +4936,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             }
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::TidScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }
@@ -5015,6 +5022,7 @@ fn grouped_target_srf_uses_project_set_before_aggregate() {
             } => aggregate_reads_project_set(left) || aggregate_reads_project_set(right),
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::TidScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }

@@ -1594,6 +1594,7 @@ fn try_parse_prepared_statement(
 }
 
 fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<Statement, ParseError> {
+    let source_sql = normalize_prepared_source_sql(sql);
     let rest = consume_keyword(sql, "prepare").trim_start();
     let (name, mut rest) = parse_unqualified_identifier(rest, "prepared statement name")?;
     rest = rest.trim_start();
@@ -1638,7 +1639,13 @@ fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<State
         parameter_types,
         query,
         query_sql,
+        source_sql,
     }))
+}
+
+fn normalize_prepared_source_sql(sql: &str) -> String {
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    format!("{trimmed};")
 }
 
 fn build_raw_execute_statement(sql: &str) -> Result<Statement, ParseError> {
@@ -2502,6 +2509,9 @@ fn is_create_schema_element_start(input: &str) -> bool {
         rest = consume_keyword(rest, "temp").trim_start();
     } else if keyword_at_start(rest, "temporary") {
         rest = consume_keyword(rest, "temporary").trim_start();
+    }
+    if keyword_at_start(rest, "unique") {
+        rest = consume_keyword(rest, "unique").trim_start();
     }
     keyword_at_start(rest, "sequence")
         || keyword_at_start(rest, "table")
@@ -18821,6 +18831,7 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
 }
 
 fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
+    let source_sql = normalize_prepared_source_sql(pair.as_str());
     let mut name = None;
     let mut query = None;
     let mut query_sql = None;
@@ -18863,6 +18874,7 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
         parameter_types,
         query: query.ok_or(ParseError::UnexpectedEof)?,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
+        source_sql,
     })
 }
 
