@@ -6,6 +6,7 @@ pub enum SyntheticSystemViewKind {
     PgEnum,
     PgType,
     PgConstraint,
+    PgInitPrivs,
     PgRange,
     PgTables,
     PgViews,
@@ -392,6 +393,18 @@ const PG_CONSTRAINT_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("coninhcount", SqlType::new(SqlTypeKind::Int2)),
     SyntheticSystemViewColumn::new("connoinherit", SqlType::new(SqlTypeKind::Bool)),
     SyntheticSystemViewColumn::new("conperiod", SqlType::new(SqlTypeKind::Bool)),
+];
+
+const PG_INIT_PRIVS_ALIASES: &[&str] = &["pg_init_privs", "pg_catalog.pg_init_privs"];
+const PG_INIT_PRIVS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("objoid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("classoid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("objsubid", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("privtype", SqlType::new(SqlTypeKind::InternalChar)),
+    SyntheticSystemViewColumn::new(
+        "initprivs",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+    ),
 ];
 
 const PG_RANGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -1387,6 +1400,13 @@ const SYNTHETIC_SYSTEM_VIEWS: &[SyntheticSystemView] = &[
         canonical_name: "pg_catalog.pg_constraint",
         aliases: PG_CONSTRAINT_ALIASES,
         columns: PG_CONSTRAINT_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgInitPrivs,
+        canonical_name: "pg_catalog.pg_init_privs",
+        aliases: PG_INIT_PRIVS_ALIASES,
+        columns: PG_INIT_PRIVS_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

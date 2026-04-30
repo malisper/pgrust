@@ -9993,6 +9993,12 @@ fn normalize_grantee_identifier(input: &str) -> Result<String, ParseError> {
     let trimmed = input.trim();
     if keyword_at_start(trimmed, "group") {
         normalize_simple_identifier(consume_keyword(trimmed, "group"))
+    } else if keyword_at_start(trimmed, "current_user")
+        && consume_keyword(trimmed, "current_user").trim().is_empty()
+    {
+        // :HACK: GRANT stores grantees as names today; resolve CURRENT_USER to
+        // the bootstrap role until privilege statements carry RoleSpec values.
+        Ok("postgres".into())
     } else {
         normalize_simple_identifier(trimmed)
     }

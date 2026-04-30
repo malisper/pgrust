@@ -1,4 +1,4 @@
-use super::expr::bind_legacy_scalar_function_call;
+use super::expr::{bind_legacy_scalar_function_call, bind_resolved_scalar_function_call};
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
 use crate::backend::parser::parse_statement;
@@ -4211,6 +4211,57 @@ fn bind_single_row_function_from_item_with_ctes(
             hint: None,
             sqlstate: "0A000",
         });
+    }
+    if resolved.scalar_impl.is_some() && resolved_row_columns.is_none() {
+        let expr = bind_resolved_scalar_function_call(
+            resolved,
+            args,
+            &empty_scope(),
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            _ctes,
+        )?;
+        let sql_type = expr_sql_type_hint(&expr).unwrap_or(resolved.result_type);
+        let mut output_columns = resolved_row_columns.unwrap_or_else(|| {
+            vec![QueryColumn {
+                name: resolved.proname.clone(),
+                sql_type,
+                wire_type_oid: None,
+            }]
+        });
+        if output_columns.len() != 1 {
+            return Err(function_coldeflist_error(
+                "a column definition list is only allowed for functions returning \"record\"",
+            ));
+        }
+        let mut targets = vec![TargetEntry::new(
+            output_columns[0].name.clone(),
+            coerce_bound_expr(expr, sql_type, output_columns[0].sql_type),
+            output_columns[0].sql_type,
+            1,
+        )];
+        if with_ordinality {
+            let ordinality_type = SqlType::new(SqlTypeKind::Int8);
+            output_columns.push(QueryColumn {
+                name: "ordinality".into(),
+                sql_type: ordinality_type,
+                wire_type_oid: None,
+            });
+            targets.push(TargetEntry::new(
+                "ordinality",
+                Expr::Const(Value::Int64(1)),
+                ordinality_type,
+                2,
+            ));
+        }
+        let plan = AnalyzedFrom::result().with_projection(targets);
+        let desc = plan.desc();
+        let scope = scope_with_output_exprs(
+            scope_for_relation(Some(&resolved.proname), &desc),
+            &plan.output_exprs,
+        );
+        return Ok((plan, scope, true));
     }
     if let Some(mut output_columns) = resolved_row_columns {
         let bound_args = bind_resolved_user_defined_table_function_args(
