@@ -267,6 +267,10 @@ fn single_local_varno(expr: &Expr) -> Option<usize> {
                     }
                 }
             }
+            Expr::GroupingKey(grouping_key) => visit(&grouping_key.expr, found),
+            Expr::GroupingFunc(grouping_func) => {
+                grouping_func.args.iter().all(|arg| visit(arg, found))
+            }
             Expr::Param(_) | Expr::Const(_) => true,
             Expr::Aggref(aggref) => {
                 aggref.args.iter().all(|arg| visit(arg, found))
@@ -379,6 +383,8 @@ fn single_local_varno(expr: &Expr) -> Option<usize> {
 pub(crate) fn expr_uses_ctid(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varattno == SELF_ITEM_POINTER_ATTR_NO,
+        Expr::GroupingKey(grouping_key) => expr_uses_ctid(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_uses_ctid),
         Expr::Param(_) | Expr::Const(_) => false,
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_uses_ctid)

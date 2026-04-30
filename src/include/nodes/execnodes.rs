@@ -74,6 +74,7 @@ pub struct SystemVarBinding {
 pub struct MaterializedRow {
     pub(crate) slot: TupleSlot,
     pub(crate) system_bindings: Vec<SystemVarBinding>,
+    pub(crate) grouping_refs: Vec<usize>,
 }
 
 /// Describes how the slot's underlying tuple data is stored.
@@ -231,8 +232,12 @@ pub trait PlanNode: std::fmt::Debug {
     /// after evaluating the predicate.
     fn current_slot(&mut self) -> Option<&mut TupleSlot>;
     fn current_system_bindings(&self) -> &[SystemVarBinding];
+    fn current_grouping_refs(&self) -> &[usize] {
+        &[]
+    }
     fn materialize_current_row(&mut self) -> Result<MaterializedRow, ExecError> {
         let bindings = self.current_system_bindings().to_vec();
+        let grouping_refs = self.current_grouping_refs().to_vec();
         let slot = self.current_slot().ok_or(ExecError::DetailedError {
             message: "executor node has no current slot to materialize".into(),
             detail: None,
@@ -244,7 +249,8 @@ pub trait PlanNode: std::fmt::Debug {
         Ok(MaterializedRow::new(
             TupleSlot::virtual_row_with_metadata(values, slot.tid(), slot.table_oid),
             bindings,
-        ))
+        )
+        .with_grouping_refs(grouping_refs))
     }
 
     /// Output column names for this node. Fixed for the lifetime of the query.
@@ -290,6 +296,24 @@ impl MaterializedRow {
         Self {
             slot,
             system_bindings,
+            grouping_refs: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_grouping_refs(mut self, grouping_refs: Vec<usize>) -> Self {
+        self.grouping_refs = grouping_refs;
+        self
+    }
+
+    pub(crate) fn new_with_grouping_refs(
+        slot: TupleSlot,
+        system_bindings: Vec<SystemVarBinding>,
+        grouping_refs: Vec<usize>,
+    ) -> Self {
+        Self {
+            slot,
+            system_bindings,
+            grouping_refs,
         }
     }
 }
@@ -314,6 +338,7 @@ pub struct AppendState {
     pub(crate) column_names: Vec<String>,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -333,6 +358,7 @@ pub struct MergeAppendState {
     pub(crate) next_index: usize,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -344,6 +370,7 @@ pub struct UniqueState {
     pub(crate) previous_values: Option<Vec<Value>>,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -750,6 +777,7 @@ pub struct ProjectionState {
     pub(crate) column_names: Vec<String>,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -763,6 +791,7 @@ pub struct OrderByState {
     pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -809,7 +838,8 @@ pub struct AggregateState {
     pub(crate) phase: AggregatePhase,
     pub(crate) disabled: bool,
     pub(crate) group_by: Vec<Expr>,
-    pub(crate) grouping_sets: Vec<Vec<Expr>>,
+    pub(crate) group_by_refs: Vec<usize>,
+    pub(crate) grouping_sets: Vec<Vec<usize>>,
     pub(crate) passthrough_exprs: Vec<Expr>,
     pub(crate) accumulators: Vec<AggAccum>,
     pub(crate) having: Option<Expr>,
@@ -822,6 +852,7 @@ pub struct AggregateState {
     /// path; catalog-backed aggregates resolve transition/final support here.
     pub(crate) runtimes: Option<Vec<AggregateRuntime>>,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -834,6 +865,7 @@ pub struct WindowAggState {
     pub(crate) result_rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -905,6 +937,7 @@ pub struct CteScanState {
     pub(crate) next_index: usize,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -965,6 +998,7 @@ pub struct ProjectSetState {
     pub(crate) next_index: usize,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) current_grouping_refs: Vec<usize>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }

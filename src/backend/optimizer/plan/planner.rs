@@ -194,7 +194,8 @@ fn aggregate_path_with_semantics(
     slot_id: usize,
     input: Path,
     group_by: Vec<Expr>,
-    grouping_sets: Vec<Vec<Expr>>,
+    group_by_refs: Vec<usize>,
+    grouping_sets: Vec<Vec<usize>>,
     passthrough_exprs: Vec<Expr>,
     accumulators: Vec<AggAccum>,
     semantic_accumulators: Option<Vec<AggAccum>>,
@@ -216,6 +217,7 @@ fn aggregate_path_with_semantics(
             pathkeys,
             input: Box::new(input),
             group_by,
+            group_by_refs,
             grouping_sets,
             passthrough_exprs,
             accumulators,
@@ -243,6 +245,13 @@ fn aggregate_path(
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
 ) -> Path {
+    let group_by_refs = group_by
+        .iter()
+        .map(|expr| match expr {
+            Expr::GroupingKey(grouping_key) => grouping_key.ref_id,
+            _ => 0,
+        })
+        .collect();
     aggregate_path_with_semantics(
         strategy,
         phase,
@@ -250,6 +259,7 @@ fn aggregate_path(
         slot_id,
         input,
         group_by,
+        group_by_refs,
         Vec::new(),
         passthrough_exprs,
         accumulators,
@@ -262,48 +272,38 @@ fn aggregate_path(
     )
 }
 
-fn plan_grouping_sets(root: &PlannerInfo, group_by: &[Expr]) -> Vec<Vec<Expr>> {
+fn plan_grouping_sets(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    group_by_refs: &[usize],
+) -> Vec<Vec<usize>> {
     if root.parse.grouping_sets.is_empty() {
         return Vec::new();
     }
 
-    let mut grouping_set_refs = root
-        .parse
-        .grouping_sets
-        .iter()
-        .map(|set| grouping_set_refs(root, group_by, set))
-        .collect::<Vec<_>>();
+    let mut grouping_set_refs = root.parse.grouping_sets.clone();
     grouping_set_refs.sort_by_key(Vec::len);
 
     let sort_refs = root
         .parse
         .sort_clause
         .iter()
-        .filter_map(|clause| grouping_expr_ref(root, group_by, &clause.expr, &mut Vec::new()))
+        .filter_map(|clause| {
+            grouping_expr_ref(root, group_by, group_by_refs, &clause.expr, &mut Vec::new())
+        })
         .collect::<Vec<_>>();
 
     extract_rollup_sets(&grouping_set_refs)
         .into_iter()
         .flat_map(|chain| reorder_grouping_sets(&chain, &sort_refs))
-        .map(|data| {
-            data.set
-                .into_iter()
-                .filter_map(|ref_id| group_by.get(ref_id - 1).cloned())
-                .collect()
-        })
-        .collect()
-}
-
-fn grouping_set_refs(root: &PlannerInfo, group_by: &[Expr], set: &[Expr]) -> Vec<usize> {
-    let mut used = Vec::new();
-    set.iter()
-        .filter_map(|expr| grouping_expr_ref(root, group_by, expr, &mut used))
+        .map(|data| data.set)
         .collect()
 }
 
 fn grouping_expr_ref(
     root: &PlannerInfo,
     group_by: &[Expr],
+    group_by_refs: &[usize],
     expr: &Expr,
     used: &mut Vec<usize>,
 ) -> Option<usize> {
@@ -318,13 +318,23 @@ fn grouping_expr_ref(
         group_by
             .iter()
             .enumerate()
-            .find(|(index, group_expr)| !used.contains(&(*index + 1)) && *group_expr == candidate)
+            .find(|(index, group_expr)| {
+                let ref_id = group_by_refs.get(*index).copied().unwrap_or(*index + 1);
+                !used.contains(&ref_id) && grouping_exprs_equal(group_expr, candidate)
+            })
             .map(|(index, _)| {
-                let ref_id = index + 1;
+                let ref_id = group_by_refs.get(index).copied().unwrap_or(index + 1);
                 used.push(ref_id);
                 ref_id
             })
     })
+}
+
+fn grouping_exprs_equal(left: &Expr, right: &Expr) -> bool {
+    match left {
+        Expr::GroupingKey(grouping_key) => grouping_key.expr.as_ref() == right,
+        _ => left == right,
+    }
 }
 
 fn aggregate_strategy_for_input(
@@ -354,6 +364,47 @@ fn prepare_aggregate_input_for_strategy(
             root,
             input,
             &aggregate_input_pathkeys(root, group_by, accumulators),
+            catalog,
+        ),
+        AggregateStrategy::Plain | AggregateStrategy::Hashed | AggregateStrategy::Mixed => input,
+    }
+}
+
+fn grouping_sets_input_pathkeys(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    group_by_refs: &[usize],
+    grouping_sets: &[Vec<usize>],
+) -> Vec<PathKey> {
+    let Some(first_set) = grouping_sets.first() else {
+        return Vec::new();
+    };
+    let first_chain_group_by = first_set
+        .iter()
+        .filter_map(|ref_id| {
+            group_by_refs
+                .iter()
+                .position(|candidate| candidate == ref_id)
+                .and_then(|index| group_by.get(index).cloned())
+        })
+        .collect::<Vec<_>>();
+    group_pathkeys(root, &first_chain_group_by)
+}
+
+fn prepare_grouping_sets_input_for_strategy(
+    root: &PlannerInfo,
+    strategy: AggregateStrategy,
+    input: Path,
+    group_by: &[Expr],
+    group_by_refs: &[usize],
+    grouping_sets: &[Vec<usize>],
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    match strategy {
+        AggregateStrategy::Sorted => ordered_group_input(
+            root,
+            input,
+            &grouping_sets_input_pathkeys(root, group_by, group_by_refs, grouping_sets),
             catalog,
         ),
         AggregateStrategy::Plain | AggregateStrategy::Hashed | AggregateStrategy::Mixed => input,
@@ -651,6 +702,7 @@ fn prefer_partitionwise_aggregate_path_cost(path: Path, existing_paths: &[Path])
             pathkeys,
             input,
             group_by,
+            group_by_refs,
             grouping_sets,
             passthrough_exprs,
             accumulators,
@@ -672,6 +724,7 @@ fn prefer_partitionwise_aggregate_path_cost(path: Path, existing_paths: &[Path])
             pathkeys,
             input,
             group_by,
+            group_by_refs,
             grouping_sets,
             passthrough_exprs,
             accumulators,
@@ -1523,6 +1576,7 @@ fn partial_partitionwise_aggregate_path(
         next_synthetic_slot_id(),
         final_input,
         group_by.to_vec(),
+        (1..=group_by.len()).collect(),
         Vec::new(),
         passthrough_exprs.to_vec(),
         final_accumulators,
@@ -1533,6 +1587,14 @@ fn partial_partitionwise_aggregate_path(
         catalog,
         root.config,
     )
+}
+
+fn aggregate_input_is_const_false(root: &PlannerInfo) -> bool {
+    matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false))))
+        || matches!(
+            root.parse.having_qual,
+            Some(Expr::Const(Value::Bool(false)))
+        )
 }
 
 fn make_aggregate_rel(
@@ -1556,9 +1618,7 @@ fn make_aggregate_rel(
         root.grouped_target.clone(),
     );
     for mut path in input_rel.pathlist.clone() {
-        if matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false))))
-            && !path_is_const_false_filter(&path)
-        {
+        if aggregate_input_is_const_false(root) && !path_is_const_false_filter(&path) {
             path = const_false_aggregate_input(path, catalog, root.config);
         }
         let group_by = root
@@ -1567,6 +1627,7 @@ fn make_aggregate_rel(
             .cloned()
             .map(|expr| expand_join_rte_vars(root, expr))
             .collect::<Vec<_>>();
+        let group_by_refs = root.aggregate_layout.group_by_refs.clone();
         let passthrough_exprs = root
             .aggregate_passthrough_exprs()
             .iter()
@@ -1595,7 +1656,7 @@ fn make_aggregate_rel(
             .having_qual
             .clone()
             .map(|expr| expand_join_rte_vars(root, expr));
-        let grouping_sets = plan_grouping_sets(root, &group_by);
+        let grouping_sets = plan_grouping_sets(root, &group_by, &group_by_refs);
         let output_columns =
             build_aggregate_output_columns(&group_by, &passthrough_exprs, &accumulators);
         if let Some(empty_input) = empty_preserved_outer_join_aggregate_input(
@@ -1616,26 +1677,23 @@ fn make_aggregate_rel(
             } else {
                 AggregateStrategy::Mixed
             };
-            let pathkeys = if strategy == AggregateStrategy::Sorted {
-                group_pathkeys(root, &group_by)
-            } else {
-                Vec::new()
-            };
-            let input = prepare_aggregate_input_for_strategy(
+            let input = prepare_grouping_sets_input_for_strategy(
                 root,
                 strategy,
                 path,
                 &group_by,
-                &accumulators,
+                &group_by_refs,
+                &grouping_sets,
                 catalog,
             );
             rel.add_path(aggregate_path_with_semantics(
                 strategy,
                 AggregatePhase::Complete,
-                pathkeys,
+                Vec::new(),
                 slot_id,
                 input,
                 group_by.clone(),
+                group_by_refs.clone(),
                 grouping_sets,
                 passthrough_exprs.clone(),
                 accumulators.clone(),
@@ -2164,7 +2222,9 @@ fn project_set_pathtarget_for_targets(targets: &[ProjectSetTarget]) -> PathTarge
             .iter()
             .map(|target| match target {
                 ProjectSetTarget::Scalar(entry) => entry.ressortgroupref,
-                ProjectSetTarget::Set { .. } => 0,
+                ProjectSetTarget::Set {
+                    ressortgroupref, ..
+                } => *ressortgroupref,
             })
             .collect(),
     )
@@ -2179,6 +2239,13 @@ fn expr_srf_depth(expr: &Expr) -> usize {
                 .max()
                 .unwrap_or(0)
         }
+        Expr::GroupingKey(grouping_key) => expr_srf_depth(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .map(expr_srf_depth)
+            .max()
+            .unwrap_or(0),
         Expr::Aggref(aggref) => aggref
             .args
             .iter()
@@ -2304,6 +2371,14 @@ fn collect_srfs_at_depth(expr: &Expr, depth: usize, out: &mut Vec<Expr>) {
         return;
     }
     match expr {
+        Expr::GroupingKey(grouping_key) => {
+            collect_srfs_at_depth(&grouping_key.expr, depth, out);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_srfs_at_depth(arg, depth, out);
+            }
+        }
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_srfs_at_depth(arg, depth, out);
@@ -2474,12 +2549,18 @@ fn project_set_targets_for_srf_level(
             .find(|target| target.expr == expr)
             .map(|target| target.name.clone())
             .unwrap_or_else(|| srf.name.clone());
+        let ressortgroupref = target_list
+            .iter()
+            .find(|target| target.expr == expr)
+            .map(|target| target.ressortgroupref)
+            .unwrap_or(0);
         targets.push(ProjectSetTarget::Set {
             name,
             source_expr: expr,
             call: srf.call.clone(),
             sql_type: srf.sql_type,
             column_index: srf.column_index,
+            ressortgroupref,
         });
     }
     targets

@@ -892,6 +892,14 @@ pub(super) fn bind_from_item_with_ctes(
             ctes,
         ),
         FromItem::DerivedTable(select) => {
+            reject_from_subselect_outer_aggregates(
+                select,
+                catalog,
+                outer_scopes,
+                grouped_outer.cloned(),
+                ctes,
+                expanded_views,
+            )?;
             let visible_agg_scope = current_visible_aggregate_scope();
             let (plan, _) = if select.set_operation.is_some() {
                 analyze_select_query_with_outer(
@@ -923,6 +931,14 @@ pub(super) fn bind_from_item_with_ctes(
         }
         FromItem::Lateral(source) => match source.as_ref() {
             FromItem::DerivedTable(select) => {
+                reject_from_subselect_outer_aggregates(
+                    select,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.cloned(),
+                    ctes,
+                    expanded_views,
+                )?;
                 let visible_agg_scope = current_visible_aggregate_scope();
                 let (plan, _) = analyze_select_query_with_outer(
                     select,
@@ -4219,6 +4235,7 @@ fn analyze_sql_function_target_only_body(
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        group_by_refs: Vec::new(),
         grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),

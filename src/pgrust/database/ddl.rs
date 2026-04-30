@@ -729,6 +729,13 @@ fn expr_references_relation_column(
 ) -> bool {
     match expr {
         Expr::Var(var) => var_references_relation_column(var, query, relation_oid, attnum),
+        Expr::GroupingKey(grouping_key) => {
+            expr_references_relation_column(&grouping_key.expr, query, relation_oid, attnum)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
         Expr::Aggref(aggref) => {
             aggref
                 .direct_args

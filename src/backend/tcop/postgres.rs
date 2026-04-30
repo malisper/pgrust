@@ -501,6 +501,16 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             detail,
             ..
         }) => {
+            if message
+                == "aggregate functions are not allowed in FROM clause of their own query level"
+            {
+                return find_aggregate_call_position(sql);
+            }
+            if message
+                == "arguments to GROUPING must be grouping expressions of the associated query level"
+            {
+                return find_grouping_call_argument_position(sql);
+            }
             if let Some(system_column) = check_constraint_system_column_error_name(message) {
                 return find_case_insensitive_token_position(sql, system_column);
             }
@@ -739,6 +749,16 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if message
+                == "aggregate functions are not allowed in FROM clause of their own query level"
+            {
+                return find_aggregate_call_position(sql);
+            }
+            if message
+                == "arguments to GROUPING must be grouping expressions of the associated query level"
+            {
+                return find_grouping_call_argument_position(sql);
+            }
             if let Some(system_column) = check_constraint_system_column_error_name(message) {
                 return find_case_insensitive_token_position(sql, system_column);
             }
@@ -919,6 +939,42 @@ fn check_constraint_system_column_error_name(message: &str) -> Option<&str> {
         .and_then(|(name, rest)| {
             (rest == " reference in check constraint is invalid").then_some(name)
         })
+}
+
+fn find_aggregate_call_position(sql: &str) -> Option<usize> {
+    [
+        "array_agg",
+        "string_agg",
+        "json_agg",
+        "sum",
+        "count",
+        "avg",
+        "min",
+        "max",
+    ]
+    .into_iter()
+    .find_map(|name| find_function_call_position(sql, name))
+}
+
+fn find_function_call_position(sql: &str, name: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let needle = format!("{name}(");
+    lower.find(&needle).map(|index| index + 1)
+}
+
+fn find_grouping_call_argument_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let start = lower.find("grouping(")?;
+    let args_start = start + "grouping(".len();
+    let args = sql.get(args_start..)?;
+    let close = args.find(')')?;
+    let args = &args[..close];
+    let arg_offset = args.rfind(',').map(|index| index + 1).unwrap_or(0);
+    let whitespace = args[arg_offset..]
+        .bytes()
+        .take_while(u8::is_ascii_whitespace)
+        .count();
+    Some(args_start + arg_offset + whitespace + 1)
 }
 
 fn domain_ddl_error_position(sql: &str, message: &str) -> Option<usize> {

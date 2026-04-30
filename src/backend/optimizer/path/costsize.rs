@@ -696,6 +696,7 @@ pub(super) fn optimize_path_with_config(
                 pathtarget,
                 input,
                 group_by,
+                group_by_refs,
                 grouping_sets,
                 passthrough_exprs,
                 accumulators,
@@ -736,6 +737,7 @@ pub(super) fn optimize_path_with_config(
                     pathkeys,
                     input: Box::new(input),
                     group_by,
+                    group_by_refs,
                     grouping_sets,
                     passthrough_exprs,
                     accumulators,
@@ -3759,6 +3761,14 @@ fn collect_expr_attrs_for_source(expr: &Expr, source_id: usize, attrs: &mut BTre
                 attrs.insert(index);
             }
         }
+        Expr::GroupingKey(grouping_key) => {
+            collect_expr_attrs_for_source(&grouping_key.expr, source_id, attrs);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_expr_attrs_for_source(arg, source_id, attrs);
+            }
+        }
         Expr::Op(op) => op
             .args
             .iter()
@@ -4806,6 +4816,11 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 1,
         Expr::Param(_) => true,
+        Expr::GroupingKey(grouping_key) => expr_uses_immediate_outer_columns(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(expr_uses_immediate_outer_columns),
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_uses_immediate_outer_columns)
                 || aggref
@@ -5087,6 +5102,13 @@ fn expr_uses_outer_relids_at_level(expr: &Expr, relids: &[usize], sublevels_up: 
     match expr {
         Expr::Var(var) => var_uses_outer_relids_at_level(var, relids, sublevels_up),
         Expr::Param(_) => false,
+        Expr::GroupingKey(grouping_key) => {
+            expr_uses_outer_relids_at_level(&grouping_key.expr, relids, sublevels_up)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up)),
         Expr::Aggref(aggref) => {
             aggref
                 .direct_args

@@ -88,6 +88,11 @@ fn expr_is_leakproof(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => true,
+        Expr::GroupingKey(grouping_key) => expr_is_leakproof(&grouping_key.expr, catalog),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .all(|arg| expr_is_leakproof(arg, catalog)),
         Expr::Op(op) => {
             let proc_oid = if op.opfuncid != 0 {
                 Some(op.opfuncid)
@@ -795,6 +800,14 @@ fn collect_jointree_relids_at_level(
 fn collect_expr_relids_at_level(expr: &Expr, levelsup: usize, relids: &mut Vec<usize>) {
     match expr {
         Expr::Var(var) if var.varlevelsup == levelsup => relids.push(var.varno),
+        Expr::GroupingKey(grouping_key) => {
+            collect_expr_relids_at_level(&grouping_key.expr, levelsup, relids);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_expr_relids_at_level(arg, levelsup, relids);
+            }
+        }
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_expr_relids_at_level(arg, levelsup, relids);
@@ -976,6 +989,7 @@ mod tests {
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            group_by_refs: Vec::new(),
             grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
@@ -1066,6 +1080,7 @@ mod tests {
                 distinct_on: Vec::new(),
                 where_qual,
                 group_by: Vec::new(),
+                group_by_refs: Vec::new(),
                 grouping_sets: Vec::new(),
                 accumulators: Vec::new(),
                 window_clauses: Vec::new(),

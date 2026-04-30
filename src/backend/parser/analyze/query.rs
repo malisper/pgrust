@@ -4,9 +4,9 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
 };
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, RelationPrivilegeMask,
-    RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan,
-    attrno_index, is_system_attr, user_attrno,
+    Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
+    RelationPrivilegeMask, RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr,
+    SubLink, SubPlan, attrno_index, is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -404,6 +404,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        group_by_refs: Vec::new(),
         grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
@@ -540,6 +541,18 @@ pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .aggfilter
                 .map(|expr| shift_expr_rtindexes(expr, offset)),
             ..*aggref
+        })),
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
+            expr: Box::new(shift_expr_rtindexes(*grouping_key.expr, offset)),
+            ..*grouping_key
+        })),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: grouping_func
+                .args
+                .into_iter()
+                .map(|arg| shift_expr_rtindexes(arg, offset))
+                .collect(),
+            ..*grouping_func
         })),
         Expr::WindowFunc(window_func) => {
             Expr::WindowFunc(Box::new(crate::include::nodes::primnodes::WindowFuncExpr {
@@ -854,6 +867,22 @@ fn rewrite_local_vars_for_output_exprs_impl(
                     rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
                 }),
             ..*aggref
+        })),
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
+            expr: Box::new(rewrite_local_vars_for_output_exprs(
+                *grouping_key.expr,
+                source_varno,
+                output_exprs,
+            )),
+            ..*grouping_key
+        })),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: grouping_func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
+                .collect(),
+            ..*grouping_func
         })),
         Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(
             crate::include::nodes::primnodes::WindowFuncExpr {

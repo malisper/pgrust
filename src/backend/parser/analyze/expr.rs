@@ -1661,6 +1661,23 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                 ..*aggref
             }))
         }
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(
+            crate::include::nodes::primnodes::GroupingKeyExpr {
+                expr: Box::new(raise_expr_varlevels(*grouping_key.expr, levels)),
+                ref_id: grouping_key.ref_id,
+            },
+        )),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(
+            crate::include::nodes::primnodes::GroupingFuncExpr {
+                args: grouping_func
+                    .args
+                    .into_iter()
+                    .map(|arg| raise_expr_varlevels(arg, levels))
+                    .collect(),
+                agglevelsup: grouping_func.agglevelsup + levels,
+                ..*grouping_func
+            },
+        )),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
             args: op
                 .args

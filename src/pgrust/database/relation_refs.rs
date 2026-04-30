@@ -9,6 +9,12 @@ use crate::include::nodes::primnodes::{RowsFromSource, set_returning_call_exprs}
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
+        Expr::GroupingKey(grouping_key) => collect_rels_from_expr(&grouping_key.expr, rels),
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_rels_from_expr(arg, rels);
+            }
+        }
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_rels_from_expr(arg, rels);

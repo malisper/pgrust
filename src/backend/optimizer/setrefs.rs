@@ -49,10 +49,12 @@ impl IndexedTlist {
                 .entries
                 .iter()
                 .find(|entry| {
-                    entry
-                        .match_exprs
-                        .iter()
-                        .any(|candidate| matches!(candidate, Expr::Var(candidate_var) if candidate_var == var))
+                    entry.match_exprs.iter().any(|candidate| {
+                        matches!(candidate, Expr::Var(candidate_var) if candidate_var == var)
+                            || matches!(candidate, Expr::GroupingKey(grouping_key)
+                                if matches!(grouping_key.expr.as_ref(), Expr::Var(candidate_var)
+                                    if candidate_var == var))
+                    })
                 })
                 .or_else(|| {
                     self.entries.iter().find(|entry| {
@@ -61,6 +63,13 @@ impl IndexedTlist {
                                 flatten_join_alias_vars(root, Expr::Var(candidate_var.clone()))
                                     == flatten_join_alias_vars(root, expr.clone())
                             }),
+                            Expr::GroupingKey(grouping_key) => {
+                                grouping_key.expr.as_ref() == expr
+                                    || root.is_some_and(|root| {
+                                        flatten_join_alias_vars(root, *grouping_key.expr.clone())
+                                            == flatten_join_alias_vars(root, expr.clone())
+                                    })
+                            }
                             _ => output_component_matches_expr(candidate, expr),
                         })
                     })
@@ -482,6 +491,7 @@ fn build_aggregate_tlist(
     slot_id: usize,
     phase: crate::include::nodes::plannodes::AggregatePhase,
     group_by: &[Expr],
+    group_by_refs: &[usize],
     passthrough_exprs: &[Expr],
     accumulators: &[crate::include::nodes::primnodes::AggAccum],
     semantic_accumulators: Option<&[crate::include::nodes::primnodes::AggAccum]>,
@@ -490,10 +500,26 @@ fn build_aggregate_tlist(
     let mut entries =
         Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
-        let mut match_exprs = vec![
-            slot_var(slot_id, user_attrno(index), expr_sql_type(expr)),
-            expr.clone(),
-        ];
+        let output_var = slot_var(slot_id, user_attrno(index), expr_sql_type(expr));
+        let mut match_exprs = vec![output_var.clone(), expr.clone()];
+        if let Some(ref_id) = group_by_refs
+            .get(index)
+            .copied()
+            .filter(|ref_id| *ref_id != 0)
+        {
+            match_exprs.push(Expr::GroupingKey(Box::new(
+                crate::include::nodes::primnodes::GroupingKeyExpr {
+                    expr: Box::new(expr.clone()),
+                    ref_id,
+                },
+            )));
+            match_exprs.push(Expr::GroupingKey(Box::new(
+                crate::include::nodes::primnodes::GroupingKeyExpr {
+                    expr: Box::new(output_var),
+                    ref_id,
+                },
+            )));
+        }
         if let Some(root) = root {
             match_exprs.push(flatten_join_alias_vars(root, expr.clone()));
         }
@@ -603,10 +629,11 @@ fn build_project_set_tlist(
                     crate::include::nodes::primnodes::ProjectSetTarget::Set {
                         source_expr,
                         sql_type,
+                        ressortgroupref,
                         ..
                     } => (
                         *sql_type,
-                        0,
+                        *ressortgroupref,
                         vec![
                             slot_var(slot_id, user_attrno(index), *sql_type),
                             source_expr.clone(),
@@ -793,6 +820,7 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             slot_id,
             phase,
             group_by,
+            group_by_refs,
             passthrough_exprs,
             accumulators,
             semantic_accumulators,
@@ -802,6 +830,7 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             *slot_id,
             *phase,
             group_by,
+            group_by_refs,
             passthrough_exprs,
             accumulators,
             semantic_accumulators.as_deref(),
@@ -924,6 +953,11 @@ fn expr_references_join_alias_var(root: &PlannerInfo, expr: &Expr) -> bool {
             .rtable
             .get(var.varno.saturating_sub(1))
             .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. })),
+        Expr::GroupingKey(grouping_key) => expr_references_join_alias_var(root, &grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
         Expr::Aggref(aggref) => {
             aggref
                 .direct_args
@@ -2012,6 +2046,13 @@ fn exec_param_for_outer_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
 fn expr_max_varlevelsup(expr: &Expr) -> usize {
     match expr {
         Expr::Var(var) => var.varlevelsup,
+        Expr::GroupingKey(grouping_key) => expr_max_varlevelsup(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
         Expr::Aggref(aggref) => aggref
             .args
             .iter()
@@ -3137,12 +3178,14 @@ fn lower_project_set_target(
             call,
             sql_type,
             column_index,
+            ressortgroupref,
         } => ProjectSetTarget::Set {
             name,
             source_expr,
             call: lower_set_returning_call(ctx, call, mode),
             sql_type,
             column_index,
+            ressortgroupref,
         },
     }
 }
@@ -3152,8 +3195,43 @@ fn lower_agg_accum(
     accum: crate::include::nodes::primnodes::AggAccum,
     path: &Path,
     input_tlist: &IndexedTlist,
+    semantic_group_by: &[Expr],
+    semantic_passthrough_exprs: &[Expr],
+    aggregate_layout: &[Expr],
+    aggregate_tlist: &IndexedTlist,
 ) -> crate::include::nodes::primnodes::AggAccum {
+    let direct_args = accum
+        .direct_args
+        .into_iter()
+        .map(|arg| {
+            let arg = match ctx.root {
+                Some(root) => lower_agg_output_expr(
+                    expand_join_rte_vars(root, arg),
+                    semantic_group_by,
+                    semantic_passthrough_exprs,
+                    aggregate_layout,
+                ),
+                None => lower_agg_output_expr(
+                    arg,
+                    semantic_group_by,
+                    semantic_passthrough_exprs,
+                    aggregate_layout,
+                ),
+            };
+            lower_expr(
+                ctx,
+                arg,
+                LowerMode::Aggregate {
+                    group_by: semantic_group_by,
+                    passthrough_exprs: semantic_passthrough_exprs,
+                    layout: aggregate_layout,
+                    tlist: aggregate_tlist,
+                },
+            )
+        })
+        .collect();
     crate::include::nodes::primnodes::AggAccum {
+        direct_args,
         args: accum
             .args
             .into_iter()
@@ -3307,6 +3385,22 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
         Expr::Aggref(_) => {
             panic!("Aggref should be lowered before executable plan creation")
         }
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(
+            crate::include::nodes::primnodes::GroupingKeyExpr {
+                expr: Box::new(lower_expr(ctx, *grouping_key.expr, mode)),
+                ref_id: grouping_key.ref_id,
+            },
+        )),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(
+            crate::include::nodes::primnodes::GroupingFuncExpr {
+                args: grouping_func
+                    .args
+                    .into_iter()
+                    .map(|arg| lower_expr(ctx, arg, mode))
+                    .collect(),
+                ..*grouping_func
+            },
+        )),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op
                 .args
@@ -3611,6 +3705,13 @@ fn expr_uses_only_index_keys(
                 && !is_system_attr(var.varattno)
                 && attrno_index(var.varattno).is_some_and(|attno| covered_columns.contains(&attno))
         }
+        Expr::GroupingKey(grouping_key) => {
+            expr_uses_only_index_keys(&grouping_key.expr, source_id, covered_columns)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .all(|arg| expr_uses_only_index_keys(arg, source_id, covered_columns)),
         Expr::Param(_)
         | Expr::Const(_)
         | Expr::CaseTest(_)
@@ -4164,7 +4265,8 @@ fn collect_plan_external_exec_paramids(
         Plan::Aggregate {
             input,
             group_by,
-            grouping_sets,
+            group_by_refs: _,
+            grouping_sets: _,
             passthrough_exprs,
             accumulators,
             having,
@@ -4173,10 +4275,6 @@ fn collect_plan_external_exec_paramids(
             collect_plan_external_exec_paramids(input, bound, out);
             group_by
                 .iter()
-                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
-            grouping_sets
-                .iter()
-                .flatten()
                 .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
             passthrough_exprs
                 .iter()
@@ -4240,6 +4338,14 @@ fn validate_executable_expr(
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => {
             panic!("executable plan contains outer-level Var in {plan_node}.{field}: {var:?}")
+        }
+        Expr::GroupingKey(grouping_key) => {
+            validate_executable_expr(&grouping_key.expr, plan_node, field, allowed_exec_params);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                validate_executable_expr(arg, plan_node, field, allowed_exec_params);
+            }
         }
         Expr::Param(Param {
             paramkind: ParamKind::Exec,
@@ -4675,7 +4781,8 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
         Plan::Aggregate {
             input,
             group_by,
-            grouping_sets,
+            group_by_refs: _,
+            grouping_sets: _,
             passthrough_exprs,
             accumulators,
             having,
@@ -4683,9 +4790,6 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
         } => {
             group_by.iter().for_each(|expr| {
                 validate_executable_expr(expr, "Aggregate", "group_by", allowed_exec_params)
-            });
-            grouping_sets.iter().flatten().for_each(|expr| {
-                validate_executable_expr(expr, "Aggregate", "grouping_sets", allowed_exec_params)
             });
             passthrough_exprs.iter().for_each(|expr| {
                 validate_executable_expr(
@@ -4786,6 +4890,14 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
     match expr {
         Expr::Var(var) if is_executor_special_varno(var.varno) && var.varlevelsup == 0 => {
             panic!("planner path contains executor-only Var in {path_node}.{field}: {var:?}")
+        }
+        Expr::GroupingKey(grouping_key) => {
+            validate_planner_expr(&grouping_key.expr, path_node, field)
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                validate_planner_expr(arg, path_node, field);
+            }
         }
         Expr::Param(Param {
             paramkind: ParamKind::Exec,
@@ -7166,7 +7278,8 @@ fn set_aggregate_references(
     disabled: bool,
     input: Box<Path>,
     group_by: Vec<Expr>,
-    grouping_sets: Vec<Vec<Expr>>,
+    group_by_refs: Vec<usize>,
+    grouping_sets: Vec<Vec<usize>>,
     passthrough_exprs: Vec<Expr>,
     accumulators: Vec<AggAccum>,
     semantic_accumulators: Option<Vec<AggAccum>>,
@@ -7174,13 +7287,20 @@ fn set_aggregate_references(
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
     let input_tlist = build_path_tlist(ctx.root, &input);
-    let aggregate_layout =
-        aggregate_output_vars(slot_id, phase, &group_by, &passthrough_exprs, &accumulators);
+    let aggregate_layout = aggregate_output_vars(
+        slot_id,
+        phase,
+        &group_by,
+        &group_by_refs,
+        &passthrough_exprs,
+        &accumulators,
+    );
     let aggregate_tlist = build_aggregate_tlist(
         ctx.root,
         slot_id,
         phase,
         &group_by,
+        &group_by_refs,
         &passthrough_exprs,
         &accumulators,
         semantic_accumulators.as_deref(),
@@ -7213,24 +7333,6 @@ fn set_aggregate_references(
             )
         })
         .collect();
-    let grouping_sets = grouping_sets
-        .into_iter()
-        .map(|set| {
-            set.into_iter()
-                .map(|expr| fix_upper_expr_for_input(root, expr, &input, &input_tlist))
-                .map(|expr| {
-                    lower_expr(
-                        ctx,
-                        expr,
-                        LowerMode::Input {
-                            path: Some(&input),
-                            tlist: &input_tlist,
-                        },
-                    )
-                })
-                .collect()
-        })
-        .collect();
     let passthrough_exprs = passthrough_exprs
         .into_iter()
         .map(|expr| fix_upper_expr_for_input(root, expr, &input, &input_tlist))
@@ -7247,7 +7349,18 @@ fn set_aggregate_references(
         .collect();
     let accumulators = accumulators
         .into_iter()
-        .map(|accum| lower_agg_accum(ctx, accum, &input, &input_tlist))
+        .map(|accum| {
+            lower_agg_accum(
+                ctx,
+                accum,
+                &input,
+                &input_tlist,
+                &semantic_group_by,
+                &semantic_passthrough_exprs,
+                &aggregate_layout,
+                &aggregate_tlist,
+            )
+        })
         .collect();
     let having = having.map(|expr| {
         let expr = match ctx.root {
@@ -7282,6 +7395,7 @@ fn set_aggregate_references(
         disabled,
         input: Box::new(set_plan_refs(ctx, *input)),
         group_by,
+        group_by_refs,
         grouping_sets,
         passthrough_exprs,
         accumulators,
@@ -7623,12 +7737,14 @@ fn set_project_set_references(
                     call,
                     sql_type,
                     column_index,
+                    ressortgroupref,
                 } => crate::include::nodes::primnodes::ProjectSetTarget::Set {
                     name,
                     source_expr,
                     call: fix_set_returning_call_upper_exprs(ctx.root, call, &input, &input_tlist),
                     sql_type,
                     column_index,
+                    ressortgroupref,
                 },
             };
             lower_project_set_target(
@@ -7986,6 +8102,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             disabled,
             input,
             group_by,
+            group_by_refs,
             grouping_sets,
             passthrough_exprs,
             accumulators,
@@ -8002,6 +8119,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             disabled,
             input,
             group_by,
+            group_by_refs,
             grouping_sets,
             passthrough_exprs,
             accumulators,
@@ -8355,6 +8473,13 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
         {
             return true;
         }
+    }
+    if let (Expr::Aggref(left_agg), Expr::Aggref(right_agg)) = (left, right)
+        && left_agg.aggno == right_agg.aggno
+        && left_agg.aggfnoid == right_agg.aggfnoid
+        && left_agg.aggtype == right_agg.aggtype
+    {
+        return true;
     }
     let Some(root) = root else {
         return false;

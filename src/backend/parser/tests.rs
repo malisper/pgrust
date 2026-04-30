@@ -16619,7 +16619,7 @@ fn planner_threads_rollup_grouping_sets_to_aggregate() {
     assert_eq!(grouping_sets[2].len(), 0, "{aggregate_shapes:?}");
 }
 
-fn aggregate_grouping_sets(plan: &Plan) -> Option<&Vec<Vec<Expr>>> {
+fn aggregate_grouping_sets(plan: &Plan) -> Option<&Vec<Vec<usize>>> {
     match plan {
         Plan::Aggregate { grouping_sets, .. } if !grouping_sets.is_empty() => Some(grouping_sets),
         Plan::Projection { input, .. }

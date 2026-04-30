@@ -1627,6 +1627,14 @@ fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<
                 attrs.insert(index);
             }
         }
+        Expr::GroupingKey(grouping_key) => {
+            collect_expr_attrs_for_rel(&grouping_key.expr, rtindex, attrs);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_expr_attrs_for_rel(arg, rtindex, attrs);
+            }
+        }
         Expr::Op(op) => op
             .args
             .iter()
@@ -2723,6 +2731,7 @@ fn build_set_operation_path(
                         pathkeys: Vec::new(),
                         input: Box::new(append),
                         group_by: set_op_output_exprs(source_id, &output_columns),
+                        group_by_refs: (1..=output_columns.len()).collect(),
                         grouping_sets: Vec::new(),
                         passthrough_exprs: Vec::new(),
                         accumulators: Vec::new(),
@@ -3443,40 +3452,11 @@ fn expr_contains_planner_volatile(expr: &Expr) -> bool {
     }
 }
 
-fn subquery_target_preserves_simple_source_name(
-    query: &Query,
-    target: &crate::include::nodes::primnodes::TargetEntry,
-) -> bool {
-    if query
-        .target_list
-        .iter()
-        .any(|target| expr_contains_outer_var(&target.expr))
-    {
-        return true;
-    }
-    let Expr::Var(var) = &target.expr else {
-        return true;
-    };
-    if var.varlevelsup != 0 {
-        return true;
-    }
-    let Some(rte_index) = var.varno.checked_sub(1) else {
-        return true;
-    };
-    let Some(att_index) = attrno_index(var.varattno) else {
-        return true;
-    };
-    query
-        .rtable
-        .get(rte_index)
-        .and_then(|rte| rte.desc.columns.get(att_index))
-        .map(|column| column.name.eq_ignore_ascii_case(&target.name))
-        .unwrap_or(true)
-}
-
 fn expr_contains_outer_var(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
+        Expr::GroupingKey(grouping_key) => expr_contains_outer_var(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_contains_outer_var),
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_outer_var)
                 || aggref
@@ -3593,17 +3573,32 @@ fn rewrite_filter_for_subquery(
     query: &Query,
 ) -> Option<Expr> {
     match expr {
+        Expr::GroupingKey(grouping_key) => {
+            rewrite_filter_for_subquery(*grouping_key.expr, rtindex, targets, query).map(|expr| {
+                Expr::GroupingKey(Box::new(
+                    crate::include::nodes::primnodes::GroupingKeyExpr {
+                        expr: Box::new(expr),
+                        ref_id: grouping_key.ref_id,
+                    },
+                ))
+            })
+        }
+        Expr::GroupingFunc(grouping_func) => Some(Expr::GroupingFunc(Box::new(
+            crate::include::nodes::primnodes::GroupingFuncExpr {
+                args: grouping_func
+                    .args
+                    .into_iter()
+                    .map(|arg| rewrite_filter_for_subquery(arg, rtindex, targets, query))
+                    .collect::<Option<Vec<_>>>()?,
+                ..*grouping_func
+            },
+        ))),
         Expr::Var(var) => {
             if var.varlevelsup != 0 || var.varno != rtindex {
                 return None;
             }
             let index = crate::include::nodes::primnodes::attrno_index(var.varattno)?;
             let target = targets.get(index)?;
-            // Preserve simple alias projection boundaries so pushed-down EXPLAIN
-            // details keep the user-visible column name instead of the source name.
-            if !subquery_target_preserves_simple_source_name(query, target) {
-                return None;
-            }
             Some(target.expr.clone())
         }
         Expr::Param(_) | Expr::Const(_) => Some(expr),

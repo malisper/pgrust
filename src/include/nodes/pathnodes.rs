@@ -366,6 +366,7 @@ pub struct UpperRelEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AggregateLayout {
     pub group_by: Vec<Expr>,
+    pub group_by_refs: Vec<usize>,
     pub passthrough_exprs: Vec<Expr>,
 }
 
@@ -656,7 +657,8 @@ pub enum Path {
         pathkeys: Vec<PathKey>,
         input: Box<Path>,
         group_by: Vec<Expr>,
-        grouping_sets: Vec<Vec<Expr>>,
+        group_by_refs: Vec<usize>,
+        grouping_sets: Vec<Vec<usize>>,
         passthrough_exprs: Vec<Expr>,
         accumulators: Vec<AggAccum>,
         having: Option<Expr>,

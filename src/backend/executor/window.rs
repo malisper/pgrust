@@ -2009,10 +2009,13 @@ pub(crate) fn execute_window_clause(
             for results in &function_values {
                 values.push(results[row_index].clone());
             }
-            output_rows.push(MaterializedRow::new(
-                TupleSlot::virtual_row(values),
-                prepared_row.row.system_bindings.clone(),
-            ));
+            output_rows.push(
+                MaterializedRow::new(
+                    TupleSlot::virtual_row(values),
+                    prepared_row.row.system_bindings.clone(),
+                )
+                .with_grouping_refs(prepared_row.row.grouping_refs.clone()),
+            );
         }
 
         partition_start = partition_end;

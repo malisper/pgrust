@@ -60,6 +60,8 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
                     .as_ref()
                     .is_some_and(expr_uses_outer_columns)
         }
+        Expr::GroupingKey(grouping_key) => expr_uses_outer_columns(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_uses_outer_columns),
         Expr::WindowFunc(window_func) => {
             window_func.args.iter().any(expr_uses_outer_columns)
                 || match &window_func.kind {
@@ -394,7 +396,6 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Aggregate {
             input,
             group_by,
-            grouping_sets,
             passthrough_exprs,
             accumulators,
             having,
@@ -402,7 +403,6 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         } => {
             plan_uses_outer_columns(input)
                 || group_by.iter().any(expr_uses_outer_columns)
-                || grouping_sets.iter().flatten().any(expr_uses_outer_columns)
                 || passthrough_exprs.iter().any(expr_uses_outer_columns)
                 || accumulators.iter().any(agg_accum_uses_outer_columns)
                 || having.as_ref().is_some_and(expr_uses_outer_columns)
@@ -474,6 +474,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
             slot: TupleSlot::empty(desc.columns.len()),
             current_bindings: Vec::new(),
+            current_grouping_refs: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -507,6 +508,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 next_index: 0,
                 slot: TupleSlot::empty(desc.columns.len()),
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -521,6 +523,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             previous_values: None,
             slot: TupleSlot::empty(0),
             current_bindings: Vec::new(),
+            current_grouping_refs: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -1283,6 +1286,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 rows: None,
                 next_index: 0,
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1345,6 +1349,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 column_names,
                 slot: TupleSlot::empty(ncols),
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1356,6 +1361,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             disabled,
             input,
             group_by,
+            group_by_refs,
             grouping_sets,
             passthrough_exprs,
             accumulators,
@@ -1372,6 +1378,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 phase,
                 disabled,
                 group_by,
+                group_by_refs,
                 grouping_sets,
                 passthrough_exprs,
                 accumulators,
@@ -1382,6 +1389,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 key_buffer,
                 runtimes: None,
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1398,6 +1406,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             result_rows: None,
             next_index: 0,
             current_bindings: Vec::new(),
+            current_grouping_refs: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -1452,6 +1461,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 next_index: 0,
                 slot: TupleSlot::empty(width),
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1564,6 +1574,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 next_index: 0,
                 slot: TupleSlot::empty(column_names.len()),
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })

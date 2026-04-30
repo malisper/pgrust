@@ -171,6 +171,7 @@ impl IndexBuildKeyProjector {
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
+                active_grouping_refs: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,

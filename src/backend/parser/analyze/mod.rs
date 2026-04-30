@@ -3036,6 +3036,20 @@ fn group_by_target_alias_expr(
     matches.next().is_none().then(|| first.expr.clone())
 }
 
+fn grouped_select_item_output_name(item: &SelectItem) -> String {
+    grouped_expr_output_name(&item.output_name, &item.expr)
+}
+
+fn grouped_expr_output_name(output_name: &str, expr: &SqlExpr) -> String {
+    if output_name == "?column?"
+        && let SqlExpr::ScalarSubquery(select) = expr
+        && let Some(target) = select.targets.first()
+    {
+        return grouped_expr_output_name(&target.output_name, &target.expr);
+    }
+    output_name.to_string()
+}
+
 #[derive(Debug, Clone, Default)]
 struct ExpandedGroupBy {
     group_by: Vec<SqlExpr>,
@@ -3061,6 +3075,12 @@ fn normalize_group_by_item(
     input_scope: &BoundScope,
 ) -> Result<GroupByItem, ParseError> {
     Ok(match item {
+        GroupByItem::Expr(SqlExpr::Row(exprs)) => GroupByItem::List(
+            exprs
+                .iter()
+                .map(|expr| normalize_group_by_expr(expr, stmt, input_scope))
+                .collect::<Result<_, _>>()?,
+        ),
         GroupByItem::Expr(expr) => {
             GroupByItem::Expr(normalize_group_by_expr(expr, stmt, input_scope)?)
         }
@@ -3220,6 +3240,12 @@ fn expr_occurrence_count(exprs: &[SqlExpr], needle: &SqlExpr) -> usize {
 fn dedupe_grouping_sets(grouping_sets: &mut Vec<Vec<SqlExpr>>) {
     let mut deduped = Vec::new();
     for set in grouping_sets.drain(..) {
+        let set = set.into_iter().fold(Vec::new(), |mut normalized, expr| {
+            if !normalized.contains(&expr) {
+                normalized.push(expr);
+            }
+            normalized
+        });
         if !deduped.contains(&set) {
             deduped.push(set);
         }
@@ -3252,12 +3278,13 @@ fn append_grouping_set_exprs(set: &mut Vec<SqlExpr>, exprs: &[SqlExpr]) {
 fn bind_grouping_sets(
     grouping_sets: &[Vec<SqlExpr>],
     group_keys: &[Expr],
+    group_key_refs: &[usize],
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     visible_ctes: &[BoundCte],
-) -> Result<Vec<Vec<Expr>>, ParseError> {
+) -> Result<Vec<Vec<usize>>, ParseError> {
     grouping_sets
         .iter()
         .map(|set| {
@@ -3272,13 +3299,14 @@ fn bind_grouping_sets(
                     grouped_outer,
                     visible_ctes,
                 )?;
-                let Some((group_index, group_key)) =
-                    group_keys
-                        .iter()
-                        .enumerate()
-                        .find(|(group_index, group_key)| {
-                            **group_key == bound && !used_group_key_indexes.contains(group_index)
-                        })
+                let Some(group_index) = group_keys
+                    .iter()
+                    .enumerate()
+                    .find(|(group_index, group_key)| {
+                        grouping_key_inner_expr(group_key) == &bound
+                            && !used_group_key_indexes.contains(group_index)
+                    })
+                    .map(|(group_index, _)| group_index)
                 else {
                     return Err(ParseError::UnexpectedToken {
                         expected: "grouping set expression in GROUP BY",
@@ -3286,11 +3314,102 @@ fn bind_grouping_sets(
                     });
                 };
                 used_group_key_indexes.push(group_index);
-                bound_set.push(group_key.clone());
+                bound_set.push(
+                    group_key_refs
+                        .get(group_index)
+                        .copied()
+                        .unwrap_or(group_index + 1),
+                );
             }
             Ok(bound_set)
         })
         .collect()
+}
+
+fn grouping_key_inner_expr(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::GroupingKey(grouping_key) => &grouping_key.expr,
+        _ => expr,
+    }
+}
+
+fn grouping_type_hashable(sql_type: SqlType) -> bool {
+    if sql_type.is_array {
+        return grouping_type_hashable(sql_type.element_type());
+    }
+    !matches!(
+        sql_type.kind,
+        SqlTypeKind::VarBit
+            | SqlTypeKind::Bit
+            | SqlTypeKind::Record
+            | SqlTypeKind::Composite
+            | SqlTypeKind::Json
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::Xml
+    )
+}
+
+fn grouping_type_sortable(sql_type: SqlType) -> bool {
+    if sql_type.is_array {
+        return grouping_type_sortable(sql_type.element_type());
+    }
+    !matches!(
+        sql_type.kind,
+        SqlTypeKind::Xid
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::Xml
+            | SqlTypeKind::TsVector
+            | SqlTypeKind::TsQuery
+    )
+}
+
+fn could_not_implement_group_by_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "could not implement GROUP BY".into(),
+        detail: Some(
+            "Some of the datatypes only support hashing, while others only support sorting.".into(),
+        ),
+        hint: None,
+        sqlstate: "42803",
+    }
+}
+
+fn grouping_ref_type(group_keys: &[Expr], group_key_refs: &[usize], ref_id: usize) -> SqlType {
+    group_key_refs
+        .iter()
+        .position(|candidate| *candidate == ref_id)
+        .and_then(|index| group_keys.get(index))
+        .and_then(|expr| expr_sql_type_hint(grouping_key_inner_expr(expr)))
+        .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text))
+}
+
+fn validate_grouping_set_capabilities(
+    grouping_sets: &[Vec<usize>],
+    group_keys: &[Expr],
+    group_key_refs: &[usize],
+    aggs: &[CollectedAggregate],
+) -> Result<(), ParseError> {
+    if grouping_sets.is_empty() {
+        return Ok(());
+    }
+
+    let sorted_grouping_required = aggs
+        .iter()
+        .any(|agg| agg.distinct || !agg.order_by.is_empty());
+    for grouping_set in grouping_sets {
+        let key_types = grouping_set
+            .iter()
+            .map(|ref_id| grouping_ref_type(group_keys, group_key_refs, *ref_id))
+            .collect::<Vec<_>>();
+        let all_sortable = key_types.iter().copied().all(grouping_type_sortable);
+        let all_hashable = key_types.iter().copied().all(grouping_type_hashable);
+        if (!all_sortable && !all_hashable) || (sorted_grouping_required && !all_sortable) {
+            return Err(could_not_implement_group_by_error());
+        }
+    }
+    Ok(())
 }
 
 fn expand_group_by_with_primary_key_dependencies(
@@ -4261,6 +4380,7 @@ fn bind_ctes(
                         distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
+                        group_by_refs: Vec::new(),
                         grouping_sets: Vec::new(),
                         accumulators: Vec::new(),
                         window_clauses: Vec::new(),
@@ -4351,6 +4471,7 @@ fn bind_ctes(
                         distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
+                        group_by_refs: Vec::new(),
                         grouping_sets: Vec::new(),
                         accumulators: Vec::new(),
                         window_clauses: Vec::new(),
@@ -5668,6 +5789,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            group_by_refs: Vec::new(),
             grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
@@ -5718,6 +5840,7 @@ pub(crate) fn bound_cte_from_query_rows(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            group_by_refs: Vec::new(),
             grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
@@ -5814,6 +5937,7 @@ fn bind_values_query_with_outer(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            group_by_refs: Vec::new(),
             grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
@@ -6063,6 +6187,7 @@ fn bind_select_query_with_outer(
 
         with_local_aggregate_scope(local_agg_scope, || {
             if needs_agg {
+                let group_key_refs = (1..=effective_group_by.len()).collect::<Vec<_>>();
                 let group_keys: Vec<Expr> = effective_group_by
                     .iter()
                     .map(|e| {
@@ -6076,10 +6201,29 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Result<_, _>>()?;
+                let group_key_exprs = group_keys
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, expr)| {
+                        Expr::GroupingKey(Box::new(
+                            crate::include::nodes::primnodes::GroupingKeyExpr {
+                                expr: Box::new(expr),
+                                ref_id: group_key_refs[index],
+                            },
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                let output_group_key_exprs = if expanded_group_by.has_explicit_grouping_sets {
+                    group_key_exprs.clone()
+                } else {
+                    group_keys.clone()
+                };
                 let grouping_sets = if expanded_group_by.has_explicit_grouping_sets {
                     bind_grouping_sets(
                         &expanded_group_by.grouping_sets,
-                        &group_keys,
+                        &group_key_exprs,
+                        &group_key_refs,
                         &scope,
                         catalog,
                         outer_scopes,
@@ -6089,13 +6233,19 @@ fn bind_select_query_with_outer(
                 } else {
                     Vec::new()
                 };
+                validate_grouping_set_capabilities(
+                    &grouping_sets,
+                    &group_key_exprs,
+                    &group_key_refs,
+                    &aggs,
+                )?;
                 let rewritten_group_keys = group_keys.clone();
                 let local_agg_scope = build_local_aggregate_scope(
                     &scope,
                     grouped_outer.as_ref(),
                     &aggs,
                     &effective_group_by,
-                    &group_keys,
+                    &output_group_key_exprs,
                 );
 
                 return with_local_aggregate_scope(local_agg_scope, || {
@@ -6478,7 +6628,7 @@ fn bind_select_query_with_outer(
                                         e,
                                         UngroupedColumnClause::Having,
                                         &effective_group_by,
-                                        &group_keys,
+                                        &output_group_key_exprs,
                                         &scope,
                                         catalog,
                                         outer_scopes,
@@ -6508,14 +6658,15 @@ fn bind_select_query_with_outer(
                                             targets.push(
                                                 TargetEntry::new(
                                                     name.name.clone(),
-                                                    group_keys.get(i).cloned().unwrap_or_else(
-                                                        || {
+                                                    output_group_key_exprs
+                                                        .get(i)
+                                                        .cloned()
+                                                        .unwrap_or_else(|| {
                                                             panic!(
                                                                 "aggregate SELECT * missing grouped key expr for target position {}",
                                                                 i + 1
                                                             )
-                                                        },
-                                                    ),
+                                                        }),
                                                     name.sql_type,
                                                     i + 1,
                                                 )
@@ -6557,20 +6708,21 @@ fn bind_select_query_with_outer(
                                                     &effective_group_by,
                                                     &mut used_group_by_targets,
                                                 ) {
-                                                group_keys.get(group_index).cloned().unwrap_or_else(
-                                                    || {
+                                                output_group_key_exprs
+                                                    .get(group_index)
+                                                    .cloned()
+                                                    .unwrap_or_else(|| {
                                                         panic!(
                                                             "aggregate output missing grouped key expr for target position {}",
                                                             group_index + 1
                                                         )
-                                                    },
-                                                )
+                                                    })
                                             } else {
                                                 bind_agg_output_expr_in_clause(
                                                     &item.expr,
                                                     UngroupedColumnClause::SelectTarget,
                                                     &effective_group_by,
-                                                    &group_keys,
+                                                    &output_group_key_exprs,
                                                     &scope,
                                                     catalog,
                                                     outer_scopes,
@@ -6591,7 +6743,7 @@ fn bind_select_query_with_outer(
                                                     )
                                                 });
                                             targets.push(TargetEntry::new(
-                                                item.output_name.clone(),
+                                                grouped_select_item_output_name(item),
                                                 expr,
                                                 sql_type,
                                                 index + 1,
@@ -6616,7 +6768,7 @@ fn bind_select_query_with_outer(
                                                     expr,
                                                     UngroupedColumnClause::OrderBy,
                                                     &effective_group_by,
-                                                    &group_keys,
+                                                    &output_group_key_exprs,
                                                     &scope,
                                                     catalog,
                                                     outer_scopes,
@@ -6639,7 +6791,7 @@ fn bind_select_query_with_outer(
                                         expr,
                                         UngroupedColumnClause::SelectTarget,
                                         &effective_group_by,
-                                        &group_keys,
+                                        &output_group_key_exprs,
                                         &scope,
                                         catalog,
                                         outer_scopes,
@@ -6687,6 +6839,7 @@ fn bind_select_query_with_outer(
                             distinct_on: Vec::new(),
                             where_qual,
                             group_by: rewritten_group_keys,
+                            group_by_refs: group_key_refs,
                             grouping_sets,
                             accumulators,
                             window_clauses,
@@ -6793,6 +6946,7 @@ fn bind_select_query_with_outer(
                     distinct_on: Vec::new(),
                     where_qual,
                     group_by: Vec::new(),
+                    group_by_refs: Vec::new(),
                     grouping_sets: Vec::new(),
                     accumulators: Vec::new(),
                     window_clauses,
@@ -7033,6 +7187,7 @@ fn bind_set_operation_query_with_outer(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            group_by_refs: Vec::new(),
             grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),

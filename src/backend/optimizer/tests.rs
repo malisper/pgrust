@@ -3096,6 +3096,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
+        group_by_refs: vec![1],
         grouping_sets: Vec::new(),
         passthrough_exprs: Vec::new(),
         accumulators: Vec::new(),
@@ -3119,6 +3120,7 @@ fn aggregate_pathkeys_follow_strategy() {
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
         group_by: vec![var(10, 1)],
+        group_by_refs: vec![1],
         grouping_sets: Vec::new(),
         passthrough_exprs: Vec::new(),
         accumulators: Vec::new(),
@@ -3522,6 +3524,7 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
             },
             sql_type: int4(),
             column_index: 1,
+            ressortgroupref: 0,
         }],
     )
     .into_plan();

@@ -10243,6 +10243,7 @@ fn execute_insert_project_set_row(
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        group_by_refs: Vec::new(),
         grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),

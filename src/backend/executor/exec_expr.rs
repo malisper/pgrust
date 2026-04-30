@@ -366,6 +366,7 @@ fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
     match value {
         Value::Int32(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
         Value::Int64(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
+        Value::EnumOid(oid) => Ok(*oid),
         _ if value.as_text().is_some() => value
             .as_text()
             .expect("guarded above")
@@ -5450,23 +5451,25 @@ fn index_display_names_for_heap(
 
 fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let catalog = executor_catalog(ctx)?;
-    let relation_oid = match values {
-        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
-        [value] | [value, _] => {
-            if let Some(text) = value.as_text() {
-                catalog
-                    .lookup_any_relation(text)
-                    .map(|entry| entry.relation_oid)
-                    .unwrap_or_default()
-            } else {
-                oid_arg_to_u32(value, "pg_get_viewdef")?
-            }
-        }
-        _ => {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "pg_get_viewdef(view [, pretty_or_wrap])",
-                actual: format!("PgGetViewDef({} args)", values.len()),
-            }));
+    if !(1..=2).contains(&values.len()) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_viewdef(view [, pretty_or_wrap])",
+            actual: format!("PgGetViewDef({} args)", values.len()),
+        }));
+    }
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let value = &values[0];
+    let relation_oid = if let Some(text) = value.as_text() {
+        catalog
+            .lookup_any_relation(text)
+            .map(|entry| entry.relation_oid)
+            .unwrap_or_default()
+    } else {
+        match value {
+            Value::EnumOid(oid) => *oid,
+            _ => oid_arg_to_u32(value, "pg_get_viewdef")?,
         }
     };
     if relation_oid == 0 {
@@ -8891,6 +8894,25 @@ pub fn eval_expr(
         ctx.check_stack_depth()?;
     }
     match expr {
+        Expr::GroupingKey(grouping_key) => eval_expr(&grouping_key.expr, slot, ctx),
+        Expr::GroupingFunc(grouping_func) => {
+            let mut result = 0i32;
+            let active_refs = if grouping_func.agglevelsup == 0 {
+                ctx.active_grouping_refs.as_slice()
+            } else {
+                ctx.expr_bindings
+                    .grouping_ref_stack
+                    .get(grouping_func.agglevelsup - 1)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+            };
+            for (index, ref_id) in grouping_func.refs.iter().enumerate() {
+                if !active_refs.contains(ref_id) {
+                    result |= 1i32 << (grouping_func.refs.len() - index - 1);
+                }
+            }
+            Ok(Value::Int32(result))
+        }
         Expr::Op(op) => eval_op_expr(op, slot, ctx),
         Expr::Bool(bool_expr) => eval_bool_expr(bool_expr, slot, ctx),
         Expr::Case(case_expr) => eval_case_expr(case_expr, slot, ctx),

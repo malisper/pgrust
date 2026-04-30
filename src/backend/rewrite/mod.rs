@@ -29,10 +29,11 @@ pub(crate) use views::{
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ExprArraySubscript, RelationPrivilegeRequirement, RowsFromItem, RowsFromSource,
-    SetReturningCall, SetReturningExpr, SortGroupClause, SqlJsonQueryFunction,
-    SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, TargetEntry, WindowClause, WindowFrame,
-    WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, set_returning_call_exprs,
+    AggAccum, Expr, ExprArraySubscript, GroupingFuncExpr, GroupingKeyExpr,
+    RelationPrivilegeRequirement, RowsFromItem, RowsFromSource, SetReturningCall, SetReturningExpr,
+    SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
+    TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
+    WindowSpec, set_returning_call_exprs,
 };
 use views::rewrite_view_relation_query;
 
@@ -91,22 +92,8 @@ fn rewrite_query(
                 rewrite_semantic_expr(expr, catalog, expanded_views, active_policy_relations)
             })
             .collect::<Result<Vec<_>, _>>()?,
-        grouping_sets: query
-            .grouping_sets
-            .into_iter()
-            .map(|set| {
-                set.into_iter()
-                    .map(|expr| {
-                        rewrite_semantic_expr(
-                            expr,
-                            catalog,
-                            expanded_views,
-                            active_policy_relations,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        group_by_refs: query.group_by_refs,
+        grouping_sets: query.grouping_sets,
         accumulators: query
             .accumulators
             .into_iter()
@@ -449,6 +436,14 @@ fn collect_expr_relation_privileges(
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. }
         | Expr::CaseTest(_) => {}
+        Expr::GroupingKey(grouping_key) => {
+            collect_expr_relation_privileges(&grouping_key.expr, privileges);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_expr_relation_privileges(arg, privileges);
+            }
+        }
         Expr::Aggref(aggref) => collect_aggref_relation_privileges(aggref, privileges),
         Expr::WindowFunc(func) => collect_window_func_relation_privileges(func, privileges),
         Expr::Op(op) => {
@@ -579,6 +574,14 @@ pub(super) fn rewrite_policy_expr(
 
 fn apply_policy_expr_permission_context(expr: &mut Expr, effective_user_oid: u32) {
     match expr {
+        Expr::GroupingKey(grouping_key) => {
+            apply_policy_expr_permission_context(&mut grouping_key.expr, effective_user_oid);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &mut grouping_func.args {
+                apply_policy_expr_permission_context(arg, effective_user_oid);
+            }
+        }
         Expr::Op(op) => {
             for arg in &mut op.args {
                 apply_policy_expr_permission_context(arg, effective_user_oid);
@@ -1493,6 +1496,25 @@ fn rewrite_semantic_expr(
                 })
                 .transpose()?,
             ..*aggref
+        })),
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
+            expr: Box::new(rewrite_semantic_expr(
+                *grouping_key.expr,
+                catalog,
+                expanded_views,
+                active_policy_relations,
+            )?),
+            ..*grouping_key
+        })),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: grouping_func
+                .args
+                .into_iter()
+                .map(|arg| {
+                    rewrite_semantic_expr(arg, catalog, expanded_views, active_policy_relations)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            ..*grouping_func
         })),
         Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(rewrite_window_func_expr(
             *window_func,

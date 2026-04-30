@@ -248,6 +248,26 @@ pub(super) fn finalize_expr_subqueries(
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. }) => other,
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(
+            crate::include::nodes::primnodes::GroupingKeyExpr {
+                expr: Box::new(finalize_expr_subqueries(
+                    *grouping_key.expr,
+                    catalog,
+                    subplans,
+                )),
+                ref_id: grouping_key.ref_id,
+            },
+        )),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(
+            crate::include::nodes::primnodes::GroupingFuncExpr {
+                args: grouping_func
+                    .args
+                    .into_iter()
+                    .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                    .collect(),
+                ..*grouping_func
+            },
+        )),
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
             args: aggref
                 .args
@@ -831,6 +851,22 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. }) => other,
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(
+            crate::include::nodes::primnodes::GroupingKeyExpr {
+                expr: Box::new(rebase_expr_subplan_ids(*grouping_key.expr, base)),
+                ref_id: grouping_key.ref_id,
+            },
+        )),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(
+            crate::include::nodes::primnodes::GroupingFuncExpr {
+                args: grouping_func
+                    .args
+                    .into_iter()
+                    .map(|arg| rebase_expr_subplan_ids(arg, base))
+                    .collect(),
+                ..*grouping_func
+            },
+        )),
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
             args: aggref
                 .args
@@ -1848,6 +1884,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             disabled,
             input,
             group_by,
+            group_by_refs,
             grouping_sets,
             passthrough_exprs,
             accumulators,
@@ -1865,14 +1902,8 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
-            grouping_sets: grouping_sets
-                .into_iter()
-                .map(|set| {
-                    set.into_iter()
-                        .map(|expr| rebase_expr_subplan_ids(expr, base))
-                        .collect()
-                })
-                .collect(),
+            group_by_refs,
+            grouping_sets,
             passthrough_exprs: passthrough_exprs
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
@@ -2001,12 +2032,14 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                         call,
                         sql_type,
                         column_index,
+                        ressortgroupref,
                     } => ProjectSetTarget::Set {
                         name,
                         source_expr: rebase_expr_subplan_ids(source_expr, base),
                         call: rebase_set_returning_call_subplan_ids(call, base),
                         sql_type,
                         column_index,
+                        ressortgroupref,
                     },
                 })
                 .collect(),
@@ -2401,6 +2434,7 @@ pub(super) fn finalize_plan_subqueries(
             disabled,
             input,
             group_by,
+            group_by_refs,
             grouping_sets,
             passthrough_exprs,
             accumulators,
@@ -2418,14 +2452,8 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
-            grouping_sets: grouping_sets
-                .into_iter()
-                .map(|set| {
-                    set.into_iter()
-                        .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
-                        .collect()
-                })
-                .collect(),
+            group_by_refs,
+            grouping_sets,
             passthrough_exprs: passthrough_exprs
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
@@ -2619,12 +2647,14 @@ pub(super) fn finalize_plan_subqueries(
                         call,
                         sql_type,
                         column_index,
+                        ressortgroupref,
                     } => ProjectSetTarget::Set {
                         name,
                         source_expr: finalize_expr_subqueries(source_expr, catalog, subplans),
                         call: finalize_set_returning_call(call, catalog, subplans),
                         sql_type,
                         column_index,
+                        ressortgroupref,
                     },
                 })
                 .collect(),

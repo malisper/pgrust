@@ -5,9 +5,10 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, FuncExpr,
-    JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc, ScalarArrayOpExpr,
-    SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, SubLinkType, Var,
-    WindowFuncExpr, WindowFuncKind, XmlExpr, set_returning_call_exprs, user_attrno,
+    GroupingFuncExpr, GroupingKeyExpr, JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc,
+    ScalarArrayOpExpr, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
+    SubLinkType, Var, WindowFuncExpr, WindowFuncKind, XmlExpr, set_returning_call_exprs,
+    user_attrno,
 };
 
 use super::{and_exprs, expr_relids, flatten_and_conjuncts, joininfo, relids_subset};
@@ -584,6 +585,18 @@ fn adjust_expr_for_pullup(expr: Expr, offset: usize, levels_to_parent: usize) ->
             offset,
             levels_to_parent,
         )?)),
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
+            expr: Box::new(adjust_expr_for_pullup(
+                *grouping_key.expr,
+                offset,
+                levels_to_parent,
+            )?),
+            ..*grouping_key
+        })),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: adjust_exprs_for_pullup(grouping_func.args, offset, levels_to_parent)?,
+            ..*grouping_func
+        })),
         Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(adjust_window_func_for_pullup(
             *window_func,
             offset,
@@ -895,6 +908,8 @@ fn adjust_case_for_pullup(
 fn expr_contains_sublink(expr: &Expr) -> bool {
     match expr {
         Expr::SubLink(_) => true,
+        Expr::GroupingKey(grouping_key) => expr_contains_sublink(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_contains_sublink),
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_sublink)
                 || aggref
@@ -994,6 +1009,8 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
 fn expr_contains_outer_var(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
+        Expr::GroupingKey(grouping_key) => expr_contains_outer_var(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_contains_outer_var),
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_outer_var)
                 || aggref

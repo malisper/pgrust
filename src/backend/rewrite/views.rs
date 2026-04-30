@@ -252,6 +252,7 @@ fn render_relation_expr_sql_with_options(
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        group_by_refs: Vec::new(),
         grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
@@ -953,16 +954,8 @@ fn render_plain_query(ctx: &ViewDeparseContext<'_>, output_names: Option<&[Strin
     if let Some(where_qual) = &ctx.query.where_qual {
         lines.push(format!("  WHERE {}", render_expr(where_qual, ctx)));
     }
-    if !ctx.query.group_by.is_empty() {
-        lines.push(format!(
-            "  GROUP BY {}",
-            ctx.query
-                .group_by
-                .iter()
-                .map(|expr| render_expr(expr, ctx))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+    if !ctx.query.group_by.is_empty() || !ctx.query.grouping_sets.is_empty() {
+        lines.push(format!("  GROUP BY {}", render_group_by_clause(ctx)));
     }
     if let Some(having_qual) = &ctx.query.having_qual {
         lines.push(format!("  HAVING {}", render_expr(having_qual, ctx)));
@@ -1000,6 +993,45 @@ fn render_select_intro(ctx: &ViewDeparseContext<'_>) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn render_group_by_clause(ctx: &ViewDeparseContext<'_>) -> String {
+    if ctx.query.grouping_sets.is_empty() {
+        return ctx
+            .query
+            .group_by
+            .iter()
+            .map(|expr| render_expr(expr, ctx))
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    let rendered_sets = ctx
+        .query
+        .grouping_sets
+        .iter()
+        .map(|set| {
+            if set.is_empty() {
+                return "()".into();
+            }
+            let rendered = set
+                .iter()
+                .filter_map(|group_ref| grouping_ref_expr(ctx, *group_ref))
+                .map(|expr| render_expr(expr, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({rendered})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("GROUPING SETS ({rendered_sets})")
+}
+
+fn grouping_ref_expr<'a>(ctx: &'a ViewDeparseContext<'_>, group_ref: usize) -> Option<&'a Expr> {
+    ctx.query
+        .group_by_refs
+        .iter()
+        .position(|candidate| *candidate == group_ref)
+        .and_then(|index| ctx.query.group_by.get(index))
 }
 
 fn render_target_entry(
@@ -2119,6 +2151,16 @@ fn render_set_operator(op: SetOperator) -> &'static str {
 
 fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
     match expr {
+        Expr::GroupingKey(grouping_key) => render_expr(&grouping_key.expr, ctx),
+        Expr::GroupingFunc(grouping_func) => {
+            let args = grouping_func
+                .args
+                .iter()
+                .map(|arg| render_expr(arg, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("GROUPING({args})")
+        }
         Expr::Var(var) => var_name(var, ctx).unwrap_or_else(|| format!("var{}", var.varattno)),
         Expr::Const(value) => render_literal(value),
         Expr::Cast(inner, ty) => {
@@ -3651,11 +3693,13 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
 }
 
 fn quote_identifier_if_needed(identifier: &str) -> String {
+    let lower = identifier.to_ascii_lowercase();
     let needs_quotes = identifier.is_empty()
         || identifier.chars().enumerate().any(|(index, ch)| {
             !(ch == '_' || ch.is_ascii_alphanumeric()) || (index == 0 && ch.is_ascii_digit())
         })
-        || identifier != identifier.to_ascii_lowercase();
+        || identifier != lower
+        || matches!(lower.as_str(), "grouping");
     if needs_quotes {
         format!("\"{}\"", identifier.replace('"', "\"\""))
     } else {
