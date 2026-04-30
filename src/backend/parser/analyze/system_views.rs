@@ -69,6 +69,7 @@ fn build_values_view(
     output_columns: Vec<QueryColumn>,
     rows: Vec<Vec<Value>>,
 ) -> Option<(AnalyzedFrom, BoundScope)> {
+    let width = output_columns.len();
     let desc = RelationDesc {
         columns: output_columns
             .iter()
@@ -77,6 +78,9 @@ fn build_values_view(
     };
     let rows = rows
         .into_iter()
+        // Keep malformed synthetic rows from turning into later executor
+        // tuple-width failures when a query projects a missing column.
+        .filter(|row| row.len() == width)
         .map(|row| row.into_iter().map(Expr::Const).collect())
         .collect();
     Some((
@@ -474,6 +478,39 @@ fn nullable_int2_array(values: Option<Vec<i16>>) -> Value {
             )
         })
         .unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MalformedPgIndexesCatalog;
+
+    impl CatalogLookup for MalformedPgIndexesCatalog {
+        fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+            None
+        }
+
+        fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
+            vec![vec![
+                Value::Text("pg_catalog".into()),
+                Value::Text("pg_settings".into()),
+                Value::Text("pg_settings_u".into()),
+                Value::Text("CREATE RULE pg_settings_u AS ...".into()),
+            ]]
+        }
+    }
+
+    #[test]
+    fn synthetic_system_view_drops_malformed_rows_before_planning() {
+        let (from, _) = bind_builtin_system_view("pg_indexes", &MalformedPgIndexesCatalog).unwrap();
+        assert_eq!(from.output_columns.len(), 5);
+
+        let RangeTblEntryKind::Values { rows, .. } = &from.rtable[0].kind else {
+            panic!("expected pg_indexes to bind as a values view");
+        };
+        assert!(rows.is_empty());
+    }
 }
 
 fn nullable_oid_array(values: Option<Vec<u32>>) -> Value {
