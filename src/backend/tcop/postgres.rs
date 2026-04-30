@@ -554,6 +554,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             {
                 return Some(position);
             }
+            if let Some(position) = composite_rowtype_error_position(sql, message) {
+                return Some(position);
+            }
             if detail.as_deref().is_some_and(|detail| {
                 detail.contains("cannot be referenced from this part of the query")
             }) && message.starts_with("column \"")
@@ -835,6 +838,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             {
                 return Some(position);
             }
+            if let Some(position) = composite_rowtype_error_position(sql, message) {
+                return Some(position);
+            }
             if let Some(position) = routine_definition_error_position(sql, message) {
                 return Some(position);
             }
@@ -932,6 +938,103 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn composite_rowtype_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message.starts_with("subfield \"")
+        && message.contains("\" is of type ")
+        && message.contains(" but expression is of type ")
+    {
+        return find_first_set_target_position(sql);
+    }
+    if message.starts_with("could not determine interpretation of row comparison operator ") {
+        let op = message
+            .strip_prefix("could not determine interpretation of row comparison operator ")?;
+        return find_case_insensitive_token_position(sql, op);
+    }
+    if message == "cannot compare rows of zero length" {
+        return find_row_comparison_operator_position(sql);
+    }
+    if message.starts_with("could not identify an ordering operator for type ") {
+        return find_order_by_expression_position(sql);
+    }
+    if message.starts_with("could not identify column \"")
+        && message.ends_with("\" in record data type")
+    {
+        return find_first_parenthesized_record_expr_position(sql);
+    }
+    if message.starts_with("column \"") && message.contains("\" not found in data type ") {
+        return find_first_parenthesized_record_expr_position(sql);
+    }
+    if message.starts_with("column \"")
+        && message.contains("\" is of type ")
+        && message.contains(" but expression is of type ")
+        && sql
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("create function ")
+    {
+        return find_create_function_body_values_expr_position(sql);
+    }
+    None
+}
+
+fn find_first_set_target_position(sql: &str) -> Option<usize> {
+    let set_position = find_case_insensitive_token_position(sql, "SET")?;
+    let mut index = set_position - 1 + "SET".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len()).then_some(index + 1)
+}
+
+fn find_row_comparison_operator_position(sql: &str) -> Option<usize> {
+    for op in ["<>", "<=", ">=", "=", "<", ">"] {
+        if let Some(position) = find_case_insensitive_token_position(sql, op) {
+            return Some(position);
+        }
+    }
+    None
+}
+
+fn find_order_by_expression_position(sql: &str) -> Option<usize> {
+    let order_position = find_case_insensitive_token_position(sql, "ORDER BY")?;
+    let mut index = order_position - 1 + "ORDER BY".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len()).then_some(index + 1)
+}
+
+fn find_first_parenthesized_record_expr_position(sql: &str) -> Option<usize> {
+    let select_position = find_case_insensitive_token_position(sql, "SELECT")?;
+    let mut index = select_position - 1 + "SELECT".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'(') {
+        return (index + 1 < bytes.len()).then_some(index + 2);
+    }
+    None
+}
+
+fn find_create_function_body_values_expr_position(sql: &str) -> Option<usize> {
+    let values_position = find_case_insensitive_token_position(sql, "values")?;
+    let mut index = values_position - 1 + "values".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'(') {
+        index += 1;
+    }
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len()).then_some(index + 1)
 }
 
 fn check_constraint_system_column_error_name(message: &str) -> Option<&str> {

@@ -3,7 +3,8 @@ use crate::backend::executor::expr_numeric::eval_power_function;
 use crate::backend::executor::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
     concat_values, div_values, mod_values, mul_values, negate_value, not_equal_values,
-    order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
+    order_record_image_values, order_values, shift_left_values, shift_right_values, sub_values,
+    values_are_distinct,
 };
 use crate::backend::executor::{ExecError, Value, cast_value};
 use crate::backend::parser::ParseError;
@@ -1362,7 +1363,7 @@ fn simplify_op_expr(op: OpExpr, case_test_value: Option<&Value>) -> Result<Expr,
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(values) = const_expr_values(&args) {
         if let Some(expr) =
-            try_fold_optional_eval(evaluate_const_op(op.op, &values, op.collation_oid))?
+            try_fold_optional_eval(evaluate_const_op(op.opno, op.op, &values, op.collation_oid))?
         {
             return Ok(expr);
         }
@@ -1371,10 +1372,20 @@ fn simplify_op_expr(op: OpExpr, case_test_value: Option<&Value>) -> Result<Expr,
 }
 
 fn evaluate_const_op(
+    opno: u32,
     op: OpExprKind,
     args: &[Value],
     collation_oid: Option<u32>,
 ) -> Result<Option<Value>, ExecError> {
+    if is_record_image_operator_oid(opno) {
+        let [Value::Record(left), Value::Record(right)] = args else {
+            return Ok(None);
+        };
+        let Some(op_text) = record_image_operator_text(op) else {
+            return Ok(None);
+        };
+        return order_record_image_values(op_text, left, right).map(Some);
+    }
     let value = match (op, args) {
         (OpExprKind::UnaryPlus, [value]) => value.clone(),
         (OpExprKind::Negate, [value]) => negate_value(value.clone())?,
@@ -1414,6 +1425,22 @@ fn evaluate_const_op(
         _ => return Ok(None),
     };
     Ok(Some(value))
+}
+
+fn is_record_image_operator_oid(opno: u32) -> bool {
+    matches!(opno, 3188..=3193)
+}
+
+fn record_image_operator_text(op: OpExprKind) -> Option<&'static str> {
+    match op {
+        OpExprKind::Eq => Some("="),
+        OpExprKind::NotEq => Some("<>"),
+        OpExprKind::Lt => Some("<"),
+        OpExprKind::LtEq => Some("<="),
+        OpExprKind::Gt => Some(">"),
+        OpExprKind::GtEq => Some(">="),
+        _ => None,
+    }
 }
 
 fn try_fold_eval(result: Result<Value, ExecError>) -> Result<Option<Expr>, ParseError> {

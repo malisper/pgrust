@@ -834,6 +834,22 @@ fn analyze_expr_internal(
                             .expect("checked above"),
                     );
                 }
+                Err(ParseError::UnknownColumn(_))
+                    if name
+                        .rsplit_once('.')
+                        .and_then(|(relation_name, _)| {
+                            relation_row_reference_level(scope, outer_scopes, relation_name)
+                        })
+                        .is_some() =>
+                {
+                    let relation_level = name
+                        .rsplit_once('.')
+                        .and_then(|(relation_name, _)| {
+                            relation_row_reference_level(scope, outer_scopes, relation_name)
+                        })
+                        .expect("checked above");
+                    info.note_varlevel(relation_level);
+                }
                 Err(err) => return Err(err),
             }
         }

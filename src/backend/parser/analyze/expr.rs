@@ -161,6 +161,7 @@ pub(super) fn build_bound_order_by_entry(
     catalog: &dyn CatalogLookup,
 ) -> Result<OrderByEntry, ParseError> {
     let expr_type = expr_sql_type_hint(&bound_expr).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    validate_order_by_type(expr_type, catalog)?;
     let descending = match item.using_operator.as_deref() {
         Some(operator) => bind_order_by_using_direction(catalog, operator, expr_type)?,
         None => item.descending,
@@ -173,6 +174,45 @@ pub(super) fn build_bound_order_by_entry(
         nulls_first: item.nulls_first,
         collation_oid,
     })
+}
+
+fn validate_order_by_type(
+    expr_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if expr_type.is_array || !matches!(expr_type.kind, SqlTypeKind::Composite) {
+        return Ok(());
+    }
+    let expr_type = expression_navigation_sql_type(expr_type, catalog);
+    if expr_type.typrelid == 0 {
+        return Ok(());
+    }
+    let Some(relation) = catalog.lookup_relation_by_oid(expr_type.typrelid) else {
+        return Ok(());
+    };
+    if relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .any(|column| {
+            matches!(
+                column.sql_type.kind,
+                SqlTypeKind::Point | SqlTypeKind::Lseg | SqlTypeKind::Path
+            )
+        })
+    {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "could not identify an ordering operator for type {}",
+                catalog_sql_type_name(expr_type, catalog)
+            ),
+            detail: None,
+            hint: Some("Use an explicit ordering operator or modify the query.".into()),
+            sqlstate: "42883",
+        });
+    }
+    Ok(())
 }
 
 fn reject_typed_srf(expr: &TypedExpr, context: &'static str) -> Result<(), ParseError> {
@@ -6315,7 +6355,11 @@ fn try_bind_column_notation_single_arg_proc(
         .into_iter()
         .filter(|row| row.prokind == 'f' && !row.proretset)
         .filter_map(|row| {
-            let declared_oid = row.proargtypes.trim().parse::<u32>().ok()?;
+            let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+            let [declared_oid] = declared_oids.as_slice() else {
+                return None;
+            };
+            let declared_oid = *declared_oid;
             let declared_row = catalog.type_by_oid(declared_oid)?;
             let declared_type = if !declared_row.sql_type.is_array
                 && matches!(declared_row.sql_type.kind, SqlTypeKind::Composite)
@@ -6328,11 +6372,22 @@ fn try_bind_column_notation_single_arg_proc(
             } else {
                 declared_row.sql_type
             };
+            let composite_declared = !declared_type.is_array
+                && matches!(
+                    declared_type.kind,
+                    SqlTypeKind::Composite | SqlTypeKind::Record
+                );
             let matches_type = declared_oid == actual_type.type_oid
                 || (actual_type.typrelid != 0 && declared_type.typrelid == actual_type.typrelid)
                 || actual_descriptor.is_some_and(|descriptor| {
                     record_descriptor_matches_composite_type(descriptor, declared_type, catalog)
-                });
+                })
+                || (composite_declared
+                    && !actual_type.is_array
+                    && matches!(
+                        actual_type.kind,
+                        SqlTypeKind::Composite | SqlTypeKind::Record
+                    ));
             matches_type.then_some((row, declared_type))
         })
         .collect::<Vec<_>>();

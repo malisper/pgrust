@@ -7596,6 +7596,7 @@ fn set_subquery_scan_references(
     filter: Option<Expr>,
     force_display: bool,
 ) -> Plan {
+    let force_display = force_display || matches!(input.as_ref(), Path::ProjectSet { .. });
     if filter.is_none() && !force_display {
         let input_columns = input.columns();
         if input_columns == output_columns {
