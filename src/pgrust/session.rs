@@ -1683,6 +1683,8 @@ struct GucState {
     track_functions: TrackFunctionsSetting,
 }
 
+const SET_CONFIG_EFFECT_PREFIX: &str = "__pgrust_set_config_effect__";
+
 #[derive(Clone)]
 struct SavepointState {
     name: String,
@@ -2632,6 +2634,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "default_transaction_deferrable" => Some("off"),
         "transaction_deferrable" => Some("off"),
         "lo_compat_privileges" => Some("off"),
+        "search_path" => Some("\"$user\", public"),
         "vacuum_cost_delay" => Some("0"),
         "password_encryption" => Some("scram-sha-256"),
         "scram_iterations" => Some("4096"),
@@ -4233,6 +4236,8 @@ impl Session {
             .or_insert_with(|| bool_guc_value(self.default_transaction_read_only()).into());
         gucs.entry("default_transaction_deferrable".into())
             .or_insert_with(|| bool_guc_value(self.default_transaction_deferrable()).into());
+        gucs.entry("search_path".into())
+            .or_insert_with(|| "\"$user\", public".into());
         gucs
     }
 
@@ -5790,6 +5795,11 @@ impl Session {
         ctx: &mut ExecutorContext,
         succeeded: bool,
     ) {
+        if succeeded {
+            self.merge_ctx_set_config_effects(ctx);
+        } else {
+            Self::clear_ctx_set_config_effects(ctx);
+        }
         let next_command_id = ctx.next_command_id;
         let mut catalog_effects = mem::take(&mut ctx.catalog_effects);
         let temp_effects = mem::take(&mut ctx.temp_effects);
@@ -5830,6 +5840,72 @@ impl Session {
         };
         let pending = mem::take(&mut ctx.pending_async_notifications);
         merge_pending_notifications(&mut txn.pending_async_notifications, pending);
+    }
+
+    fn merge_ctx_set_config_effects(&mut self, ctx: &mut ExecutorContext) {
+        let effects = Self::take_ctx_set_config_effects(ctx);
+        for (name, value, is_local) in effects {
+            if is_local && self.active_txn.is_none() {
+                continue;
+            }
+            match value {
+                Some(value) => {
+                    self.gucs.insert(name.clone(), value.clone());
+                    if !is_local && let Some(txn) = self.active_txn.as_mut() {
+                        txn.guc_commit_state.gucs.insert(name, value);
+                    }
+                }
+                None => {
+                    self.gucs.remove(&name);
+                    if !is_local && let Some(txn) = self.active_txn.as_mut() {
+                        txn.guc_commit_state.gucs.remove(&name);
+                    }
+                }
+            }
+        }
+    }
+
+    fn clear_ctx_set_config_effects(ctx: &mut ExecutorContext) {
+        let keys = ctx
+            .gucs
+            .keys()
+            .filter(|key| key.starts_with(SET_CONFIG_EFFECT_PREFIX))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            ctx.gucs.remove(&key);
+        }
+    }
+
+    fn take_ctx_set_config_effects(
+        ctx: &mut ExecutorContext,
+    ) -> Vec<(String, Option<String>, bool)> {
+        let keys = ctx
+            .gucs
+            .keys()
+            .filter(|key| key.starts_with(SET_CONFIG_EFFECT_PREFIX))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut effects = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(raw) = ctx.gucs.remove(&key) else {
+                continue;
+            };
+            let Some(name) = key.strip_prefix(SET_CONFIG_EFFECT_PREFIX) else {
+                continue;
+            };
+            let mut chars = raw.chars();
+            let is_local = matches!(chars.next(), Some('L'));
+            let action = chars.next();
+            let payload = chars.as_str();
+            let value = match action {
+                Some('=') => Some(payload.to_string()),
+                Some('-') => None,
+                _ => continue,
+            };
+            effects.push((name.to_string(), value, is_local));
+        }
+        effects
     }
 
     fn merge_completed_streaming_portal(
@@ -5892,6 +5968,11 @@ impl Session {
         guard: &mut SelectGuard,
         succeeded: bool,
     ) -> Result<(), ExecError> {
+        if succeeded {
+            self.merge_ctx_set_config_effects(&mut guard.ctx);
+        } else {
+            Self::clear_ctx_set_config_effects(&mut guard.ctx);
+        }
         let xid = guard.ctx.transaction_xid();
         let next_command_id = guard.ctx.next_command_id;
         let mut catalog_effects = mem::take(&mut guard.ctx.catalog_effects);
@@ -9836,8 +9917,11 @@ impl Session {
         // tuple predicate. A native plan node can later render `TID Cond:
         // CURRENT OF ...` for exact EXPLAIN parity.
         let predicate = format!(
-            "ctid = '({},{})'::tid",
-            row.tid.block_number, row.tid.offset_number
+            "ctid = '({},{})'::tid AND '__pgrust_current_of:{}' = '__pgrust_current_of:{}'",
+            row.tid.block_number,
+            row.tid.offset_number,
+            cursor_name.replace('\'', "''"),
+            cursor_name.replace('\'', "''")
         );
         let mut rewritten = String::with_capacity(sql.len() + predicate.len());
         rewritten.push_str(&sql[..start]);

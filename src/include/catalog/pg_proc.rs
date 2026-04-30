@@ -9380,6 +9380,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![INTERNAL_TYPE_OID],
         ),
         (
+            3688,
+            "ts_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
             2410,
             "int2vectorrecv",
             INT2VECTOR_TYPE_OID,
@@ -9547,6 +9553,7 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
                 | "brin_minmax_multi_summary_recv"
                 | "brin_minmax_multi_summary_send"
                 | "array_typanalyze"
+                | "ts_typanalyze"
                 | "range_typanalyze"
                 | "multirange_typanalyze"
         ) {

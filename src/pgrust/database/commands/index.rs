@@ -2389,7 +2389,7 @@ impl Database {
                 datetime_config: DateTimeConfig::default(),
                 statement_timestamp_usecs:
                     crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-                gucs: std::collections::HashMap::new(),
+                gucs: super::maintenance_safe_gucs(),
                 interrupts,
                 stats: std::sync::Arc::clone(&self.stats),
                 session_stats: self.session_stats_state(client_id),
@@ -2998,6 +2998,23 @@ impl Database {
         )? {
             rebuilt_index.rel = rel;
         }
+        let has_expression_eval = rebuilt_index.index_meta.indexprs.as_ref().is_some()
+            || rebuilt_index
+                .index_meta
+                .indpred
+                .as_deref()
+                .is_some_and(|predicate| !predicate.trim().is_empty());
+        let visible_catalog = if visible_catalog.is_none() && has_expression_eval {
+            let maintenance_search_path = vec!["pg_catalog".into(), "pg_temp".into()];
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, cid)),
+                Some(&maintenance_search_path),
+            );
+            Some(crate::backend::executor::executor_catalog(catalog))
+        } else {
+            visible_catalog
+        };
         let mut ctx = ExecutorContext {
             pool: self.pool.clone(),
             data_dir: None,
@@ -3014,7 +3031,7 @@ impl Database {
             datetime_config: DateTimeConfig::default(),
             statement_timestamp_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
+            gucs: super::maintenance_safe_gucs(),
             interrupts,
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),

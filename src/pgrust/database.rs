@@ -1344,8 +1344,9 @@ impl Database {
                         typinput: DOMAIN_IN_PROC_OID,
                         typoutput: base_catalog
                             .as_ref()
-                            .map(|row| row.typoutput)
+                            .and_then(|row| (row.oid == base_type_oid).then_some(row.typoutput))
                             .or_else(|| base_entry.map(|entry| entry.output_proc_oid))
+                            .or_else(|| base_catalog.as_ref().map(|row| row.typoutput))
                             .filter(|oid| *oid != 0)
                             .unwrap_or_else(|| {
                                 synthetic_type_output_proc_oid(domain.sql_type.type_oid)
@@ -1353,8 +1354,9 @@ impl Database {
                         typreceive: DOMAIN_RECV_PROC_OID,
                         typsend: base_catalog
                             .as_ref()
-                            .map(|row| row.typsend)
+                            .and_then(|row| (row.oid == base_type_oid).then_some(row.typsend))
                             .or_else(|| base_entry.map(|entry| entry.send_proc_oid))
+                            .or_else(|| base_catalog.as_ref().map(|row| row.typsend))
                             .unwrap_or(0),
                         typmodin: base_catalog
                             .as_ref()
@@ -1369,8 +1371,9 @@ impl Database {
                         typdelim: base_catalog.as_ref().map(|row| row.typdelim).unwrap_or(','),
                         typanalyze: base_catalog
                             .as_ref()
-                            .map(|row| row.typanalyze)
+                            .and_then(|row| (row.oid == base_type_oid).then_some(row.typanalyze))
                             .or_else(|| base_entry.map(|entry| entry.analyze_proc_oid))
+                            .or_else(|| base_catalog.as_ref().map(|row| row.typanalyze))
                             .unwrap_or(0),
                         typbasetype: base_type_oid,
                         typcollation: base_catalog
