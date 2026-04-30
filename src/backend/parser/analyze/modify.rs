@@ -1570,6 +1570,9 @@ fn bind_returning_targets(
     if targets.is_empty() {
         return Ok(Vec::new());
     }
+    for target in targets {
+        reject_window_clause(&target.expr, "RETURNING")?;
+    }
     match bind_select_targets(targets, scope, catalog, outer_scopes, None, local_ctes)? {
         BoundSelectTargets::Plain(targets)
             if targets
@@ -4015,6 +4018,8 @@ fn rewrite_auto_view_scan_plan(
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
@@ -4026,6 +4031,8 @@ fn rewrite_auto_view_scan_plan(
                 resolved,
             )),
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         },
         Plan::SubqueryScan {
@@ -5901,6 +5908,7 @@ fn bind_simple_update(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, local_ctes)
         })
         .transpose()?;
@@ -6112,6 +6120,7 @@ fn bind_update_from(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(
                 expr,
                 &eval_scope,
@@ -6428,6 +6437,7 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &visible_ctes)
         })
         .transpose()?;
@@ -6567,6 +6577,7 @@ fn bind_delete_using(
         .where_clause
         .as_ref()
         .map(|expr| {
+            reject_window_clause(expr, "WHERE")?;
             bind_expr_with_outer_and_ctes(
                 expr,
                 &eval_scope,

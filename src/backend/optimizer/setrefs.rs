@@ -4518,9 +4518,21 @@ fn collect_plan_external_exec_paramids(
                 collect_external_expr_exec_paramids(having, bound, out);
             }
         }
-        Plan::WindowAgg { input, clause, .. } => {
+        Plan::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
             collect_plan_external_exec_paramids(input, bound, out);
             collect_window_clause_exec_paramids(clause, out);
+            if let Some(run_condition) = run_condition {
+                collect_external_expr_exec_paramids(run_condition, bound, out);
+            }
+            if let Some(top_qual) = top_qual {
+                collect_external_expr_exec_paramids(top_qual, bound, out);
+            }
         }
         Plan::FunctionScan { call, .. } => {
             collect_set_returning_call_external_exec_paramids(call, bound, out)
@@ -5063,7 +5075,13 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
             }
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
-        Plan::WindowAgg { input, clause, .. } => {
+        Plan::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
             for expr in &clause.spec.partition_by {
                 validate_executable_expr(expr, "WindowAgg", "partition_by", allowed_exec_params);
             }
@@ -5087,6 +5105,17 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
                         );
                     }
                 }
+            }
+            if let Some(run_condition) = run_condition {
+                validate_executable_expr(
+                    run_condition,
+                    "WindowAgg",
+                    "run_condition",
+                    allowed_exec_params,
+                );
+            }
+            if let Some(top_qual) = top_qual {
+                validate_executable_expr(top_qual, "WindowAgg", "top_qual", allowed_exec_params);
             }
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
@@ -5563,7 +5592,13 @@ fn validate_planner_path(path: &Path) {
             }
             validate_planner_path(input);
         }
-        Path::WindowAgg { input, clause, .. } => {
+        Path::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
             for expr in &clause.spec.partition_by {
                 validate_planner_expr(expr, "WindowAgg", "partition_by");
             }
@@ -5583,6 +5618,12 @@ fn validate_planner_path(path: &Path) {
                         validate_planner_expr(filter, "WindowAgg", "functions");
                     }
                 }
+            }
+            if let Some(run_condition) = run_condition {
+                validate_planner_expr(run_condition, "WindowAgg", "run_condition");
+            }
+            if let Some(top_qual) = top_qual {
+                validate_planner_expr(top_qual, "WindowAgg", "top_qual");
             }
             validate_planner_path(input);
         }
@@ -7898,6 +7939,15 @@ fn lower_window_clause_for_input(
             },
         )
     };
+    let lower_moving_sensitive_expr = |ctx: &mut SetRefsContext<'_>, expr: Expr| {
+        if !expr_contains_window_moving_volatile(&expr) {
+            return lower_expr_for_input(ctx, expr);
+        }
+        let lowered = rebuild_setrefs_expr(root, expr, |inner| {
+            lower_projection_expr_by_input_target(root, inner, input, input_tlist)
+        });
+        lower_expr(ctx, lowered, LowerMode::Scalar)
+    };
     WindowClause {
         spec: crate::include::nodes::primnodes::WindowSpec {
             partition_by: clause
@@ -7953,35 +8003,136 @@ fn lower_window_clause_for_input(
         functions: clause
             .functions
             .into_iter()
-            .map(|func| crate::include::nodes::primnodes::WindowFuncExpr {
-                kind: match func.kind {
-                    WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
-                        args: aggref
-                            .args
-                            .into_iter()
-                            .map(|arg| lower_expr_for_input(ctx, arg))
-                            .collect(),
-                        aggorder: aggref
-                            .aggorder
-                            .into_iter()
-                            .map(|item| OrderByEntry {
-                                expr: lower_expr_for_input(ctx, item.expr),
-                                ..item
-                            })
-                            .collect(),
-                        aggfilter: aggref.aggfilter.map(|expr| lower_expr_for_input(ctx, expr)),
-                        ..aggref
-                    }),
-                    WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
-                },
-                args: func
-                    .args
-                    .into_iter()
-                    .map(|arg| lower_expr_for_input(ctx, arg))
-                    .collect(),
-                ..func
+            .map(|func| {
+                let args_are_moving_sensitive = matches!(func.kind, WindowFuncKind::Aggregate(_));
+                crate::include::nodes::primnodes::WindowFuncExpr {
+                    kind: match func.kind {
+                        WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                            args: aggref
+                                .args
+                                .into_iter()
+                                .map(|arg| lower_moving_sensitive_expr(ctx, arg))
+                                .collect(),
+                            aggorder: aggref
+                                .aggorder
+                                .into_iter()
+                                .map(|item| OrderByEntry {
+                                    expr: lower_expr_for_input(ctx, item.expr),
+                                    ..item
+                                })
+                                .collect(),
+                            aggfilter: aggref
+                                .aggfilter
+                                .map(|expr| lower_moving_sensitive_expr(ctx, expr)),
+                            ..aggref
+                        }),
+                        WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+                    },
+                    args: func
+                        .args
+                        .into_iter()
+                        .map(|arg| {
+                            if args_are_moving_sensitive {
+                                lower_moving_sensitive_expr(ctx, arg)
+                            } else {
+                                lower_expr_for_input(ctx, arg)
+                            }
+                        })
+                        .collect(),
+                    ..func
+                }
             })
             .collect(),
+    }
+}
+
+fn expr_contains_window_moving_volatile(expr: &Expr) -> bool {
+    match expr {
+        Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => op.args.iter().any(expr_contains_window_moving_volatile),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_window_moving_volatile),
+        Expr::Func(func) => {
+            matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(
+                    BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal
+                )
+            ) || func.args.iter().any(expr_contains_window_moving_volatile)
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_window_moving_volatile(inner)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_window_moving_volatile(expr)
+                || expr_contains_window_moving_volatile(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_window_moving_volatile(expr))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_window_moving_volatile(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_window_moving_volatile(left)
+                || expr_contains_window_moving_volatile(right)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_window_moving_volatile(&saop.left)
+                || expr_contains_window_moving_volatile(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(expr_contains_window_moving_volatile)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_window_moving_volatile(expr)),
+        Expr::FieldSelect { expr, .. } => expr_contains_window_moving_volatile(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_window_moving_volatile(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_window_moving_volatile)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_window_moving_volatile)
+                })
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_window_moving_volatile(expr))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_window_moving_volatile(&arm.expr)
+                        || expr_contains_window_moving_volatile(&arm.result)
+                })
+                || expr_contains_window_moving_volatile(&case_expr.defresult)
+        }
+        Expr::SetReturning(_) | Expr::SubLink(_) | Expr::SubPlan(_) => false,
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_window_moving_volatile),
+        _ => false,
     }
 }
 
@@ -7991,15 +8142,31 @@ fn set_window_references(
     slot_id: usize,
     input: Box<Path>,
     clause: WindowClause,
+    run_condition: Option<Expr>,
+    top_qual: Option<Expr>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
     let input_tlist = build_path_tlist(ctx.root, &input);
     let clause = lower_window_clause_for_input(ctx, &input, &input_tlist, clause);
-    let _ = build_window_tlist(ctx.root, slot_id, &input, &clause, &output_columns);
+    let window_tlist = build_window_tlist(ctx.root, slot_id, &input, &clause, &output_columns);
+    let lower_window_output_qual = |ctx: &mut SetRefsContext<'_>, expr: Expr| {
+        lower_expr(
+            ctx,
+            expr,
+            LowerMode::Input {
+                path: None,
+                tlist: &window_tlist,
+            },
+        )
+    };
+    let run_condition = run_condition.map(|expr| lower_window_output_qual(ctx, expr));
+    let top_qual = top_qual.map(|expr| lower_window_output_qual(ctx, expr));
     Plan::WindowAgg {
         plan_info,
         input: Box::new(set_plan_refs(ctx, *input)),
         clause,
+        run_condition,
+        top_qual,
         output_columns,
     }
 }
@@ -8065,7 +8232,15 @@ fn set_subquery_scan_references(
     filter: Option<Expr>,
     force_display: bool,
 ) -> Plan {
-    let force_display = force_display || matches!(input.as_ref(), Path::ProjectSet { .. });
+    let force_display = force_display
+        || matches!(input.as_ref(), Path::ProjectSet { .. })
+        || path_contains_visible_window_top_qual(input.as_ref())
+        || (path_contains_window_run_condition(input.as_ref())
+            && parent_filter_uses_unselected_subquery_attr(ctx.root, rtindex))
+        || (path_contains_window_agg(input.as_ref())
+            && path_contains_function_scan(input.as_ref()))
+        || (subroot.as_ref().parse.where_qual.is_some()
+            && path_contains_window_agg(input.as_ref()));
     if filter.is_none() && !force_display {
         let input_columns = input.columns();
         if input_columns == output_columns {
@@ -8125,20 +8300,309 @@ fn set_subquery_scan_references(
     if input.columns() == output_columns && filter.is_none() && !force_display {
         input
     } else {
+        let scan_name = subquery_scan_name(ctx, rtindex, &input, &output_columns);
         Plan::SubqueryScan {
             plan_info,
             input: Box::new(input),
-            scan_name: subquery_scan_name(ctx, rtindex),
+            scan_name,
             filter,
             output_columns,
         }
     }
 }
 
-fn subquery_scan_name(ctx: &SetRefsContext<'_>, rtindex: usize) -> Option<String> {
-    ctx.root
+fn path_contains_window_agg(path: &Path) -> bool {
+    match path {
+        Path::WindowAgg { .. } => true,
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_window_agg(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(path_contains_window_agg),
+        Path::BitmapHeapScan { bitmapqual, .. } => path_contains_window_agg(bitmapqual),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => path_contains_window_agg(left) || path_contains_window_agg(right),
+        _ => false,
+    }
+}
+
+fn path_contains_function_scan(path: &Path) -> bool {
+    match path {
+        Path::FunctionScan { .. } => true,
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_function_scan(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(path_contains_function_scan),
+        Path::BitmapHeapScan { bitmapqual, .. } => path_contains_function_scan(bitmapqual),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => path_contains_function_scan(left) || path_contains_function_scan(right),
+        _ => false,
+    }
+}
+
+fn path_contains_window_run_condition(path: &Path) -> bool {
+    match path {
+        Path::WindowAgg {
+            input,
+            run_condition,
+            top_qual,
+            ..
+        } => {
+            run_condition.is_some()
+                || top_qual.is_some()
+                || path_contains_window_run_condition(input)
+        }
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_window_run_condition(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(path_contains_window_run_condition),
+        Path::BitmapHeapScan { bitmapqual, .. } => path_contains_window_run_condition(bitmapqual),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => path_contains_window_run_condition(left) || path_contains_window_run_condition(right),
+        _ => false,
+    }
+}
+
+fn path_contains_visible_window_top_qual(path: &Path) -> bool {
+    match path {
+        Path::WindowAgg {
+            input, top_qual, ..
+        } => {
+            top_qual
+                .as_ref()
+                .is_some_and(|qual| !matches!(qual, Expr::Const(Value::Bool(true))))
+                || path_contains_visible_window_top_qual(input)
+        }
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_visible_window_top_qual(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::SetOp { children, .. } => {
+            children.iter().any(path_contains_visible_window_top_qual)
+        }
+        Path::BitmapHeapScan { bitmapqual, .. } => {
+            path_contains_visible_window_top_qual(bitmapqual)
+        }
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => {
+            path_contains_visible_window_top_qual(left)
+                || path_contains_visible_window_top_qual(right)
+        }
+        _ => false,
+    }
+}
+
+fn parent_filter_uses_unselected_subquery_attr(root: Option<&PlannerInfo>, rtindex: usize) -> bool {
+    let Some(root) = root else {
+        return false;
+    };
+    let mut target_attrs = BTreeSet::new();
+    for target in &root.parse.target_list {
+        collect_rte_attrs(&target.expr, rtindex, &mut target_attrs);
+    }
+    let Some(where_qual) = root.parse.where_qual.as_ref() else {
+        return false;
+    };
+    let mut filter_attrs = BTreeSet::new();
+    collect_rte_attrs(where_qual, rtindex, &mut filter_attrs);
+    filter_attrs.iter().any(|attr| !target_attrs.contains(attr))
+}
+
+fn collect_rte_attrs(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<usize>) {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varno == rtindex => {
+            if let Some(index) = attrno_index(var.varattno) {
+                attrs.insert(index);
+            }
+        }
+        Expr::Aggref(aggref) => {
+            for expr in aggref.direct_args.iter().chain(aggref.args.iter()) {
+                collect_rte_attrs(expr, rtindex, attrs);
+            }
+            for item in &aggref.aggorder {
+                collect_rte_attrs(&item.expr, rtindex, attrs);
+            }
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                collect_rte_attrs(filter, rtindex, attrs);
+            }
+        }
+        Expr::WindowFunc(func) => {
+            for expr in &func.args {
+                collect_rte_attrs(expr, rtindex, attrs);
+            }
+            if let WindowFuncKind::Aggregate(aggref) = &func.kind {
+                for expr in aggref.direct_args.iter().chain(aggref.args.iter()) {
+                    collect_rte_attrs(expr, rtindex, attrs);
+                }
+                for item in &aggref.aggorder {
+                    collect_rte_attrs(&item.expr, rtindex, attrs);
+                }
+                if let Some(filter) = aggref.aggfilter.as_ref() {
+                    collect_rte_attrs(filter, rtindex, attrs);
+                }
+            }
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_rte_attrs(arg, rtindex, attrs);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_rte_attrs(arg, rtindex, attrs);
+            }
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_rte_attrs(arg, rtindex, attrs);
+            }
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => collect_rte_attrs(inner, rtindex, attrs),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            collect_rte_attrs(left, rtindex, attrs);
+            collect_rte_attrs(right, rtindex, attrs);
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = case_expr.arg.as_ref() {
+                collect_rte_attrs(arg, rtindex, attrs);
+            }
+            for arm in &case_expr.args {
+                collect_rte_attrs(&arm.expr, rtindex, attrs);
+                collect_rte_attrs(&arm.result, rtindex, attrs);
+            }
+            collect_rte_attrs(&case_expr.defresult, rtindex, attrs);
+        }
+        _ => {}
+    }
+}
+
+fn subquery_scan_name(
+    ctx: &SetRefsContext<'_>,
+    rtindex: usize,
+    input: &Plan,
+    output_columns: &[QueryColumn],
+) -> Option<String> {
+    let name = ctx
+        .root
         .and_then(|root| root.parse.rtable.get(rtindex.saturating_sub(1)))
-        .and_then(|rte| rte.alias.clone())
+        .and_then(|rte| {
+            rte.alias
+                .clone()
+                .or_else(|| (!rte.eref.aliasname.is_empty()).then(|| rte.eref.aliasname.clone()))
+        });
+    if name.as_deref() == Some("subquery") && plan_contains_function_scan(input) {
+        return output_columns.first().map(|column| column.name.clone());
+    }
+    name
+}
+
+fn plan_contains_function_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::FunctionScan { .. } => true,
+        Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. } => plan_contains_function_scan(input),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_contains_function_scan),
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_function_scan(bitmapqual),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => plan_contains_function_scan(left) || plan_contains_function_scan(right),
+        _ => false,
+    }
 }
 
 fn set_worktable_scan_references(
@@ -8602,9 +9066,20 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             slot_id,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
             ..
-        } => set_window_references(ctx, plan_info, slot_id, input, clause, output_columns),
+        } => set_window_references(
+            ctx,
+            plan_info,
+            slot_id,
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            output_columns,
+        ),
         Path::Values {
             plan_info,
             rows,
@@ -8937,7 +9412,6 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
             _ => false,
         };
         if same_kind
-            && left_window.winref == right_window.winref
             && left_window.winno == right_window.winno
             && left_window.result_type == right_window.result_type
         {

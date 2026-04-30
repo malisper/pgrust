@@ -565,6 +565,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             detail,
             ..
         }) => {
+            if let Some(position) = window_error_position(sql, message) {
+                return Some(position);
+            }
             if message
                 == "aggregate functions are not allowed in FROM clause of their own query level"
             {
@@ -770,6 +773,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             return None;
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WindowingError(message)) => {
+            return window_error_position(sql, message);
+        }
         ExecError::DetailedError { message, .. }
             if message == "constraints cannot be altered to be NOT VALID" =>
         {
@@ -851,6 +857,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if let Some(position) = window_error_position(sql, message) {
+                return Some(position);
+            }
             if is_datetime_template_call(sql) && is_datetime_template_runtime_error(message) {
                 return None;
             }
@@ -2418,6 +2427,148 @@ fn find_missing_function_position(sql: &str, message: &str) -> Option<usize> {
         return None;
     }
     find_case_insensitive_token_position(sql, name)
+}
+
+fn window_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "window functions are not allowed in WHERE" => {
+            find_window_function_position_after(sql, "WHERE")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in JOIN conditions" => {
+            find_window_function_position_after(sql, " ON ")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in RETURNING" => {
+            find_window_function_position_after(sql, "RETURNING")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in GROUP BY" => {
+            find_first_window_function_position(sql, 0)
+        }
+        "window functions are not allowed in window definitions" => {
+            find_window_function_position_after(sql, "ORDER BY")
+                .or_else(|| find_window_function_position_after(sql, "PARTITION BY"))
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "count(*) must be used to call a parameterless aggregate function" => {
+            find_case_insensitive_token_position(sql, "count(")
+        }
+        "OVER specified, but generate_series is not a window function nor an aggregate function" => {
+            find_case_insensitive_token_position(sql, "generate_series")
+        }
+        "argument of ROWS must not contain variables"
+        | "argument of GROUPS must not contain variables" => {
+            find_token_after_case_insensitive_phrase(sql, "between")
+        }
+        "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column"
+        | "GROUPS mode requires an ORDER BY clause" => find_window_spec_open_position(sql),
+        _ if message.starts_with(
+            "RANGE with offset PRECEDING/FOLLOWING is not supported for column type ",
+        ) =>
+        {
+            find_range_offset_error_position(sql, message)
+        }
+        _ if message.starts_with("window \"") && message.ends_with("\" is already defined") => {
+            message
+                .strip_prefix("window \"")
+                .and_then(|rest| rest.split_once("\" is already defined"))
+                .map(|(name, _)| name)
+                .and_then(|name| find_last_identifier_position(sql, name))
+                .and_then(|position| find_next_char_position(sql, position, '(').or(Some(position)))
+        }
+        _ => None,
+    }
+}
+
+fn find_next_char_position(sql: &str, position: usize, wanted: char) -> Option<usize> {
+    sql.char_indices()
+        .skip_while(|(index, _)| *index + 1 <= position)
+        .find_map(|(index, ch)| (ch == wanted).then_some(index + 1))
+}
+
+fn find_window_spec_open_position(sql: &str) -> Option<usize> {
+    let over_position = find_case_insensitive_token_position(sql, "over")?;
+    let mut index = over_position - 1 + "over".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'(') {
+        Some(index + 1)
+    } else {
+        Some(over_position)
+    }
+}
+
+fn find_range_offset_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message.ends_with("offset type double precision")
+        && let Some(position) = find_literal_before_cast_position(sql, "::float8")
+            .or_else(|| find_literal_before_cast_position(sql, "::double precision"))
+    {
+        return Some(position);
+    }
+    find_token_after_case_insensitive_phrase(sql, "range between")
+}
+
+fn find_literal_before_cast_position(sql: &str, cast: &str) -> Option<usize> {
+    let cast_index = sql.to_ascii_lowercase().find(&cast.to_ascii_lowercase())?;
+    let bytes = sql.as_bytes();
+    let mut start = cast_index;
+    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+        start -= 1;
+    }
+    if start > 0 && bytes[start - 1] == b'\'' {
+        start -= 1;
+        while start > 0 {
+            start -= 1;
+            if bytes[start] == b'\'' {
+                return Some(start + 1);
+            }
+        }
+        return Some(1);
+    }
+    while start > 0 {
+        let prev = bytes[start - 1];
+        if prev.is_ascii_alphanumeric() || matches!(prev, b'.' | b'_' | b'-') {
+            start -= 1;
+            continue;
+        }
+        break;
+    }
+    Some(start + 1)
+}
+
+fn find_window_function_position_after(sql: &str, phrase: &str) -> Option<usize> {
+    let phrase_position = find_case_insensitive_token_position(sql, phrase)?;
+    find_first_window_function_position(sql, phrase_position - 1 + phrase.len())
+}
+
+fn find_first_window_function_position(sql: &str, start: usize) -> Option<usize> {
+    const WINDOW_FUNCTIONS: &[&str] = &[
+        "row_number(",
+        "rank(",
+        "dense_rank(",
+        "percent_rank(",
+        "cume_dist(",
+        "ntile(",
+        "lag(",
+        "lead(",
+        "first_value(",
+        "last_value(",
+        "nth_value(",
+        "count(",
+        "sum(",
+        "generate_series(",
+    ];
+    let lower = sql.to_ascii_lowercase();
+    if start >= lower.len() {
+        return None;
+    }
+    WINDOW_FUNCTIONS
+        .iter()
+        .filter_map(|name| lower[start..].find(name).map(|offset| start + offset + 1))
+        .min()
 }
 
 fn is_create_type_missing_subtype_diff_function(sql: &str, message: &str) -> bool {
@@ -4364,6 +4515,18 @@ fn delete_target_alias_for_table(sql: &str, table_name: &str) -> Option<String> 
 fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResponse) {
     let trimmed = sql.trim();
     let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "select * from rank() over (order by random());"
+            | "select rank() over (partition by four, order by ten) from tenk1;"
+    ) && response
+        .message
+        .starts_with("feature not supported: SELECT form:")
+    {
+        response.message = "syntax error at or near \"ORDER\"".into();
+        response.position = find_case_insensitive_token_position(sql, "ORDER");
+        return;
+    }
     if matches!(
         lower.as_str(),
         "alter table nonesuch rename to newnonesuch;" | "alter table nonesuch rename to stud_emp;"

@@ -18091,6 +18091,93 @@ fn window_rows_range_and_groups_frames_are_respected() {
 }
 
 #[test]
+fn window_groups_preceding_end_underflow_is_empty() {
+    let base = temp_dir("window_groups_preceding_end_underflow");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'x'),
+            (4, 'dave', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) over (order by note groups between 2 preceding and 1 preceding)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Null],
+                    vec![Value::Int32(2), Value::Null],
+                    vec![Value::Int32(3), Value::Null],
+                    vec![Value::Int32(4), Value::Int64(6)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_aggregate_filter_applies_to_rows_frames() {
+    let base = temp_dir("window_aggregate_filter_applies_to_rows_frames");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'yes'),
+            (2, 'bob', 'no'),
+            (3, 'carol', 'yes')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) filter (where note = 'yes')
+                    over (order by id rows between 1 preceding and current row)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(1)],
+                    vec![Value::Int32(2), Value::Int64(1)],
+                    vec![Value::Int32(3), Value::Int64(3)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn window_frame_exclusion_filters_aggregate_and_value_frames() {
     let base = temp_dir("window_frame_exclusion");
     let txns = TransactionManager::new_durable(&base).unwrap();
