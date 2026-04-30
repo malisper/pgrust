@@ -1717,11 +1717,7 @@ fn append_rule_query_output(
             *column_names = std::mem::take(&mut outcome.query_column_names);
         }
     }
-    for row in outcome.query_rows.drain(..) {
-        if !rows.contains(&row) {
-            rows.push(row);
-        }
-    }
+    rows.append(&mut outcome.query_rows);
 }
 
 fn execute_statement_level_instead_rules(

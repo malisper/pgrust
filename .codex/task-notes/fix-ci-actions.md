@@ -52,6 +52,45 @@ No local failures in the attached CI repro set.
 ---
 
 Goal:
+Fix cargo-test CI failures from returning-diffs PR logs
+`cargo-test-run__1_2__73857809546.log` and
+`cargo-test-run__2_2__73857809586.log`.
+
+Key decisions:
+Preserve duplicate query rows produced by rule actions; PostgreSQL returns the
+rule action SELECT output once per INSERT source row in the writable CTE
+`INSERT ... SELECT` case.
+Track whether a recursive CTE body came from the direct recursive-union CTE
+grammar so top-level WITH items in the nonrecursive arm are classified as
+subquery context, while parenthesized left arms still report non-recursive-term
+errors.
+Make parser tests match through `ParseError::unpositioned()` so source-location
+wrappers do not break diagnostic-kind assertions.
+
+Files touched:
+src/backend/parser/analyze/mod.rs
+src/backend/parser/gram.rs
+src/backend/parser/tests.rs
+src/include/nodes/parsenodes.rs
+src/pgrust/database/commands/rules.rs
+src/pgrust/session.rs
+src/pl/plpgsql/compile.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet recursive_cte_rejects_
+scripts/cargo_isolated.sh test --lib --quiet recursive_cte_reports_target_operator_error_before_filter_operator_error
+scripts/cargo_isolated.sh test --lib --quiet parse_with_recursive_cte_union_all
+scripts/cargo_isolated.sh test --lib --quiet writable_cte_insert_instead_select_rule_joins_original_source
+scripts/cargo_isolated.sh check
+
+Remaining:
+No local failures for the two attached CI repros; check still emits existing
+unreachable-pattern warnings.
+
+---
+
+Goal:
 Fix CI failures from cargo-test-run__1_2__73514442155.log, cargo-test-run__2_2__73514442144.log, and cargo-test_73514581540.log.
 
 Key decisions:

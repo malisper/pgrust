@@ -10665,11 +10665,13 @@ impl Session {
                 CteBody::RecursiveUnion {
                     all,
                     left_nested,
+                    anchor_with_is_subquery,
                     anchor,
                     recursive,
                 } => CteBody::RecursiveUnion {
                     all: *all,
                     left_nested: *left_nested,
+                    anchor_with_is_subquery: *anchor_with_is_subquery,
                     anchor: Box::new(Self::substitute_cte_body(anchor, subst)?),
                     recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
                 },
@@ -10725,11 +10727,13 @@ impl Session {
             CteBody::RecursiveUnion {
                 all,
                 left_nested,
+                anchor_with_is_subquery,
                 anchor,
                 recursive,
             } => CteBody::RecursiveUnion {
                 all: *all,
                 left_nested: *left_nested,
+                anchor_with_is_subquery: *anchor_with_is_subquery,
                 anchor: Box::new(Self::substitute_cte_body(anchor, subst)?),
                 recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
             },

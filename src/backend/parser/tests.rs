@@ -13996,11 +13996,13 @@ fn parse_with_recursive_cte_union_all() {
                 crate::backend::parser::CteBody::RecursiveUnion {
                     all,
                     left_nested,
+                    anchor_with_is_subquery,
                     anchor,
                     recursive,
                 } => {
                     assert!(*all);
                     assert!(!*left_nested);
+                    assert!(*anchor_with_is_subquery);
                     assert!(matches!(
                         anchor.as_ref(),
                         crate::backend::parser::CteBody::Values(_)
@@ -17688,12 +17690,17 @@ fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() 
         select * from outermost order by 1",
     )
     .unwrap();
-    assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::InvalidRecursion(message))
-            if message
-                == "recursive reference to query \"outermost\" must not appear within a subquery"
-    ));
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    let unpositioned = err.unpositioned();
+    assert!(
+        matches!(
+            unpositioned,
+            ParseError::InvalidRecursion(message)
+                if message
+                    == "recursive reference to query \"outermost\" must not appear within a subquery"
+        ),
+        "got {unpositioned:?}"
+    );
 }
 
 #[test]
@@ -17707,9 +17714,10 @@ fn recursive_cte_rejects_parenthesized_left_with_self_reference_as_non_recursive
         select * from x",
     )
     .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
     assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::InvalidRecursion(message))
+        err.unpositioned(),
+        ParseError::InvalidRecursion(message)
             if message
                 == "recursive reference to query \"x\" must not appear within its non-recursive term"
     ));
@@ -17726,13 +17734,14 @@ fn recursive_cte_reports_target_operator_error_before_filter_operator_error() {
         select n, pg_typeof(n) from t",
     )
     .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
     assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::UndefinedOperator {
+        err.unpositioned(),
+        ParseError::UndefinedOperator {
             op: "+",
             left_type,
             right_type
-        }) if left_type == "text" && right_type == "integer"
+        } if left_type == "text" && right_type == "integer"
     ));
 }
 

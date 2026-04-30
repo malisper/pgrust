@@ -4298,6 +4298,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
         CteBody::RecursiveUnion {
             all,
             left_nested: _,
+            anchor_with_is_subquery: _,
             anchor,
             recursive,
         } => Ok(SelectStatement {
@@ -4390,10 +4391,15 @@ fn bind_ctes(
             CteBody::RecursiveUnion {
                 all,
                 left_nested,
+                anchor_with_is_subquery,
                 anchor,
                 recursive,
             } if with_recursive && self_references_cte => {
-                let top_level_with_names = recursive_union_top_level_with_names(anchor, recursive);
+                let top_level_with_names = recursive_union_top_level_with_names(
+                    anchor,
+                    recursive,
+                    *anchor_with_is_subquery,
+                );
                 validate_recursive_cte_non_recursive_term(
                     anchor,
                     &cte.name,
@@ -5280,16 +5286,28 @@ pub(crate) fn cte_body_references_table(body: &CteBody, table_name: &str) -> boo
 fn recursive_union_top_level_with_names(
     anchor: &CteBody,
     recursive: &SelectStatement,
+    anchor_with_is_subquery: bool,
 ) -> Vec<String> {
-    cte_body_top_level_with_names(anchor)
-        .into_iter()
-        .filter(|anchor_name| {
-            recursive
-                .with
-                .iter()
-                .any(|cte| cte.name.eq_ignore_ascii_case(anchor_name))
-        })
-        .collect()
+    let anchor_names = cte_body_top_level_with_names(anchor);
+    let mut names = if anchor_with_is_subquery {
+        anchor_names.clone()
+    } else {
+        Vec::new()
+    };
+    for anchor_name in anchor_names.into_iter().filter(|anchor_name| {
+        recursive
+            .with
+            .iter()
+            .any(|cte| cte.name.eq_ignore_ascii_case(anchor_name))
+    }) {
+        if !names
+            .iter()
+            .any(|candidate: &String| candidate.eq_ignore_ascii_case(&anchor_name))
+        {
+            names.push(anchor_name);
+        }
+    }
+    names
 }
 
 fn cte_body_top_level_with_names(body: &CteBody) -> Vec<String> {
