@@ -51,24 +51,34 @@ impl IndexedTlist {
                 .iter()
                 .find(|entry| {
                     entry.match_exprs.iter().any(|candidate| {
-                        matches!(candidate, Expr::Var(candidate_var) if candidate_var == var)
+                        matches!(candidate, Expr::Var(candidate_var) if vars_match_for_setrefs(candidate_var, var))
                             || matches!(candidate, Expr::GroupingKey(grouping_key)
                                 if matches!(grouping_key.expr.as_ref(), Expr::Var(candidate_var)
-                                    if candidate_var == var))
+                                    if vars_match_for_setrefs(candidate_var, var)))
                     })
                 })
                 .or_else(|| {
                     self.entries.iter().find(|entry| {
                         entry.match_exprs.iter().any(|candidate| match candidate {
                             Expr::Var(candidate_var) => root.is_some_and(|root| {
-                                flatten_join_alias_vars(root, Expr::Var(candidate_var.clone()))
-                                    == flatten_join_alias_vars(root, expr.clone())
+                                exprs_match_for_setrefs(
+                                    &flatten_join_alias_vars(
+                                        root,
+                                        Expr::Var(candidate_var.clone()),
+                                    ),
+                                    &flatten_join_alias_vars(root, expr.clone()),
+                                )
                             }),
                             Expr::GroupingKey(grouping_key) => {
-                                grouping_key.expr.as_ref() == expr
+                                exprs_match_for_setrefs(grouping_key.expr.as_ref(), expr)
                                     || root.is_some_and(|root| {
-                                        flatten_join_alias_vars(root, *grouping_key.expr.clone())
-                                            == flatten_join_alias_vars(root, expr.clone())
+                                        exprs_match_for_setrefs(
+                                            &flatten_join_alias_vars(
+                                                root,
+                                                *grouping_key.expr.clone(),
+                                            ),
+                                            &flatten_join_alias_vars(root, expr.clone()),
+                                        )
                                     })
                             }
                             _ => output_component_matches_expr(candidate, expr),
@@ -203,6 +213,30 @@ fn expr_collation_oid(expr: &Expr) -> Option<u32> {
     }
 }
 
+fn vars_match_for_setrefs(left: &Var, right: &Var) -> bool {
+    // PostgreSQL's search_indexed_tlist_for_var matches Vars by varno/varattno
+    // and copies the caller's Var into the replacement.  Do the same logical
+    // match here: type and collation are expression metadata, not tlist lookup
+    // keys, and can legitimately be missing from intermediate path targets.
+    left.varno == right.varno
+        && left.varattno == right.varattno
+        && left.varlevelsup == right.varlevelsup
+}
+
+fn exprs_match_for_setrefs(left: &Expr, right: &Expr) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left, right) {
+        (Expr::Var(left_var), Expr::Var(right_var)) => vars_match_for_setrefs(left_var, right_var),
+        (Expr::GroupingKey(left_key), Expr::GroupingKey(right_key)) => {
+            left_key.ref_id == right_key.ref_id
+                && exprs_match_for_setrefs(&left_key.expr, &right_key.expr)
+        }
+        _ => false,
+    }
+}
+
 fn special_slot_var(
     varno: usize,
     index: usize,
@@ -216,6 +250,15 @@ fn special_slot_var(
         vartype: sql_type,
         collation_oid,
     })
+}
+
+fn special_slot_var_for_expr(varno: usize, entry: &IndexedTlistEntry, expr: &Expr) -> Expr {
+    special_slot_var(
+        varno,
+        entry.index,
+        entry.sql_type,
+        expr_collation_oid(expr).or(entry.collation_oid),
+    )
 }
 
 fn build_simple_tlist_from_exprs(output_vars: &[Expr]) -> IndexedTlist {
@@ -270,7 +313,7 @@ fn build_base_scan_tlist(
             if info
                 .translated_vars
                 .get(index)
-                .is_some_and(|translated| translated == &output_vars[index])
+                .is_some_and(|translated| exprs_match_for_setrefs(translated, &output_vars[index]))
             {
                 entry.match_exprs = dedup_match_exprs(vec![
                     entry.match_exprs[0].clone(),
@@ -313,7 +356,7 @@ fn build_simple_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             if info
                 .translated_vars
                 .get(index)
-                .is_some_and(|translated| translated == &output_vars[index])
+                .is_some_and(|translated| exprs_match_for_setrefs(translated, &output_vars[index]))
             {
                 entry.match_exprs = dedup_match_exprs(vec![
                     entry.match_exprs[0].clone(),
@@ -1315,7 +1358,7 @@ fn expr_references_join_alias_var(root: &PlannerInfo, expr: &Expr) -> bool {
 }
 
 fn output_component_matches_expr(candidate: &Expr, expr: &Expr) -> bool {
-    if candidate == expr {
+    if exprs_match_for_setrefs(candidate, expr) {
         return true;
     }
     match candidate {
@@ -1351,11 +1394,10 @@ fn lower_top_level_input_var(
                 && !is_special_varno(var.varno)
                 && !is_system_attr(var.varattno) =>
         {
+            let expr = Expr::Var(var.clone());
             search_input_tlist_entry(root, &Expr::Var(var.clone()), input, tlist)
                 .filter(|entry| entry.sql_type == var.vartype)
-                .map(|entry| {
-                    special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid)
-                })
+                .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, &expr))
                 .unwrap_or(Expr::Var(var))
         }
         other => other,
@@ -1371,7 +1413,7 @@ fn lower_projection_expr_by_input_target(
     if let Some(entry) = search_input_tlist_entry(root, &expr, input, input_tlist)
         && entry.sql_type == expr_sql_type(&expr)
     {
-        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid);
+        return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }
     let map_var = |var: Var| {
         if var.varlevelsup != 0 || is_special_varno(var.varno) || is_system_attr(var.varattno) {
@@ -1380,9 +1422,7 @@ fn lower_projection_expr_by_input_target(
         let expr = Expr::Var(var.clone());
         search_input_tlist_entry(root, &expr, input, input_tlist)
             .filter(|entry| entry.sql_type == var.vartype)
-            .map(|entry| {
-                special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid)
-            })
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, &expr))
             .unwrap_or(Expr::Var(var))
     };
     match expr {
@@ -1687,7 +1727,7 @@ fn lower_order_by_expr_for_input(
 ) -> OrderByEntry {
     if let Some(entry) = search_tlist_entry_by_sortgroupref(item.ressortgroupref, input_tlist) {
         return OrderByEntry {
-            expr: special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid),
+            expr: special_slot_var_for_expr(OUTER_VAR, entry, &item.expr),
             ..item
         };
     }
@@ -2166,7 +2206,7 @@ fn fix_input_tlist_expr(
 ) -> Option<Expr> {
     search_input_tlist_entry(root, expr, input, input_tlist)
         .filter(|entry| entry.sql_type == expr_sql_type(expr))
-        .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid))
+        .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
 }
 
 fn fix_join_rte_var_for_input(
@@ -2275,16 +2315,13 @@ fn fix_upper_expr_for_input(
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
     match mode {
         LowerMode::Scalar => None,
-        LowerMode::Input { tlist, .. } => search_tlist_entry(None, expr, tlist).map(|entry| {
-            special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid)
-        }),
+        LowerMode::Input { tlist, .. } => search_tlist_entry(None, expr, tlist)
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr)),
         LowerMode::Aggregate { layout, tlist, .. } => search_tlist_entry(None, expr, tlist)
-            .map(|entry| {
-                special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid)
-            })
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
             .or_else(|| {
                 layout.iter().enumerate().find_map(|(index, candidate)| {
-                    (candidate == expr).then(|| {
+                    exprs_match_for_setrefs(candidate, expr).then(|| {
                         special_slot_var(
                             OUTER_VAR,
                             index,
@@ -2298,13 +2335,10 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
             outer_tlist,
             inner_tlist,
         } => search_tlist_entry(None, expr, outer_tlist)
-            .map(|entry| {
-                special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid)
-            })
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
             .or_else(|| {
-                search_tlist_entry(None, expr, inner_tlist).map(|entry| {
-                    special_slot_var(INNER_VAR, entry.index, entry.sql_type, entry.collation_oid)
-                })
+                search_tlist_entry(None, expr, inner_tlist)
+                    .map(|entry| special_slot_var_for_expr(INNER_VAR, entry, expr))
             }),
     }
 }
@@ -7439,9 +7473,7 @@ fn set_projection_references(
         let expr = target
             .input_resno
             .and_then(|input_resno| input_tlist.entries.get(input_resno.saturating_sub(1)))
-            .map(|entry| {
-                special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid)
-            })
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, &target.expr))
             .unwrap_or_else(|| {
                 let lowered = lower_projection_expr_by_input_target(
                     root,
@@ -8753,7 +8785,7 @@ fn lower_join_clause_list(
 
 fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, tlist: &IndexedTlist) -> Expr {
     if let Some(entry) = search_tlist_entry(root, &expr, tlist) {
-        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid);
+        return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }
     if let (Expr::Var(var), Some(root)) = (&expr, root)
         && root
@@ -8786,7 +8818,7 @@ fn fix_join_expr_for_inputs(
 }
 
 fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bool {
-    if left == right {
+    if exprs_match_for_setrefs(left, right) {
         return true;
     }
     if let (Expr::WindowFunc(left_window), Expr::WindowFunc(right_window)) = (left, right) {
@@ -8821,9 +8853,9 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     let flattened_right = maybe_flatten_join_alias_vars(root, right);
     match (flattened_left.as_ref(), flattened_right.as_ref()) {
         (None, None) => false,
-        (Some(left), None) => left == right,
-        (None, Some(right)) => left == right,
-        (Some(left), Some(right)) => left == right,
+        (Some(left), None) => exprs_match_for_setrefs(left, right),
+        (None, Some(right)) => exprs_match_for_setrefs(left, right),
+        (Some(left), Some(right)) => exprs_match_for_setrefs(left, right),
     }
 }
 
@@ -9229,10 +9261,10 @@ fn fix_join_expr(
     inner_tlist: &IndexedTlist,
 ) -> Expr {
     if let Some(entry) = search_tlist_entry(root, &expr, outer_tlist) {
-        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid);
+        return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }
     if let Some(entry) = search_tlist_entry(root, &expr, inner_tlist) {
-        return special_slot_var(INNER_VAR, entry.index, entry.sql_type, entry.collation_oid);
+        return special_slot_var_for_expr(INNER_VAR, entry, &expr);
     }
     if let (Expr::Var(var), Some(root)) = (&expr, root)
         && root

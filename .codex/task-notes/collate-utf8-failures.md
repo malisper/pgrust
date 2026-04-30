@@ -6,6 +6,7 @@ The downloaded diff compares actual output to collate.utf8_1.out, the non-UTF8 s
 Added PostgreSQL-compatible builtin pg_collation rows/metadata, CREATE COLLATION option syntax for builtin provider locales, casefold(text), and runtime support for C, PG_C_UTF8, and PG_UNICODE_FAST text/regex behavior.
 Preserved implicit column collation through Var and FuncExpr metadata, generated relation output expressions, and setrefs slot Vars.
 The final regression-only mismatch was the SELECT header for top-level ~*/!~* expressions rewritten through regexp_like; select-list naming now keeps ?column? for those operator spellings.
+CI exposed setrefs panics where intermediate path tlists dropped Var collation metadata. Matched PostgreSQL setrefs behavior more closely: Var lookup uses varno/varattno identity rather than collation, and replacement slot Vars preserve collation from the expression being lowered when available.
 
 Files touched:
 Parser/catalog/planner/executor collation paths, plus focused parser/catalog/database/executor tests.
@@ -19,6 +20,12 @@ scripts/cargo_isolated.sh test --lib --quiet catalog_store_persists_pg_collation
 scripts/cargo_isolated.sh test --lib --quiet create_builtin_provider_collations_from_options
 scripts/cargo_isolated.sh test --lib --quiet builtin_utf8_collations_drive_text_and_regex_functions
 scripts/run_regression.sh --test collate.utf8 --jobs 1 --timeout 120 --port 55433
+scripts/cargo_isolated.sh test --lib --quiet recursive_cte_search_depth_first_executes
+scripts/cargo_isolated.sh test --lib --quiet tablesample_system_accepts_lateral_expressions_in_explain
+scripts/cargo_isolated.sh test --lib --quiet recursive_cte_cycle_tracking_returns_record_arrays
+scripts/cargo_isolated.sh test --lib --quiet update_from_updates_rows_and_returns_source_columns
+scripts/cargo_isolated.sh test --lib --quiet text_tsearch_match_operator_accepts_tsquery
+scripts/run_regression.sh --test collate.utf8 --jobs 1 --timeout 120 --port 55434
 
 Remaining:
 No remaining collate.utf8 failures; regression passed 59/59 queries.
