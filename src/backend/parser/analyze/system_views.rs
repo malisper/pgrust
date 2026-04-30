@@ -594,6 +594,11 @@ fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>
         .into_iter()
         .map(|view| (view.relation_oid, view.updatability))
         .collect::<std::collections::BTreeMap<_, _>>();
+    let sequence_rows = catalog
+        .sequence_rows()
+        .into_iter()
+        .map(|row| (row.seqrelid, row))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut rows = Vec::new();
     for (schema_name, table_name, relation) in
         information_schema_relation_rows(catalog, &['r', 'p', 'v', 'f'])
@@ -619,13 +624,17 @@ fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>
                     Some((namespace.nspname, row.typname))
                 })
                 .unwrap_or_else(|| ("pg_catalog".into(), sql_type_name(column.sql_type)));
+            let identity_sequence = column
+                .identity
+                .and(column.default_sequence_oid)
+                .and_then(|sequence_oid| sequence_rows.get(&sequence_oid));
             rows.push(vec![
                 Value::Text(REGRESSION_DATABASE_NAME.into()),
                 Value::Text(schema_name.clone().into()),
                 Value::Text(table_name.clone().into()),
                 Value::Text(column.name.clone().into()),
                 Value::Int32((index + 1) as i32),
-                if is_generated {
+                if is_generated || column.identity.is_some() {
                     Value::Null
                 } else {
                     column
@@ -674,14 +683,22 @@ fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>
                         }
                     })
                     .unwrap_or(Value::Null),
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
+                identity_sequence
+                    .map(|row| Value::Text(row.seqstart.to_string().into()))
+                    .unwrap_or(Value::Null),
+                identity_sequence
+                    .map(|row| Value::Text(row.seqincrement.to_string().into()))
+                    .unwrap_or(Value::Null),
+                identity_sequence
+                    .map(|row| Value::Text(row.seqmax.to_string().into()))
+                    .unwrap_or(Value::Null),
+                identity_sequence
+                    .map(|row| Value::Text(row.seqmin.to_string().into()))
+                    .unwrap_or(Value::Null),
                 column
                     .identity
-                    .map(|_| yes_or_no(false))
-                    .unwrap_or(Value::Null),
+                    .map(|_| yes_or_no(identity_sequence.is_some_and(|row| row.seqcycle)))
+                    .unwrap_or_else(|| yes_or_no(false)),
                 Value::Text(if is_generated { "ALWAYS" } else { "NEVER" }.into()),
                 if is_generated {
                     column

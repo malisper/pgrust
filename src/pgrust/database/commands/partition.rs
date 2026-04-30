@@ -535,6 +535,22 @@ impl Database {
         ensure_relation_owner(self, client_id, &child, &stmt.partition_table)?;
         reject_typed_table_ddl(&parent, "attach partition to")?;
         reject_typed_attach_partition_child(&child)?;
+        if let Some(column) = child
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.identity.is_some())
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "table \"{}\" being attached contains an identity column \"{}\"",
+                    stmt.partition_table, column.name
+                ),
+                detail: Some("The new partition may not contain an identity column.".into()),
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
         validate_partition_relation_compatibility(
             &catalog,
             &parent,
@@ -609,6 +625,14 @@ impl Database {
             catalog_effects,
         )?;
         let next_cid = next_cid.saturating_add(1);
+        let mut next_cid = self.copy_parent_identity_columns_to_attached_partition_in_transaction(
+            client_id,
+            xid,
+            next_cid,
+            &parent,
+            &updated_child,
+            catalog_effects,
+        )?;
         if bound.is_default() {
             self.update_partitioned_table_default_partition_in_transaction(
                 client_id,
@@ -619,6 +643,7 @@ impl Database {
                 configured_search_path,
                 catalog_effects,
             )?;
+            next_cid = next_cid.saturating_add(1);
         }
         let next_cid = self.reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
             client_id,
@@ -659,6 +684,61 @@ impl Database {
             catalog_effects,
         )?;
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn copy_parent_identity_columns_to_attached_partition_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        mut cid: CommandId,
+        parent: &BoundRelation,
+        child: &BoundRelation,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        for parent_column in parent
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped && column.identity.is_some())
+        {
+            let Some(child_column) = child
+                .desc
+                .columns
+                .iter()
+                .find(|column| {
+                    !column.dropped && column.name.eq_ignore_ascii_case(&parent_column.name)
+                })
+                .cloned()
+            else {
+                continue;
+            };
+            let child_column_name = child_column.name.clone();
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_set_column_identity_mvcc(
+                    child.relation_oid,
+                    &child_column_name,
+                    parent_column.identity,
+                    parent_column.default_expr.clone(),
+                    parent_column.default_sequence_oid,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            cid = cid.saturating_add(1);
+        }
+        Ok(cid)
     }
 
     fn mark_attached_partition_inheritance_metadata_in_transaction(
@@ -1208,6 +1288,14 @@ impl Database {
                 catalog_effects,
             )?;
         }
+        next_cid = self.clear_detached_partition_identity_columns_in_transaction(
+            client_id,
+            xid,
+            next_cid,
+            &parent,
+            &child,
+            catalog_effects,
+        )?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -1261,6 +1349,59 @@ impl Database {
         }
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn clear_detached_partition_identity_columns_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        mut cid: CommandId,
+        parent: &BoundRelation,
+        child: &BoundRelation,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        for parent_column in parent
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped && column.identity.is_some())
+        {
+            let Some(child_column) = child.desc.columns.iter().find(|column| {
+                !column.dropped && column.name.eq_ignore_ascii_case(&parent_column.name)
+            }) else {
+                continue;
+            };
+            if child_column.identity.is_none()
+                && child_column.default_sequence_oid != parent_column.default_sequence_oid
+            {
+                continue;
+            }
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_set_column_identity_mvcc(
+                    child.relation_oid,
+                    &child_column.name,
+                    None,
+                    None,
+                    None,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            cid = cid.saturating_add(1);
+        }
+        Ok(cid)
     }
 
     #[allow(clippy::too_many_arguments)]

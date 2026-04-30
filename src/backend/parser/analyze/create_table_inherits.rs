@@ -90,6 +90,14 @@ pub fn lower_create_table_with_catalog(
             });
         }
     }
+    if stmt.partition_of.is_some() && stmt.columns().any(|column| column.identity.is_some()) {
+        return Err(ParseError::DetailedError {
+            message: "cannot define identity column in a partition".into(),
+            detail: Some("Identity columns are inherited from the partitioned table.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
     let mut merged_columns = merge_inherited_columns(stmt, &parents, catalog)?;
     dedupe_inherited_not_null_names(&mut merged_columns);
     let inherited_constraints = inherited_table_constraints(&parents, catalog);
@@ -129,6 +137,29 @@ pub fn lower_create_table_with_catalog(
             column.not_null_constraint_is_local = merged.not_null_is_local;
             column.not_null_constraint_inhcount = merged.not_null_inhcount;
         }
+    }
+    if stmt.partition_of.is_some()
+        && let Some(parent) = parents.iter().find(|parent| parent.relkind == 'p')
+    {
+        for column in &mut lowered.relation_desc.columns {
+            let Some(parent_column) = parent.desc.columns.iter().find(|parent_column| {
+                !parent_column.dropped && parent_column.name.eq_ignore_ascii_case(&column.name)
+            }) else {
+                continue;
+            };
+            if parent_column.identity.is_some() {
+                column.identity = parent_column.identity;
+                column.default_expr = parent_column.default_expr.clone();
+                column.default_sequence_oid = parent_column.default_sequence_oid;
+                column.missing_default_value = None;
+            }
+        }
+        lowered.owned_sequences.retain(|sequence| {
+            match parent.desc.columns.get(sequence.column_index) {
+                Some(column) => column.identity.is_none(),
+                None => true,
+            }
+        });
     }
     lowered.parent_oids = parents
         .into_iter()
@@ -486,6 +517,7 @@ fn merge_inherited_columns(
                 } else {
                     column.default_expr.clone()
                 },
+                explicit_null: false,
                 generated,
                 identity: None,
                 storage: Some(column.storage.attstorage),
@@ -829,6 +861,33 @@ fn merge_local_column(
             });
         }
         merged.column.default_expr = local.default_expr.clone();
+        merged.conflicting_parent_default = false;
+    }
+    if local.identity.is_some() {
+        if merged.column.identity.is_some() {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "column \"{}\" inherits from identity column but specifies identity",
+                    merged.column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        if merged.column.default_expr.is_some() {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "both default and identity specified for column \"{}\"",
+                    merged.column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        merged.column.identity = local.identity.clone();
+        merged.column.default_expr = None;
         merged.conflicting_parent_default = false;
     }
     Ok(())

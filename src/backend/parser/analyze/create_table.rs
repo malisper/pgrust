@@ -43,9 +43,16 @@ pub struct LoweredCreateTable {
 pub struct OwnedSequenceSpec {
     pub column_index: usize,
     pub column_name: String,
+    pub kind: OwnedSequenceKind,
     pub serial_kind: SerialKind,
     pub sql_type: SqlType,
     pub options: SequenceOptionsSpec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedSequenceKind {
+    Serial,
+    Identity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,11 +187,27 @@ pub fn lower_create_table(
                             column.name, stmt.table_name
                         )
                     } else {
-                        format!("conflicting identity definition for column \"{}\"", column.name)
+                        format!(
+                            "both default and identity specified for column \"{}\" of table \"{}\"",
+                            column.name, stmt.table_name
+                        )
                     };
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "identity column without DEFAULT, generated expression, or serial type",
-                        actual,
+                    return Err(ParseError::DetailedError {
+                        message: actual,
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                if column.identity.is_some() && column.explicit_null {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "conflicting NULL/NOT NULL declarations for column \"{}\" of table \"{}\"",
+                            column.name, stmt.table_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
                     });
                 }
                 if serial_kind.is_some() && column.generated.is_some() {
@@ -260,6 +283,7 @@ pub fn lower_create_table(
                     owned_sequences.push(OwnedSequenceSpec {
                         column_index: index,
                         column_name: column.name.clone(),
+                        kind: OwnedSequenceKind::Serial,
                         serial_kind,
                         sql_type,
                         options: SequenceOptionsSpec::default(),
@@ -271,6 +295,7 @@ pub fn lower_create_table(
                     owned_sequences.push(OwnedSequenceSpec {
                         column_index: index,
                         column_name: column.name.clone(),
+                        kind: OwnedSequenceKind::Identity,
                         serial_kind: serial_kind_for_identity_sql_type(sql_type)?,
                         sql_type,
                         options: identity.options.clone(),
@@ -446,6 +471,7 @@ fn expand_create_table_of_type(
                 ty: RawTypeName::Builtin(column.sql_type),
                 collation: None,
                 default_expr: None,
+                explicit_null: false,
                 generated: None,
                 identity: None,
                 storage: None,
@@ -482,6 +508,14 @@ fn expand_create_table_of_type(
                 column.collation = options.collation.clone();
                 column.default_expr = options.default_expr.clone();
                 column.generated = options.generated.clone();
+                if options.identity.is_some() {
+                    return Err(ParseError::DetailedError {
+                        message: "identity columns are not supported on typed tables".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
                 column.identity = options.identity.clone();
                 column.storage = options.storage;
                 column.compression = options.compression;
@@ -689,6 +723,7 @@ fn expand_like_clause(
                 } else {
                     None
                 },
+                explicit_null: false,
                 generated,
                 identity: options
                     .identity
@@ -1021,9 +1056,11 @@ fn serial_kind_for_identity_sql_type(sql_type: SqlType) -> Result<SerialKind, Pa
         SqlTypeKind::Int2 if !sql_type.is_array => Ok(SerialKind::Small),
         SqlTypeKind::Int4 if !sql_type.is_array => Ok(SerialKind::Regular),
         SqlTypeKind::Int8 if !sql_type.is_array => Ok(SerialKind::Big),
-        _ => Err(ParseError::UnexpectedToken {
-            expected: "smallint, integer, or bigint identity column",
-            actual: format_sql_type_name(sql_type),
+        _ => Err(ParseError::DetailedError {
+            message: "identity column type must be smallint, integer, or bigint".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
         }),
     }
 }
@@ -1110,6 +1147,7 @@ mod tests {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
                 collation: None,
                 default_expr: None,
+                explicit_null: false,
                 generated: None,
                 identity: None,
                 storage: None,
@@ -1150,6 +1188,7 @@ mod tests {
                 },
                 collation: None,
                 default_expr: None,
+                explicit_null: false,
                 generated: None,
                 identity: None,
                 storage: None,
@@ -1193,6 +1232,7 @@ mod tests {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     collation: None,
                     default_expr: Some(default_expr.into()),
+                    explicit_null: false,
                     generated: None,
                     identity: None,
                     storage: None,
@@ -1250,6 +1290,7 @@ mod tests {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     collation: None,
                     default_expr: None,
+                    explicit_null: false,
                     generated: None,
                     identity: None,
                     storage: None,
@@ -1264,6 +1305,7 @@ mod tests {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                     collation: None,
                     default_expr: None,
+                    explicit_null: false,
                     generated: None,
                     identity: None,
                     storage: None,
@@ -1527,6 +1569,7 @@ mod tests {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     collation: None,
                     default_expr: None,
+                    explicit_null: false,
                     generated: None,
                     identity: None,
                     storage: None,
@@ -1578,6 +1621,7 @@ mod tests {
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 collation: None,
                 default_expr: None,
+                explicit_null: false,
                 generated: None,
                 identity: None,
                 storage: None,
@@ -1622,6 +1666,7 @@ mod tests {
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 collation: None,
                 default_expr: Some("7".into()),
+                explicit_null: false,
                 generated: None,
                 identity: None,
                 storage: None,
@@ -1662,6 +1707,7 @@ mod tests {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                 collation: None,
                 default_expr: None,
+                explicit_null: false,
                 generated: None,
                 identity: None,
                 storage: None,
@@ -1701,6 +1747,7 @@ mod tests {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                 collation: None,
                 default_expr: None,
+                explicit_null: false,
                 generated: None,
                 identity: None,
                 storage: None,

@@ -2900,6 +2900,14 @@ fn parse_partition_column_override(
             parse_expr(rest).map_err(PartitionStatementParseError::Parse)?;
             default_expr = Some(rest.to_string());
             rest = "";
+        } else if keyword_at_start(rest, "generated") {
+            return Err(ParseError::DetailedError {
+                message: "identity columns are not supported on partitions".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            }
+            .into());
         } else {
             return Err(ParseError::UnexpectedToken {
                 expected: "partition column option",
@@ -21888,7 +21896,9 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
                         Rule::create_table_element => {
-                            elements.push(build_create_table_element(inner)?)
+                            let table_name =
+                                relation_name.as_ref().map(|(_, table)| table.as_str());
+                            elements.push(build_create_table_element_for_table(inner, table_name)?)
                         }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
                         _ => {}
@@ -22511,13 +22521,18 @@ fn split_rule_action_list(list_sql: &str) -> Result<Vec<String>, ParseError> {
     Ok(actions)
 }
 
-fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
+fn build_create_table_element_for_table(
+    pair: Pair<'_, Rule>,
+    table_name: Option<&str>,
+) -> Result<CreateTableElement, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
         Rule::create_table_like_clause => Ok(CreateTableElement::Like(
             build_create_table_like_clause(inner)?,
         )),
-        Rule::column_def => Ok(CreateTableElement::Column(build_column_def(inner)?)),
+        Rule::column_def => Ok(CreateTableElement::Column(build_column_def_for_table(
+            inner, table_name,
+        )?)),
         Rule::table_constraint => Ok(CreateTableElement::Constraint(build_table_constraint(
             inner,
         )?)),
@@ -22526,6 +22541,10 @@ fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement
             actual: inner.as_str().to_string(),
         }),
     }
+}
+
+fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
+    build_create_table_element_for_table(pair, None)
 }
 
 fn build_typed_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
@@ -22580,7 +22599,7 @@ fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions
                 set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
             }
             Rule::column_identity => {
-                set_column_identity(&mut identity, build_column_identity(flag)?, &name)?;
+                set_column_identity(&mut identity, build_column_identity(flag)?, &name, None)?;
             }
             Rule::column_compression => {
                 compression = Some(build_column_compression(flag)?);
@@ -22609,6 +22628,7 @@ fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions
                         &mut identity,
                         build_column_identity(identity_part)?,
                         &name,
+                        None,
                     )?;
                 } else {
                     constraints.push(build_column_constraint(flag)?)
@@ -25876,6 +25896,13 @@ fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseEr
 }
 
 fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
+    build_column_def_for_table(pair, None)
+}
+
+fn build_column_def_for_table(
+    pair: Pair<'_, Rule>,
+    table_name: Option<&str>,
+) -> Result<ColumnDef, ParseError> {
     let mut inner = pair.into_inner();
     let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let ty = canonicalize_column_type_name(build_type_name(
@@ -25885,6 +25912,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     let mut collation = None;
     let mut generated = None;
     let mut identity = None;
+    let mut explicit_null = false;
     let mut storage = None;
     let mut compression = None;
     let mut constraints = Vec::new();
@@ -25913,7 +25941,12 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                 set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
             }
             Rule::column_identity => {
-                set_column_identity(&mut identity, build_column_identity(flag)?, &name)?;
+                set_column_identity(
+                    &mut identity,
+                    build_column_identity(flag)?,
+                    &name,
+                    table_name,
+                )?;
             }
             Rule::column_compression => {
                 compression = Some(build_column_compression(flag)?);
@@ -25921,7 +25954,9 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
             Rule::column_storage => {
                 storage = Some(build_column_storage(flag)?);
             }
-            Rule::nullable => {}
+            Rule::nullable => {
+                explicit_null = true;
+            }
             Rule::named_column_constraint => {
                 let generated_part = flag
                     .clone()
@@ -25942,6 +25977,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                         &mut identity,
                         build_column_identity(identity_part)?,
                         &name,
+                        table_name,
                     )?;
                 } else {
                     constraints.push(build_column_constraint(flag)?)
@@ -25962,6 +25998,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         ty,
         collation,
         default_expr,
+        explicit_null,
         generated,
         identity,
         storage,
@@ -25989,8 +26026,19 @@ fn set_column_identity(
     target: &mut Option<ColumnIdentityDef>,
     value: ColumnIdentityDef,
     column_name: &str,
+    table_name: Option<&str>,
 ) -> Result<(), ParseError> {
     if target.is_some() {
+        if let Some(table_name) = table_name {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "multiple identity specifications for column \"{column_name}\" of table \"{table_name}\""
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
         return Err(ParseError::UnexpectedToken {
             expected: "single identity clause",
             actual: format!("multiple identity clauses specified for column \"{column_name}\""),

@@ -137,6 +137,7 @@ impl CatalogStore {
         &mut self,
         sequence_oid: u32,
         owned_by: Option<(u32, i32)>,
+        deptype: char,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let sequence = class_row_by_oid_mvcc(self, ctx, sequence_oid)?
@@ -161,7 +162,7 @@ impl CatalogStore {
                         && row.objsubid == 0
                         && row.refclassid == PG_CLASS_RELATION_OID
                         && row.refobjsubid > 0
-                        && row.deptype == DEPENDENCY_AUTO
+                        && matches!(row.deptype, DEPENDENCY_AUTO | DEPENDENCY_INTERNAL)
                 })
                 .collect::<Vec<_>>();
         sort_pg_depend_rows(&mut old_rows);
@@ -173,6 +174,7 @@ impl CatalogStore {
                     sequence_oid,
                     relation_oid,
                     attnum,
+                    deptype,
                 )]
             })
             .unwrap_or_default();

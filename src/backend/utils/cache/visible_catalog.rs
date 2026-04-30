@@ -20,16 +20,17 @@ use crate::include::catalog::{
     PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgForeignDataWrapperRow,
     PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
     PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows,
-    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_opfamily_rows, bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows,
-    bootstrap_pg_proc_rows_by_name, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
-    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
-    builtin_range_rows, builtin_type_rows, synthetic_range_proc_rows_by_name,
+    PgPublicationRow, PgRangeRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_conversion_rows, bootstrap_pg_database_rows, bootstrap_pg_enum_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows, bootstrap_pg_proc_row_by_oid,
+    bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name, bootstrap_pg_ts_config_map_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows,
+    bootstrap_pg_ts_template_rows, builtin_range_rows, builtin_type_rows,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -174,6 +175,13 @@ impl VisibleCatalog {
         self.catcache
             .as_ref()
             .map(|catcache| catcache.depend_rows())
+            .unwrap_or_default()
+    }
+
+    pub fn sequence_rows(&self) -> Vec<PgSequenceRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.sequence_rows())
             .unwrap_or_default()
     }
 
@@ -374,6 +382,10 @@ impl CatalogLookup for VisibleCatalog {
 
     fn constraint_rows(&self) -> Vec<PgConstraintRow> {
         VisibleCatalog::constraint_rows(self)
+    }
+
+    fn sequence_rows(&self) -> Vec<PgSequenceRow> {
+        VisibleCatalog::sequence_rows(self)
     }
 
     fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {

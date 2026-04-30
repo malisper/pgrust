@@ -14,9 +14,9 @@ use crate::backend::parser::{
     AlterAggregateRenameStatement, AlterRoutineOption, CreateAggregateStatement, CreateFunctionArg,
     CreateFunctionBodyKind, CreateFunctionReturnSpec, CreateFunctionStatement,
     CreateProcedureStatement, CreateTableAsQuery, FunctionArgMode, FunctionParallel,
-    FunctionVolatility, OwnedSequenceSpec, ParseError, PartitionBoundSpec, RawTypeName, RelOption,
-    RoutineSignature, SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
-    resolve_raw_type_name, serialize_partition_bound,
+    FunctionVolatility, OwnedSequenceKind, OwnedSequenceSpec, ParseError, PartitionBoundSpec,
+    RawTypeName, RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement, parse_statement,
+    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
@@ -29,11 +29,11 @@ use crate::backend::utils::misc::notices::{
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
-    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, DEPENDENCY_NORMAL, EVENT_TRIGGER_TYPE_OID,
-    INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID,
-    PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgDependRow, PgProcRow, RECORD_TYPE_OID,
-    TRIGGER_TYPE_OID, VOID_TYPE_OID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
+    DEPENDENCY_NORMAL, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
+    PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow,
+    PgDependRow, PgProcRow, RECORD_TYPE_OID, TRIGGER_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -57,7 +57,15 @@ use crate::pl::plpgsql::validate_create_function_body_with_options;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CreatedOwnedSequence {
     pub(super) column_index: usize,
+    pub(super) kind: OwnedSequenceKind,
     pub(super) sequence_oid: u32,
+}
+
+pub(super) fn owned_sequence_dependency_kind(kind: OwnedSequenceKind) -> char {
+    match kind {
+        OwnedSequenceKind::Serial => DEPENDENCY_AUTO,
+        OwnedSequenceKind::Identity => DEPENDENCY_INTERNAL,
+    }
 }
 
 struct EffectiveTypeAclGrantees {
@@ -4114,6 +4122,11 @@ impl Database {
 
         let sequence_oid = match persistence {
             TablePersistence::Permanent | TablePersistence::Unlogged => {
+                let relpersistence = if persistence == TablePersistence::Unlogged {
+                    'u'
+                } else {
+                    'p'
+                };
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -4131,7 +4144,7 @@ impl Database {
                         SequenceRuntime::sequence_relation_desc(),
                         namespace_oid,
                         1,
-                        'p',
+                        relpersistence,
                         'S',
                         self.auth_state(client_id).current_user_oid(),
                         None,
@@ -4175,6 +4188,7 @@ impl Database {
 
         Ok(CreatedOwnedSequence {
             column_index: column.column_index,
+            kind: column.kind,
             sequence_oid,
         })
     }
@@ -6377,6 +6391,7 @@ impl Database {
                                         relation.relation_oid,
                                         created_sequence.column_index.saturating_add(1) as i32,
                                     )),
+                                    owned_sequence_dependency_kind(created_sequence.kind),
                                     &ctx,
                                 )
                                 .map_err(map_catalog_error)?;
@@ -6557,11 +6572,24 @@ impl Database {
                         }
                     };
                 for created_sequence in &created_sequences {
+                    let mut sequence_dependency_cid = table_cid.saturating_add(1);
+                    if lowered.partition_spec.is_some() || lowered.partition_parent_oid.is_some() {
+                        sequence_dependency_cid =
+                            sequence_dependency_cid.max(table_cid.saturating_add(3));
+                    }
+                    if lowered
+                        .partition_bound
+                        .as_ref()
+                        .is_some_and(PartitionBoundSpec::is_default)
+                    {
+                        sequence_dependency_cid =
+                            sequence_dependency_cid.max(table_cid.saturating_add(4));
+                    }
                     let ctx = CatalogWriteContext {
                         pool: self.pool.clone(),
                         txns: self.txns.clone(),
                         xid,
-                        cid: table_cid.saturating_add(1),
+                        cid: sequence_dependency_cid,
                         client_id,
                         waiter: None,
                         interrupts: Arc::clone(&interrupts),
@@ -6575,6 +6603,7 @@ impl Database {
                                 relation.relation_oid,
                                 created_sequence.column_index.saturating_add(1) as i32,
                             )),
+                            owned_sequence_dependency_kind(created_sequence.kind),
                             &ctx,
                         )
                         .map_err(map_catalog_error)?;
@@ -7253,6 +7282,7 @@ impl Database {
                                     ),
                                     collation: None,
                                     default_expr: None,
+                                    explicit_null: false,
                                     generated: None,
                                     identity: None,
                                     storage: None,

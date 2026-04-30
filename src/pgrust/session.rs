@@ -1235,7 +1235,11 @@ fn bind_copy_column_defaults(
             }
             if let Some(sequence_oid) = column.default_sequence_oid {
                 let expr = Expr::builtin_func(
-                    crate::include::nodes::primnodes::BuiltinScalarFunction::NextVal,
+                    if column.identity.is_some() {
+                        crate::include::nodes::primnodes::BuiltinScalarFunction::IdentityNextVal
+                    } else {
+                        crate::include::nodes::primnodes::BuiltinScalarFunction::NextVal
+                    },
                     Some(crate::backend::parser::SqlType::new(
                         crate::backend::parser::SqlTypeKind::Int8,
                     )),
@@ -12936,6 +12940,7 @@ impl Session {
                         search_path.as_deref(),
                         &datetime_config,
                         &mut txn.catalog_effects,
+                        &mut txn.sequence_effects,
                     )
                 }
                 Statement::AlterTableAlterColumnDefault(ref alter_stmt) => {
