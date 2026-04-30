@@ -187,6 +187,8 @@ use crate::include::catalog::{
     bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
     default_btree_opclass_oid, default_hash_opclass_oid,
 };
+
+const SET_CONFIG_EFFECT_PREFIX: &str = "__pgrust_set_config_effect__";
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, NumericValue, RecordDescriptor, RecordValue,
 };
@@ -2980,6 +2982,15 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
     if name == "server_encoding" {
         return Ok(Value::Text("UTF8".into()));
     }
+    if name == "search_path" {
+        return Ok(Value::Text(
+            ctx.gucs
+                .get("search_path")
+                .cloned()
+                .unwrap_or_else(default_search_path_guc_value)
+                .into(),
+        ));
+    }
     if name == "datestyle" {
         return Ok(Value::Text(
             crate::backend::utils::misc::guc_datetime::format_datestyle(&ctx.datetime_config)
@@ -3034,6 +3045,7 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
         "fsync" => return Ok(Value::Text("on".into())),
         "max_prepared_transactions" => return Ok(Value::Text("64".into())),
         "lo_compat_privileges" => return Ok(Value::Text("off".into())),
+        "search_path" => return Ok(Value::Text(default_search_path_guc_value().into())),
         "server_encoding" => return Ok(Value::Text("UTF8".into())),
         "synchronous_commit" => return Ok(Value::Text("on".into())),
         "wal_sync_method" => return Ok(Value::Text("fsync".into())),
@@ -3051,7 +3063,7 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
 }
 
 fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
-    let (name, new_value, _is_local) = match values {
+    let (name, new_value, is_local) = match values {
         [Value::Null, _, _] => {
             return Err(ExecError::DetailedError {
                 message: "SET requires parameter name".into(),
@@ -3096,6 +3108,7 @@ fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value,
         Some(value) => {
             let stored_value = normalize_set_config_value(&name, &value)?;
             ctx.gucs.insert(name.clone(), stored_value.clone());
+            record_set_config_effect(ctx, &name, Some(&stored_value), is_local);
             if name == "row_security"
                 && let Some(db) = &ctx.database
             {
@@ -3106,9 +3119,31 @@ fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value,
         }
         None => {
             ctx.gucs.remove(&name);
+            record_set_config_effect(ctx, &name, None, is_local);
             Ok(Value::Text(String::new().into()))
         }
     }
+}
+
+fn default_search_path_guc_value() -> String {
+    "\"$user\", public".into()
+}
+
+fn record_set_config_effect(
+    ctx: &mut ExecutorContext,
+    name: &str,
+    value: Option<&str>,
+    is_local: bool,
+) {
+    let mode = if is_local { 'L' } else { 'S' };
+    let (action, payload) = match value {
+        Some(value) => ('=', value),
+        None => ('-', ""),
+    };
+    ctx.gucs.insert(
+        format!("{SET_CONFIG_EFFECT_PREFIX}{name}"),
+        format!("{mode}{action}{payload}"),
+    );
 }
 
 fn normalize_set_config_value(name: &str, value: &str) -> Result<String, ExecError> {

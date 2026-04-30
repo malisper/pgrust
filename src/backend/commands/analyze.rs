@@ -322,7 +322,11 @@ fn sample_relation(
     let sampled_block_count = sampled_blocks.len();
     let mut reservoir = ReservoirSampler::new(sample_rows_target);
     let mut visible_rows_on_sampled_blocks = 0usize;
-    let expression_indexes = analyze_expression_indexes(relation, catalog);
+    let expression_indexes = if selected_columns.len() == relation.desc.columns.len() {
+        Vec::new()
+    } else {
+        analyze_expression_indexes(relation, catalog)
+    };
     let mut expression_rows = Vec::new();
     let toast_ctx = relation.toast.map(|toast| ToastFetchContext {
         relation: toast,

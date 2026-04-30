@@ -6164,6 +6164,13 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         ) {
             return true;
         }
+        if row.typtype == 'b'
+            && row.typrelid == 0
+            && row.typinput != 0
+            && builtin_type_name_for_oid(row.oid).is_none()
+        {
+            return true;
+        }
     }
     catalog
         .cast_by_source_target(TEXT_TYPE_OID, target_oid)

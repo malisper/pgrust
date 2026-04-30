@@ -7,7 +7,9 @@ use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::tidbitmap::TidBitmap;
-use crate::include::nodes::plannodes::{IndexScanKey, PartitionPrunePlan, PlanEstimate};
+use crate::include::nodes::plannodes::{
+    IndexScanKey, PartitionPrunePlan, PlanEstimate, TidScanCond,
+};
 use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
@@ -409,6 +411,39 @@ pub struct SeqScanState {
 impl std::fmt::Debug for SeqScanState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SeqScanState")
+            .field("rel", &self.rel)
+            .field("relation_name", &self.relation_name)
+            .field("has_qual", &self.qual.is_some())
+            .finish()
+    }
+}
+
+pub struct TidScanState {
+    pub(crate) rel: RelFileLocator,
+    pub(crate) relation_name: String,
+    pub(crate) relkind: char,
+    pub(crate) relispopulated: bool,
+    pub(crate) toast_relation: Option<ToastRelationRef>,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) desc: Rc<RelationDesc>,
+    pub(crate) attr_descs: Rc<[AttributeDesc]>,
+    pub(crate) tid_cond: TidScanCond,
+    pub(crate) candidates: Vec<ItemPointerData>,
+    pub(crate) candidate_index: usize,
+    pub(crate) candidates_initialized: bool,
+    pub(crate) slot: TupleSlot,
+    pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
+    pub(crate) qual_expr: Option<Expr>,
+    pub(crate) source_id: usize,
+    pub(crate) relation_oid: u32,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for TidScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TidScanState")
             .field("rel", &self.rel)
             .field("relation_name", &self.relation_name)
             .field("has_qual", &self.qual.is_some())

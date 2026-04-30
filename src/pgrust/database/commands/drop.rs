@@ -3440,25 +3440,6 @@ impl Database {
                     .into_iter()
                     .filter(|row| row.connamespace == schema.oid)
                     .collect::<Vec<_>>();
-                let mut proc_rows = catcache
-                    .proc_rows()
-                    .into_iter()
-                    .filter(|row| row.pronamespace == schema.oid)
-                    .collect::<Vec<_>>();
-                proc_rows.sort_by_key(|row| row.oid);
-                for proc_row in proc_rows {
-                    let signature = drop_proc_signature_text(&proc_row, &catalog);
-                    notices.push(format!(
-                        "drop cascades to function {}",
-                        drop_schema_display_signature_name(
-                            &catcache,
-                            &visible_namespaces,
-                            proc_row.pronamespace,
-                            &signature
-                        )
-                    ));
-                }
-
                 conversion_rows.sort_by_key(|row| row.oid);
                 for row in conversion_rows {
                     notices.push(format!(

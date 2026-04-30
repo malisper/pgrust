@@ -440,6 +440,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if suppress_unknown_column_position(sql) {
                 return None;
             }
+            if create_schema_first_element_position(sql).is_some() {
+                return find_create_schema_element_identifier_position(sql, name)
+                    .or_else(|| find_last_identifier_position(sql, name));
+            }
             return find_case_insensitive_token_position(sql, name)
                 .or_else(|| find_error_value_position(sql, name));
         }
@@ -575,6 +579,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 .and_then(|rest| rest.strip_suffix('"'))
             {
                 return find_case_insensitive_token_position(sql, option);
+            }
+            if message == "CREATE SCHEMA IF NOT EXISTS cannot include schema elements" {
+                return create_schema_first_element_position(sql);
             }
             if let Some(position) =
                 publication_where_error_position(sql, message, detail.as_deref())
@@ -5041,6 +5048,25 @@ fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
         from = idx + token.len();
     }
     None
+}
+
+fn create_schema_first_element_position(sql: &str) -> Option<usize> {
+    let start = find_ascii_keyword(sql, "create", 0)?;
+    let schema = find_ascii_keyword(sql, "schema", start + "create".len())?;
+    let search_start = schema + "schema".len();
+    let create = find_ascii_keyword(sql, "create", search_start);
+    let grant = find_ascii_keyword(sql, "grant", search_start);
+    match (create, grant) {
+        (Some(create), Some(grant)) => Some(create.min(grant) + 1),
+        (Some(create), None) => Some(create + 1),
+        (None, Some(grant)) => Some(grant + 1),
+        (None, None) => None,
+    }
+}
+
+fn find_create_schema_element_identifier_position(sql: &str, token: &str) -> Option<usize> {
+    let start = create_schema_first_element_position(sql)?.saturating_sub(1);
+    find_identifier_in_segment(&sql[start..], token).map(|offset| start + offset + 1)
 }
 use crate::ClientId;
 use crate::pgrust::cluster::Cluster;
