@@ -10693,21 +10693,6 @@ fn build_hash_index_keys(
     if index_key_count(index) != 1 {
         return (Vec::new(), Vec::new());
     }
-    // :HACK: Hash scans over multirange keys can miss semantically equal
-    // numeric multirange values because the current hash support is not fully
-    // canonicalized with range equality. Prefer the heap scan until the hash
-    // support function matches PostgreSQL's multirange hash semantics.
-    if parsed_quals.iter().any(|qual| {
-        expr_sql_type(&qual.key_expr).is_multirange()
-            || index_argument_sql_type(&qual.argument).is_some_and(SqlType::is_multirange)
-    }) || index
-        .index_meta
-        .indclass
-        .iter()
-        .any(|opclass| *opclass == crate::include::catalog::MULTIRANGE_HASH_OPCLASS_OID)
-    {
-        return (Vec::new(), Vec::new());
-    }
     let Some((qual_idx, key)) = parsed_quals
         .iter()
         .enumerate()

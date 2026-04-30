@@ -9400,7 +9400,7 @@ fn parse_power_operator_and_in_list() {
     let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args, .. } if name == "power" && args.args().len() == 2
+        SqlExpr::BinaryOperator { op, .. } if op == "^"
     ));
     assert!(matches!(
         &stmt.targets[1].expr,

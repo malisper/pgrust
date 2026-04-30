@@ -26313,107 +26313,26 @@ fn trunc_and_round_large_negative_scale_short_circuit_to_zero() {
 
 #[test]
 fn large_object_metadata_tracks_create_and_unlink() {
-    let base = temp_dir("large_object_metadata_tracks_create_and_unlink");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    let large_objects =
-        std::sync::Arc::new(crate::pgrust::database::LargeObjectRuntime::new_ephemeral());
-    let run_large_object_sql = |sql: &str| -> Result<StatementResult, ExecError> {
-        let mut catalog = catalog();
-        crate::backend::catalog::store::sync_catalog_heaps_for_tests(&base, &catalog).unwrap();
-        let smgr = MdStorageManager::new(&base);
-        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
-        for name in catalog.table_names().collect::<Vec<_>>() {
-            if let Some(entry) = catalog.get(&name) {
-                create_fork(&*pool, entry.rel);
-            }
-        }
-        let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
-        let mut ctx = ExecutorContext {
-            pool,
-            data_dir: None,
-            txns: txns_arc,
-            txn_waiter: None,
-            lock_status_provider: None,
-            sequences: Some(std::sync::Arc::new(
-                crate::pgrust::database::SequenceRuntime::new_ephemeral(),
-            )),
-            large_objects: Some(large_objects.clone()),
-            stats_import_runtime: None,
-            async_notify_runtime: None,
-            advisory_locks: std::sync::Arc::new(
-                crate::backend::storage::lmgr::AdvisoryLockManager::new(),
-            ),
-            row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
-            checkpoint_stats:
-                crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
-            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-            statement_timestamp_usecs:
-                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
-            interrupts: std::sync::Arc::new(
-                crate::backend::utils::misc::interrupts::InterruptState::new(),
-            ),
-            stats: std::sync::Arc::new(parking_lot::RwLock::new(
-                crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
-            )),
-            session_stats: std::sync::Arc::new(parking_lot::RwLock::new(
-                crate::pgrust::database::SessionStatsState::default(),
-            )),
-            snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
-            write_xid_override: None,
-            transaction_state: None,
-            client_id: 77,
-            current_database_name: "postgres".to_string(),
-            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-            current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-            active_role_oid: None,
-            session_replication_role: Default::default(),
-            statement_lock_scope_id: None,
-            transaction_lock_scope_id: None,
-            next_command_id: 0,
-            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
-            random_state: crate::backend::executor::PgPrngState::shared(),
-            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-            case_test_values: Vec::new(),
-            system_bindings: Vec::new(),
-            active_grouping_refs: Vec::new(),
-            subplans: Vec::new(),
-            timed: false,
-            allow_side_effects: true,
-            pending_async_notifications: Vec::new(),
-            catalog_effects: Vec::new(),
-            temp_effects: Vec::new(),
-            database: None,
-            pending_catalog_effects: Vec::new(),
-            pending_table_locks: Vec::new(),
-            pending_portals: Vec::new(),
-            catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
-            scalar_function_cache: std::collections::HashMap::new(),
-            srf_rows_cache: std::collections::HashMap::new(),
-            plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
-                crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
-            )),
-            pinned_cte_tables: std::collections::HashMap::new(),
-            cte_tables: std::collections::HashMap::new(),
-            cte_producers: std::collections::HashMap::new(),
-            recursive_worktables: std::collections::HashMap::new(),
-            deferred_foreign_keys: None,
-            trigger_depth: 0,
-        };
-        execute_sql(sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)
-    };
+    let db = Database::open(
+        temp_dir("large_object_metadata_tracks_create_and_unlink"),
+        16,
+    )
+    .unwrap();
+    let mut session = Session::new(77);
 
-    match run_large_object_sql("select lo_create(1001)").unwrap() {
+    match session.execute(&db, "select lo_create(1001)").unwrap() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(1001)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
 
-    match run_large_object_sql(
-        "select oid, lomowner, lomacl from pg_largeobject_metadata order by oid",
-    )
-    .unwrap()
+    match session
+        .execute(
+            &db,
+            "select oid, lomowner, lomacl from pg_largeobject_metadata order by oid",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
@@ -26428,14 +26347,17 @@ fn large_object_metadata_tracks_create_and_unlink() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    match run_large_object_sql("select lo_unlink(1001)").unwrap() {
+    match session.execute(&db, "select lo_unlink(1001)").unwrap() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int32(1)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
 
-    match run_large_object_sql("select oid from pg_largeobject_metadata").unwrap() {
+    match session
+        .execute(&db, "select oid from pg_largeobject_metadata")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert!(rows.is_empty());
         }
