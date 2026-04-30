@@ -7167,10 +7167,32 @@ fn memoize_inner_plan_is_trivial_or_function(plan: &Plan) -> bool {
         // cheap, and memoizing FunctionScan can also be observably wrong for
         // volatile set-returning functions.
         Plan::FunctionScan { .. } | Plan::Result { .. } => true,
+        // :HACK: PostgreSQL keeps the lateral partitioned aggregate cases in
+        // partition_prune as a plain Aggregate over Append. Avoid wrapping the
+        // whole aggregate when the inner relation is already a partitioned
+        // append; per-child rescans are cheap and the visible plan shape
+        // matters for the regression.
+        Plan::Aggregate { input, .. } => plan_is_partitioned_append_under_passthrough(input),
         Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::Limit { input, .. }
         | Plan::Materialize { input, .. } => memoize_inner_plan_is_trivial_or_function(input),
+        _ => false,
+    }
+}
+
+fn plan_is_partitioned_append_under_passthrough(plan: &Plan) -> bool {
+    match plan {
+        Plan::Append {
+            partition_prune, ..
+        }
+        | Plan::MergeAppend {
+            partition_prune, ..
+        } => partition_prune.is_some(),
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Materialize { input, .. } => plan_is_partitioned_append_under_passthrough(input),
         _ => false,
     }
 }

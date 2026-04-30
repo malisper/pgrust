@@ -521,14 +521,6 @@ fn expr_may_match_bound(
                     ancestor_bound,
                     catalog,
                     relation_oid,
-                ) || relaxed_or_arm_may_match_bound(
-                    arg,
-                    spec,
-                    bound,
-                    sibling_bounds,
-                    ancestor_bound,
-                    catalog,
-                    relation_oid,
                 )
             }),
             BoolExprType::Not => true,
@@ -633,34 +625,6 @@ fn expr_may_match_bound(
         }
         _ => true,
     }
-}
-
-fn relaxed_or_arm_may_match_bound(
-    expr: &Expr,
-    spec: &LoweredPartitionSpec,
-    bound: &PartitionBoundSpec,
-    sibling_bounds: &[PartitionBoundSpec],
-    ancestor_bound: Option<&PartitionBoundSpec>,
-    catalog: Option<&dyn CatalogLookup>,
-    relation_oid: Option<u32>,
-) -> bool {
-    let Expr::Bool(bool_expr) = expr else {
-        return false;
-    };
-    if bool_expr.boolop != BoolExprType::And {
-        return false;
-    }
-    bool_expr.args.iter().any(|arg| {
-        expr_may_match_bound(
-            arg,
-            spec,
-            bound,
-            sibling_bounds,
-            ancestor_bound,
-            catalog,
-            relation_oid,
-        )
-    })
 }
 
 fn explicit_list_bound_may_match_expr(
@@ -964,9 +928,16 @@ fn partition_key_cast_is_prune_compatible(
     let Some(key_ty) = expr_sql_type_hint(normalize_key_expr(key_expr)) else {
         return false;
     };
-    key_ty == *cast_ty
-        || (integer_partition_cast_type(&key_ty) && integer_partition_cast_type(cast_ty))
-        || (text_relabel_partition_cast_type(&key_ty) && text_relabel_partition_cast_type(cast_ty))
+    partition_key_cast_types_match(&key_ty, cast_ty)
+}
+
+fn partition_key_cast_types_match(
+    key_ty: &crate::backend::parser::SqlType,
+    cast_ty: &crate::backend::parser::SqlType,
+) -> bool {
+    key_ty == cast_ty
+        || (integer_partition_cast_type(key_ty) && integer_partition_cast_type(cast_ty))
+        || (text_relabel_partition_cast_type(key_ty) && text_relabel_partition_cast_type(cast_ty))
 }
 
 fn integer_partition_cast_type(ty: &crate::backend::parser::SqlType) -> bool {
@@ -997,7 +968,7 @@ fn simple_var_matches(left: &Expr, right: &Expr) -> bool {
             if left.varlevelsup == 0
                 && right.varlevelsup == 0
                 && left.varattno == right.varattno
-                && left.vartype == right.vartype
+                && partition_key_cast_types_match(&left.vartype, &right.vartype)
     )
 }
 
@@ -1053,7 +1024,7 @@ fn const_value_for_partition_key(
         }
         Expr::Cast(inner, target_type) => {
             let key_type = key_type?;
-            if *target_type != key_type {
+            if !partition_key_cast_types_match(&key_type, target_type) {
                 return None;
             }
             let value = const_value(inner)?;
@@ -2822,6 +2793,24 @@ mod tests {
         }
     }
 
+    fn char_list_spec() -> LoweredPartitionSpec {
+        LoweredPartitionSpec {
+            strategy: PartitionStrategy::List,
+            key_columns: vec!["a".into()],
+            key_exprs: vec![Expr::Var(Var {
+                varno: 1,
+                varattno: 1,
+                varlevelsup: 0,
+                vartype: SqlType::with_char_len(SqlTypeKind::Char, 1),
+            })],
+            key_types: vec![SqlType::with_char_len(SqlTypeKind::Char, 1)],
+            key_sqls: vec!["a".into()],
+            partattrs: vec![1],
+            partclass: vec![0],
+            partcollation: vec![0],
+        }
+    }
+
     fn bool_spec() -> LoweredPartitionSpec {
         LoweredPartitionSpec {
             strategy: PartitionStrategy::List,
@@ -3216,6 +3205,35 @@ mod tests {
     }
 
     #[test]
+    fn char_partition_key_relabel_cast_matches_partition_key() {
+        let spec = char_list_spec();
+        let ad_bound = text_bound(&["a", "d"]);
+        let bc_bound = text_bound(&["b", "c"]);
+        let casted_key = Expr::Cast(
+            Box::new(Expr::Var(Var {
+                varno: 1,
+                varattno: 1,
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Char),
+            })),
+            SqlType::new(SqlTypeKind::Char),
+        );
+        let expr = Expr::and(
+            Expr::op_auto(
+                OpExprKind::Gt,
+                vec![casted_key.clone(), Expr::Const(Value::Text("a".into()))],
+            ),
+            Expr::op_auto(
+                OpExprKind::Lt,
+                vec![casted_key, Expr::Const(Value::Text("d".into()))],
+            ),
+        );
+
+        assert!(!expr_may_match_bound(&expr, &spec, &ad_bound, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &bc_bound, &[]));
+    }
+
+    #[test]
     fn range_default_is_pruned_when_query_interval_is_fully_covered_by_siblings() {
         let spec = range_spec();
         let default_bound = int_range_default_bound();
@@ -3335,6 +3353,97 @@ mod tests {
             &default_bound,
             &siblings
         ));
+    }
+
+    fn mc3p_bounds() -> Vec<PartitionBoundSpec> {
+        vec![
+            multi_int_range_bound(
+                vec![
+                    PartitionRangeDatumValue::MinValue,
+                    PartitionRangeDatumValue::MinValue,
+                    PartitionRangeDatumValue::MinValue,
+                ],
+                vec![int_value(1), int_value(1), int_value(1)],
+            ),
+            multi_int_range_bound(
+                vec![int_value(1), int_value(1), int_value(1)],
+                vec![int_value(10), int_value(5), int_value(10)],
+            ),
+            multi_int_range_bound(
+                vec![int_value(10), int_value(5), int_value(10)],
+                vec![int_value(10), int_value(10), int_value(10)],
+            ),
+            multi_int_range_bound(
+                vec![int_value(10), int_value(10), int_value(10)],
+                vec![int_value(10), int_value(10), int_value(20)],
+            ),
+            multi_int_range_bound(
+                vec![int_value(10), int_value(10), int_value(20)],
+                vec![
+                    int_value(10),
+                    PartitionRangeDatumValue::MaxValue,
+                    PartitionRangeDatumValue::MaxValue,
+                ],
+            ),
+            multi_int_range_bound(
+                vec![int_value(11), int_value(1), int_value(1)],
+                vec![int_value(20), int_value(10), int_value(10)],
+            ),
+            multi_int_range_bound(
+                vec![int_value(20), int_value(10), int_value(10)],
+                vec![int_value(20), int_value(20), int_value(20)],
+            ),
+            multi_int_range_bound(
+                vec![int_value(20), int_value(20), int_value(20)],
+                vec![
+                    PartitionRangeDatumValue::MaxValue,
+                    PartitionRangeDatumValue::MaxValue,
+                    PartitionRangeDatumValue::MaxValue,
+                ],
+            ),
+            int_range_default_bound(),
+        ]
+    }
+
+    fn mc3p_expr() -> Expr {
+        Expr::or(
+            Expr::or(
+                Expr::and(
+                    Expr::and(
+                        int_att_cmp(1, OpExprKind::Eq, 1),
+                        int_att_cmp(2, OpExprKind::Eq, 1),
+                    ),
+                    int_att_cmp(3, OpExprKind::Eq, 1),
+                ),
+                Expr::and(
+                    Expr::and(
+                        int_att_cmp(1, OpExprKind::Eq, 10),
+                        int_att_cmp(2, OpExprKind::Eq, 5),
+                    ),
+                    int_att_cmp(3, OpExprKind::Eq, 10),
+                ),
+            ),
+            Expr::and(
+                int_att_cmp(1, OpExprKind::Gt, 11),
+                int_att_cmp(1, OpExprKind::Lt, 20),
+            ),
+        )
+    }
+
+    #[test]
+    fn multi_key_range_or_uses_full_arm_constraints() {
+        let spec = multi_int_range_spec(3);
+        let bounds = mc3p_bounds();
+        let expr = mc3p_expr();
+        let visible = bounds
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bound)| {
+                expr_may_match_bound(&expr, &spec, bound, &bounds).then_some(index)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(visible, vec![1, 2, 5, 8]);
     }
 
     #[test]

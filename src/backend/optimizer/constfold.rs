@@ -1303,9 +1303,6 @@ fn simplify_bool_expr(
             if args.len() == 1 && !saw_null {
                 return Ok(args.pop().expect("one bool arg"));
             }
-            if and_args_have_contradictory_equalities(&args) {
-                return Ok(Expr::Const(Value::Bool(false)));
-            }
             if saw_null {
                 args.push(Expr::Const(Value::Null));
             }
@@ -1344,58 +1341,6 @@ fn simplify_bool_expr(
                 args,
             })))
         }
-    }
-}
-
-fn and_args_have_contradictory_equalities(args: &[Expr]) -> bool {
-    let mut equalities: Vec<(&Expr, &Value, Option<u32>)> = Vec::new();
-    for arg in args {
-        let Some((expr, value, collation_oid)) = equality_to_const(arg) else {
-            continue;
-        };
-        if matches!(value, Value::Null) {
-            continue;
-        }
-        if equalities
-            .iter()
-            .any(|(existing_expr, existing_value, existing_collation_oid)| {
-                *existing_expr == expr
-                    && *existing_collation_oid == collation_oid
-                    && *existing_value != value
-            })
-        {
-            return true;
-        }
-        equalities.push((expr, value, collation_oid));
-    }
-    false
-}
-
-fn equality_to_const(expr: &Expr) -> Option<(&Expr, &Value, Option<u32>)> {
-    let Expr::Op(op) = expr else {
-        return None;
-    };
-    if op.op != OpExprKind::Eq || op.args.len() != 2 {
-        return None;
-    }
-    let collation_oid = op_equality_collation(op);
-    match (&op.args[0], &op.args[1]) {
-        (left, Expr::Const(value)) => Some((left, value, collation_oid)),
-        (Expr::Const(value), right) => Some((right, value, collation_oid)),
-        _ => None,
-    }
-}
-
-fn op_equality_collation(op: &OpExpr) -> Option<u32> {
-    op.collation_oid
-        .or_else(|| op.args.iter().find_map(top_level_explicit_collation))
-}
-
-fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
-    match expr {
-        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
-        Expr::Cast(inner, _) => top_level_explicit_collation(inner),
-        _ => None,
     }
 }
 
@@ -1563,6 +1508,37 @@ mod tests {
             vartype: SqlType::new(SqlTypeKind::Int4),
             collation_oid: None,
         })
+    }
+
+    #[test]
+    fn contradictory_var_equalities_are_not_folded_out_of_or_arms() {
+        let impossible_arm = Expr::and(
+            Expr::op_auto(
+                OpExprKind::Eq,
+                vec![int_var(), Expr::Const(Value::Int32(1))],
+            ),
+            Expr::op_auto(
+                OpExprKind::Eq,
+                vec![int_var(), Expr::Const(Value::Int32(3))],
+            ),
+        );
+        let possible_arm = Expr::and(
+            Expr::op_auto(
+                OpExprKind::Gt,
+                vec![int_var(), Expr::Const(Value::Int32(1))],
+            ),
+            Expr::op_auto(
+                OpExprKind::Eq,
+                vec![int_var(), Expr::Const(Value::Int32(15))],
+            ),
+        );
+        let simplified = simplify_where_qual(Expr::or(impossible_arm, possible_arm)).unwrap();
+
+        assert!(matches!(
+            simplified,
+            Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or
+                && bool_expr.args.len() == 2
+        ));
     }
 
     #[test]

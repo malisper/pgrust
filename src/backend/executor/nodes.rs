@@ -1635,6 +1635,11 @@ fn startup_prune_expr_is_evaluable(expr: &Expr) -> bool {
         Expr::Param(param) => param.paramkind == ParamKind::External,
         Expr::SubPlan(subplan) => subplan.par_param.is_empty() && subplan.args.is_empty(),
         Expr::SubLink(_) => false,
+        Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
         Expr::Op(op) => op.args.iter().all(startup_prune_expr_is_evaluable),
         Expr::Bool(bool_expr) => bool_expr.args.iter().all(startup_prune_expr_is_evaluable),
         Expr::Func(func) => func.args.iter().all(startup_prune_expr_is_evaluable),
@@ -5257,6 +5262,16 @@ fn render_explain_scalar_array_op(
     };
     let right_sql = if expr_has_varchar_display_type(&saop.left) {
         render_explain_varchar_array_as_text_array(&saop.right, qualifier, column_names)
+    } else if display_type.is_none() {
+        crate::include::nodes::primnodes::expr_sql_type_hint(&saop.left).and_then(|left_type| {
+            render_explain_context_array_without_outer_cast(
+                &saop.right,
+                left_type,
+                saop.collation_oid,
+                qualifier,
+                column_names,
+            )
+        })
     } else {
         None
     }
@@ -5371,6 +5386,60 @@ fn render_explain_varchar_array_as_text_array(
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!("(ARRAY[{elements}])::text[]"))
+}
+
+fn render_explain_context_array_without_outer_cast(
+    expr: &Expr,
+    context_element_type: SqlType,
+    collation_oid: Option<u32>,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    let (elements, array_type) = match expr {
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => (elements.as_slice(), *array_type),
+        Expr::Cast(inner, array_type) if array_type.is_array => {
+            let Expr::ArrayLiteral { elements, .. } = inner.as_ref() else {
+                return None;
+            };
+            (elements.as_slice(), *array_type)
+        }
+        _ => return None,
+    };
+    let array_element_type = array_type.element_type();
+    if !scalar_array_context_type_matches(context_element_type, array_element_type)
+        || elements.iter().all(array_element_is_const_like)
+    {
+        return None;
+    }
+    let elements = elements
+        .iter()
+        .map(|expr| {
+            render_explain_infix_operand_with_display_type(
+                expr,
+                Some(array_element_type),
+                collation_oid,
+                qualifier,
+                column_names,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("ARRAY[{elements}]"))
+}
+
+fn scalar_array_context_type_matches(left: SqlType, right: SqlType) -> bool {
+    left == right || left.with_typmod(SqlType::NO_TYPEMOD) == right.with_typmod(SqlType::NO_TYPEMOD)
+}
+
+fn array_element_is_const_like(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(_) => true,
+        Expr::Cast(inner, _) => array_element_is_const_like(inner),
+        _ => false,
+    }
 }
 
 pub(crate) fn render_verbose_range_support_expr(

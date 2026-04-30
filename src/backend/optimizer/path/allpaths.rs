@@ -639,25 +639,6 @@ fn is_append_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
         .is_some_and(|rel| matches!(rel.reloptkind, RelOptKind::OtherMemberRel))
 }
 
-fn is_regular_inheritance_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
-    let Some(parent_relid) = root
-        .append_rel_infos
-        .get(rtindex)
-        .and_then(Option::as_ref)
-        .map(|info| info.parent_relid)
-    else {
-        return false;
-    };
-    root.parse
-        .rtable
-        .get(parent_relid.saturating_sub(1))
-        .and_then(|rte| match rte.kind {
-            RangeTblEntryKind::Relation { relkind, .. } => Some(relkind),
-            _ => None,
-        })
-        .is_some_and(|relkind| relkind != 'p')
-}
-
 fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
     if rel
         .baserestrictinfo
@@ -4702,9 +4683,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         .get(rtindex)
         .and_then(Option::as_ref)
         .and_then(base_filter_expr);
-    let constraint_exclusion_applies = root.config.constraint_exclusion_on
-        || (root.config.constraint_exclusion_partition
-            && is_regular_inheritance_child_rel(root, rtindex));
+    let constraint_exclusion_applies = root.config.constraint_exclusion_on;
     if constraint_exclusion_applies
         && let RangeTblEntryKind::Relation { relation_oid, .. } = rte.kind.clone()
         && (!relation_may_satisfy_own_partition_bound(catalog, relation_oid, filter.as_ref())
