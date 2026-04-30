@@ -25467,6 +25467,114 @@ fn create_gin_jsonb_index_uses_bitmap_scan_and_rechecks() {
 }
 
 #[test]
+fn gin_jsonb_numeric_keys_use_jsonb_equality() {
+    let base = temp_dir("gin_jsonb_numeric_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table docs (id int4, j jsonb)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into docs values \
+         (1, '{\"age\":25}'::jsonb), \
+         (2, '{\"age\":25.0}'::jsonb), \
+         (3, '{\"age\":26}'::jsonb)",
+    )
+    .unwrap();
+    db.execute(1, "create index docs_j_gin on docs using gin (j)")
+        .unwrap();
+    db.execute(1, "set enable_seqscan = off").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j @> '{\"age\":25}'::jsonb",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j @> '{\"age\":25.0}'::jsonb",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn gin_jsonb_path_ops_and_jsonpath_ops_use_bitmap_recheck() {
+    let base = temp_dir("gin_jsonb_path_ops");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table docs (id int4, j jsonb)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into docs values \
+         (1, '{\"wait\":null,\"a\":1}'::jsonb), \
+         (2, '{\"wait\":1,\"a\":1}'::jsonb), \
+         (3, '{\"a\":2}'::jsonb)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index docs_j_path_gin on docs using gin (j jsonb_path_ops)",
+    )
+    .unwrap();
+    db.execute(1, "analyze docs").unwrap();
+    db.execute(1, "set enable_seqscan = off").unwrap();
+    let relfilenode = relfilenode_for(&db, 1, "docs_j_path_gin");
+
+    let path_exists = explain_lines(
+        &db,
+        1,
+        "select id from docs where j @? '$.wait ? (@ == null)'",
+    );
+    assert!(
+        path_exists
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on docs")),
+        "expected Bitmap Heap Scan for @?, got {path_exists:?}"
+    );
+    assert!(
+        path_exists.iter().any(|line| line
+            .contains(&format!("Bitmap Index Scan using rel {relfilenode} "))
+            || line.contains("Bitmap Index Scan on docs_j_path_gin")),
+        "expected Bitmap Index Scan for @?, got {path_exists:?}"
+    );
+
+    let path_match = explain_lines(&db, 1, "select id from docs where j @@ '$.wait == null'");
+    assert!(
+        path_match.iter().any(|line| line
+            .contains(&format!("Bitmap Index Scan using rel {relfilenode} "))
+            || line.contains("Bitmap Index Scan on docs_j_path_gin")),
+        "expected Bitmap Index Scan for @@, got {path_match:?}"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j @> '{\"a\":1}'::jsonb",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn scalar_repeat_in_from_returns_single_row() {
+    let base = temp_dir("scalar_repeat_from");
+    let db = Database::open(&base, 16).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select s from repeat('xyzzy', 2) s"),
+        vec![vec![Value::Text("xyzzyxyzzy".into())]]
+    );
+}
+
+#[test]
 fn create_gin_array_index_builds_and_vacuums() {
     let base = temp_dir("gin_array_vacuum");
     let db = Database::open(&base, 16).unwrap();

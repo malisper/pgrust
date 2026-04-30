@@ -13,7 +13,7 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
-    attrno_index, expr_contains_set_returning,
+    attrno_index, expr_contains_set_returning, expr_sql_type_hint,
 };
 use crate::include::nodes::primnodes::{
     JoinType, QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement,
@@ -935,6 +935,77 @@ fn resolve_assignment_indirection_sql_type(
     Ok(current)
 }
 
+fn validate_jsonb_assignment_target_subscripts(
+    column_type: SqlType,
+    target: &BoundAssignmentTarget,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    let mut current = column_type;
+    for subscript in &target.subscripts {
+        current = validate_jsonb_assignment_subscript_step(current, subscript, catalog)?;
+    }
+    for step in &target.indirection {
+        current = assignment_navigation_sql_type(current, catalog);
+        match step {
+            BoundAssignmentTargetIndirection::Subscript(subscript) => {
+                current = validate_jsonb_assignment_subscript_step(current, subscript, catalog)?;
+            }
+            BoundAssignmentTargetIndirection::Field(field) => {
+                current = resolve_assignment_field_type(current, field, catalog)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_jsonb_assignment_subscript_step(
+    current: SqlType,
+    subscript: &BoundArraySubscript,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let current = assignment_navigation_sql_type(current, catalog);
+    if current.kind == SqlTypeKind::Jsonb && !current.is_array {
+        if subscript.is_slice {
+            return Err(ParseError::DetailedError {
+                message: "jsonb subscript does not support slices".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if let Some(sql_type) = subscript.lower.as_ref().and_then(expr_sql_type_hint) {
+            validate_jsonb_subscript_sql_type(sql_type)?;
+        }
+        return Ok(SqlType::new(SqlTypeKind::Jsonb));
+    }
+    if current.kind == SqlTypeKind::Point && !current.is_array {
+        return Ok(SqlType::new(SqlTypeKind::Float8));
+    }
+    if current.is_array {
+        return Ok(if subscript.is_slice {
+            SqlType::array_of(current.element_type())
+        } else {
+            current.element_type()
+        });
+    }
+    Ok(current)
+}
+
+fn validate_jsonb_subscript_sql_type(sql_type: SqlType) -> Result<(), ParseError> {
+    if !sql_type.is_array && (is_integer_family(sql_type) || is_text_like_type(sql_type)) {
+        return Ok(());
+    }
+    Err(ParseError::DetailedError {
+        message: format!(
+            "subscript type {} is not supported",
+            sql_type_name(sql_type)
+        ),
+        detail: None,
+        hint: Some("jsonb subscript must be coercible to either integer or text.".into()),
+        sqlstate: "42804",
+    })
+}
+
 fn merge_explain_target_name(stmt: &MergeStatement) -> String {
     stmt.target_alias
         .as_ref()
@@ -1089,6 +1160,11 @@ fn bind_merge_when_clause(
                             catalog,
                         )?,
                     };
+                    validate_jsonb_assignment_target_subscripts(
+                        target_desc.columns[column_index].sql_type,
+                        &target,
+                        catalog,
+                    )?;
                     ensure_generated_assignment_allowed(
                         target_desc,
                         &target,
@@ -5080,6 +5156,11 @@ fn bind_simple_update(
                     catalog,
                 )?,
             };
+            validate_jsonb_assignment_target_subscripts(
+                entry.desc.columns[column_index].sql_type,
+                &target,
+                catalog,
+            )?;
             ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
             ensure_identity_update_assignment_allowed(&entry.desc, &target, &assignment.expr)?;
             Ok(BoundAssignment {
@@ -5271,6 +5352,11 @@ fn bind_update_from(
                     catalog,
                 )?,
             };
+            validate_jsonb_assignment_target_subscripts(
+                entry.desc.columns[column_index].sql_type,
+                &target,
+                catalog,
+            )?;
             ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
             ensure_identity_update_assignment_allowed(&entry.desc, &target, &assignment.expr)?;
             Ok(BoundAssignment {
@@ -5372,7 +5458,7 @@ pub(super) fn bind_assignment_target(
     let column_index = resolve_column(scope, &target.column)?;
     let indirection =
         bind_assignment_indirection(&target.indirection, scope, catalog, local_ctes, &[])?;
-    Ok(BoundAssignmentTarget {
+    let bound = BoundAssignmentTarget {
         column_index,
         subscripts: bind_assignment_subscripts(
             &target.subscripts,
@@ -5388,7 +5474,13 @@ pub(super) fn bind_assignment_target(
             &target.indirection,
             catalog,
         )?,
-    })
+    };
+    validate_jsonb_assignment_target_subscripts(
+        scope.desc.columns[column_index].sql_type,
+        &bound,
+        catalog,
+    )?;
+    Ok(bound)
 }
 
 fn bind_assignment_indirection(

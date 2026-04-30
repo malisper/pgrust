@@ -9718,7 +9718,7 @@ fn btree_options_from_reloptions(reloptions: Option<&[String]>) -> Option<BtreeO
     found.then_some(options)
 }
 
-fn explicit_btree_opclass_oid(opclass_name: &str, type_oid: u32) -> Option<u32> {
+fn explicit_opclass_oid(am_oid: u32, opclass_name: &str, type_oid: u32) -> Option<u32> {
     let opclass_name = opclass_name
         .rsplit_once('.')
         .map(|(_, name)| name)
@@ -9726,14 +9726,14 @@ fn explicit_btree_opclass_oid(opclass_name: &str, type_oid: u32) -> Option<u32> 
     crate::include::catalog::bootstrap_pg_opclass_rows()
         .into_iter()
         .find(|row| {
-            row.opcmethod == crate::include::catalog::BTREE_AM_OID
+            row.opcmethod == am_oid
                 && row.opcname.eq_ignore_ascii_case(opclass_name)
-                && btree_opclass_accepts_type(row.opcintype, type_oid)
+                && opclass_accepts_type(row.opcintype, type_oid)
         })
         .map(|row| row.oid)
 }
 
-fn btree_opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
+fn opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
     use crate::include::catalog::{
         ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BPCHAR_TYPE_OID,
         TEXT_TYPE_OID, VARCHAR_TYPE_OID,
@@ -10131,17 +10131,8 @@ fn default_index_build_options_for_relation(
             .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
         let type_oid = resolved_sql_type_oid(type_lookup, table, column.sql_type)?;
         let opclass_oid = if let Some(opclass_name) = column_name.opclass.as_deref() {
-            if am_oid == crate::include::catalog::BTREE_AM_OID {
-                explicit_btree_opclass_oid(opclass_name, type_oid)
-                    .ok_or_else(|| CatalogError::UnknownType("index operator class".into()))?
-            } else {
-                crate::include::catalog::default_opclass_oid_for_am(
-                    am_oid,
-                    type_oid,
-                    column.sql_type,
-                )
-                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?
-            }
+            explicit_opclass_oid(am_oid, opclass_name, type_oid)
+                .ok_or_else(|| CatalogError::UnknownType("index operator class".into()))?
         } else {
             crate::include::catalog::default_opclass_oid_for_am(am_oid, type_oid, column.sql_type)
                 .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?

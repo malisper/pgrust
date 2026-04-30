@@ -85,7 +85,7 @@ pub(super) fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostS
         cross_function_join_left_relid(current),
     ) && candidate_left_relid != current_left_relid
     {
-        return candidate_left_relid > current_left_relid;
+        return candidate_left_relid < current_left_relid;
     }
     if let (Some(candidate_left_relids), Some(current_left_relids)) = (
         cross_join_left_relid_count(candidate),
