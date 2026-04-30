@@ -2301,10 +2301,22 @@ fn validate_sql_function_body_on_create(
     if sql_function_arg_type_is_polymorphic(prorettype) {
         return Ok(());
     }
-    let columns = with_external_param_types(&external_param_types, || match stmt {
-        Statement::Select(select) => {
-            pg_plan_query_with_outer(&select, catalog, &outer_columns).map(|planned| planned.columns())
+    if matches!(create_stmt.body_kind, CreateFunctionBodyKind::As) {
+        if sql_function_should_skip_quoted_body_return_validation(create_stmt, catalog, prorettype)
+        {
+            return Ok(());
         }
+        if sql_function_quoted_body_dml_returns_rows(&stmt) {
+            return Ok(());
+        }
+        if !sql_function_statement_is_simple_return_validation_candidate(&stmt) {
+            return Ok(());
+        }
+    }
+    let columns = match with_external_param_types(&external_param_types, || {
+        match &stmt {
+        Statement::Select(select) => pg_plan_query_with_outer(select, catalog, &outer_columns)
+            .map(|planned| planned.columns()),
         Statement::Values(values) => pg_plan_values_query_with_outer(&values, catalog, &outer_columns)
             .map(|planned| planned.columns()),
         _ => Err(match sql_function_final_statement_error(catalog, prorettype) {
@@ -2333,8 +2345,20 @@ fn validate_sql_function_body_on_create(
                 sqlstate: "42P13",
             },
         }),
-    })
-    .map_err(ExecError::Parse)?;
+    }
+    }) {
+        Ok(columns) => Some(columns),
+        Err(err)
+            if matches!(create_stmt.body_kind, CreateFunctionBodyKind::As)
+                && sql_function_validation_error_is_undefined_routine(&err) =>
+        {
+            None
+        }
+        Err(err) => return Err(ExecError::Parse(err)),
+    };
+    let Some(columns) = columns else {
+        return Ok(());
+    };
     if columns.len() != 1 {
         return Err(sql_function_return_column_count_error(catalog, prorettype));
     }
@@ -2347,6 +2371,95 @@ fn validate_sql_function_body_on_create(
         ));
     }
     Ok(())
+}
+
+fn sql_function_should_skip_quoted_body_return_validation(
+    create_stmt: &CreateFunctionStatement,
+    catalog: &dyn CatalogLookup,
+    prorettype: u32,
+) -> bool {
+    match &create_stmt.return_spec {
+        CreateFunctionReturnSpec::Table(_)
+        | CreateFunctionReturnSpec::DerivedFromOutArgs { .. } => {
+            return true;
+        }
+        CreateFunctionReturnSpec::Type { setof, .. } if *setof => return true,
+        CreateFunctionReturnSpec::Type { .. } => {}
+    }
+    sql_function_return_oid_is_composite_like(catalog, prorettype)
+}
+
+fn sql_function_return_oid_is_composite_like(catalog: &dyn CatalogLookup, oid: u32) -> bool {
+    if oid == RECORD_TYPE_OID {
+        return true;
+    }
+    if catalog.type_by_oid(oid).is_some_and(|row| {
+        matches!(
+            row.sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        ) || row.typtype == 'c'
+    }) {
+        return true;
+    }
+    catalog
+        .domain_by_type_oid(oid)
+        .is_some_and(|domain| sql_function_type_is_composite_like(catalog, domain.sql_type))
+}
+
+fn sql_function_type_is_composite_like(catalog: &dyn CatalogLookup, ty: SqlType) -> bool {
+    if matches!(ty.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
+        return true;
+    }
+    ty.type_oid != 0 && sql_function_return_oid_is_composite_like(catalog, ty.type_oid)
+}
+
+fn sql_function_quoted_body_dml_returns_rows(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Insert(stmt) => !stmt.returning.is_empty(),
+        Statement::Update(stmt) => !stmt.returning.is_empty(),
+        Statement::Delete(stmt) => !stmt.returning.is_empty(),
+        Statement::Merge(stmt) => !stmt.returning.is_empty(),
+        _ => false,
+    }
+}
+
+fn sql_function_statement_is_simple_return_validation_candidate(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Select(select) => {
+            sql_function_select_is_simple_return_validation_candidate(select)
+        }
+        Statement::Values(_) => true,
+        _ => false,
+    }
+}
+
+fn sql_function_select_is_simple_return_validation_candidate(select: &SelectStatement) -> bool {
+    !select.with_recursive
+        && select.with.is_empty()
+        && !select.distinct
+        && select.distinct_on.is_empty()
+        && select.from.is_none()
+        && select.where_clause.is_none()
+        && select.group_by.is_empty()
+        && select.having.is_none()
+        && select.window_clauses.is_empty()
+        && select.order_by.is_empty()
+        && select.limit.is_none()
+        && select.offset.is_none()
+        && select.locking_clause.is_none()
+        && select.locking_targets.is_empty()
+        && select.set_operation.is_none()
+}
+
+fn sql_function_validation_error_is_undefined_routine(err: &ParseError) -> bool {
+    matches!(
+        err.unpositioned(),
+        ParseError::DetailedError {
+            message,
+            sqlstate: "42883",
+            ..
+        } if message.starts_with("function ") && message.ends_with(" does not exist")
+    )
 }
 
 fn validate_sql_function_positional_params(

@@ -1319,7 +1319,15 @@ fn format_sql_standard_return_body(
     if !lower.starts_with("return ") {
         return Some(body);
     }
-    let expr_sql = replace_sql_standard_body_params(body["return".len()..].trim(), proc_row);
+    let raw_expr = body["return".len()..].trim();
+    if raw_expr.contains('$')
+        && sql_function_input_arg_names(proc_row)
+            .iter()
+            .all(Option::is_none)
+    {
+        return Some(body);
+    }
+    let expr_sql = replace_sql_standard_body_params(raw_expr, proc_row);
     let rendered =
         render_sql_standard_select_expr(&format!("SELECT {expr_sql}"), proc_row, catalog)?;
     Some(format!("RETURN {rendered}"))

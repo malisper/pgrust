@@ -41,3 +41,37 @@ Result: PASS, 180/180 queries matched.
 
 Remaining:
 None for create_function_sql. The regression passes against ../postgres expected output.
+
+---
+
+Goal:
+Fix CI cargo-test failures reported after the create_function_sql PR was opened.
+
+Key decisions:
+Keep quoted LANGUAGE SQL body validation narrow: still reject syntax errors, bad
+$n parameters, simple scalar return count/type mismatches, and empty bodies, but
+do not reject supported quoted-body cases whose shape is validated at execution
+time or depends on later catalog state.
+Preserve SQL-standard runtime normalization separately from SQL-function inlining
+so RETURN bodies can execute while non-SELECT inlining candidates are rejected.
+Let scalar void SQL functions used in FROM produce a single function-scan row.
+Keep catalog pg_get_functiondef output with raw $n references when no argument
+names exist to deparse against.
+
+Files touched:
+src/pgrust/database/commands/create.rs
+src/backend/executor/sqlfunc.rs
+src/backend/executor/srf.rs
+src/backend/executor/exec_expr.rs
+
+Tests run:
+cargo fmt
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql cargo test --lib --quiet sql_function
+Result: PASS, 23 passed.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql cargo test --lib --quiet create_function
+Result: PASS, 24 passed.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/run_regression.sh --test create_function_sql --jobs 1 --port 61344 --results-dir /tmp/pgrust_regress_create_function_sql
+Result: PASS, 180/180 queries matched.
+
+Remaining:
+None for the attached CI repro set.

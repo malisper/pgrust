@@ -593,7 +593,7 @@ fn execute_sql_function_query(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    let sql = inline_sql_function_body(
+    let sql = inline_sql_function_body_for_execution(
         row,
         arg_values,
         arg_type_oids,
@@ -1716,7 +1716,57 @@ fn inline_sql_function_body(
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
+    let body = row.prosrc.trim().trim_end_matches(';').trim().to_string();
+    if !sql_function_body_is_inline_select_candidate(&body) {
+        return Err(sql_function_runtime_error(
+            "SQL function inlining only supports SELECT bodies",
+            None,
+            "0A000",
+        ));
+    }
+    substitute_sql_function_body_args(
+        row,
+        body,
+        args,
+        call_arg_type_oids,
+        catalog,
+        datetime_config,
+    )
+}
+
+fn inline_sql_function_body_for_execution(
+    row: &PgProcRow,
+    args: &[Value],
+    call_arg_type_oids: Option<&[u32]>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
     let body = normalized_sql_function_body(&row.prosrc);
+    substitute_sql_function_body_args(
+        row,
+        body,
+        args,
+        call_arg_type_oids,
+        catalog,
+        datetime_config,
+    )
+}
+
+fn sql_function_body_is_inline_select_candidate(body: &str) -> bool {
+    let lower = body.trim_start().to_ascii_lowercase();
+    starts_with_sql_command(&lower, "select")
+        || starts_with_sql_command(&lower, "with")
+        || starts_with_sql_command(&lower, "values")
+}
+
+fn substitute_sql_function_body_args(
+    row: &PgProcRow,
+    body: String,
+    args: &[Value],
+    call_arg_type_oids: Option<&[u32]>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
     let arg_type_oids = effective_sql_function_arg_type_oids(row, args.len(), call_arg_type_oids);
     let mut sql = substitute_positional_args_with_catalog(
         &body,

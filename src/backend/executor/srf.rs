@@ -141,11 +141,6 @@ pub(crate) fn eval_set_returning_call(
                 return Ok(Vec::new());
             }
             let output_columns = function_output_columns(output_columns, *with_ordinality);
-            if output_columns.len() == 1
-                && matches!(output_columns[0].sql_type.kind, SqlTypeKind::Void)
-            {
-                return Ok(Vec::new());
-            }
             if let Some(inlined_expr) = inlined_expr {
                 eval_inlined_user_defined_function_scan(inlined_expr, output_columns, slot, ctx)
             } else {
