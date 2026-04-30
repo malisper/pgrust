@@ -3450,7 +3450,17 @@ fn auto_view_base_children(
     resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
     catalog: &dyn CatalogLookup,
 ) -> Result<Vec<BoundRelation>, ViewDmlRewriteError> {
-    let relation_oids = if resolved.base_inh {
+    let relation_oids = if resolved.base_relation.relkind == 'p' {
+        catalog
+            .find_all_inheritors(resolved.base_relation.relation_oid)
+            .into_iter()
+            .filter(|oid| {
+                catalog
+                    .relation_by_oid(*oid)
+                    .is_some_and(|relation| relation.relkind == 'r')
+            })
+            .collect()
+    } else if resolved.base_inh {
         catalog.find_all_inheritors(resolved.base_relation.relation_oid)
     } else {
         vec![resolved.base_relation.relation_oid]

@@ -1239,6 +1239,7 @@ impl PlanNode for AppendState {
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         ensure_append_runtime_pruned(
+            &mut self.children,
             &mut self.active_children,
             &mut self.visible_children,
             &mut self.subplans_removed,
@@ -1381,7 +1382,21 @@ fn append_explain_child_indexes(
         .unwrap_or_else(|| (0..child_count).collect())
 }
 
+fn renumber_relation_alias(relation_name: &str, ordinal: usize) -> String {
+    let Some((relation, alias)) = relation_name.rsplit_once(' ') else {
+        return relation_name.to_string();
+    };
+    let Some((prefix, suffix)) = alias.rsplit_once('_') else {
+        return relation_name.to_string();
+    };
+    if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        return relation_name.to_string();
+    }
+    format!("{relation} {prefix}_{ordinal}")
+}
+
 fn ensure_append_runtime_pruned(
+    children: &mut [PlanState],
     active_children: &mut Option<Vec<usize>>,
     visible_children: &mut Option<Vec<usize>>,
     subplans_removed: &mut usize,
@@ -1411,7 +1426,15 @@ fn ensure_append_runtime_pruned(
             active.push(index);
         }
     }
+    let should_renumber_aliases = *subplans_removed > 0 || startup_removed > 0;
     *subplans_removed += startup_removed;
+    if should_renumber_aliases {
+        for (ordinal, child_index) in startup_visible.iter().enumerate() {
+            if let Some(child) = children.get_mut(*child_index) {
+                child.renumber_append_child_aliases(ordinal + 1);
+            }
+        }
+    }
     *visible_children = Some(startup_visible);
     *active_children = Some(active);
     Ok(())
@@ -1553,6 +1576,7 @@ impl PlanNode for MergeAppendState {
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         ensure_append_runtime_pruned(
+            &mut self.children,
             &mut self.active_children,
             &mut self.visible_children,
             &mut self.subplans_removed,
@@ -2150,6 +2174,9 @@ impl PlanNode for SeqScanState {
     fn node_label(&self) -> String {
         format!("Seq Scan on {}", self.relation_name)
     }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
+    }
     fn explain_details(
         &self,
         indent: usize,
@@ -2444,6 +2471,9 @@ impl PlanNode for IndexOnlyScanState {
             self.index_name, self.relation_name
         )
     }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
+    }
 
     fn explain_details(
         &self,
@@ -2728,6 +2758,9 @@ impl PlanNode for IndexScanState {
             "{scan_name}{direction} using {} on {}",
             self.index_name, self.relation_name
         )
+    }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
     }
     fn explain_details(
         &self,
@@ -3559,6 +3592,9 @@ impl PlanNode for BitmapHeapScanState {
 
     fn node_label(&self) -> String {
         format!("Bitmap Heap Scan on {}", self.relation_name)
+    }
+    fn renumber_append_child_aliases(&mut self, ordinal: usize) {
+        self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
     }
 
     fn explain_details(

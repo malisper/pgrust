@@ -267,6 +267,7 @@ pub trait PlanNode: std::fmt::Debug {
         _lines: &mut Vec<String>,
     ) {
     }
+    fn renumber_append_child_aliases(&mut self, _ordinal: usize) {}
 
     /// Format children for EXPLAIN output. The node itself is formatted by
     /// the caller; this method handles child nodes.

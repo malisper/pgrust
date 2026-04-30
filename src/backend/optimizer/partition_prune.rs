@@ -218,11 +218,54 @@ fn expr_contains_tuple_var(expr: &Expr) -> bool {
             expr_contains_tuple_var(left) || expr_contains_tuple_var(right)
         }
         Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_tuple_var),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_tuple_var(expr)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_tuple_var(expr))
+                || case_expr.args.iter().any(|when| {
+                    expr_contains_tuple_var(&when.expr) || expr_contains_tuple_var(&when.result)
+                })
+                || expr_contains_tuple_var(&case_expr.defresult)
+        }
         Expr::Func(func) => func.args.iter().any(expr_contains_tuple_var),
         Expr::SubPlan(subplan) => subplan
             .testexpr
             .as_deref()
             .is_some_and(expr_contains_tuple_var),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_tuple_var(expr)
+                || expr_contains_tuple_var(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_tuple_var(expr))
+        }
+        Expr::FieldSelect { expr, .. } => expr_contains_tuple_var(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_tuple_var(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_tuple_var)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_tuple_var)
+                })
+        }
         _ => false,
     }
 }
@@ -288,6 +331,79 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
                 Some(catalog),
                 None,
             ) && relation_may_satisfy_own_partition_bound(catalog, row.inhparent, Some(filter))
+        })
+}
+
+pub(crate) fn relation_may_satisfy_own_partition_bound_with_runtime_values(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    filter: Option<&Expr>,
+    eval_runtime_value: &mut dyn FnMut(&Expr) -> Option<Value>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    if let Expr::Bool(bool_expr) = filter
+        && bool_expr.boolop == BoolExprType::Or
+    {
+        return bool_expr.args.iter().any(|arg| {
+            relation_may_satisfy_own_partition_bound_with_runtime_values(
+                catalog,
+                relation_oid,
+                Some(arg),
+                eval_runtime_value,
+            )
+        });
+    }
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+        return true;
+    };
+    let Some(bound) = relation
+        .relpartbound
+        .as_deref()
+        .and_then(|text| deserialize_partition_bound(text).ok())
+    else {
+        return true;
+    };
+    catalog
+        .inheritance_parents(relation_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .all(|row| {
+            let Some(parent) = catalog.relation_by_oid(row.inhparent) else {
+                return true;
+            };
+            let Ok(spec) = relation_partition_spec(&parent) else {
+                return true;
+            };
+            let Some(spec) =
+                partition_spec_for_relation_filter(&spec, &parent.desc, &relation.desc)
+            else {
+                return true;
+            };
+            let sibling_bounds = catalog
+                .inheritance_children(row.inhparent)
+                .into_iter()
+                .filter(|row| !row.inhdetachpending)
+                .filter_map(|row| catalog.relation_by_oid(row.inhrelid))
+                .filter_map(|rel| {
+                    rel.relpartbound
+                        .and_then(|text| deserialize_partition_bound(text.as_str()).ok())
+                })
+                .collect::<Vec<_>>();
+            partition_may_satisfy_filter_with_runtime_values(
+                &spec,
+                Some(&bound),
+                &sibling_bounds,
+                filter,
+                Some(catalog),
+                |expr| eval_runtime_value(expr),
+            ) && relation_may_satisfy_own_partition_bound_with_runtime_values(
+                catalog,
+                row.inhparent,
+                Some(filter),
+                eval_runtime_value,
+            )
         })
 }
 

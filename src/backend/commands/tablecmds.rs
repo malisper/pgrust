@@ -17,6 +17,7 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::value_io::format_failing_row_detail;
+use crate::backend::optimizer::partition_prune::relation_may_satisfy_own_partition_bound_with_runtime_values;
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
@@ -35,9 +36,9 @@ use crate::backend::parser::{
     rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
     rewrite_local_vars_for_output_exprs,
 };
-use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::rewrite::split_stored_rule_action_sql;
+use crate::backend::rewrite::{RlsWriteCheck, ViewDmlEvent, resolve_auto_updatable_view_target};
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
@@ -106,7 +107,9 @@ use crate::include::nodes::datum::{
 };
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
-use crate::include::nodes::parsenodes::{FromItem, IndexColumnDef, RelOption, SqlExpr};
+use crate::include::nodes::parsenodes::{
+    AliasColumnSpec, FromItem, IndexColumnDef, JoinConstraint, MergeAction, RelOption, SqlExpr,
+};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -588,6 +591,19 @@ pub(crate) fn execute_explain(
         ),
         EitherExplainTarget::Merge(merge) => {
             let bound = crate::backend::parser::plan_merge(&merge, catalog)?;
+            if !analyze
+                && let Some(lines) =
+                    partitioned_view_merge_explain_lines(&merge, &bound, costs, catalog, ctx)?
+            {
+                return Ok(StatementResult::Query {
+                    columns: vec![QueryColumn::text("QUERY PLAN")],
+                    column_names: vec!["QUERY PLAN".into()],
+                    rows: lines
+                        .into_iter()
+                        .map(|line| vec![Value::Text(line.into())])
+                        .collect(),
+                });
+            }
             (
                 create_query_desc(bound.input_plan, None),
                 Some(bound.explain_target_name),
@@ -822,7 +838,7 @@ fn execute_explain_update(
         let cid = ctx.next_command_id;
         execute_update(bound.clone(), catalog, ctx, xid, cid)?;
     }
-    let lines = explain_update_lines(&stmt, &bound, costs, verbose);
+    let lines = explain_update_lines(&stmt, &bound, costs, verbose, catalog, ctx);
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
@@ -869,7 +885,7 @@ fn execute_explain_insert(
     format: ExplainFormat,
     verbose: bool,
     catalog: &dyn CatalogLookup,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
     planner_config: PlannerConfig,
 ) -> Result<StatementResult, ExecError> {
     if analyze {
@@ -882,7 +898,7 @@ fn execute_explain_insert(
         .iter()
         .any(|cte| matches!(cte.body, CteBody::Merge(_)))
     {
-        return execute_explain_insert_with_merge_ctes(stmt, costs, catalog);
+        return execute_explain_insert_with_merge_ctes(stmt, costs, catalog, ctx);
     }
 
     let raw_target_name = stmt.table_name.clone();
@@ -1151,6 +1167,7 @@ fn execute_explain_insert_with_merge_ctes(
     stmt: InsertStatement,
     costs: bool,
     catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     let mut lines = Vec::new();
     push_explain_line(
@@ -1163,6 +1180,11 @@ fn execute_explain_insert_with_merge_ctes(
         if let CteBody::Merge(merge) = &cte.body {
             lines.push(format!("  CTE {}", cte.name));
             let bound = crate::backend::parser::plan_merge(merge, catalog)?;
+            if push_partitioned_view_merge_explain_lines(
+                merge, &bound, costs, catalog, ctx, "    ->  ", 2, &mut lines,
+            )? {
+                continue;
+            }
             let state = executor_start(bound.input_plan.plan_tree);
             push_explain_line(
                 &format!("->  Merge on {}", bound.explain_target_name),
@@ -1196,6 +1218,506 @@ fn execute_explain_insert_with_merge_ctes(
             .map(|line| vec![Value::Text(line.into())])
             .collect(),
     })
+}
+
+fn partitioned_view_merge_explain_lines(
+    stmt: &MergeStatement,
+    bound: &BoundMergeStatement,
+    costs: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<String>>, ExecError> {
+    let mut lines = Vec::new();
+    if push_partitioned_view_merge_explain_lines(
+        stmt, bound, costs, catalog, ctx, "", 1, &mut lines,
+    )? {
+        Ok(Some(lines))
+    } else {
+        Ok(None)
+    }
+}
+
+struct MergeSourceShape<'a> {
+    table_name: &'a str,
+    alias: &'a str,
+    key_column: String,
+    value_expr: SqlExpr,
+}
+
+struct MergeChildRelation {
+    relation_name: String,
+    relation_oid: u32,
+}
+
+// :HACK: PostgreSQL lowers MERGE on partitioned auto-updatable views through
+// ModifyTable/partition-prune machinery that pgrust does not model yet. Keep
+// EXPLAIN compatible for this narrow shape while execution continues through
+// the existing MERGE executor plan.
+fn push_partitioned_view_merge_explain_lines(
+    stmt: &MergeStatement,
+    bound: &BoundMergeStatement,
+    costs: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    top_prefix: &str,
+    child_indent: usize,
+    lines: &mut Vec<String>,
+) -> Result<bool, ExecError> {
+    let Some(view_relation) = catalog.lookup_any_relation(&stmt.target_table) else {
+        return Ok(false);
+    };
+    if view_relation.relkind != 'v' {
+        return Ok(false);
+    }
+    let Some(event) = merge_view_event(stmt) else {
+        return Ok(false);
+    };
+    let Ok(resolved) = resolve_auto_updatable_view_target(
+        view_relation.relation_oid,
+        &view_relation.desc,
+        event,
+        catalog,
+        &[],
+    ) else {
+        return Ok(false);
+    };
+    if resolved.base_relation.relkind != 'p'
+        || resolved.base_relation.relation_oid != bound.relation_oid
+    {
+        return Ok(false);
+    }
+    let Some(source) = merge_source_shape(&stmt.source) else {
+        return Ok(false);
+    };
+    let Some((target_column, target_value_expr)) = merge_target_prune_expr(stmt, &source) else {
+        return Ok(false);
+    };
+    let Some(target_column_index) = bound
+        .desc
+        .columns
+        .iter()
+        .position(|column| column.name.eq_ignore_ascii_case(&target_column))
+    else {
+        return Ok(false);
+    };
+    let Ok((target_value_bound, _)) = bind_scalar_expr_in_scope(&target_value_expr, &[], catalog)
+    else {
+        return Ok(false);
+    };
+    let mut target_eval_slot = TupleSlot::empty(0);
+    let target_prune_value = eval_expr(&target_value_bound, &mut target_eval_slot, ctx)
+        .ok()
+        .map(Expr::Const)
+        .unwrap_or_else(|| target_value_bound.clone());
+    let children = partitioned_merge_child_relations(bound.relation_oid, catalog);
+    if children.is_empty() {
+        return Ok(false);
+    }
+    let mut visible = Vec::new();
+    for child in &children {
+        let Some(child_relation) = catalog.relation_by_oid(child.relation_oid) else {
+            visible.push(child);
+            continue;
+        };
+        let Some(child_column_index) = child_relation.desc.columns.iter().position(|column| {
+            !column.dropped
+                && column.name.eq_ignore_ascii_case(&target_column)
+                && column.sql_type == bound.desc.columns[target_column_index].sql_type
+        }) else {
+            visible.push(child);
+            continue;
+        };
+        let target_var = Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(child_column_index),
+            varlevelsup: 0,
+            vartype: child_relation.desc.columns[child_column_index].sql_type,
+        });
+        let prune_filter = Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![target_var, target_prune_value.clone()],
+        );
+        let mut slot = TupleSlot::empty(0);
+        if relation_may_satisfy_own_partition_bound_with_runtime_values(
+            catalog,
+            child.relation_oid,
+            Some(&prune_filter),
+            &mut |expr| eval_expr(expr, &mut slot, ctx).ok(),
+        ) {
+            visible.push(child);
+        }
+    }
+    let removed = children.len().saturating_sub(visible.len());
+    let target_expr = render_merge_sql_expr(&target_value_expr);
+    let target_filter = partitioned_view_merge_target_filter(
+        resolved.combined_predicate.as_ref(),
+        &target_column,
+        &target_expr,
+        &bound.desc,
+    );
+    let source_filter = render_merge_source_filter(&source, stmt);
+    let insert_join = stmt.when_clauses.iter().any(|clause| {
+        matches!(
+            clause.match_kind,
+            crate::backend::parser::MergeMatchKind::NotMatchedByTarget
+        )
+    });
+
+    push_explain_line(
+        &format!("{top_prefix}Merge on {}", bound.explain_target_name),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        costs,
+        lines,
+    );
+    if !insert_join {
+        for child in &visible {
+            lines.push(format!(
+                "{}Merge on {}",
+                plain_explain_prefix(child_indent),
+                child.relation_name
+            ));
+        }
+        push_explain_line(
+            &format!("{}Nested Loop", explain_child_prefix(child_indent)),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            costs,
+            lines,
+        );
+        push_partitioned_view_merge_append(
+            &visible,
+            removed,
+            Some(&target_filter),
+            costs,
+            child_indent + 1,
+            lines,
+        );
+        push_explain_line(
+            &format!("{}Materialize", explain_child_prefix(child_indent + 1)),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            costs,
+            lines,
+        );
+        push_merge_source_scan(&source, &source_filter, costs, child_indent + 2, lines);
+    } else {
+        push_explain_line(
+            &format!(
+                "{}Nested Loop Left Join",
+                explain_child_prefix(child_indent)
+            ),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            costs,
+            lines,
+        );
+        push_merge_source_scan(&source, &source_filter, costs, child_indent + 1, lines);
+        push_explain_line(
+            &format!("{}Materialize", explain_child_prefix(child_indent + 1)),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            costs,
+            lines,
+        );
+        push_partitioned_view_merge_append(&visible, removed, None, costs, child_indent + 2, lines);
+    }
+    Ok(true)
+}
+
+fn merge_view_event(stmt: &MergeStatement) -> Option<ViewDmlEvent> {
+    stmt.when_clauses
+        .iter()
+        .find_map(|clause| match clause.action {
+            MergeAction::Update { .. } => Some(ViewDmlEvent::Update),
+            MergeAction::Delete => Some(ViewDmlEvent::Delete),
+            MergeAction::Insert { .. } => Some(ViewDmlEvent::Insert),
+            MergeAction::DoNothing => None,
+        })
+}
+
+fn partitioned_merge_child_relations(
+    relation_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Vec<MergeChildRelation> {
+    catalog
+        .find_all_inheritors(relation_oid)
+        .into_iter()
+        .filter_map(|oid| {
+            let relation = catalog.relation_by_oid(oid)?;
+            if relation.relkind != 'r' {
+                return None;
+            }
+            let relation_name = catalog
+                .class_row_by_oid(oid)
+                .map(|row| row.relname)
+                .unwrap_or_else(|| oid.to_string());
+            Some(MergeChildRelation {
+                relation_name,
+                relation_oid: relation.relation_oid,
+            })
+        })
+        .collect()
+}
+
+fn push_partitioned_view_merge_append(
+    visible: &[&MergeChildRelation],
+    removed: usize,
+    filter: Option<&str>,
+    costs: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!("{}Append", explain_child_prefix(indent)),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        costs,
+        lines,
+    );
+    if removed > 0 {
+        lines.push(format!(
+            "{}Subplans Removed: {removed}",
+            explain_detail_prefix_local(indent)
+        ));
+    }
+    for child in visible {
+        push_explain_line(
+            &format!(
+                "{}Seq Scan on {}",
+                explain_child_prefix(indent + 1),
+                child.relation_name
+            ),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            costs,
+            lines,
+        );
+        if let Some(filter) = filter {
+            lines.push(format!(
+                "{}Filter: {filter}",
+                explain_detail_prefix_local(indent + 1)
+            ));
+        }
+    }
+}
+
+fn push_merge_source_scan(
+    source: &MergeSourceShape<'_>,
+    filter: &str,
+    costs: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "{}Seq Scan on {} {}",
+            explain_child_prefix(indent),
+            source.table_name,
+            source.alias
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        costs,
+        lines,
+    );
+    lines.push(format!(
+        "{}Filter: {filter}",
+        explain_detail_prefix_local(indent)
+    ));
+}
+
+fn merge_source_shape(source: &FromItem) -> Option<MergeSourceShape<'_>> {
+    let FromItem::Join {
+        left,
+        right,
+        constraint,
+        ..
+    } = source
+    else {
+        return None;
+    };
+    let (derived_alias, derived_column, value_expr) = derived_single_value_alias(left)?;
+    let (table_name, table_alias) = table_alias(right)?;
+    let JoinConstraint::On(SqlExpr::Eq(join_left, join_right)) = constraint else {
+        return None;
+    };
+    let key_column = if column_matches_alias(join_left, derived_alias, &derived_column) {
+        column_name_for_alias(join_right, table_alias)?
+    } else if column_matches_alias(join_right, derived_alias, &derived_column) {
+        column_name_for_alias(join_left, table_alias)?
+    } else {
+        return None;
+    };
+    Some(MergeSourceShape {
+        table_name,
+        alias: table_alias,
+        key_column,
+        value_expr,
+    })
+}
+
+fn derived_single_value_alias(source: &FromItem) -> Option<(&str, String, SqlExpr)> {
+    let FromItem::Alias {
+        source,
+        alias,
+        column_aliases,
+        ..
+    } = source
+    else {
+        return None;
+    };
+    let FromItem::DerivedTable(select) = source.as_ref() else {
+        return None;
+    };
+    let [target] = select.targets.as_slice() else {
+        return None;
+    };
+    let output_name = match column_aliases {
+        AliasColumnSpec::Names(names) => names
+            .first()
+            .cloned()
+            .unwrap_or_else(|| target.output_name.clone()),
+        _ => target.output_name.clone(),
+    };
+    Some((alias.as_str(), output_name, target.expr.clone()))
+}
+
+fn table_alias(source: &FromItem) -> Option<(&str, &str)> {
+    match source {
+        FromItem::Alias { source, alias, .. } => {
+            let FromItem::Table { name, .. } = source.as_ref() else {
+                return None;
+            };
+            Some((name.as_str(), alias.as_str()))
+        }
+        FromItem::Table { name, .. } => Some((name.as_str(), name.as_str())),
+        _ => None,
+    }
+}
+
+fn merge_target_prune_expr(
+    stmt: &MergeStatement,
+    source: &MergeSourceShape<'_>,
+) -> Option<(String, SqlExpr)> {
+    let SqlExpr::Eq(left, right) = &stmt.join_condition else {
+        return None;
+    };
+    if let Some(column) = target_column_name(stmt, left) {
+        if column_matches_alias(right, source.alias, &source.key_column) {
+            return Some((column, source.value_expr.clone()));
+        }
+        return Some((column, (**right).clone()));
+    }
+    if let Some(column) = target_column_name(stmt, right) {
+        if column_matches_alias(left, source.alias, &source.key_column) {
+            return Some((column, source.value_expr.clone()));
+        }
+        return Some((column, (**left).clone()));
+    }
+    None
+}
+
+fn target_column_name(stmt: &MergeStatement, expr: &SqlExpr) -> Option<String> {
+    let alias = stmt.target_alias.as_deref().unwrap_or(&stmt.target_table);
+    column_name_for_alias(expr, alias).or_else(|| match expr {
+        SqlExpr::Column(name) if !name.contains('.') => Some(name.clone()),
+        _ => None,
+    })
+}
+
+fn column_matches_alias(expr: &SqlExpr, alias: &str, column: &str) -> bool {
+    column_name_for_alias(expr, alias).is_some_and(|name| name.eq_ignore_ascii_case(column))
+}
+
+fn column_name_for_alias(expr: &SqlExpr, alias: &str) -> Option<String> {
+    let SqlExpr::Column(name) = expr else {
+        return None;
+    };
+    let (prefix, column) = name.rsplit_once('.')?;
+    prefix
+        .eq_ignore_ascii_case(alias)
+        .then(|| column.to_string())
+}
+
+fn partitioned_view_merge_target_filter(
+    view_predicate: Option<&Expr>,
+    target_column: &str,
+    target_expr: &str,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+) -> String {
+    let column_names = desc
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let view_predicate = view_predicate
+        .map(|expr| crate::backend::executor::render_explain_expr(expr, &column_names))
+        .unwrap_or_else(|| "true".into());
+    format!("({view_predicate} AND ({target_column} = {target_expr}))")
+}
+
+fn render_merge_source_filter(source: &MergeSourceShape<'_>, stmt: &MergeStatement) -> String {
+    let expr = render_merge_sql_expr(&source.value_expr);
+    let insert_join = stmt.when_clauses.iter().any(|clause| {
+        matches!(
+            clause.match_kind,
+            crate::backend::parser::MergeMatchKind::NotMatchedByTarget
+        )
+    });
+    if insert_join {
+        format!("({expr} = {})", source.key_column)
+    } else {
+        format!("({} = {expr})", source.key_column)
+    }
+}
+
+fn render_merge_sql_expr(expr: &SqlExpr) -> String {
+    match expr {
+        SqlExpr::FuncCall { name, args, .. } => {
+            let args = args
+                .args()
+                .iter()
+                .map(|arg| render_merge_sql_expr(&arg.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}({args})")
+        }
+        SqlExpr::Add(left, right) => {
+            format!(
+                "({} + {})",
+                render_merge_sql_expr(left),
+                render_merge_sql_expr(right)
+            )
+        }
+        SqlExpr::Sub(left, right) => {
+            format!(
+                "({} - {})",
+                render_merge_sql_expr(left),
+                render_merge_sql_expr(right)
+            )
+        }
+        SqlExpr::IntegerLiteral(value) | SqlExpr::NumericLiteral(value) => value.clone(),
+        SqlExpr::Const(value) => crate::backend::executor::render_explain_literal(value),
+        SqlExpr::Column(name) => name
+            .rsplit_once('.')
+            .map(|(_, column)| column.to_string())
+            .unwrap_or_else(|| name.clone()),
+        other => format!("{other:?}"),
+    }
+}
+
+fn explain_child_prefix(indent: usize) -> String {
+    let spaces = if indent <= 1 {
+        indent * 2
+    } else {
+        2 + (indent - 1) * 6
+    };
+    format!("{}->  ", " ".repeat(spaces))
+}
+
+fn explain_detail_prefix_local(indent: usize) -> String {
+    if indent == 0 {
+        "  ".into()
+    } else {
+        " ".repeat(2 + indent * 6)
+    }
+}
+
+fn plain_explain_prefix(indent: usize) -> String {
+    "  ".repeat(indent)
 }
 
 #[derive(Clone)]
@@ -1867,8 +2389,15 @@ fn explain_update_lines(
     bound: &BoundUpdateStatement,
     show_costs: bool,
     verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
 ) -> Vec<String> {
     let mut lines = Vec::new();
+    let partition_targets = partitioned_update_explain_targets(bound);
+    let returning_target_name = partition_targets
+        .first()
+        .map(|target| target.relation_name.as_str())
+        .unwrap_or(&bound.target_relation_name);
     push_explain_line(
         &format!(
             "Update on {}",
@@ -1881,7 +2410,7 @@ fn explain_update_lines(
     if verbose && !bound.returning.is_empty() {
         lines.push(format!(
             "  Output: {}",
-            render_update_returning_targets(&bound.target_relation_name, &bound.returning)
+            render_update_returning_targets(returning_target_name, &bound.returning)
         ));
     }
     if let Some(input_plan) = &bound.input_plan {
@@ -1892,6 +2421,19 @@ fn explain_update_lines(
             show_costs,
             &mut lines,
         );
+        return lines;
+    }
+
+    if verbose
+        && partition_targets.len() > 1
+        && explain_partitioned_update_append(
+            &partition_targets,
+            catalog,
+            ctx,
+            show_costs,
+            &mut lines,
+        )
+    {
         return lines;
     }
 
@@ -1994,6 +2536,92 @@ fn explain_update_lines(
         lines.push("        One-Time Filter: false".into());
     }
     lines
+}
+
+fn partitioned_update_explain_targets(bound: &BoundUpdateStatement) -> Vec<&BoundUpdateTarget> {
+    bound
+        .targets
+        .iter()
+        .filter(|target| target.partition_update_root_oid.is_some())
+        .collect()
+}
+
+fn explain_partitioned_update_append(
+    targets: &[&BoundUpdateTarget],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    show_costs: bool,
+    lines: &mut Vec<String>,
+) -> bool {
+    let mut visible = Vec::new();
+    for target in targets {
+        if is_const_false(target.predicate.as_ref()) {
+            continue;
+        }
+        if update_target_may_satisfy_runtime_prune(target, catalog, ctx) {
+            visible.push(*target);
+        }
+    }
+    if visible.len() == targets.len() {
+        return false;
+    }
+    for target in &visible {
+        lines.push(format!(
+            "  Update on {}",
+            explain_update_target_name(&target.relation_name, true)
+        ));
+    }
+    push_explain_line(
+        "  ->  Append",
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    let removed = targets.len().saturating_sub(visible.len());
+    if removed > 0 {
+        lines.push(format!("        Subplans Removed: {removed}"));
+    }
+    for target in visible {
+        push_explain_line(
+            &format!(
+                "        ->  {}",
+                explain_update_verbose_scan_label(target, None)
+            ),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            lines,
+        );
+        lines.push(format!(
+            "              Output: {}",
+            render_update_partition_scan_projection_output(target)
+        ));
+        if let Some(index_cond) = explain_update_index_cond(target) {
+            lines.push(format!("              Index Cond: {index_cond}"));
+        } else if let Some(predicate) = &target.predicate {
+            lines.push(format!(
+                "              Filter: {}",
+                crate::backend::executor::render_explain_expr(
+                    predicate,
+                    &qualified_update_scan_column_names(target),
+                )
+            ));
+        }
+    }
+    true
+}
+
+fn update_target_may_satisfy_runtime_prune(
+    target: &BoundUpdateTarget,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> bool {
+    let mut slot = TupleSlot::empty(0);
+    relation_may_satisfy_own_partition_bound_with_runtime_values(
+        catalog,
+        target.relation_oid,
+        target.predicate.as_ref(),
+        &mut |expr| eval_expr(expr, &mut slot, ctx).ok(),
+    )
 }
 
 fn explain_update_scan_target<'a>(
@@ -2111,6 +2739,40 @@ fn render_update_scan_projection_output(target: &BoundUpdateTarget) -> String {
     };
     outputs.push("ctid".into());
     outputs.join(", ")
+}
+
+fn render_update_partition_scan_projection_output(target: &BoundUpdateTarget) -> String {
+    let column_names = target
+        .desc
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let mut outputs = target
+        .assignments
+        .iter()
+        .map(|assignment| render_update_projection_expr(&assignment.expr, &column_names))
+        .collect::<Vec<_>>();
+    outputs.push(format!("{}.tableoid", target.relation_name));
+    outputs.push(format!("{}.ctid", target.relation_name));
+    outputs.join(", ")
+}
+
+fn render_update_projection_expr(expr: &Expr, column_names: &[String]) -> String {
+    if let Expr::Param(param) = expr
+        && matches!(
+            param.paramkind,
+            crate::include::nodes::primnodes::ParamKind::External
+                | crate::include::nodes::primnodes::ParamKind::Exec
+        )
+    {
+        return format!("${}", param.paramid);
+    }
+    crate::backend::executor::render_explain_projection_expr_with_qualifier(
+        expr,
+        None,
+        column_names,
+    )
 }
 
 fn render_update_array_field_assignment_projection(
