@@ -9380,6 +9380,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![INTERNAL_TYPE_OID],
         ),
         (
+            3688,
+            "ts_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
             2410,
             "int2vectorrecv",
             INT2VECTOR_TYPE_OID,
@@ -9547,6 +9553,7 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
                 | "brin_minmax_multi_summary_recv"
                 | "brin_minmax_multi_summary_send"
                 | "array_typanalyze"
+                | "ts_typanalyze"
                 | "range_typanalyze"
                 | "multirange_typanalyze"
         ) {
@@ -12002,6 +12009,9 @@ pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Opti
 
 pub fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
     let builtin_by_src = builtin_scalar_function_for_proc_src(&row.prosrc);
+    if row.prosrc.eq_ignore_ascii_case("test_atomic_ops") {
+        return Some(BuiltinScalarFunction::PgRustTestAtomicOps);
+    }
     if row.pronamespace != PG_CATALOG_NAMESPACE_OID {
         return builtin_by_src.filter(|func| is_dynamic_range_scalar_function(*func));
     }
@@ -12037,6 +12047,7 @@ fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RangeDifference
             | BuiltinScalarFunction::RangeMerge
             | BuiltinScalarFunction::PgRustInternalBinaryCoercible
+            | BuiltinScalarFunction::PgRustTestAtomicOps
             | BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid
     )
 }
@@ -12568,6 +12579,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustTestEncConversion,
         ),
         (
+            "test_atomic_ops",
+            BuiltinScalarFunction::PgRustTestAtomicOps,
+        ),
+        (
             "pg_rust_is_catalog_text_unique_index_oid",
             BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid,
         ),
@@ -12801,6 +12816,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
         ("pg_numa_available", BuiltinScalarFunction::PgNumaAvailable),
+        (
+            "gin_clean_pending_list",
+            BuiltinScalarFunction::GinCleanPendingList,
+        ),
         (
             "brin_summarize_new_values",
             BuiltinScalarFunction::BrinSummarizeNewValues,
@@ -16549,6 +16568,18 @@ fn brin_support_proc_rows() -> Vec<PgProcRow> {
             false,
             'f',
             'i',
+        ),
+        proc_row(
+            3789,
+            "gin_clean_pending_list",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID]),
+            "gin_clean_pending_list",
+            1,
+            false,
+            false,
+            'f',
+            'v',
         ),
         proc_row(
             3952,

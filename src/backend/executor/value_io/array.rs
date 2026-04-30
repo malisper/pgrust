@@ -7,8 +7,8 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::AttributeAlign;
 use crate::include::catalog::{
     BOOL_TYPE_OID, BYTEA_TYPE_OID, DATE_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID,
-    INT4_TYPE_OID, INT8_TYPE_OID, INTERVAL_TYPE_OID, OID_TYPE_OID, REGTYPE_TYPE_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID, builtin_type_rows,
+    INT4_TYPE_OID, INT8_TYPE_OID, INTERVAL_TYPE_OID, NAME_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
+    REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID, builtin_type_rows,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use std::collections::HashMap;
@@ -1360,7 +1360,7 @@ fn format_array_values_nested(
             }
             Value::Int16(v) => out.push_str(&v.to_string()),
             Value::Int32(v) if array.element_type_oid == Some(REGTYPE_TYPE_OID) => {
-                out.push_str(&format_regtype_array_element(*v as u32));
+                push_array_text_element(&mut out, &format_regtype_array_element(*v as u32));
             }
             Value::Int32(v) => out.push_str(&v.to_string()),
             Value::EnumOid(v) => out.push_str(&v.to_string()),
@@ -1368,7 +1368,7 @@ fn format_array_values_nested(
                 let rendered = u32::try_from(*v)
                     .map(format_regtype_array_element)
                     .unwrap_or_else(|_| v.to_string());
-                out.push_str(&rendered);
+                push_array_text_element(&mut out, &rendered);
             }
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Xid8(v) => out.push_str(&v.to_string()),
@@ -1537,7 +1537,9 @@ fn format_regtype_array_element(oid: u32) -> String {
         INT2_TYPE_OID => "smallint".into(),
         INT4_TYPE_OID => "integer".into(),
         INT8_TYPE_OID => "bigint".into(),
+        NAME_TYPE_OID => "name".into(),
         OID_TYPE_OID => "oid".into(),
+        PATH_TYPE_OID => "path".into(),
         TEXT_TYPE_OID => "text".into(),
         TEXT_ARRAY_TYPE_OID => "text[]".into(),
         _ => oid.to_string(),

@@ -1209,7 +1209,9 @@ fn eval_pg_prepared_statement(ctx: &ExecutorContext) -> Vec<TupleSlot> {
                 Value::Text(row.statement.into()),
                 Value::TimestampTz(TimestampTzADT(row.prepare_time)),
                 regtype_array(row.parameter_type_oids),
-                regtype_array(row.result_type_oids),
+                row.result_type_oids
+                    .map(regtype_array)
+                    .unwrap_or(Value::Null),
                 Value::Bool(row.from_sql),
                 Value::Int64(row.generic_plans),
                 Value::Int64(row.custom_plans),

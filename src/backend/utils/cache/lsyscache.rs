@@ -3,6 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
+use crate::backend::catalog::indexing::{
+    system_catalog_index_entry_for_db, system_catalog_index_relcache,
+};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
 use crate::backend::rewrite::{
@@ -33,14 +37,18 @@ use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
 use crate::include::catalog::{
-    CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
-    PgEnumRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, CONSTRAINT_FOREIGN,
+    CONSTRAINT_NOTNULL, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow,
+    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
+    PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    bootstrap_catalog_kinds, bootstrap_pg_class_rows, bootstrap_relation_desc,
+    system_catalog_index_by_oid, system_catalog_index_is_primary, system_catalog_indexes,
+    system_catalog_indexes_for_heap,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -68,6 +76,158 @@ fn catalog_name_lookup_keys(name: &str) -> Vec<Value> {
         .into_iter()
         .map(|name| Value::Text(name.into()))
         .collect()
+}
+
+fn bootstrap_catalog_kind_by_relation_oid(relation_oid: u32) -> Option<BootstrapCatalogKind> {
+    bootstrap_catalog_kinds()
+        .into_iter()
+        .find(|kind| kind.relation_oid() == relation_oid)
+}
+
+fn system_catalog_index_class_row(
+    descriptor: crate::include::catalog::CatalogIndexDescriptor,
+) -> PgClassRow {
+    PgClassRow {
+        oid: descriptor.relation_oid,
+        relname: descriptor.relation_name.into(),
+        relnamespace: PG_CATALOG_NAMESPACE_OID,
+        reltype: 0,
+        relowner: BOOTSTRAP_SUPERUSER_OID,
+        relam: BTREE_AM_OID,
+        relfilenode: descriptor.relation_oid,
+        reltablespace: 0,
+        relpages: 0,
+        reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        reltoastrelid: 0,
+        relhasindex: false,
+        relpersistence: 'p',
+        relkind: 'i',
+        relnatts: descriptor.key_attnums.len() as i16,
+        relhassubclass: false,
+        relhastriggers: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+        relispopulated: true,
+        relispartition: false,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        relpartbound: None,
+        reloptions: None,
+        relacl: None,
+        relreplident: 'd',
+        reloftype: 0,
+    }
+}
+
+fn bootstrap_class_row_by_oid(relation_oid: u32) -> Option<PgClassRow> {
+    bootstrap_pg_class_rows()
+        .into_iter()
+        .find(|row| row.oid == relation_oid)
+        .or_else(|| {
+            system_catalog_index_by_oid(relation_oid)
+                .copied()
+                .map(system_catalog_index_class_row)
+        })
+}
+
+fn bootstrap_class_row_by_name_namespace(relname: &str, namespace_oid: u32) -> Option<PgClassRow> {
+    if namespace_oid != PG_CATALOG_NAMESPACE_OID {
+        return None;
+    }
+    bootstrap_pg_class_rows()
+        .into_iter()
+        .find(|row| row.relname.eq_ignore_ascii_case(relname))
+        .or_else(|| {
+            system_catalog_indexes()
+                .iter()
+                .find(|descriptor| descriptor.relation_name.eq_ignore_ascii_case(relname))
+                .copied()
+                .map(system_catalog_index_class_row)
+        })
+}
+
+fn bootstrap_index_row(descriptor: crate::include::catalog::CatalogIndexDescriptor) -> PgIndexRow {
+    let meta = crate::backend::catalog::indexing::system_catalog_index_meta(descriptor);
+    PgIndexRow {
+        indexrelid: descriptor.relation_oid,
+        indrelid: meta.indrelid,
+        indnatts: meta.indkey.len() as i16,
+        indnkeyatts: meta.indclass.len() as i16,
+        indisunique: meta.indisunique,
+        indnullsnotdistinct: meta.indnullsnotdistinct,
+        indisprimary: system_catalog_index_is_primary(&descriptor),
+        indisexclusion: meta.indisexclusion,
+        indimmediate: true,
+        indisclustered: false,
+        indisvalid: meta.indisvalid,
+        indcheckxmin: false,
+        indisready: meta.indisready,
+        indislive: meta.indislive,
+        indisreplident: false,
+        indkey: meta.indkey,
+        indcollation: meta.indcollation,
+        indclass: meta.indclass,
+        indoption: meta.indoption,
+        indexprs: meta.indexprs,
+        indpred: meta.indpred,
+    }
+}
+
+fn bootstrap_relation_entry_by_oid(db: &Database, relation_oid: u32) -> Option<RelCacheEntry> {
+    if let Some(kind) = bootstrap_catalog_kind_by_relation_oid(relation_oid) {
+        let class = bootstrap_class_row_by_oid(relation_oid)?;
+        let desc = bootstrap_relation_desc(kind);
+        return Some(RelCacheEntry {
+            rel: bootstrap_catalog_rel(kind, db.database_oid),
+            relation_oid: class.oid,
+            namespace_oid: class.relnamespace,
+            owner_oid: class.relowner,
+            of_type_oid: class.reloftype,
+            row_type_oid: class.reltype,
+            array_type_oid: 0,
+            reltoastrelid: class.reltoastrelid,
+            relhasindex: class.relhasindex,
+            relpersistence: class.relpersistence,
+            relkind: class.relkind,
+            relispartition: class.relispartition,
+            relispopulated: class.relispopulated,
+            relpartbound: class.relpartbound,
+            relhastriggers: class.relhastriggers,
+            relrowsecurity: class.relrowsecurity,
+            relforcerowsecurity: class.relforcerowsecurity,
+            desc,
+            partitioned_table: None,
+            partition_spec: None,
+            index: None,
+        });
+    }
+
+    let descriptor = system_catalog_index_by_oid(relation_oid).copied()?;
+    let entry = system_catalog_index_entry_for_db(descriptor, db.database_oid);
+    Some(RelCacheEntry {
+        rel: entry.rel,
+        relation_oid: entry.relation_oid,
+        namespace_oid: entry.namespace_oid,
+        owner_oid: entry.owner_oid,
+        of_type_oid: entry.of_type_oid,
+        row_type_oid: entry.row_type_oid,
+        array_type_oid: entry.array_type_oid,
+        reltoastrelid: entry.reltoastrelid,
+        relhasindex: entry.relhasindex,
+        relpersistence: entry.relpersistence,
+        relkind: entry.relkind,
+        relispartition: entry.relispartition,
+        relispopulated: entry.relispopulated,
+        relpartbound: entry.relpartbound,
+        relhastriggers: entry.relhastriggers,
+        relrowsecurity: entry.relrowsecurity,
+        relforcerowsecurity: entry.relforcerowsecurity,
+        desc: entry.desc,
+        partitioned_table: entry.partitioned_table,
+        partition_spec: None,
+        index: Some(system_catalog_index_relcache(descriptor)),
+    })
 }
 
 fn namespace_row_by_name(
@@ -122,12 +282,14 @@ fn class_row_by_oid(
     oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
     SearchSysCache1(db, client_id, txn_ctx, SysCacheId::RELOID, oid_key(oid))
-        .ok()?
+        .ok()
         .into_iter()
+        .flatten()
         .find_map(|tuple| match tuple {
             SysCacheTuple::Class(row) => Some(row),
             _ => None,
         })
+        .or_else(|| bootstrap_class_row_by_oid(oid))
 }
 
 fn class_row_by_name_namespace(
@@ -148,8 +310,9 @@ fn class_row_by_name_namespace(
                 key,
                 oid_key(namespace_oid),
             )
-            .ok()?
+            .ok()
             .into_iter()
+            .flatten()
             .find_map(|tuple| match tuple {
                 SysCacheTuple::Class(row)
                     if !db.other_session_temp_namespace_oid(client_id, row.relnamespace) =>
@@ -159,6 +322,7 @@ fn class_row_by_name_namespace(
                 _ => None,
             })
         })
+        .or_else(|| bootstrap_class_row_by_name_namespace(relname, namespace_oid))
 }
 
 fn attribute_rows_for_relation(
@@ -1429,11 +1593,17 @@ pub fn index_row_by_indexrelid(
         SysCacheId::INDEXRELID,
         oid_key(relation_oid),
     )
-    .ok()?
+    .ok()
     .into_iter()
+    .flatten()
     .find_map(|tuple| match tuple {
         SysCacheTuple::Index(row) => Some(row),
         _ => None,
+    })
+    .or_else(|| {
+        system_catalog_index_by_oid(relation_oid)
+            .copied()
+            .map(bootstrap_index_row)
     })
 }
 
@@ -1443,7 +1613,7 @@ fn index_rows_for_heap(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<PgIndexRow> {
-    SearchSysCacheList1(
+    let mut rows: Vec<PgIndexRow> = SearchSysCacheList1(
         db,
         client_id,
         txn_ctx,
@@ -1459,7 +1629,20 @@ fn index_rows_for_heap(
             })
             .collect()
     })
-    .unwrap_or_default()
+    .unwrap_or_default();
+    let mut seen = rows
+        .iter()
+        .map(|row| row.indexrelid)
+        .collect::<BTreeSet<_>>();
+    if let Some(kind) = bootstrap_catalog_kind_by_relation_oid(relation_oid) {
+        rows.extend(
+            system_catalog_indexes_for_heap(kind)
+                .copied()
+                .filter(|descriptor| seen.insert(descriptor.relation_oid))
+                .map(bootstrap_index_row),
+        );
+    }
+    rows
 }
 
 pub fn relation_get_index_list(
@@ -1526,7 +1709,7 @@ pub fn relation_entry_by_oid(
             .then_some(entry);
     }
 
-    None
+    bootstrap_relation_entry_by_oid(db, relation_oid)
 }
 
 fn relation_entry_by_name_namespace(

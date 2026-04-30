@@ -7090,6 +7090,12 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
                 return true;
             }
         }
+        if !source_type.is_array
+            && is_text_like_type(source_type)
+            && user_defined_base_type_has_input_oid(target_oid, catalog)
+        {
+            return true;
+        }
         if is_user_defined_base_type_oid(source_oid, catalog)
             || is_user_defined_base_type_oid(target_oid, catalog)
         {
@@ -7152,6 +7158,14 @@ fn is_user_defined_base_type_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> 
                 && !row.sql_type.is_multirange()
                 && matches!(row.sql_type.kind, SqlTypeKind::Text)
                 && row.typrelid == 0
+        })
+}
+
+fn user_defined_base_type_has_input_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> bool {
+    type_oid != 0
+        && builtin_type_name_for_oid(type_oid).is_none()
+        && catalog.type_by_oid(type_oid).is_some_and(|row| {
+            row.typtype == 'b' && row.typrelid == 0 && !row.sql_type.is_array && row.typinput != 0
         })
 }
 

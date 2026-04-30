@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::backend::commands::rolecmds::PasswordSettings;
 use crate::backend::executor::{
     ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot,
     cast_value_with_config, eval_expr, execute_planned_stmt,
@@ -332,6 +333,7 @@ fn reject_restricted_views_in_plan(
     match plan {
         Plan::Result { .. } | Plan::WorkTableScan { .. } | Plan::FunctionScan { .. } => Ok(()),
         Plan::SeqScan { relation_oid, .. }
+        | Plan::TidScan { relation_oid, .. }
         | Plan::IndexOnlyScan { relation_oid, .. }
         | Plan::IndexScan { relation_oid, .. }
         | Plan::BitmapIndexScan { relation_oid, .. } => {
@@ -1080,6 +1082,10 @@ impl Database {
         let object_kind = oa_token_after(&tokens, &["on"])
             .ok_or_else(|| oa_unsupported_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
         let objtype = oa_default_acl_objtype(&object_kind)?;
+        let is_grant = tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("grant"));
+        let grantee_name = oa_token_after(&tokens, &["to"]);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let role = if let Some(role_name) = role_name {
             catalog
@@ -1122,13 +1128,24 @@ impl Database {
                     })
             })
             .transpose()?;
-        self.object_addresses.write().upsert_default_acl(
-            role.oid,
-            role.rolname,
-            namespace.as_ref().map(|row| row.oid),
-            namespace.map(|row| row.nspname),
-            objtype,
-        );
+        let namespace_oid = namespace.as_ref().map(|row| row.oid);
+        let namespace_name = namespace.map(|row| row.nspname);
+        let mut object_addresses = self.object_addresses.write();
+        if is_grant
+            && grantee_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&role.rolname))
+        {
+            object_addresses.remove_default_acl(role.oid, namespace_oid, objtype);
+        } else {
+            object_addresses.upsert_default_acl(
+                role.oid,
+                role.rolname,
+                namespace_oid,
+                namespace_name,
+                objtype,
+            );
+        }
         Ok(())
     }
 
@@ -1302,9 +1319,7 @@ impl Database {
             let truncate_targets = if entry.relkind == 'p' {
                 partitioned_truncate_targets(&catalog, entry.relation_oid)
             } else if catalog.has_subclass(entry.relation_oid) {
-                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                    "TRUNCATE on inherited parents is not supported yet".into(),
-                )));
+                inherited_truncate_targets(&catalog, entry.relation_oid)
             } else {
                 vec![entry]
             };
@@ -2195,9 +2210,12 @@ impl Database {
             | Statement::Prepare(_)
             | Statement::Execute(_)
             | Statement::Deallocate(_) => Ok(StatementResult::AffectedRows(0)),
-            Statement::CreateRole(ref create_stmt) => {
-                self.execute_create_role_stmt(client_id, create_stmt, None)
-            }
+            Statement::CreateRole(ref create_stmt) => self.execute_create_role_stmt(
+                client_id,
+                create_stmt,
+                None,
+                PasswordSettings::default(),
+            ),
             Statement::CreateDatabase(ref create_stmt) => {
                 self.execute_create_database_stmt(client_id, create_stmt)
             }
@@ -2205,7 +2223,7 @@ impl Database {
                 self.execute_alter_database_stmt(client_id, alter_stmt)
             }
             Statement::AlterRole(ref alter_stmt) => {
-                self.execute_alter_role_stmt(client_id, alter_stmt)
+                self.execute_alter_role_stmt(client_id, alter_stmt, PasswordSettings::default())
             }
             Statement::DropRole(ref drop_stmt) => self.execute_drop_role_stmt(client_id, drop_stmt),
             Statement::DropDatabase(ref drop_stmt) => {
@@ -4653,6 +4671,18 @@ fn partitioned_truncate_targets(
         .find_all_inheritors(root_oid)
         .into_iter()
         .filter(|oid| *oid != root_oid)
+        .filter_map(|oid| catalog.relation_by_oid(oid))
+        .filter(|entry| entry.relkind == 'r')
+        .collect()
+}
+
+fn inherited_truncate_targets(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    root_oid: u32,
+) -> Vec<crate::backend::parser::BoundRelation> {
+    catalog
+        .find_all_inheritors(root_oid)
+        .into_iter()
         .filter_map(|oid| catalog.relation_by_oid(oid))
         .filter(|entry| entry.relkind == 'r')
         .collect()

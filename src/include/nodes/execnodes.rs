@@ -7,7 +7,9 @@ use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::tidbitmap::TidBitmap;
-use crate::include::nodes::plannodes::{IndexScanKey, PartitionPrunePlan, PlanEstimate};
+use crate::include::nodes::plannodes::{
+    IndexScanKey, PartitionPrunePlan, PlanEstimate, TidScanCond,
+};
 use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
@@ -205,6 +207,7 @@ pub struct NodeExecStats {
     pub total_time: Duration,
     pub first_tuple_time: Option<Duration>,
     pub rows_removed_by_filter: u64,
+    pub rows_removed_by_index_recheck: u64,
     pub index_searches: u64,
     pub heap_fetches: u64,
     pub stack_depth_checked: bool,
@@ -287,6 +290,62 @@ pub trait PlanNode: std::fmt::Debug {
         timing: bool,
         lines: &mut Vec<String>,
     );
+
+    fn explain_json(&self, analyze: bool, indent: usize) -> String {
+        if let Some(child) = self.explain_passthrough() {
+            return child.explain_json(analyze, indent);
+        }
+
+        let pad = " ".repeat(indent);
+        let field_pad = " ".repeat(indent + 2);
+        let stats = self.node_stats();
+        let mut lines = vec![format!("{pad}{{")];
+        lines.push(format!(
+            "{field_pad}\"Node Type\": {},",
+            serde_json::to_string(&self.node_label()).unwrap_or_else(|_| "\"\"".into())
+        ));
+        if analyze {
+            lines.push(format!(
+                "{field_pad}\"Actual Rows\": {:.2},",
+                stats.rows as f64
+            ));
+            if stats.rows_removed_by_index_recheck > 0 {
+                lines.push(format!(
+                    "{field_pad}\"Rows Removed by Index Recheck\": {},",
+                    stats.rows_removed_by_index_recheck
+                ));
+            } else {
+                lines.push(format!("{field_pad}\"Rows Removed by Index Recheck\": 0,"));
+            }
+            if stats.rows_removed_by_filter > 0 {
+                lines.push(format!(
+                    "{field_pad}\"Rows Removed by Filter\": {},",
+                    stats.rows_removed_by_filter
+                ));
+            }
+        }
+        let children = self.explain_json_children(analyze, indent + 2);
+        if !children.is_empty() {
+            lines.push(format!("{field_pad}\"Plans\": ["));
+            let child_count = children.len();
+            for (idx, child) in children.into_iter().enumerate() {
+                let suffix = if idx + 1 == child_count { "" } else { "," };
+                lines.push(format!("{child}{suffix}"));
+            }
+            lines.push(format!("{field_pad}],"));
+        }
+        if let Some(last) = lines.last_mut()
+            && last.ends_with(',')
+        {
+            last.pop();
+        }
+        lines.push(format!("{pad}}}"));
+        lines.join("\n")
+    }
+
+    fn explain_json_children(&self, _analyze: bool, _indent: usize) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Executor plan state — a trait object for dynamic dispatch.
@@ -409,6 +468,39 @@ pub struct SeqScanState {
 impl std::fmt::Debug for SeqScanState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SeqScanState")
+            .field("rel", &self.rel)
+            .field("relation_name", &self.relation_name)
+            .field("has_qual", &self.qual.is_some())
+            .finish()
+    }
+}
+
+pub struct TidScanState {
+    pub(crate) rel: RelFileLocator,
+    pub(crate) relation_name: String,
+    pub(crate) relkind: char,
+    pub(crate) relispopulated: bool,
+    pub(crate) toast_relation: Option<ToastRelationRef>,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) desc: Rc<RelationDesc>,
+    pub(crate) attr_descs: Rc<[AttributeDesc]>,
+    pub(crate) tid_cond: TidScanCond,
+    pub(crate) candidates: Vec<ItemPointerData>,
+    pub(crate) candidate_index: usize,
+    pub(crate) candidates_initialized: bool,
+    pub(crate) slot: TupleSlot,
+    pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
+    pub(crate) qual_expr: Option<Expr>,
+    pub(crate) source_id: usize,
+    pub(crate) relation_oid: u32,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for TidScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TidScanState")
             .field("rel", &self.rel)
             .field("relation_name", &self.relation_name)
             .field("has_qual", &self.qual.is_some())

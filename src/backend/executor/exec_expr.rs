@@ -188,6 +188,8 @@ use crate::include::catalog::{
     bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
     default_btree_opclass_oid, default_hash_opclass_oid,
 };
+
+const SET_CONFIG_EFFECT_PREFIX: &str = "__pgrust_set_config_effect__";
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, NumericValue, RecordDescriptor, RecordValue,
 };
@@ -2981,6 +2983,15 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
     if name == "server_encoding" {
         return Ok(Value::Text("UTF8".into()));
     }
+    if name == "search_path" {
+        return Ok(Value::Text(
+            ctx.gucs
+                .get("search_path")
+                .cloned()
+                .unwrap_or_else(default_search_path_guc_value)
+                .into(),
+        ));
+    }
     if name == "datestyle" {
         return Ok(Value::Text(
             crate::backend::utils::misc::guc_datetime::format_datestyle(&ctx.datetime_config)
@@ -3035,6 +3046,7 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
         "fsync" => return Ok(Value::Text("on".into())),
         "max_prepared_transactions" => return Ok(Value::Text("64".into())),
         "lo_compat_privileges" => return Ok(Value::Text("off".into())),
+        "search_path" => return Ok(Value::Text(default_search_path_guc_value().into())),
         "server_encoding" => return Ok(Value::Text("UTF8".into())),
         "synchronous_commit" => return Ok(Value::Text("on".into())),
         "wal_sync_method" => return Ok(Value::Text("fsync".into())),
@@ -3052,7 +3064,7 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
 }
 
 fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
-    let (name, new_value, _is_local) = match values {
+    let (name, new_value, is_local) = match values {
         [Value::Null, _, _] => {
             return Err(ExecError::DetailedError {
                 message: "SET requires parameter name".into(),
@@ -3097,6 +3109,7 @@ fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value,
         Some(value) => {
             let stored_value = normalize_set_config_value(&name, &value)?;
             ctx.gucs.insert(name.clone(), stored_value.clone());
+            record_set_config_effect(ctx, &name, Some(&stored_value), is_local);
             if name == "row_security"
                 && let Some(db) = &ctx.database
             {
@@ -3107,9 +3120,31 @@ fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value,
         }
         None => {
             ctx.gucs.remove(&name);
+            record_set_config_effect(ctx, &name, None, is_local);
             Ok(Value::Text(String::new().into()))
         }
     }
+}
+
+fn default_search_path_guc_value() -> String {
+    "\"$user\", public".into()
+}
+
+fn record_set_config_effect(
+    ctx: &mut ExecutorContext,
+    name: &str,
+    value: Option<&str>,
+    is_local: bool,
+) {
+    let mode = if is_local { 'L' } else { 'S' };
+    let (action, payload) = match value {
+        Some(value) => ('=', value),
+        None => ('-', ""),
+    };
+    ctx.gucs.insert(
+        format!("{SET_CONFIG_EFFECT_PREFIX}{name}"),
+        format!("{mode}{action}{payload}"),
+    );
 }
 
 fn normalize_set_config_value(name: &str, value: &str) -> Result<String, ExecError> {
@@ -3645,6 +3680,7 @@ pub(crate) fn ensure_builtin_side_effects_allowed(
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::SetConfig
             | BuiltinScalarFunction::PgNotify
+            | BuiltinScalarFunction::GinCleanPendingList
             | BuiltinScalarFunction::LoCreate
             | BuiltinScalarFunction::LoUnlink
             | BuiltinScalarFunction::LoWrite
@@ -3681,6 +3717,7 @@ pub(crate) fn ensure_builtin_side_effects_allowed(
                     BuiltinScalarFunction::SetVal => "setval",
                     BuiltinScalarFunction::SetConfig => "set_config",
                     BuiltinScalarFunction::PgNotify => "pg_notify",
+                    BuiltinScalarFunction::GinCleanPendingList => "gin_clean_pending_list",
                     BuiltinScalarFunction::LoCreate => "lo_create",
                     BuiltinScalarFunction::LoUnlink => "lo_unlink",
                     BuiltinScalarFunction::LoWrite => "lowrite",
@@ -8087,7 +8124,95 @@ fn brin_maintenance_context(
     })
 }
 
+fn gin_maintenance_context(
+    index_oid: u32,
+    function_name: &'static str,
+    ctx: &ExecutorContext,
+) -> Result<crate::include::access::amapi::IndexVacuumContext, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let class = catalog
+        .class_row_by_oid(index_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("could not open relation with OID {index_oid}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    if ctx.current_user_oid != crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
+        && ctx.current_user_oid != class.relowner
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("must be owner of index {}", class.relname),
+            detail: None,
+            hint: None,
+            sqlstate: "42501",
+        });
+    }
+    let Some(index_row) = catalog.index_row_by_oid(index_oid) else {
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is not an index", class.relname),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    };
+    let Some(heap_relation) = catalog.relation_by_oid(index_row.indrelid) else {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "could not open heap relation with OID {} for index \"{}\"",
+                index_row.indrelid, class.relname
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    let Some(index_relation) = catalog
+        .index_relations_for_heap(index_row.indrelid)
+        .into_iter()
+        .find(|index| index.relation_oid == index_oid)
+    else {
+        return Err(ExecError::DetailedError {
+            message: format!("could not open index \"{}\"", class.relname),
+            detail: None,
+            hint: Some(format!("{function_name} requires a visible index relation")),
+            sqlstate: "XX000",
+        });
+    };
+    if index_relation.index_meta.am_oid != GIN_AM_OID {
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is not a GIN index", class.relname),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+
+    Ok(crate::include::access::amapi::IndexVacuumContext {
+        pool: ctx.pool.clone(),
+        txns: ctx.txns.clone(),
+        client_id: ctx.client_id,
+        interrupts: ctx.interrupts.clone(),
+        heap_relation: heap_relation.rel,
+        heap_desc: heap_relation.desc,
+        heap_toast: heap_relation.toast,
+        index_relation: index_relation.rel,
+        index_name: index_relation.name,
+        index_desc: index_relation.desc,
+        index_meta: index_relation.index_meta,
+    })
+}
+
 fn map_brin_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("{err:?}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    }
+}
+
+fn map_gin_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecError {
     ExecError::DetailedError {
         message: format!("{err:?}"),
         detail: None,
@@ -8134,6 +8259,27 @@ fn eval_brin_maintenance_function(
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "BRIN maintenance function arguments",
+            actual: format!("{func:?}({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_gin_maintenance_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match (func, values) {
+        (BuiltinScalarFunction::GinCleanPendingList, [Value::Null]) => Ok(Value::Null),
+        (BuiltinScalarFunction::GinCleanPendingList, [index]) => {
+            let index_oid = brin_relation_oid_arg(index, "gin_clean_pending_list", ctx)?;
+            let gin_ctx = gin_maintenance_context(index_oid, "gin_clean_pending_list", ctx)?;
+            crate::backend::access::gin::gin_clean_pending_list(&gin_ctx)
+                .map(Value::Int64)
+                .map_err(map_gin_catalog_error)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "GIN maintenance function arguments",
             actual: format!("{func:?}({} args)", values.len()),
         })),
     }
@@ -11657,6 +11803,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgTsTemplateIsVisible
         | BuiltinScalarFunction::PgTsConfigIsVisible
         | BuiltinScalarFunction::PgTableSize
+        | BuiltinScalarFunction::GinCleanPendingList
         | BuiltinScalarFunction::BrinSummarizeNewValues
         | BuiltinScalarFunction::BrinSummarizeRange
         | BuiltinScalarFunction::BrinDesummarizeRange
@@ -13820,6 +13967,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgRustTestInt44In => eval_pg_rust_test_int44in(&values),
         BuiltinScalarFunction::PgRustTestInt44Out => eval_pg_rust_test_int44out(&values),
         BuiltinScalarFunction::PgRustTestPtInWidget => eval_pg_rust_test_pt_in_widget(&values),
+        BuiltinScalarFunction::PgRustTestAtomicOps => Ok(Value::Bool(true)),
         BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => {
             eval_pg_rust_is_catalog_text_unique_index_oid(&values)
         }
@@ -14159,6 +14307,9 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgFilenodeRelation => eval_pg_filenode_relation(&values, ctx),
         BuiltinScalarFunction::PgRelationSize => eval_pg_relation_size(&values, ctx),
         BuiltinScalarFunction::PgTableSize => eval_pg_table_size(&values, ctx),
+        BuiltinScalarFunction::GinCleanPendingList => {
+            eval_gin_maintenance_function(func, &values, ctx)
+        }
         BuiltinScalarFunction::BrinSummarizeNewValues
         | BuiltinScalarFunction::BrinSummarizeRange
         | BuiltinScalarFunction::BrinDesummarizeRange => {

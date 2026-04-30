@@ -107,6 +107,7 @@ fn reject_restricted_views_in_plan(
     match plan {
         Plan::Result { .. } | Plan::WorkTableScan { .. } | Plan::FunctionScan { .. } => Ok(()),
         Plan::SeqScan { relation_oid, .. }
+        | Plan::TidScan { relation_oid, .. }
         | Plan::IndexOnlyScan { relation_oid, .. }
         | Plan::IndexScan { relation_oid, .. }
         | Plan::BitmapIndexScan { relation_oid, .. } => {

@@ -18,6 +18,9 @@ use crate::backend::commands::copyto::{
     CopyToDmlEvent, CopyToSink, IoCopyToSink, begin_copy_to, begin_copy_to_dml_capture,
     finish_copy_to, finish_copy_to_dml_capture, write_copy_to, write_copy_to_row,
 };
+use crate::backend::commands::rolecmds::{
+    PasswordEncryption, PasswordSettings, parse_scram_iterations, role_settings,
+};
 use crate::backend::commands::tablecmds::{
     check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
     check_relation_column_privileges, execute_merge, execute_prepared_insert_row,
@@ -38,19 +41,25 @@ use crate::backend::parser::{
     CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
     CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause, DeallocateStatement,
     DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource,
-    InsertStatement, OrderByItem, ParseError, ParseOptions, PrepareStatement,
-    PreparedExternalParam, PreparedInsert, PreparedStatementQuery, RawTypeName, RawWindowFrame,
-    RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem, SelectStatement, SqlCallArgs,
-    SqlExpr, SqlFunctionArg, Statement, TransactionOptions, UpdateStatement, ValuesStatement,
+    InsertStatement, MergeAction, MergeInsertSource, MergeStatement, OrderByItem, ParseError,
+    ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert, PreparedStatementQuery,
+    RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem,
+    SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType, SqlTypeKind, Statement,
+    TransactionOptions, UpdateStatement, ValuesStatement, analyze_select_query_with_outer,
     bind_delete, bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
-    bind_insert_with_outer_scopes_and_ctes, bind_update, bind_update_with_outer_scopes_and_ctes,
-    bound_cte_from_query_rows, cte_body_references_table, delete_statement_references_table,
-    insert_statement_references_table, merge_statement_references_table, pg_plan_query_with_config,
+    bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope, bind_update,
+    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_rows, cte_body_references_table,
+    delete_statement_references_table, insert_statement_references_table,
+    merge_statement_references_table, pg_plan_query_with_config,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
-    plan_merge, plan_merge_with_outer_ctes, select_statement_references_table,
-    update_statement_references_table,
+    plan_merge, plan_merge_with_outer_ctes, raw_type_name_is_unknown, resolve_raw_type_name,
+    select_statement_references_table, update_statement_references_table,
+    with_external_param_types,
 };
-use crate::backend::rewrite::relation_row_security_is_enabled_for_user;
+use crate::backend::rewrite::{
+    load_view_return_query, relation_has_security_invoker,
+    relation_row_security_is_enabled_for_user,
+};
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
@@ -74,14 +83,14 @@ use crate::backend::utils::misc::stack_depth::{
 };
 use crate::include::catalog::{
     ANYARRAYOID, ANYELEMENTOID, ANYOID, BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_FOREIGN, INT4_TYPE_OID,
-    NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID,
-    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID,
-    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, PG_WRITE_SERVER_FILES_OID, PgProcRow,
-    TEXT_TYPE_OID,
+    NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CHECKPOINT_OID, PG_CLASS_RELATION_OID,
+    PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_MAINTAIN_OID,
+    PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
+    PG_WRITE_SERVER_FILES_OID, PgProcRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::execnodes::ScalarType;
 use crate::include::nodes::pathnodes::PlannerConfig;
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, set_returning_call_exprs};
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::commands::privilege::{
@@ -1172,6 +1181,7 @@ struct CopyInsertOptions<'a> {
     null_marker: &'a str,
     default_marker: Option<&'a str>,
     on_error: CopyOnError,
+    where_clause: Option<&'a str>,
     where_filter: Option<CopyWhereFilter>,
     progress: Option<CopyProgressOptions>,
 }
@@ -1222,6 +1232,163 @@ impl CopyWhereFilter {
             literal: self.literal.clone(),
         })
     }
+}
+
+fn visible_non_generated_column_indexes(desc: &RelationDesc) -> Vec<usize> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, column)| (!column.dropped && column.generated.is_none()).then_some(idx))
+        .collect()
+}
+
+fn copy_target_column_indexes(
+    desc: &RelationDesc,
+    target_columns: Option<&[String]>,
+) -> Result<Vec<usize>, ExecError> {
+    let Some(columns) = target_columns else {
+        return Ok(visible_non_generated_column_indexes(desc));
+    };
+    let mut indexes = Vec::with_capacity(columns.len());
+    for name in columns {
+        let Some(index) = desc
+            .columns
+            .iter()
+            .position(|column| !column.dropped && column.name == *name)
+        else {
+            return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+        };
+        if desc.columns[index].generated.is_some() {
+            return Err(copy_generated_column_error(&desc.columns[index].name));
+        }
+        indexes.push(index);
+    }
+    Ok(indexes)
+}
+
+fn copy_target_column_names(
+    desc: &RelationDesc,
+    target_columns: Option<&[String]>,
+) -> Result<Vec<String>, ExecError> {
+    copy_target_column_indexes(desc, target_columns).map(|indexes| {
+        indexes
+            .into_iter()
+            .map(|index| desc.columns[index].name.clone())
+            .collect()
+    })
+}
+
+fn copy_generated_column_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("column \"{column_name}\" is a generated column"),
+        detail: Some("Generated columns cannot be used in COPY.".into()),
+        hint: None,
+        sqlstate: "428C9",
+    }
+}
+
+fn copy_generated_where_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: "generated columns are not supported in COPY FROM WHERE conditions".into(),
+        detail: Some(format!("Column \"{column_name}\" is a generated column.")),
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn validate_copy_where_generated_references(
+    table_name: &str,
+    desc: &RelationDesc,
+    clause: &str,
+) -> Result<(), ExecError> {
+    let generated_columns = desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped && column.generated.is_some())
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    let Some(first_generated) = generated_columns.first().copied() else {
+        return Ok(());
+    };
+    let identifiers = copy_where_identifiers(clause);
+    for generated in generated_columns {
+        if identifiers
+            .iter()
+            .any(|identifier| identifier.eq_ignore_ascii_case(generated))
+        {
+            return Err(copy_generated_where_error(generated));
+        }
+    }
+    let relation_name = table_name.rsplit('.').next().unwrap_or(table_name);
+    if identifiers
+        .iter()
+        .any(|identifier| identifier.eq_ignore_ascii_case(relation_name))
+    {
+        return Err(copy_generated_where_error(first_generated));
+    }
+    Ok(())
+}
+
+fn copy_where_identifiers(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if ch == '\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] as char == '\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '"' {
+            i += 1;
+            let mut ident = String::new();
+            while i < bytes.len() {
+                let quoted = bytes[i] as char;
+                if quoted == '"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                        ident.push('"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                ident.push(quoted);
+                i += 1;
+            }
+            if !ident.is_empty() {
+                out.push(ident);
+            }
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                let next = bytes[i] as char;
+                if next == '_' || next.is_ascii_alphanumeric() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(input[start..i].to_string());
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 fn bind_copy_column_defaults(
@@ -1519,6 +1686,8 @@ struct GucState {
     track_functions: TrackFunctionsSetting,
 }
 
+const SET_CONFIG_EFFECT_PREFIX: &str = "__pgrust_set_config_effect__";
+
 #[derive(Clone)]
 struct SavepointState {
     name: String,
@@ -1564,6 +1733,7 @@ impl ActiveTransaction {
 struct PreparedSelectStatement {
     query: PreparedStatementQuery,
     query_sql: String,
+    source_sql: String,
     parameter_types: Vec<RawTypeName>,
     result_columns: Option<Vec<QueryColumn>>,
     generic_plans: usize,
@@ -2469,7 +2639,10 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "default_transaction_deferrable" => Some("off"),
         "transaction_deferrable" => Some("off"),
         "lo_compat_privileges" => Some("off"),
+        "search_path" => Some("\"$user\", public"),
         "vacuum_cost_delay" => Some("0"),
+        "password_encryption" => Some("scram-sha-256"),
+        "scram_iterations" => Some("4096"),
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
@@ -2781,11 +2954,8 @@ impl Session {
             return Ok(StatementResult::AffectedRows(0));
         };
         if txn.failed {
-            let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
             self.abort_taken_transaction(db, &txn);
-            for rel in held_locks {
-                db.table_locks.unlock_table(rel, self.client_id);
-            }
+            db.table_locks.unlock_all_for_client(self.client_id);
             self.restore_guc_state(db, txn.guc_start_state);
             self.portals.drop_transaction_portals(false);
             return Ok(StatementResult::AffectedRows(0));
@@ -2806,11 +2976,8 @@ impl Session {
         let Some(txn) = self.active_txn.take() else {
             return;
         };
-        let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
         self.abort_taken_transaction(db, &txn);
-        for rel in held_locks {
-            db.table_locks.unlock_table(rel, self.client_id);
-        }
+        db.table_locks.unlock_all_for_client(self.client_id);
         self.restore_guc_state(db, txn.guc_start_state);
         self.portals.drop_transaction_portals(false);
     }
@@ -3090,6 +3257,45 @@ impl Session {
                 .filter(|schema| !schema.is_empty())
                 .collect(),
         )
+    }
+
+    fn password_settings(&self) -> PasswordSettings {
+        let default = PasswordSettings::default();
+        let encryption = self
+            .gucs
+            .get("password_encryption")
+            .and_then(|value| PasswordEncryption::parse(value))
+            .unwrap_or(default.encryption);
+        let scram_iterations = self
+            .gucs
+            .get("scram_iterations")
+            .and_then(|value| parse_scram_iterations(value))
+            .unwrap_or(default.scram_iterations);
+        PasswordSettings {
+            encryption,
+            scram_iterations,
+        }
+    }
+
+    fn apply_active_role_settings(&mut self, db: &Database) -> Result<(), ExecError> {
+        let Some(active_role_oid) = self.auth.active_role_oid() else {
+            return Ok(());
+        };
+        let settings = role_settings(db.database_oid, active_role_oid);
+        if settings.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.capture_guc_state();
+        let mut changed = Vec::new();
+        for (name, value) in settings {
+            let normalized = apply_guc_value_to_state(&mut state, &name, &value)?;
+            changed.push(normalized);
+        }
+        self.install_guc_state(state);
+        for normalized in changed {
+            self.after_guc_change(db, &normalized);
+        }
+        Ok(())
     }
 
     pub(crate) fn row_security_enabled(&self) -> bool {
@@ -3719,6 +3925,10 @@ impl Session {
         let object_kind = token_after(&tokens, &["on"])
             .ok_or_else(|| unsupported_object_address_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
         let objtype = default_acl_objtype(&object_kind)?;
+        let is_grant = tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("grant"));
+        let grantee_name = token_after(&tokens, &["to"]);
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
         let role = if let Some(role_name) = role_name {
             catalog
@@ -3758,13 +3968,24 @@ impl Session {
                     })
             })
             .transpose()?;
-        db.object_addresses.write().upsert_default_acl(
-            role.oid,
-            role.rolname,
-            namespace.as_ref().map(|row| row.oid),
-            namespace.map(|row| row.nspname),
-            objtype,
-        );
+        let namespace_oid = namespace.as_ref().map(|row| row.oid);
+        let namespace_name = namespace.map(|row| row.nspname);
+        let mut object_addresses = db.object_addresses.write();
+        if is_grant
+            && grantee_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&role.rolname))
+        {
+            object_addresses.remove_default_acl(role.oid, namespace_oid, objtype);
+        } else {
+            object_addresses.upsert_default_acl(
+                role.oid,
+                role.rolname,
+                namespace_oid,
+                namespace_name,
+                objtype,
+            );
+        }
         Ok(())
     }
 
@@ -4035,6 +4256,8 @@ impl Session {
             .or_insert_with(|| bool_guc_value(self.default_transaction_read_only()).into());
         gucs.entry("default_transaction_deferrable".into())
             .or_insert_with(|| bool_guc_value(self.default_transaction_deferrable()).into());
+        gucs.entry("search_path".into())
+            .or_insert_with(|| "\"$user\", public".into());
         gucs
     }
 
@@ -5757,6 +5980,11 @@ impl Session {
         ctx: &mut ExecutorContext,
         succeeded: bool,
     ) {
+        if succeeded {
+            self.merge_ctx_set_config_effects(ctx);
+        } else {
+            Self::clear_ctx_set_config_effects(ctx);
+        }
         let next_command_id = ctx.next_command_id;
         let mut catalog_effects = mem::take(&mut ctx.catalog_effects);
         let temp_effects = mem::take(&mut ctx.temp_effects);
@@ -5797,6 +6025,72 @@ impl Session {
         };
         let pending = mem::take(&mut ctx.pending_async_notifications);
         merge_pending_notifications(&mut txn.pending_async_notifications, pending);
+    }
+
+    fn merge_ctx_set_config_effects(&mut self, ctx: &mut ExecutorContext) {
+        let effects = Self::take_ctx_set_config_effects(ctx);
+        for (name, value, is_local) in effects {
+            if is_local && self.active_txn.is_none() {
+                continue;
+            }
+            match value {
+                Some(value) => {
+                    self.gucs.insert(name.clone(), value.clone());
+                    if !is_local && let Some(txn) = self.active_txn.as_mut() {
+                        txn.guc_commit_state.gucs.insert(name, value);
+                    }
+                }
+                None => {
+                    self.gucs.remove(&name);
+                    if !is_local && let Some(txn) = self.active_txn.as_mut() {
+                        txn.guc_commit_state.gucs.remove(&name);
+                    }
+                }
+            }
+        }
+    }
+
+    fn clear_ctx_set_config_effects(ctx: &mut ExecutorContext) {
+        let keys = ctx
+            .gucs
+            .keys()
+            .filter(|key| key.starts_with(SET_CONFIG_EFFECT_PREFIX))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            ctx.gucs.remove(&key);
+        }
+    }
+
+    fn take_ctx_set_config_effects(
+        ctx: &mut ExecutorContext,
+    ) -> Vec<(String, Option<String>, bool)> {
+        let keys = ctx
+            .gucs
+            .keys()
+            .filter(|key| key.starts_with(SET_CONFIG_EFFECT_PREFIX))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut effects = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(raw) = ctx.gucs.remove(&key) else {
+                continue;
+            };
+            let Some(name) = key.strip_prefix(SET_CONFIG_EFFECT_PREFIX) else {
+                continue;
+            };
+            let mut chars = raw.chars();
+            let is_local = matches!(chars.next(), Some('L'));
+            let action = chars.next();
+            let payload = chars.as_str();
+            let value = match action {
+                Some('=') => Some(payload.to_string()),
+                Some('-') => None,
+                _ => continue,
+            };
+            effects.push((name.to_string(), value, is_local));
+        }
+        effects
     }
 
     fn merge_completed_streaming_portal(
@@ -5859,6 +6153,11 @@ impl Session {
         guard: &mut SelectGuard,
         succeeded: bool,
     ) -> Result<(), ExecError> {
+        if succeeded {
+            self.merge_ctx_set_config_effects(&mut guard.ctx);
+        } else {
+            Self::clear_ctx_set_config_effects(&mut guard.ctx);
+        }
         let xid = guard.ctx.transaction_xid();
         let next_command_id = guard.ctx.next_command_id;
         let mut catalog_effects = mem::take(&mut guard.ctx.catalog_effects);
@@ -6108,11 +6407,8 @@ impl Session {
         let Some(txn) = self.active_txn.take() else {
             return;
         };
-        let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
         self.abort_taken_transaction(db, &txn);
-        for rel in held_locks {
-            db.table_locks.unlock_table(rel, self.client_id);
-        }
+        db.table_locks.unlock_all_for_client(self.client_id);
         self.restore_guc_state(db, txn.guc_start_state);
         self.portals.drop_transaction_portals(false);
     }
@@ -6374,7 +6670,6 @@ impl Session {
         txn: ActiveTransaction,
         result: Result<StatementResult, ExecError>,
     ) -> Result<StatementResult, ExecError> {
-        let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
         let result = match result {
             Ok(r) => {
                 (|| {
@@ -6452,9 +6747,7 @@ impl Session {
                 Err(e)
             }
         };
-        for rel in held_locks {
-            db.table_locks.unlock_table(rel, self.client_id);
-        }
+        db.table_locks.unlock_all_for_client(self.client_id);
         if result.is_ok() && txn.local_auth_active && self.auth != txn.auth_at_start {
             self.auth = txn.auth_at_start.clone();
             db.install_auth_state(self.client_id, self.auth.clone());
@@ -7082,7 +7375,7 @@ impl Session {
             Statement::Do(_) => {
                 self.execute_call_stmt_autocommit(db, stmt, statement_lock_scope_id)
             }
-            Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
+            Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(db, prepare_stmt),
             Statement::Execute(ref execute_stmt) => {
                 self.execute_prepared_statement(db, execute_stmt, statement_lock_scope_id)
             }
@@ -8779,6 +9072,7 @@ impl Session {
                         self.client_id,
                         create_stmt,
                         self.gucs.get("createrole_self_grant").map(String::as_str),
+                        self.password_settings(),
                     )
                 }
             }
@@ -8792,7 +9086,7 @@ impl Session {
                     }
                     result
                 } else {
-                    db.execute_alter_role_stmt(self.client_id, alter_stmt)
+                    db.execute_alter_role_stmt(self.client_id, alter_stmt, self.password_settings())
                 }
             }
             Statement::DropRole(ref drop_stmt) => {
@@ -8945,6 +9239,7 @@ impl Session {
                     result
                 } else {
                     self.auth = db.execute_set_role_stmt(self.client_id, set_stmt)?;
+                    self.apply_active_role_settings(db)?;
                     Ok(StatementResult::AffectedRows(0))
                 }
             }
@@ -9466,11 +9761,8 @@ impl Session {
                 if self.active_txn.as_ref().is_some_and(|txn| txn.failed) {
                     let txn = self.active_txn.take().unwrap();
                     let chained_options = options.chain.then(|| txn.chained_options());
-                    let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                     self.abort_taken_transaction(db, &txn);
-                    for rel in held_locks {
-                        db.table_locks.unlock_table(rel, self.client_id);
-                    }
+                    db.table_locks.unlock_all_for_client(self.client_id);
                     self.restore_guc_state(db, txn.guc_start_state);
                     self.portals.drop_transaction_portals(false);
                     if let Some(chained_options) = chained_options {
@@ -9521,11 +9813,8 @@ impl Session {
                     }
                 };
                 let chained_options = options.chain.then(|| txn.chained_options());
-                let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                 self.abort_taken_transaction(db, &txn);
-                for rel in held_locks {
-                    db.table_locks.unlock_table(rel, self.client_id);
-                }
+                db.table_locks.unlock_all_for_client(self.client_id);
                 self.restore_guc_state(db, txn.guc_start_state);
                 self.portals.drop_transaction_portals(false);
                 if let Some(chained_options) = chained_options {
@@ -9825,8 +10114,11 @@ impl Session {
         // tuple predicate. A native plan node can later render `TID Cond:
         // CURRENT OF ...` for exact EXPLAIN parity.
         let predicate = format!(
-            "ctid = '({},{})'::tid",
-            row.tid.block_number, row.tid.offset_number
+            "ctid = '({},{})'::tid AND '__pgrust_current_of:{}' = '__pgrust_current_of:{}'",
+            row.tid.block_number,
+            row.tid.offset_number,
+            cursor_name.replace('\'', "''"),
+            cursor_name.replace('\'', "''")
         );
         let mut rewritten = String::with_capacity(sql.len() + predicate.len());
         rewritten.push_str(&sql[..start]);
@@ -9892,8 +10184,597 @@ impl Session {
         }
     }
 
+    fn prepared_statement_external_types(
+        parameter_types: &[RawTypeName],
+        catalog: &dyn CatalogLookup,
+    ) -> Result<Vec<(usize, SqlType)>, ParseError> {
+        parameter_types
+            .iter()
+            .enumerate()
+            .map(|(index, raw)| resolve_raw_type_name(raw, catalog).map(|ty| (index + 1, ty)))
+            .collect()
+    }
+
+    fn query_columns_type_oids(columns: &[QueryColumn], catalog: &dyn CatalogLookup) -> Vec<u32> {
+        columns
+            .iter()
+            .filter_map(|column| {
+                column.wire_type_oid.or_else(|| {
+                    catalog.type_oid_for_sql_type(column.sql_type).or_else(|| {
+                        (column.sql_type.type_oid != 0).then_some(column.sql_type.type_oid)
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn target_entries_to_query_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+        targets
+            .iter()
+            .filter(|target| !target.resjunk)
+            .map(|target| QueryColumn {
+                name: target.name.clone(),
+                sql_type: target.sql_type,
+                wire_type_oid: None,
+            })
+            .collect()
+    }
+
+    fn prepared_result_columns(
+        query: &PreparedStatementQuery,
+        parameter_types: &[RawTypeName],
+        catalog: &dyn CatalogLookup,
+    ) -> Result<Option<Vec<QueryColumn>>, ExecError> {
+        let external_types = Self::prepared_statement_external_types(parameter_types, catalog)
+            .map_err(ExecError::Parse)?;
+        with_external_param_types(&external_types, || match query {
+            PreparedStatementQuery::Select(select) => {
+                let (query, _) =
+                    analyze_select_query_with_outer(select, catalog, &[], None, None, &[], &[])?;
+                Ok(Some(Self::target_entries_to_query_columns(
+                    &query.target_list,
+                )))
+            }
+            PreparedStatementQuery::Insert(insert) => {
+                let bound = bind_insert(insert, catalog)?;
+                Ok((!bound.returning.is_empty())
+                    .then(|| Self::target_entries_to_query_columns(&bound.returning)))
+            }
+            PreparedStatementQuery::Update(update) => {
+                let bound = bind_update(update, catalog)?;
+                Ok((!bound.returning.is_empty())
+                    .then(|| Self::target_entries_to_query_columns(&bound.returning)))
+            }
+            PreparedStatementQuery::Merge(merge) => {
+                let bound = plan_merge(merge, catalog)?;
+                Ok((!bound.returning.is_empty())
+                    .then(|| Self::target_entries_to_query_columns(&bound.returning)))
+            }
+        })
+        .map_err(ExecError::Parse)
+    }
+
+    fn infer_prepare_statement_parameter_types(
+        prepare_stmt: &PrepareStatement,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<Vec<RawTypeName>, ExecError> {
+        let highest = Self::max_prepared_param_in_sql(&prepare_stmt.query_sql);
+        if !prepare_stmt.parameter_types.is_empty() && highest > prepare_stmt.parameter_types.len()
+        {
+            return Err(Self::prepared_statement_param_error(highest));
+        }
+        let count = highest.max(prepare_stmt.parameter_types.len());
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut inferred = vec![None; count];
+        for (index, raw) in prepare_stmt.parameter_types.iter().enumerate() {
+            if raw_type_name_is_unknown(raw) {
+                continue;
+            }
+            inferred[index] = Some(resolve_raw_type_name(raw, catalog).map_err(ExecError::Parse)?);
+        }
+        match &prepare_stmt.query {
+            PreparedStatementQuery::Select(select) => {
+                Self::infer_select_prepared_parameter_types(select, catalog, &mut inferred)?;
+            }
+            PreparedStatementQuery::Insert(insert) => {
+                Self::infer_insert_prepared_parameter_types(insert, catalog, &mut inferred)?;
+            }
+            PreparedStatementQuery::Update(update) => {
+                Self::infer_update_prepared_parameter_types(update, catalog, &mut inferred)?;
+            }
+            PreparedStatementQuery::Merge(merge) => {
+                Self::infer_merge_prepared_parameter_types(merge, catalog, &mut inferred)?;
+            }
+        }
+        Ok(inferred
+            .into_iter()
+            .map(|ty| RawTypeName::Builtin(ty.unwrap_or_else(|| SqlType::new(SqlTypeKind::Text))))
+            .collect())
+    }
+
+    fn infer_select_prepared_parameter_types(
+        select: &SelectStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let mut columns = BTreeMap::new();
+        if let Some(from) = &select.from {
+            Self::collect_prepared_from_item_columns(from, catalog, &mut columns);
+        }
+        if let Some(where_clause) = &select.where_clause {
+            Self::infer_prepared_expr_parameter_types(where_clause, &columns, catalog, inferred)?;
+        }
+        Ok(())
+    }
+
+    fn infer_update_prepared_parameter_types(
+        update: &UpdateStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let Some(relation) = catalog.lookup_any_relation(&update.table_name) else {
+            return Ok(());
+        };
+        let mut columns = BTreeMap::new();
+        Self::insert_relation_desc_columns(&mut columns, None, &relation.desc);
+        for assignment in &update.assignments {
+            if let Some(column) = relation.desc.columns.iter().find(|column| {
+                !column.dropped && column.name.eq_ignore_ascii_case(&assignment.target.column)
+            }) {
+                Self::infer_prepared_expr_against_type(
+                    &assignment.expr,
+                    column.sql_type,
+                    catalog,
+                    inferred,
+                )?;
+            }
+        }
+        if let Some(where_clause) = &update.where_clause {
+            Self::infer_prepared_expr_parameter_types(where_clause, &columns, catalog, inferred)?;
+        }
+        Ok(())
+    }
+
+    fn infer_merge_prepared_parameter_types(
+        merge: &MergeStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let Some(relation) = catalog.lookup_any_relation(&merge.target_table) else {
+            return Ok(());
+        };
+        let mut columns = BTreeMap::new();
+        Self::insert_relation_desc_columns(&mut columns, None, &relation.desc);
+        let target_qualifier = merge
+            .target_alias
+            .as_deref()
+            .or_else(|| merge.target_table.rsplit('.').next());
+        Self::insert_relation_desc_columns(&mut columns, target_qualifier, &relation.desc);
+        Self::collect_prepared_from_item_columns(&merge.source, catalog, &mut columns);
+        Self::infer_prepared_expr_parameter_types(
+            &merge.join_condition,
+            &columns,
+            catalog,
+            inferred,
+        )?;
+        for clause in &merge.when_clauses {
+            if let Some(condition) = &clause.condition {
+                Self::infer_prepared_expr_parameter_types(condition, &columns, catalog, inferred)?;
+            }
+            match &clause.action {
+                MergeAction::DoNothing | MergeAction::Delete => {}
+                MergeAction::Update { assignments } => {
+                    for assignment in assignments {
+                        if let Some(column) = relation.desc.columns.iter().find(|column| {
+                            !column.dropped
+                                && column.name.eq_ignore_ascii_case(&assignment.target.column)
+                        }) {
+                            Self::infer_prepared_expr_against_type(
+                                &assignment.expr,
+                                column.sql_type,
+                                catalog,
+                                inferred,
+                            )?;
+                        }
+                    }
+                }
+                MergeAction::Insert {
+                    columns, source, ..
+                } => {
+                    let target_types = columns
+                        .as_ref()
+                        .map(|targets| {
+                            targets
+                                .iter()
+                                .filter_map(|target| {
+                                    relation
+                                        .desc
+                                        .columns
+                                        .iter()
+                                        .find(|column| {
+                                            !column.dropped
+                                                && column.name.eq_ignore_ascii_case(&target.column)
+                                        })
+                                        .map(|column| column.sql_type)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_else(|| {
+                            relation
+                                .desc
+                                .columns
+                                .iter()
+                                .filter(|column| !column.dropped)
+                                .map(|column| column.sql_type)
+                                .collect::<Vec<_>>()
+                        });
+                    if let MergeInsertSource::Values(values) = source {
+                        for (expr, target_type) in values.iter().zip(target_types.iter()) {
+                            Self::infer_prepared_expr_against_type(
+                                expr,
+                                *target_type,
+                                catalog,
+                                inferred,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        for target in &merge.returning {
+            Self::infer_prepared_expr_parameter_types(&target.expr, &columns, catalog, inferred)?;
+        }
+        Ok(())
+    }
+
+    fn infer_insert_prepared_parameter_types(
+        insert: &InsertStatement,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        let Some(relation) = catalog.lookup_any_relation(&insert.table_name) else {
+            return Ok(());
+        };
+        let target_types = insert
+            .columns
+            .as_ref()
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter_map(|target| {
+                        relation
+                            .desc
+                            .columns
+                            .iter()
+                            .find(|column| {
+                                !column.dropped && column.name.eq_ignore_ascii_case(&target.column)
+                            })
+                            .map(|column| column.sql_type)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                relation
+                    .desc
+                    .columns
+                    .iter()
+                    .filter(|column| !column.dropped)
+                    .map(|column| column.sql_type)
+                    .collect::<Vec<_>>()
+            });
+        if let InsertSource::Values(rows) = &insert.source {
+            for row in rows {
+                for (expr, target_type) in row.iter().zip(target_types.iter()) {
+                    Self::infer_prepared_expr_against_type(expr, *target_type, catalog, inferred)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_prepared_from_item_columns(
+        item: &FromItem,
+        catalog: &dyn CatalogLookup,
+        columns: &mut BTreeMap<String, SqlType>,
+    ) {
+        match item {
+            FromItem::Table { name, .. } => {
+                if let Some(relation) = catalog.lookup_any_relation(name) {
+                    let qualifier = name.rsplit('.').next();
+                    Self::insert_relation_desc_columns(columns, qualifier, &relation.desc);
+                    Self::insert_relation_desc_columns(columns, None, &relation.desc);
+                }
+            }
+            FromItem::Alias { source, alias, .. } => {
+                Self::collect_prepared_from_item_columns(source, catalog, columns);
+                if let Some(desc) = Self::prepared_from_item_relation_desc(source, catalog) {
+                    Self::insert_relation_desc_columns(columns, Some(alias), &desc);
+                }
+            }
+            FromItem::Join { left, right, .. } => {
+                Self::collect_prepared_from_item_columns(left, catalog, columns);
+                Self::collect_prepared_from_item_columns(right, catalog, columns);
+            }
+            FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
+                Self::collect_prepared_from_item_columns(source, catalog, columns);
+            }
+            FromItem::DerivedTable(_)
+            | FromItem::Values { .. }
+            | FromItem::Expression { .. }
+            | FromItem::FunctionCall { .. }
+            | FromItem::RowsFrom { .. }
+            | FromItem::JsonTable(_)
+            | FromItem::XmlTable(_) => {}
+        }
+    }
+
+    fn prepared_from_item_relation_desc(
+        item: &FromItem,
+        catalog: &dyn CatalogLookup,
+    ) -> Option<RelationDesc> {
+        match item {
+            FromItem::Table { name, .. } => catalog.lookup_any_relation(name).map(|rel| rel.desc),
+            FromItem::Alias { source, .. }
+            | FromItem::Lateral(source)
+            | FromItem::TableSample { source, .. } => {
+                Self::prepared_from_item_relation_desc(source, catalog)
+            }
+            _ => None,
+        }
+    }
+
+    fn insert_relation_desc_columns(
+        columns: &mut BTreeMap<String, SqlType>,
+        qualifier: Option<&str>,
+        desc: &RelationDesc,
+    ) {
+        for column in &desc.columns {
+            if column.dropped {
+                continue;
+            }
+            columns.insert(column.name.to_ascii_lowercase(), column.sql_type);
+            if let Some(qualifier) = qualifier {
+                columns.insert(
+                    format!(
+                        "{}.{}",
+                        qualifier.to_ascii_lowercase(),
+                        column.name.to_ascii_lowercase()
+                    ),
+                    column.sql_type,
+                );
+            }
+        }
+    }
+
+    fn infer_prepared_expr_parameter_types(
+        expr: &SqlExpr,
+        columns: &BTreeMap<String, SqlType>,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        match expr {
+            SqlExpr::Eq(left, right)
+            | SqlExpr::NotEq(left, right)
+            | SqlExpr::Lt(left, right)
+            | SqlExpr::LtEq(left, right)
+            | SqlExpr::Gt(left, right)
+            | SqlExpr::GtEq(left, right) => {
+                if let Some(target) = Self::prepared_expr_type(right, columns, catalog) {
+                    Self::infer_prepared_expr_against_type(left, target, catalog, inferred)?;
+                }
+                if let Some(target) = Self::prepared_expr_type(left, columns, catalog) {
+                    Self::infer_prepared_expr_against_type(right, target, catalog, inferred)?;
+                }
+                Self::infer_prepared_expr_parameter_types(left, columns, catalog, inferred)?;
+                Self::infer_prepared_expr_parameter_types(right, columns, catalog, inferred)?;
+            }
+            SqlExpr::And(left, right) | SqlExpr::Or(left, right) => {
+                Self::infer_prepared_expr_parameter_types(left, columns, catalog, inferred)?;
+                Self::infer_prepared_expr_parameter_types(right, columns, catalog, inferred)?;
+            }
+            SqlExpr::Cast(inner, raw) => {
+                let target = resolve_raw_type_name(raw, catalog).map_err(ExecError::Parse)?;
+                Self::infer_prepared_expr_against_type(inner, target, catalog, inferred)?;
+            }
+            SqlExpr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                Self::infer_prepared_expr_against_type(
+                    expr,
+                    SqlType::new(SqlTypeKind::Text),
+                    catalog,
+                    inferred,
+                )?;
+                Self::infer_prepared_expr_against_type(
+                    pattern,
+                    SqlType::new(SqlTypeKind::Text),
+                    catalog,
+                    inferred,
+                )?;
+                if let Some(escape) = escape {
+                    Self::infer_prepared_expr_against_type(
+                        escape,
+                        SqlType::new(SqlTypeKind::Text),
+                        catalog,
+                        inferred,
+                    )?;
+                }
+            }
+            SqlExpr::Not(inner)
+            | SqlExpr::IsNull(inner)
+            | SqlExpr::IsNotNull(inner)
+            | SqlExpr::UnaryPlus(inner)
+            | SqlExpr::Negate(inner)
+            | SqlExpr::BitNot(inner)
+            | SqlExpr::PrefixOperator { expr: inner, .. }
+            | SqlExpr::GeometryUnaryOp { expr: inner, .. } => {
+                Self::infer_prepared_expr_parameter_types(inner, columns, catalog, inferred)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn infer_prepared_expr_against_type(
+        expr: &SqlExpr,
+        target: SqlType,
+        catalog: &dyn CatalogLookup,
+        inferred: &mut [Option<SqlType>],
+    ) -> Result<(), ExecError> {
+        match expr {
+            SqlExpr::Parameter(index) | SqlExpr::ParamRef(index) => {
+                Self::set_inferred_prepared_parameter_type(inferred, *index, target);
+            }
+            SqlExpr::Cast(inner, raw) => {
+                let target = resolve_raw_type_name(raw, catalog).map_err(ExecError::Parse)?;
+                Self::infer_prepared_expr_against_type(inner, target, catalog, inferred)?;
+            }
+            _ => {
+                let empty = BTreeMap::new();
+                Self::infer_prepared_expr_parameter_types(expr, &empty, catalog, inferred)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepared_expr_type(
+        expr: &SqlExpr,
+        columns: &BTreeMap<String, SqlType>,
+        catalog: &dyn CatalogLookup,
+    ) -> Option<SqlType> {
+        match expr {
+            SqlExpr::Column(name) => columns.get(&name.to_ascii_lowercase()).copied(),
+            SqlExpr::Cast(_, raw) => resolve_raw_type_name(raw, catalog).ok(),
+            SqlExpr::Const(Value::Int16(_)) => Some(SqlType::new(SqlTypeKind::Int2)),
+            SqlExpr::Const(Value::Int32(_)) | SqlExpr::IntegerLiteral(_) => {
+                Some(SqlType::new(SqlTypeKind::Int4))
+            }
+            SqlExpr::Const(Value::Int64(_)) => Some(SqlType::new(SqlTypeKind::Int8)),
+            SqlExpr::Const(Value::Float64(_)) => Some(SqlType::new(SqlTypeKind::Float8)),
+            SqlExpr::NumericLiteral(_) => Some(SqlType::new(SqlTypeKind::Numeric)),
+            SqlExpr::Const(Value::Bool(_)) => Some(SqlType::new(SqlTypeKind::Bool)),
+            SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) => {
+                Some(SqlType::new(SqlTypeKind::Text))
+            }
+            SqlExpr::CurrentUser | SqlExpr::SessionUser | SqlExpr::CurrentRole => {
+                Some(SqlType::new(SqlTypeKind::Name))
+            }
+            SqlExpr::CurrentCatalog | SqlExpr::CurrentSchema => {
+                Some(SqlType::new(SqlTypeKind::Text))
+            }
+            SqlExpr::UnaryPlus(inner) | SqlExpr::Negate(inner) => {
+                Self::prepared_expr_type(inner, columns, catalog)
+            }
+            _ => None,
+        }
+    }
+
+    fn set_inferred_prepared_parameter_type(
+        inferred: &mut [Option<SqlType>],
+        parameter: usize,
+        target: SqlType,
+    ) {
+        if parameter == 0 {
+            return;
+        }
+        if let Some(slot) = inferred.get_mut(parameter - 1)
+            && slot.is_none()
+        {
+            *slot = Some(target);
+        }
+    }
+
+    fn validate_prepared_execute_arg_types(
+        &self,
+        execute_stmt: &ExecuteStatement,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<(), ExecError> {
+        let prepared = self.resolve_prepared_statement(execute_stmt)?;
+        let args = parse_prepared_execute_args(&execute_stmt.args_sql)?;
+        for (index, (arg, raw_type)) in args.iter().zip(prepared.parameter_types.iter()).enumerate()
+        {
+            let target_type = resolve_raw_type_name(raw_type, catalog).map_err(ExecError::Parse)?;
+            let (_, source_type) =
+                bind_scalar_expr_in_named_slot_scope(arg, &[], &[], catalog, &[])
+                    .map_err(ExecError::Parse)?;
+            if !Self::prepared_execute_arg_can_coerce(source_type, target_type, catalog) {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!(
+                        "parameter ${} of type {} cannot be coerced to the expected type {}",
+                        index + 1,
+                        format_sql_type_name(source_type),
+                        format_sql_type_name(target_type)
+                    ),
+                    detail: None,
+                    hint: Some("You will need to rewrite or cast the expression.".into()),
+                    sqlstate: "42804",
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    fn prepared_execute_arg_can_coerce(
+        source: SqlType,
+        target: SqlType,
+        catalog: &dyn CatalogLookup,
+    ) -> bool {
+        if source == target {
+            return true;
+        }
+        let source_oid = catalog
+            .type_oid_for_sql_type(source)
+            .or_else(|| (source.type_oid != 0).then_some(source.type_oid));
+        let target_oid = catalog
+            .type_oid_for_sql_type(target)
+            .or_else(|| (target.type_oid != 0).then_some(target.type_oid));
+        if source_oid.is_some() && source_oid == target_oid {
+            return true;
+        }
+        if !source.is_array && !target.is_array && matches!(source.kind, SqlTypeKind::Text) {
+            return true;
+        }
+        if !source.is_array
+            && !target.is_array
+            && matches!(target.kind, SqlTypeKind::Text | SqlTypeKind::Name)
+        {
+            return true;
+        }
+        if Self::prepared_numeric_family(source) && Self::prepared_numeric_family(target) {
+            return true;
+        }
+        let Some(source_oid) = source_oid else {
+            return false;
+        };
+        let Some(target_oid) = target_oid else {
+            return false;
+        };
+        catalog
+            .cast_by_source_target(source_oid, target_oid)
+            .is_some_and(|row| matches!(row.castcontext, 'i' | 'a'))
+    }
+
+    fn prepared_numeric_family(sql_type: SqlType) -> bool {
+        !sql_type.is_array
+            && matches!(
+                sql_type.kind,
+                SqlTypeKind::Int2
+                    | SqlTypeKind::Int4
+                    | SqlTypeKind::Int8
+                    | SqlTypeKind::Float4
+                    | SqlTypeKind::Float8
+                    | SqlTypeKind::Numeric
+            )
+    }
+
     fn apply_prepare_statement(
         &mut self,
+        db: &Database,
         prepare_stmt: &PrepareStatement,
     ) -> Result<StatementResult, ExecError> {
         let name = Self::prepared_statement_name(&prepare_stmt.name);
@@ -9905,11 +10786,17 @@ impl Session {
                 sqlstate: "42P05",
             }));
         }
+        let catalog = self.catalog_lookup(db);
+        let parameter_types =
+            Self::infer_prepare_statement_parameter_types(prepare_stmt, &catalog)?;
+        let result_columns =
+            Self::prepared_result_columns(&prepare_stmt.query, &parameter_types, &catalog)?;
         let prepared = PreparedSelectStatement {
             query: prepare_stmt.query.clone(),
             query_sql: prepare_stmt.query_sql.clone(),
-            parameter_types: prepare_stmt.parameter_types.clone(),
-            result_columns: None,
+            source_sql: prepare_stmt.source_sql.clone(),
+            parameter_types,
+            result_columns,
             generic_plans: 0,
             custom_plans: 0,
             prepare_time: crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
@@ -9969,19 +10856,22 @@ impl Session {
             .iter()
             .map(|(name, prepared)| SessionPreparedStatementViewRow {
                 name: name.clone(),
-                statement: prepared.query_sql.clone(),
+                statement: prepared.source_sql.clone(),
                 prepare_time: prepared.prepare_time,
                 parameter_type_oids: prepared
                     .parameter_types
                     .iter()
-                    .filter_map(|raw| raw.as_builtin())
+                    .filter_map(|raw| resolve_raw_type_name(raw, catalog).ok())
                     .filter_map(|ty| {
                         catalog
                             .type_oid_for_sql_type(ty)
                             .or_else(|| (ty.type_oid != 0).then_some(ty.type_oid))
                     })
                     .collect(),
-                result_type_oids: Vec::new(),
+                result_type_oids: prepared
+                    .result_columns
+                    .as_ref()
+                    .map(|columns| Self::query_columns_type_oids(columns, catalog)),
                 from_sql: true,
                 generic_plans: prepared.generic_plans as i64,
                 custom_plans: prepared.custom_plans as i64,
@@ -10405,9 +11295,11 @@ impl Session {
             prepared.parameter_types.len()
         };
         if args.len() != expected {
-            return Err(Self::prepared_statement_param_count_error(
-                expected,
+            let name = Self::prepared_statement_name(&execute_stmt.name);
+            return Err(Self::prepared_statement_arg_count_error(
+                &name,
                 args.len(),
+                expected,
             ));
         }
         let statement = match prepared.query {
@@ -11576,6 +12468,8 @@ impl Session {
     ) -> Result<StatementResult, ExecError> {
         let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
         self.check_read_only_statement_allowed(db, &resolved.statement)?;
+        let validation_catalog = self.catalog_lookup(db);
+        self.validate_prepared_execute_arg_types(execute_stmt, &validation_catalog)?;
         if self.active_txn.is_some() {
             let _plan_kind = self.record_prepared_plan_use(&execute_stmt.name, None)?;
             // Transactional prepared execution still uses the older substitution path until
@@ -11633,9 +12527,12 @@ impl Session {
         };
         let search_path = self.configured_search_path();
         let plan_kind = if self.active_txn.is_some() {
+            let catalog = self.catalog_lookup(db);
+            self.validate_prepared_execute_arg_types(execute_stmt, &catalog)?;
             self.record_prepared_plan_use(&execute_stmt.name, None)?
         } else {
             let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
+            self.validate_prepared_execute_arg_types(execute_stmt, &catalog)?;
             self.record_prepared_plan_use(&execute_stmt.name, Some(&catalog as &dyn CatalogLookup))?
         };
         let mut resolved_explain = explain_stmt.clone();
@@ -11871,6 +12768,1134 @@ impl Session {
         }
     }
 
+    fn collect_lock_table_relation(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        relation: crate::backend::parser::BoundRelation,
+        require_acl: bool,
+        include_descendants: bool,
+        require_view_ref_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        let class_row = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation with OID {} does not exist", relation.relation_oid),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+
+        if !matches!(class_row.relkind, 'r' | 'p' | 'v') {
+            return Err(ExecError::DetailedError {
+                message: format!("cannot lock relation \"{}\"", class_row.relname),
+                detail: None,
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
+        if require_acl && !Self::lock_table_acl_allows(&class_row, auth, auth_catalog, mode) {
+            return Err(Self::lock_table_permission_denied(
+                class_row.relkind,
+                &class_row.relname,
+            ));
+        }
+        if !visited.insert(relation.relation_oid) {
+            return Ok(());
+        }
+
+        targets.push((
+            crate::pgrust::database::relation_lock_tag(&relation),
+            class_row.relname.clone(),
+        ));
+
+        if include_descendants && matches!(class_row.relkind, 'r' | 'p') {
+            for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+                if child_oid == relation.relation_oid {
+                    continue;
+                }
+                let Some(child_relation) = catalog.relation_by_oid(child_oid) else {
+                    continue;
+                };
+                Self::collect_lock_table_relation(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    child_relation,
+                    false,
+                    false,
+                    require_view_ref_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+        }
+
+        if class_row.relkind == 'v' {
+            let referenced_relations_need_acl = require_view_ref_acl
+                || relation_has_security_invoker(catalog, relation.relation_oid);
+            Self::collect_lock_view_dependency_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                relation.relation_oid,
+                referenced_relations_need_acl,
+                visited,
+                targets,
+            )?;
+            let query =
+                load_view_return_query(relation.relation_oid, &relation.desc, None, catalog, &[])
+                    .map_err(ExecError::Parse)?;
+            Self::collect_lock_query_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &query,
+                referenced_relations_need_acl,
+                visited,
+                targets,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn collect_lock_view_dependency_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        view_oid: u32,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        let return_rule_oids = catalog
+            .rewrite_rows_for_relation(view_oid)
+            .into_iter()
+            .filter(|row| row.rulename == "_RETURN")
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
+        if return_rule_oids.is_empty() {
+            return Ok(());
+        }
+        let mut relation_oids = catalog
+            .depend_rows()
+            .into_iter()
+            .filter(|row| {
+                row.classid == PG_REWRITE_RELATION_OID
+                    && return_rule_oids.contains(&row.objid)
+                    && row.refclassid == PG_CLASS_RELATION_OID
+                    && row.refobjid != view_oid
+            })
+            .map(|row| row.refobjid)
+            .collect::<Vec<_>>();
+        relation_oids.sort_unstable();
+        relation_oids.dedup();
+        for relation_oid in relation_oids {
+            if let Some(relation) = catalog.relation_by_oid(relation_oid) {
+                Self::collect_lock_table_relation(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    relation,
+                    require_acl,
+                    true,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_lock_query_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        query: &crate::include::nodes::parsenodes::Query,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        for rte in &query.rtable {
+            for qual in &rte.security_quals {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    qual,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            match &rte.kind {
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Relation {
+                    relation_oid,
+                    ..
+                } => {
+                    if let Some(relation) = catalog.relation_by_oid(*relation_oid) {
+                        Self::collect_lock_table_relation(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            relation,
+                            require_acl,
+                            true,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Join {
+                    joinaliasvars,
+                    ..
+                } => {
+                    for expr in joinaliasvars {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            expr,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Values { rows, .. } => {
+                    for expr in rows.iter().flatten() {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            expr,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Function { call } => {
+                    for expr in set_returning_call_exprs(call) {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            expr,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Cte { query, .. }
+                | crate::include::nodes::parsenodes::RangeTblEntryKind::Subquery { query } => {
+                    Self::collect_lock_query_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        query,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                crate::include::nodes::parsenodes::RangeTblEntryKind::Result
+                | crate::include::nodes::parsenodes::RangeTblEntryKind::WorkTable { .. } => {}
+            }
+        }
+        if let Some(jointree) = &query.jointree {
+            Self::collect_lock_join_tree_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                jointree,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for target in &query.target_list {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &target.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for clause in &query.distinct_on {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &clause.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(where_qual) = &query.where_qual {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                where_qual,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for expr in &query.group_by {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for accum in &query.accumulators {
+            Self::collect_lock_agg_accum_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                accum,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for clause in &query.window_clauses {
+            Self::collect_lock_window_clause_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                clause,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(having_qual) = &query.having_qual {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                having_qual,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for clause in &query.sort_clause {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &clause.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(recursive_union) = &query.recursive_union {
+            Self::collect_lock_query_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &recursive_union.anchor,
+                require_acl,
+                visited,
+                targets,
+            )?;
+            Self::collect_lock_query_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &recursive_union.recursive,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(set_operation) = &query.set_operation {
+            for input in &set_operation.inputs {
+                Self::collect_lock_query_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    input,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_lock_join_tree_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        node: &crate::include::nodes::parsenodes::JoinTreeNode,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        match node {
+            crate::include::nodes::parsenodes::JoinTreeNode::RangeTblRef(_) => Ok(()),
+            crate::include::nodes::parsenodes::JoinTreeNode::JoinExpr {
+                left,
+                right,
+                quals,
+                ..
+            } => {
+                Self::collect_lock_join_tree_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    left,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_join_tree_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    right,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    quals,
+                    require_acl,
+                    visited,
+                    targets,
+                )
+            }
+        }
+    }
+
+    fn collect_lock_agg_accum_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        accum: &crate::include::nodes::primnodes::AggAccum,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        for expr in &accum.args {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for item in &accum.order_by {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &item.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(filter) = &accum.filter {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                filter,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn collect_lock_window_clause_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        clause: &crate::include::nodes::primnodes::WindowClause,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        for expr in &clause.spec.partition_by {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for item in &clause.spec.order_by {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &item.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        Self::collect_lock_window_frame_bound_relations(
+            catalog,
+            auth,
+            auth_catalog,
+            mode,
+            &clause.spec.frame.start_bound,
+            require_acl,
+            visited,
+            targets,
+        )?;
+        Self::collect_lock_window_frame_bound_relations(
+            catalog,
+            auth,
+            auth_catalog,
+            mode,
+            &clause.spec.frame.end_bound,
+            require_acl,
+            visited,
+            targets,
+        )?;
+        for func in &clause.functions {
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) = &func.kind
+            {
+                Self::collect_lock_aggref_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    aggref,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            for arg in &func.args {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    arg,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_lock_window_frame_bound_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        bound: &crate::include::nodes::primnodes::WindowFrameBound,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        match bound {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset)
+            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &offset.expr,
+                    require_acl,
+                    visited,
+                    targets,
+                )
+            }
+            crate::include::nodes::primnodes::WindowFrameBound::UnboundedPreceding
+            | crate::include::nodes::primnodes::WindowFrameBound::CurrentRow
+            | crate::include::nodes::primnodes::WindowFrameBound::UnboundedFollowing => Ok(()),
+        }
+    }
+
+    fn collect_lock_aggref_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        aggref: &crate::include::nodes::primnodes::Aggref,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        for arg in &aggref.direct_args {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                arg,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for arg in &aggref.args {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                arg,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        for item in &aggref.aggorder {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &item.expr,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        if let Some(filter) = &aggref.aggfilter {
+            Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                filter,
+                require_acl,
+                visited,
+                targets,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn collect_lock_expr_relations(
+        catalog: &dyn CatalogLookup,
+        auth: &AuthState,
+        auth_catalog: &AuthCatalog,
+        mode: TableLockMode,
+        expr: &Expr,
+        require_acl: bool,
+        visited: &mut BTreeSet<u32>,
+        targets: &mut Vec<(RelFileLocator, String)>,
+    ) -> Result<(), ExecError> {
+        match expr {
+            Expr::Aggref(aggref) => Self::collect_lock_aggref_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                aggref,
+                require_acl,
+                visited,
+                targets,
+            )?,
+            Expr::GroupingKey(grouping_key) => Self::collect_lock_expr_relations(
+                catalog,
+                auth,
+                auth_catalog,
+                mode,
+                &grouping_key.expr,
+                require_acl,
+                visited,
+                targets,
+            )?,
+            Expr::GroupingFunc(grouping_func) => {
+                for arg in &grouping_func.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::WindowFunc(func) => {
+                if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                    &func.kind
+                {
+                    Self::collect_lock_aggref_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        aggref,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                for arg in &func.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Op(op) => {
+                for arg in &op.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Bool(bool_expr) => {
+                for arg in &bool_expr.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Case(case_expr) => {
+                if let Some(arg) = &case_expr.arg {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                for arm in &case_expr.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        &arm.expr,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        &arm.result,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &case_expr.defresult,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::Func(func) => {
+                for arg in &func.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::SqlJsonQueryFunction(func) => {
+                for child in func.child_exprs() {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        child,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::SetReturning(srf) => {
+                for arg in set_returning_call_exprs(&srf.call) {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::SubLink(sublink) => {
+                if let Some(testexpr) = &sublink.testexpr {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        testexpr,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                Self::collect_lock_query_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &sublink.subselect,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::SubPlan(subplan) => {
+                if let Some(testexpr) = &subplan.testexpr {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        testexpr,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+                for arg in &subplan.args {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        arg,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::ScalarArrayOp(saop) => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &saop.left,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    &saop.right,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::Xml(xml) => {
+                for child in xml.child_exprs() {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        child,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    inner,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            }
+            | Expr::Similar {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    expr,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    pattern,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                if let Some(escape) = escape {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        escape,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    inner,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::IsDistinctFrom(left, right)
+            | Expr::IsNotDistinctFrom(left, right)
+            | Expr::Coalesce(left, right) => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    left,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    right,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::ArrayLiteral { elements, .. } => {
+                for element in elements {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        element,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::Row { fields, .. } => {
+                for (_, expr) in fields {
+                    Self::collect_lock_expr_relations(
+                        catalog,
+                        auth,
+                        auth_catalog,
+                        mode,
+                        expr,
+                        require_acl,
+                        visited,
+                        targets,
+                    )?;
+                }
+            }
+            Expr::FieldSelect { expr, .. } => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    expr,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+            }
+            Expr::ArraySubscript { array, subscripts } => {
+                Self::collect_lock_expr_relations(
+                    catalog,
+                    auth,
+                    auth_catalog,
+                    mode,
+                    array,
+                    require_acl,
+                    visited,
+                    targets,
+                )?;
+                for subscript in subscripts {
+                    if let Some(lower) = &subscript.lower {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            lower,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                    if let Some(upper) = &subscript.upper {
+                        Self::collect_lock_expr_relations(
+                            catalog,
+                            auth,
+                            auth_catalog,
+                            mode,
+                            upper,
+                            require_acl,
+                            visited,
+                            targets,
+                        )?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn try_lock_table_if_needed(
         &mut self,
         db: &Database,
@@ -11914,35 +13939,23 @@ impl Session {
         let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
         let mut targets = Vec::new();
 
-        for table_name in &stmt.table_names {
+        let mut visited = BTreeSet::new();
+        for target in &stmt.targets {
             let relation = catalog
-                .lookup_any_relation(table_name)
-                .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
-            let class_row = catalog
-                .class_row_by_oid(relation.relation_oid)
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: format!("relation with OID {} does not exist", relation.relation_oid),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                })?;
-
-            if !matches!(class_row.relkind, 'r' | 'p' | 'v') {
-                return Err(ExecError::DetailedError {
-                    message: format!("cannot lock relation \"{}\"", class_row.relname),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42809",
-                });
-            }
-            if !Self::lock_table_acl_allows(&class_row, self.auth_state(), &auth_catalog, mode) {
-                return Err(Self::lock_table_permission_denied(
-                    class_row.relkind,
-                    &class_row.relname,
-                ));
-            }
-
-            targets.push((relation.rel, class_row.relname.clone()));
+                .lookup_any_relation(&target.name)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.name.clone())))?;
+            Self::collect_lock_table_relation(
+                &catalog,
+                self.auth_state(),
+                &auth_catalog,
+                mode,
+                relation,
+                true,
+                !target.only,
+                false,
+                &mut visited,
+                &mut targets,
+            )?;
         }
 
         for (rel, relation_name) in targets {
@@ -12505,7 +14518,9 @@ impl Session {
                     Ok(StatementResult::AffectedRows(0))
                 }
                 Statement::Do(ref do_stmt) => self.execute_plpgsql_do(db, do_stmt, xid, cid),
-                Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
+                Statement::Prepare(ref prepare_stmt) => {
+                    self.apply_prepare_statement(db, prepare_stmt)
+                }
                 Statement::Execute(ref execute_stmt) => {
                     self.execute_prepared_statement(db, execute_stmt, None)
                 }
@@ -14425,11 +16440,13 @@ impl Session {
                     self.apply_alter_index_set(db, alter_stmt)
                 }
                 Statement::CreateRole(ref create_stmt) => {
+                    let password_settings = self.password_settings();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_create_role_stmt_in_transaction(
                         client_id,
                         create_stmt,
                         self.gucs.get("createrole_self_grant").map(String::as_str),
+                        password_settings,
                         xid,
                         cid,
                         &mut txn.catalog_effects,
@@ -14450,10 +16467,12 @@ impl Session {
                     )
                 }
                 Statement::AlterRole(ref alter_stmt) => {
+                    let password_settings = self.password_settings();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_role_stmt_in_transaction(
                         client_id,
                         alter_stmt,
+                        password_settings,
                         xid,
                         cid,
                         &mut txn.catalog_effects,
@@ -14678,6 +16697,7 @@ impl Session {
                 Statement::SetRole(ref set_stmt) => {
                     self.auth =
                         db.execute_set_role_stmt_in_transaction(client_id, set_stmt, xid, cid)?;
+                    self.apply_active_role_settings(db)?;
                     Ok(StatementResult::AffectedRows(0))
                 }
                 Statement::ResetRole(ref reset_stmt) => {
@@ -17245,6 +19265,7 @@ impl Session {
                 } else {
                     CopyOnError::Stop
                 },
+                where_clause: copy.options.where_clause.as_deref(),
                 where_filter,
                 progress,
             },
@@ -17274,22 +19295,10 @@ impl Session {
             .read()
             .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
         let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
-        let target_indexes = if let Some(columns) = columns {
-            let mut indexes = Vec::with_capacity(columns.len());
-            for name in columns {
-                let Some(index) = desc
-                    .columns
-                    .iter()
-                    .position(|column| !column.dropped && column.name == *name)
-                else {
-                    return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
-                };
-                indexes.push(index);
-            }
-            indexes
-        } else {
-            desc.visible_column_indexes()
-        };
+        let target_indexes = copy_target_column_indexes(&desc, columns.as_deref())?;
+        if let Some(clause) = copy.options.where_clause.as_deref() {
+            validate_copy_where_generated_references(name, &desc, clause)?;
+        }
         check_relation_column_privileges(&ctx, relation_oid, 'a', target_indexes.iter().copied())?;
         if relation_row_security_is_enabled_for_user(
             relation_oid,
@@ -17303,10 +19312,11 @@ impl Session {
                 sqlstate: "0A000",
             });
         }
+        let visible_default_indexes = visible_non_generated_column_indexes(&desc);
         let validation_default_indexes = if copy.options.default_marker.is_some() {
-            desc.visible_column_indexes()
+            visible_default_indexes
         } else {
-            desc.visible_column_indexes()
+            visible_default_indexes
                 .into_iter()
                 .filter(|column_index| !target_indexes.contains(column_index))
                 .collect::<Vec<_>>()
@@ -17385,20 +19395,11 @@ impl Session {
         table_name: &str,
         target_columns: Option<&[String]>,
     ) -> Result<Vec<String>, ExecError> {
-        if let Some(columns) = target_columns {
-            return Ok(columns.to_vec());
-        }
         let catalog = self.catalog_lookup(db);
         let entry = catalog
             .lookup_any_relation(table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.to_string())))?;
-        Ok(entry
-            .desc
-            .columns
-            .iter()
-            .filter(|column| !column.dropped)
-            .map(|column| column.name.clone())
-            .collect())
+        copy_target_column_names(&entry.desc, target_columns)
     }
 
     fn copy_query_rows(
@@ -17429,9 +19430,13 @@ impl Session {
                     }
                 }
                 self.ensure_copy_to_relation_source(db, name, columns.as_deref())?;
+                let target_columns = relation
+                    .as_ref()
+                    .map(|entry| copy_target_column_names(&entry.desc, columns.as_deref()))
+                    .transpose()?;
                 relation_copy_to_query_sql(
                     name,
-                    columns.as_deref(),
+                    target_columns.as_deref(),
                     relation.is_some_and(|entry| entry.relkind == 'r'),
                 )
             }
@@ -17482,6 +19487,7 @@ impl Session {
                 null_marker,
                 default_marker: None,
                 on_error: CopyOnError::Stop,
+                where_clause: None,
                 where_filter: None,
                 progress: None,
             },
@@ -17553,28 +19559,10 @@ impl Session {
                             catalog.index_relations_for_heap(entry.relation_oid),
                         )
                     };
-                    let target_indexes = if let Some(columns) = target_columns {
-                        let mut indexes = Vec::with_capacity(columns.len());
-                        for name in columns {
-                            let Some(index) = desc
-                                .columns
-                                .iter()
-                                .position(|column| !column.dropped && column.name == *name)
-                            else {
-                                return Err(ExecError::Parse(ParseError::UnknownColumn(
-                                    name.clone(),
-                                )));
-                            };
-                            indexes.push(index);
-                        }
-                        indexes
-                    } else {
-                        desc.columns
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(idx, column)| (!column.dropped).then_some(idx))
-                            .collect()
-                    };
+                    let target_indexes = copy_target_column_indexes(&desc, target_columns)?;
+                    if let Some(clause) = options.where_clause {
+                        validate_copy_where_generated_references(table_name, &desc, clause)?;
+                    }
                     let where_filter = options
                         .where_filter
                         .as_ref()
@@ -17615,14 +19603,15 @@ impl Session {
                         target_indexes.iter().copied(),
                     )?;
                     let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
-                    let omitted_default_indexes = desc
-                        .visible_column_indexes()
-                        .into_iter()
+                    let visible_default_indexes = visible_non_generated_column_indexes(&desc);
+                    let omitted_default_indexes = visible_default_indexes
+                        .iter()
+                        .copied()
                         .filter(|column_index| !target_indexes.contains(column_index))
                         .collect::<Vec<_>>();
                     if rows.is_empty() {
                         let validation_default_indexes = if options.default_marker.is_some() {
-                            desc.visible_column_indexes()
+                            visible_default_indexes
                         } else {
                             omitted_default_indexes.clone()
                         };
@@ -18598,7 +20587,6 @@ impl Session {
 
 fn relation_copy_to_query_sql(table_name: &str, columns: Option<&[String]>, only: bool) -> String {
     let target = columns
-        .filter(|columns| !columns.is_empty())
         .map(|columns| {
             columns
                 .iter()
@@ -18696,6 +20684,34 @@ fn apply_guc_value_to_state(
         }
         "vacuum_cost_delay" => {
             parse_vacuum_cost_delay_ms(value)?;
+        }
+        "password_encryption" => {
+            let encryption =
+                PasswordEncryption::parse(value).ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for parameter \"password_encryption\": \"{value}\""
+                    ),
+                    detail: None,
+                    hint: Some("Available values: md5, scram-sha-256.".into()),
+                    sqlstate: "22023",
+                })?;
+            stored_value = match encryption {
+                PasswordEncryption::Md5 => "md5",
+                PasswordEncryption::ScramSha256 => "scram-sha-256",
+            }
+            .to_string();
+        }
+        "scram_iterations" => {
+            let iterations =
+                parse_scram_iterations(value).ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "invalid value for parameter \"scram_iterations\": \"{value}\""
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                })?;
+            stored_value = iterations.to_string();
         }
         "seq_page_cost" => {
             let parsed = value.parse::<f64>().map_err(|_| ExecError::DetailedError {

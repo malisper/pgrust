@@ -130,8 +130,14 @@ impl Database {
             has_database_create_privilege,
             &namespace_rows,
         )?;
-        let CreateSchemaResolution::Create(resolved) = resolved else {
-            return Ok(StatementResult::AffectedRows(0));
+        let resolved = match resolved {
+            CreateSchemaResolution::Create(resolved) => resolved,
+            CreateSchemaResolution::SkipExisting(schema_name) => {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    "schema \"{schema_name}\" already exists, skipping"
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
         };
         let elements =
             transform_create_schema_stmt_elements(&stmt.elements, &resolved.schema_name)?;

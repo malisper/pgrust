@@ -356,6 +356,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return Some(position);
     }
+    if let Some(parameter) = prepared_parameter_coercion_error_index(e)
+        && let Some(position) = find_execute_argument_position(sql, parameter)
+    {
+        return Some(position);
+    }
     if suppress_sql_json_query_function_runtime_position(sql, e)
         || suppress_sql_json_table_runtime_position(sql, e)
     {
@@ -450,6 +455,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UnknownColumn(name)) => {
             if suppress_unknown_column_position(sql) {
                 return None;
+            }
+            if create_schema_first_element_position(sql).is_some() {
+                return find_create_schema_element_identifier_position(sql, name)
+                    .or_else(|| find_last_identifier_position(sql, name));
             }
             return find_case_insensitive_token_position(sql, name)
                 .or_else(|| find_error_value_position(sql, name));
@@ -596,6 +605,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 .and_then(|rest| rest.strip_suffix('"'))
             {
                 return find_case_insensitive_token_position(sql, option);
+            }
+            if message == "CREATE SCHEMA IF NOT EXISTS cannot include schema elements" {
+                return create_schema_first_element_position(sql);
             }
             if let Some(position) =
                 publication_where_error_position(sql, message, detail.as_deref())
@@ -1033,6 +1045,86 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn prepared_parameter_coercion_error_index(e: &ExecError) -> Option<usize> {
+    let message = match e {
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+        | ExecError::DetailedError { message, .. } => message,
+        _ => return None,
+    };
+    let rest = message.strip_prefix("parameter $")?;
+    let digits = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn find_execute_argument_position(sql: &str, parameter: usize) -> Option<usize> {
+    if parameter == 0
+        || !sql
+            .trim_start()
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("execute"))
+    {
+        return None;
+    }
+    let bytes = sql.as_bytes();
+    let open = bytes.iter().position(|byte| *byte == b'(')?;
+    let mut arg = 1usize;
+    let mut index = open + 1;
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        match quote {
+            Some(q) => {
+                if bytes[index] == q {
+                    if index + 1 < bytes.len() && bytes[index + 1] == q {
+                        index += 2;
+                        continue;
+                    }
+                    quote = None;
+                }
+                index += 1;
+            }
+            None => match bytes[index] {
+                b'\'' | b'"' => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    quote = Some(bytes[index]);
+                    index += 1;
+                }
+                b' ' | b'\t' | b'\n' | b'\r' => {
+                    index += 1;
+                }
+                b'(' => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    depth += 1;
+                    index += 1;
+                }
+                b')' if depth == 0 => return None,
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    index += 1;
+                }
+                b',' if depth == 0 => {
+                    arg += 1;
+                    index += 1;
+                }
+                _ => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    index += 1;
+                }
+            },
+        }
+    }
+    None
 }
 
 fn composite_rowtype_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -5319,6 +5411,25 @@ fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
     }
     None
 }
+
+fn create_schema_first_element_position(sql: &str) -> Option<usize> {
+    let start = find_ascii_keyword(sql, "create", 0)?;
+    let schema = find_ascii_keyword(sql, "schema", start + "create".len())?;
+    let search_start = schema + "schema".len();
+    let create = find_ascii_keyword(sql, "create", search_start);
+    let grant = find_ascii_keyword(sql, "grant", search_start);
+    match (create, grant) {
+        (Some(create), Some(grant)) => Some(create.min(grant) + 1),
+        (Some(create), None) => Some(create + 1),
+        (None, Some(grant)) => Some(grant + 1),
+        (None, None) => None,
+    }
+}
+
+fn find_create_schema_element_identifier_position(sql: &str, token: &str) -> Option<usize> {
+    let start = create_schema_first_element_position(sql)?.saturating_sub(1);
+    find_identifier_in_segment(&sql[start..], token).map(|offset| start + offset + 1)
+}
 use crate::ClientId;
 use crate::pgrust::cluster::Cluster;
 use crate::pgrust::database::{Database, SessionPreparedStatementViewRow};
@@ -6560,7 +6671,7 @@ fn refresh_protocol_prepared_statement_view_rows(state: &mut ConnectionState) {
             statement: prepared.sql.clone(),
             prepare_time: prepared.prepare_time,
             parameter_type_oids: prepared.param_type_oids.clone(),
-            result_type_oids: Vec::new(),
+            result_type_oids: Some(Vec::new()),
             from_sql: false,
             generic_plans: 0,
             custom_plans: 0,
@@ -12234,25 +12345,15 @@ fn send_queued_notices_with_sql_and_min_messages(
         let position = notice.position.or_else(|| {
             sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message, *occurrence))
         });
-        if notice.hint.is_some() {
-            send_notice_with_hint(
-                stream,
-                notice.severity,
-                notice.sqlstate,
-                &notice.message,
-                notice.hint.as_deref(),
-                position,
-            )?;
-        } else {
-            send_notice_with_severity(
-                stream,
-                notice.severity,
-                notice.sqlstate,
-                &notice.message,
-                notice.detail.as_deref(),
-                position,
-            )?;
-        }
+        send_notice_with_fields(
+            stream,
+            notice.severity,
+            notice.sqlstate,
+            &notice.message,
+            notice.detail.as_deref(),
+            notice.hint.as_deref(),
+            position,
+        )?;
     }
     send_plpgsql_notices(stream, &take_notices())
 }
