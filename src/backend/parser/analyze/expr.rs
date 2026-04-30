@@ -2982,6 +2982,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     varattno: system_column.varattno,
                     varlevelsup: system_column.varlevelsup,
                     vartype: system_column.sql_type,
+                    collation_oid: None,
                 })
             } else {
                 match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {

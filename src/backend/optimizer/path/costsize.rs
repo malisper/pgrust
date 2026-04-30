@@ -2612,6 +2612,7 @@ fn btree_index_natural_pathkeys(
                     varattno: user_attrno(heap_index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 }),
                 ressortgroupref: 0,
                 descending: index_desc ^ backward,
@@ -3187,6 +3188,7 @@ fn hash_clause_from_runtime_index_key(
         varattno: heap_attno.into(),
         varlevelsup: 0,
         vartype: column.sql_type,
+        collation_oid: None,
     });
     let IndexScanKeyArgument::Runtime(runtime) = &key.argument else {
         return None;
@@ -3726,6 +3728,7 @@ fn index_scan_key_expr(
         varattno: heap_attno.into(),
         varlevelsup: 0,
         vartype: column.sql_type,
+        collation_oid: Some(column.collation_oid),
     }))
 }
 

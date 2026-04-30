@@ -3751,8 +3751,6 @@ fn render_subquery_op(op: SubqueryComparisonOp) -> &'static str {
         SubqueryComparisonOp::NotILike => "NOT ILIKE",
         SubqueryComparisonOp::Similar => "SIMILAR TO",
         SubqueryComparisonOp::NotSimilar => "NOT SIMILAR TO",
-        SubqueryComparisonOp::RegexMatch => "~",
-        SubqueryComparisonOp::NotRegexMatch => "!~",
     }
 }
 
@@ -4036,6 +4034,7 @@ fn render_join_merged_input_var(
         varattno: user_attrno(left_col - 1),
         varlevelsup: 0,
         vartype: sql_type,
+        collation_oid: None,
     };
     var_name(&var, ctx)
 }

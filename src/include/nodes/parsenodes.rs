@@ -3603,7 +3603,13 @@ pub struct CreateConversionStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateCollationStatement {
     pub collation_name: String,
-    pub source_collation: String,
+    pub kind: CreateCollationKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateCollationKind {
+    From { source_collation: String },
+    Options { options: Vec<RelOption> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

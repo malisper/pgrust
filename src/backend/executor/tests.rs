@@ -32,6 +32,7 @@ fn local_var(index: usize) -> Expr {
         varattno: user_attrno(index),
         varlevelsup: 0,
         vartype: crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+        collation_oid: None,
     })
 }
 
@@ -1708,6 +1709,7 @@ fn pg_column_compression_reports_compressed_heap_values() {
             vartype: crate::backend::parser::SqlType::new(
                 crate::backend::parser::SqlTypeKind::Text,
             ),
+            collation_oid: None,
         })],
     );
 
@@ -4633,6 +4635,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(2),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::SubPlan(Box::new(SubPlan {
                     sublink_type: SubLinkType::ExprSubLink,
@@ -4654,6 +4657,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(4),
                     varlevelsup: 0,
                     vartype: text,
+                    collation_oid: None,
                 })],
             ),
             Expr::binary_op(
@@ -4664,6 +4668,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: text,
+                    collation_oid: None,
                 }),
                 Expr::CurrentUser,
             ),
@@ -4709,6 +4714,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(1)),
             ),
@@ -4720,6 +4726,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(3)),
             ),
@@ -4745,12 +4752,14 @@ fn explain_expr_matches_postgres_filter_formatting() {
         varattno: user_attrno(0),
         varlevelsup: 0,
         vartype: int4,
+        collation_oid: None,
     });
     let b = Expr::Var(Var {
         varno: 1,
         varattno: user_attrno(1),
         varlevelsup: 0,
         vartype: text,
+        collation_oid: None,
     });
     let modulo = Expr::binary_op(
         OpExprKind::Mod,
@@ -4807,6 +4816,7 @@ fn explain_expr_matches_postgres_filter_formatting() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: ts,
+            collation_oid: None,
         }),
         Expr::LocalTimestamp { precision: None },
     );
@@ -4885,6 +4895,7 @@ fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
             varattno: user_attrno(1),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Char),
+            collation_oid: None,
         }),
         Expr::ArrayLiteral {
             elements: vec![Expr::Const(Value::Text("ab".into()))],
@@ -4917,6 +4928,7 @@ fn explain_join_expr_renders_function_args_with_join_vars() {
                 varattno: user_attrno(2),
                 varlevelsup: 0,
                 vartype: text,
+                collation_oid: None,
             }),
             Expr::Const(Value::Int32(3)),
         ],
@@ -4956,6 +4968,7 @@ fn explain_expr_renders_varchar_scalar_array_with_nonconst_element() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: varchar,
+                collation_oid: None,
             })),
             text,
         )),
@@ -5008,6 +5021,7 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: polygon_ty,
+                collation_oid: None,
             }),
             Expr::Const(Value::Polygon(GeoPolygon {
                 bound_box: GeoBox {
@@ -5043,6 +5057,7 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: circle_ty,
+                collation_oid: None,
             }),
             Expr::Const(Value::Circle(GeoCircle {
                 center: GeoPoint { x: 500.0, y: 500.0 },
@@ -5076,6 +5091,7 @@ fn explain_sort_key_renders_box_coordinate_subscripts() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Box),
+                collation_oid: None,
             })],
         )],
     );
@@ -5140,6 +5156,7 @@ fn explain_const_false_and_scan_filter_uses_one_time_filter() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(1000)),
             ),

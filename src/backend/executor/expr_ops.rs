@@ -33,7 +33,10 @@ use crate::backend::utils::time::datetime::{
     timezone_offset_seconds_at_utc, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::is_valid_finite_timestamp_usecs;
-use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
+use crate::include::catalog::{
+    C_COLLATION_OID, DEFAULT_COLLATION_OID, PG_C_UTF8_COLLATION_OID, PG_UNICODE_FAST_COLLATION_OID,
+    POSIX_COLLATION_OID, UCS_BASIC_COLLATION_OID,
+};
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
     TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
@@ -363,6 +366,28 @@ pub(crate) fn compare_values_with_type(
     collation_oid: Option<u32>,
     datetime_config: Option<&DateTimeConfig>,
 ) -> Result<Value, ExecError> {
+    compare_values_with_type_and_catalog(
+        op,
+        left,
+        left_type,
+        right,
+        right_type,
+        collation_oid,
+        datetime_config,
+        None,
+    )
+}
+
+pub(crate) fn compare_values_with_type_and_catalog(
+    op: &'static str,
+    left: Value,
+    left_type: Option<SqlType>,
+    right: Value,
+    right_type: Option<SqlType>,
+    collation_oid: Option<u32>,
+    datetime_config: Option<&DateTimeConfig>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
@@ -376,11 +401,15 @@ pub(crate) fn compare_values_with_type(
     if let (Some(left_text), Some(right_text)) = (left.as_text(), right.as_text())
         && (is_bpchar_type(left_type) || is_bpchar_type(right_type))
     {
-        ensure_builtin_collation_supported(collation_oid)?;
+        ensure_text_collation_supported(collation_oid, catalog)?;
         return Ok(Value::Bool(
             bpchar_comparison_text(left_text, left_type)
                 == bpchar_comparison_text(right_text, right_type),
         ));
+    }
+    if left.as_text().is_some() && right.as_text().is_some() {
+        ensure_text_collation_supported(collation_oid, catalog)?;
+        return Ok(Value::Bool(left.as_text() == right.as_text()));
     }
     compare_values(op, left, right, collation_oid)
 }
@@ -407,10 +436,30 @@ pub(crate) fn not_equal_values_with_type(
     collation_oid: Option<u32>,
     datetime_config: Option<&DateTimeConfig>,
 ) -> Result<Value, ExecError> {
+    not_equal_values_with_type_and_catalog(
+        left,
+        left_type,
+        right,
+        right_type,
+        collation_oid,
+        datetime_config,
+        None,
+    )
+}
+
+pub(crate) fn not_equal_values_with_type_and_catalog(
+    left: Value,
+    left_type: Option<SqlType>,
+    right: Value,
+    right_type: Option<SqlType>,
+    collation_oid: Option<u32>,
+    datetime_config: Option<&DateTimeConfig>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    match compare_values_with_type(
+    match compare_values_with_type_and_catalog(
         "=",
         left,
         left_type,
@@ -418,6 +467,7 @@ pub(crate) fn not_equal_values_with_type(
         right_type,
         collation_oid,
         datetime_config,
+        catalog,
     )? {
         Value::Bool(value) => Ok(Value::Bool(!value)),
         other => Err(ExecError::NonBoolQual(other)),
@@ -1752,16 +1802,82 @@ pub(crate) fn ensure_builtin_collation_supported(
     collation_oid: Option<u32>,
 ) -> Result<(), ExecError> {
     match collation_oid {
-        None | Some(DEFAULT_COLLATION_OID | C_COLLATION_OID | POSIX_COLLATION_OID) => Ok(()),
+        None
+        | Some(
+            DEFAULT_COLLATION_OID
+            | C_COLLATION_OID
+            | POSIX_COLLATION_OID
+            | UCS_BASIC_COLLATION_OID
+            | PG_C_UTF8_COLLATION_OID
+            | PG_UNICODE_FAST_COLLATION_OID,
+        ) => Ok(()),
         Some(oid) => Err(ExecError::DetailedError {
             message: format!("collation with OID {oid} is not supported"),
-            detail: Some(
-                "Only the built-in collations \"default\", \"C\", and \"POSIX\" are supported"
-                    .into(),
-            ),
+            detail: Some("Only deterministic built-in codepoint collations are supported".into()),
             hint: None,
             sqlstate: "0A000",
         }),
+    }
+}
+
+pub(crate) fn ensure_text_collation_supported(
+    collation_oid: Option<u32>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<(), ExecError> {
+    text_collation_semantics(collation_oid, catalog).map(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextCollationSemantics {
+    Default,
+    Ascii,
+    PgCUtf8,
+    PgUnicodeFast,
+}
+
+pub(crate) fn text_collation_semantics(
+    collation_oid: Option<u32>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<TextCollationSemantics, ExecError> {
+    match collation_oid {
+        None | Some(DEFAULT_COLLATION_OID) => Ok(TextCollationSemantics::Default),
+        Some(C_COLLATION_OID | POSIX_COLLATION_OID | UCS_BASIC_COLLATION_OID) => {
+            Ok(TextCollationSemantics::Ascii)
+        }
+        Some(PG_C_UTF8_COLLATION_OID) => Ok(TextCollationSemantics::PgCUtf8),
+        Some(PG_UNICODE_FAST_COLLATION_OID) => Ok(TextCollationSemantics::PgUnicodeFast),
+        Some(oid) => {
+            let Some(row) = catalog.and_then(|catalog| {
+                catalog
+                    .collation_rows()
+                    .into_iter()
+                    .find(|row| row.oid == oid)
+            }) else {
+                return ensure_builtin_collation_supported(Some(oid))
+                    .map(|_| TextCollationSemantics::Default);
+            };
+            match (
+                row.collprovider,
+                row.collcollate.as_deref(),
+                row.collctype.as_deref(),
+                row.colllocale.as_deref(),
+            ) {
+                ('c', Some("C" | "POSIX"), Some("C" | "POSIX"), _) => {
+                    Ok(TextCollationSemantics::Ascii)
+                }
+                ('b', _, _, Some("C")) => Ok(TextCollationSemantics::Ascii),
+                ('b', _, _, Some("C.UTF-8")) => Ok(TextCollationSemantics::PgCUtf8),
+                ('b', _, _, Some("PG_UNICODE_FAST")) => Ok(TextCollationSemantics::PgUnicodeFast),
+                _ => Err(ExecError::DetailedError {
+                    message: format!("collation with OID {oid} is not supported"),
+                    detail: Some(
+                        "Only deterministic built-in codepoint collations are supported".into(),
+                    ),
+                    hint: None,
+                    sqlstate: "0A000",
+                }),
+            }
+        }
     }
 }
 
@@ -1770,7 +1886,16 @@ fn compare_text_values(
     right: &str,
     collation_oid: Option<u32>,
 ) -> Result<Ordering, ExecError> {
-    ensure_builtin_collation_supported(collation_oid)?;
+    compare_text_values_with_catalog(left, right, collation_oid, None)
+}
+
+pub(crate) fn compare_text_values_with_catalog(
+    left: &str,
+    right: &str,
+    collation_oid: Option<u32>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Ordering, ExecError> {
+    ensure_text_collation_supported(collation_oid, catalog)?;
     Ok(left.cmp(right))
 }
 

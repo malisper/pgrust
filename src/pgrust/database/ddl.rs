@@ -2323,6 +2323,7 @@ pub(super) fn validate_alter_table_alter_column_type(
                 varattno: user_attrno(column_index),
                 varlevelsup: 0,
                 vartype: current_column.sql_type,
+                collation_oid: None,
             }),
             current_column.sql_type,
         ),

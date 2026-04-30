@@ -129,6 +129,7 @@ fn local_var(index: usize, ty: SqlType) -> Expr {
         varattno: user_attrno(index),
         varlevelsup: 0,
         vartype: ty,
+        collation_oid: None,
     })
 }
 

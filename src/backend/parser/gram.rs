@@ -17612,6 +17612,22 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
     let collation_name = schema_name
         .map(|schema| format!("{schema}.{base_name}"))
         .unwrap_or(base_name);
+    let rest = rest.trim_start();
+    if rest.starts_with('(') {
+        let (options_sql, trailing) = take_parenthesized_segment(rest)?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: trailing.trim().into(),
+            });
+        }
+        return Ok(CreateCollationStatement {
+            collation_name,
+            kind: CreateCollationKind::Options {
+                options: parse_collation_option_assignments(&options_sql)?,
+            },
+        });
+    }
     let Some(rest) = consume_keyword_if_present(rest, "from") else {
         return Err(ParseError::UnexpectedToken {
             expected: "FROM",
@@ -17630,8 +17646,49 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
         .unwrap_or(source_base);
     Ok(CreateCollationStatement {
         collation_name,
-        source_collation,
+        kind: CreateCollationKind::From { source_collation },
     })
+}
+
+fn parse_collation_option_assignments(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    split_comma_separated_sql(input)?
+        .into_iter()
+        .map(|part| {
+            let (name_sql, value_sql) =
+                part.split_once('=')
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "collation option assignment",
+                        actual: part.trim().into(),
+                    })?;
+            let (name, tail) = parse_sql_identifier(name_sql)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "collation option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            let value_sql = value_sql.trim();
+            let value = if let Some(literal_len) = scan_string_literal_token_len(value_sql) {
+                if !value_sql[literal_len..].trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "end of collation option",
+                        actual: value_sql[literal_len..].trim().into(),
+                    });
+                }
+                decode_string_literal(&value_sql[..literal_len])?
+            } else {
+                let (value, tail) = parse_sql_identifier(value_sql)?;
+                if !tail.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "collation option value",
+                        actual: tail.trim().into(),
+                    });
+                }
+                value
+            };
+            Ok(RelOption { name, value })
+        })
+        .collect()
 }
 
 fn build_drop_conversion_statement(sql: &str) -> Result<DropConversionStatement, ParseError> {
@@ -25019,6 +25076,8 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         let expr_pair = item_inner.next().ok_or(ParseError::UnexpectedEof)?;
         let expr_is_extract = top_level_extract_expr(expr_pair.clone());
         let expr_is_power_operator = top_level_power_operator_expr(expr_pair.clone());
+        let expr_is_case_insensitive_regex_operator =
+            top_level_case_insensitive_regex_operator_expr(expr_pair.clone());
         let expr = build_expr(expr_pair)?;
         let output_name = if let Some(alias_pair) = item_inner.next() {
             let alias = alias_pair
@@ -25029,6 +25088,8 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         } else if expr_is_extract {
             "extract".into()
         } else if expr_is_power_operator {
+            "?column?".into()
+        } else if expr_is_case_insensitive_regex_operator {
             "?column?".into()
         } else {
             select_item_name(&expr, index)
@@ -25194,6 +25255,42 @@ fn top_level_power_operator_expr(pair: Pair<'_, Rule>) -> bool {
                 return false;
             }
             top_level_power_operator_expr(first)
+        }
+        _ => false,
+    }
+}
+
+fn top_level_case_insensitive_regex_operator_expr(pair: Pair<'_, Rule>) -> bool {
+    match pair.as_rule() {
+        Rule::cmp_expr => {
+            let input = pair.as_str();
+            find_top_level_operator(input, b'~', Some(b'*')).is_some()
+                || find_top_level_operator(input, b'!', Some(b'~'))
+                    .is_some_and(|index| input.as_bytes().get(index + 2) == Some(&b'*'))
+        }
+        Rule::expr
+        | Rule::or_expr
+        | Rule::and_expr
+        | Rule::not_expr
+        | Rule::json_access_expr
+        | Rule::concat_expr
+        | Rule::add_expr
+        | Rule::bit_expr
+        | Rule::shift_expr
+        | Rule::mul_expr
+        | Rule::unary_expr
+        | Rule::positive_expr
+        | Rule::negated_expr
+        | Rule::postfix_expr
+        | Rule::primary_expr => {
+            let mut inner = pair.into_inner();
+            let Some(first) = inner.next() else {
+                return false;
+            };
+            if inner.next().is_some() {
+                return false;
+            }
+            top_level_case_insensitive_regex_operator_expr(first)
         }
         _ => false,
     }

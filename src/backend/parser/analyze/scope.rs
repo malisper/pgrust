@@ -129,15 +129,28 @@ fn default_scope_output_exprs(varno: usize, desc: &RelationDesc) -> Vec<Expr> {
     desc.columns
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
+        .map(|(index, column)| scope_column_var_expr(varno, index, column))
         .collect()
+}
+
+fn scope_column_var_expr(varno: usize, index: usize, column: &ColumnDesc) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+        collation_oid: (column.collation_oid != 0).then_some(column.collation_oid),
+    })
+}
+
+fn scope_query_column_var_expr(varno: usize, index: usize, column: &QueryColumn) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+        collation_oid: None,
+    })
 }
 
 pub(super) fn bind_values_rows(
@@ -1365,6 +1378,7 @@ fn table_sample_qual(
         implementation: ScalarFunctionImpl::Builtin(
             BuiltinScalarFunction::PgRustTablesampleBernoulli,
         ),
+        collation_oid: None,
         display_args: None,
         args: vec![
             Expr::Var(Var {
@@ -1372,6 +1386,7 @@ fn table_sample_qual(
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Tid),
+                collation_oid: None,
             }),
             percent,
             seed,
@@ -4773,14 +4788,7 @@ fn retarget_analyzed_from_output_columns(
     plan.output_exprs = output_columns
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno: rtindex,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
+        .map(|(index, column)| scope_query_column_var_expr(rtindex, index, column))
         .collect();
     plan.output_columns = output_columns;
 }

@@ -20,17 +20,18 @@ use crate::include::nodes::parsenodes::{
     CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnSubscriptionStatement,
     CommentOnTypeStatement, CommentOnViewStatement, CompositeTypeAttributeDef,
     CreateAggregateStatement, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod,
-    CreateCastStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
-    CreateTriggerStatement, CreateTypeStatement, CursorScrollOption, DeclareCursorStatement,
-    DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement, DropSubscriptionStatement,
-    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
-    GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy,
-    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
-    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
-    TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    CreateCastStatement, CreateCollationKind, CreateCompositeTypeStatement,
+    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, CursorScrollOption,
+    DeclareCursorStatement, DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement,
+    DropSubscriptionStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef,
+    InsertSource, InsertStatement, JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind,
+    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
+    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
+    RawPartitionSpec, RawTypeName, RelOption, SetSessionAuthorizationStatement,
+    SetTransactionScope, SqlCallArgs, SubscriptionOptionValue, TableConstraint,
+    TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec,
+    TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -606,6 +607,78 @@ fn parse_select_with_default_collation_keeps_raw_ast() {
             collation: "default".into(),
         }
     );
+}
+
+#[test]
+fn parse_create_collation_from_source() {
+    match parse_statement("create collation regress_c from \"C\"").unwrap() {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_c");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::From {
+                    source_collation: "C".into()
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_create_collation_builtin_options() {
+    match parse_statement("create collation regress_builtin_c (provider = builtin, locale = 'C')")
+        .unwrap()
+    {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_builtin_c");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::Options {
+                    options: vec![
+                        RelOption {
+                            name: "provider".into(),
+                            value: "builtin".into(),
+                        },
+                        RelOption {
+                            name: "locale".into(),
+                            value: "C".into(),
+                        },
+                    ]
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_create_collation_builtin_locale_alias() {
+    match parse_statement(
+        "create collation regress_builtin_c_utf8 (provider=builtin, locale='C.UTF8')",
+    )
+    .unwrap()
+    {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_builtin_c_utf8");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::Options {
+                    options: vec![
+                        RelOption {
+                            name: "provider".into(),
+                            value: "builtin".into(),
+                        },
+                        RelOption {
+                            name: "locale".into(),
+                            value: "C.UTF8".into(),
+                        },
+                    ]
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
 }
 
 fn is_outer_user_var(expr: &Expr, index: usize) -> bool {
@@ -2099,6 +2172,7 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype: SqlType::new(SqlTypeKind::Int4),
+                    collation_oid: None,
                 })
             );
         }
@@ -2111,6 +2185,7 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     );
 }
@@ -16926,6 +17001,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
         varattno: 2,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Text),
+        collation_oid: None,
     });
 
     assert_eq!(query.group_by, vec![name_var.clone()]);
@@ -16938,6 +17014,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varattno: 2,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: None,
         }))))
     );
     assert_eq!(query.sort_clause.len(), 1);
@@ -16948,6 +17025,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varattno: 2,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: None,
         })
     );
 }
@@ -17300,6 +17378,7 @@ fn analyze_group_by_resolves_select_alias_when_no_input_column_matches() {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })]
     );
 }
@@ -17318,12 +17397,14 @@ fn analyze_group_by_prefers_input_column_over_select_alias() {
                 varattno: 2,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Text),
+                collation_oid: None,
             }),
             Expr::Var(Var {
                 varno: 1,
                 varattno: 1,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Int4),
+                collation_oid: None,
             }),
         ]
     );
@@ -20343,6 +20424,7 @@ fn analyze_simple_case_uses_case_test_expr() {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype,
+                    ..
                 })) if *vartype == SqlType::new(SqlTypeKind::Int4)
             ));
             assert_eq!(case_expr.args.len(), 1);

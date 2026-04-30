@@ -1257,6 +1257,7 @@ fn returning_pseudo_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr>
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1377,6 +1378,7 @@ fn projected_output_exprs(desc: &RelationDesc, start_index: usize) -> Vec<Expr> 
                 varattno: user_attrno(start_index + index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1397,6 +1399,7 @@ fn projected_output_exprs_with_width(
                 varattno: user_attrno(start_index + index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -1421,6 +1424,7 @@ fn with_merge_target_identity(
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Tid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
@@ -1436,6 +1440,7 @@ fn with_merge_target_identity(
                 varattno: TABLE_OID_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Oid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Oid),
             tableoid_resno,
@@ -1464,6 +1469,7 @@ fn with_update_target_identity(
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Tid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
@@ -1479,6 +1485,7 @@ fn with_update_target_identity(
                 varattno: TABLE_OID_ATTR_NO,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Oid),
+                collation_oid: None,
             }),
             SqlType::new(SqlTypeKind::Oid),
             tableoid_resno,
@@ -1843,6 +1850,7 @@ fn bind_merge_returning_targets(
                         varattno: user_attrno(merge_action_index),
                         varlevelsup: 0,
                         vartype: SqlType::new(SqlTypeKind::Text),
+                        collation_oid: None,
                     }),
                     SqlType::new(SqlTypeKind::Text),
                     entries.len() + 1,
@@ -2867,6 +2875,7 @@ fn update_input_identity_expr(index: usize, input_columns: &[QueryColumn]) -> Ex
             .get(index)
             .map(|column| column.sql_type)
             .unwrap_or_else(|| SqlType::new(SqlTypeKind::AnyElement)),
+        collation_oid: None,
     })
 }
 

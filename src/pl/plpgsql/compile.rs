@@ -3164,6 +3164,7 @@ fn outer_scope_from_slot_columns(
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect::<Vec<_>>();
@@ -3200,6 +3201,7 @@ fn outer_scope_from_slot_columns(
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             }));
         }
         scope_columns.extend(relation_scope.columns);
@@ -4427,6 +4429,7 @@ fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Ex
             varattno: user_attrno(var.slot),
             varlevelsup: 0,
             vartype: var.ty,
+            collation_oid: None,
         })),
         field: field.clone(),
         field_type: SqlType::new(SqlTypeKind::Text),
