@@ -32,6 +32,8 @@ enum ConflictActionResult {
     Updated {
         old_values: Vec<Value>,
         new_values: Vec<Value>,
+        new_tid: ItemPointerData,
+        relation_oid: u32,
     },
     Skipped,
     Retry,
@@ -283,6 +285,9 @@ fn run_conflict_update(
         &stmt.desc,
         &stmt.relation_constraints,
         update_write_checks,
+        None,
+        &[],
+        false,
         &stmt.referenced_by_foreign_keys,
         &stmt.indexes,
         conflict_tid,
@@ -294,12 +299,7 @@ fn run_conflict_update(
         None,
     )?;
     match write_result {
-        WriteUpdatedRowResult::Updated(
-            _new_tid,
-            _write_info,
-            no_action_checks,
-            outbound_checks,
-        ) => {
+        WriteUpdatedRowResult::Updated(new_tid, write_info, no_action_checks, outbound_checks) => {
             validate_pending_outbound_foreign_key_checks(outbound_checks, ctx)?;
             validate_pending_no_action_checks(no_action_checks, ctx)?;
             if let Some(triggers) = triggers {
@@ -311,6 +311,8 @@ fn run_conflict_update(
             Ok(ConflictActionResult::Updated {
                 old_values: current_old_values,
                 new_values,
+                new_tid,
+                relation_oid: write_info.relation_oid(),
             })
         }
         WriteUpdatedRowResult::TupleUpdated(_new_tid) => Ok(ConflictActionResult::Retry),
@@ -652,6 +654,8 @@ pub(crate) fn execute_insert_on_conflict_rows(
                         ConflictActionResult::Updated {
                             old_values,
                             new_values,
+                            new_tid,
+                            relation_oid,
                         } => {
                             if stmt.returning.is_empty() {
                                 affected_rows.push(new_values);
@@ -659,8 +663,8 @@ pub(crate) fn execute_insert_on_conflict_rows(
                                 affected_rows.push(project_returning_row_with_old_new(
                                     &stmt.returning,
                                     &new_values,
-                                    None,
-                                    None,
+                                    Some(new_tid),
+                                    Some(relation_oid),
                                     Some(&old_values),
                                     Some(&new_values),
                                     ctx,

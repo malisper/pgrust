@@ -12517,6 +12517,7 @@ fn bind_update_alias_hides_base_table_name() {
         other => panic!("expected update statement, got {other:?}"),
     };
     match bind_update(&stmt, &catalog) {
+        Err(ParseError::InvalidFromClauseReference(name)) if name == "people" => {}
         Err(ParseError::MissingFromClauseEntry(name)) if name == "people" => {}
         Err(ParseError::UnknownColumn(name)) if name == "people.id" => {}
         other => panic!("expected hidden-target name resolution error, got {other:?}"),

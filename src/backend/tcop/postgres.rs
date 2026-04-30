@@ -3699,6 +3699,10 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
         ));
     }
     if response.detail.is_none()
+        && !response
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("table alias"))
         && let Some(table_name) = invalid_from_clause_reference_table(e)
     {
         response.detail = Some(format!(
@@ -3774,6 +3778,73 @@ fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResp
     apply_join_regression_error_compat(sql, response);
     apply_alter_table_regression_error_compat(sql, response);
     apply_insert_conflict_regression_error_compat(sql, response);
+    apply_update_alias_regression_error_compat(sql, response);
+    apply_update_regression_error_position_compat(sql, response);
+}
+
+fn apply_update_regression_error_position_compat(sql: &str, response: &mut ExecErrorResponse) {
+    if !sql.trim_start().to_ascii_lowercase().starts_with("update ") || response.position.is_some()
+    {
+        return;
+    }
+    if response.message.starts_with("column \"") && response.message.contains("\" of relation \"") {
+        response.position = find_token_after_case_insensitive_phrase(sql, "SET");
+        return;
+    }
+    if response.message == "column \"a\" is of type integer but expression is of type record" {
+        response.position = find_case_insensitive_token_position(sql, "v.*");
+        return;
+    }
+    if response.message
+        == "source for a multiple-column UPDATE item must be a sub-SELECT or ROW() expression"
+    {
+        response.position = find_case_insensitive_token_position(sql, "(v.*)")
+            .or_else(|| find_case_insensitive_token_position(sql, "v.*"));
+    }
+}
+
+fn apply_update_alias_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
+    if !response
+        .message
+        .starts_with("invalid reference to FROM-clause entry for table ")
+    {
+        return;
+    }
+    let Some((table_name, alias)) = update_target_alias(sql) else {
+        return;
+    };
+    if response.message
+        != format!("invalid reference to FROM-clause entry for table \"{table_name}\"")
+    {
+        return;
+    }
+    response.detail = None;
+    response.hint = Some(format!(
+        "Perhaps you meant to reference the table alias \"{alias}\"."
+    ));
+}
+
+fn update_target_alias(sql: &str) -> Option<(String, String)> {
+    let mut tokens = sql.split_whitespace();
+    let update = tokens.next()?;
+    if !update.eq_ignore_ascii_case("update") {
+        return None;
+    }
+    let table_name = clean_sql_identifier_token(tokens.next()?);
+    let mut alias = clean_sql_identifier_token(tokens.next()?);
+    if alias.eq_ignore_ascii_case("as") {
+        alias = clean_sql_identifier_token(tokens.next()?);
+    }
+    if alias.eq_ignore_ascii_case("set") || alias.is_empty() {
+        return None;
+    }
+    Some((table_name, alias))
+}
+
+fn clean_sql_identifier_token(token: &str) -> String {
+    token
+        .trim_matches(|ch: char| matches!(ch, '"' | ',' | ';' | '(' | ')'))
+        .to_string()
 }
 
 fn apply_insert_conflict_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {

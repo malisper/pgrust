@@ -25254,13 +25254,15 @@ fn split_row_assignment_expr(
         SqlExpr::Row(items) if items.len() == arity => Ok(items),
         SqlExpr::Row(items) if items.len() == 1 && arity > 1 => {
             if let SqlExpr::Column(name) = &items[0]
-                && let Some(relation) = name.strip_suffix(".*")
+                && name.ends_with(".*")
             {
+                let row_expr = SqlExpr::Row(vec![SqlExpr::Column(name.clone())]);
                 return Ok(targets
                     .iter()
-                    .map(|target| SqlExpr::FieldSelect {
-                        expr: Box::new(SqlExpr::Column(relation.to_string())),
-                        field: target.column.clone(),
+                    .enumerate()
+                    .map(|(index, _)| SqlExpr::FieldSelect {
+                        expr: Box::new(row_expr.clone()),
+                        field: format!("f{}", index + 1),
                     })
                     .collect());
             }
@@ -25294,7 +25296,12 @@ fn split_row_assignment_expr(
         other if arity == 1 => Ok(vec![other]),
         other => Err(ParseError::UnexpectedToken {
             expected: "row assignment source",
-            actual: format!("{other:?}"),
+            actual: if matches!(other, SqlExpr::Column(ref name) if name.ends_with(".*")) {
+                "source for a multiple-column UPDATE item must be a sub-SELECT or ROW() expression"
+                    .into()
+            } else {
+                format!("{other:?}")
+            },
         }),
     }
 }

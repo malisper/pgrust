@@ -15,7 +15,8 @@ use crate::include::nodes::primnodes::{
     SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SqlJsonTable, SqlJsonTableBehavior,
     SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
     SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
-    SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMIN_ATTR_NO, expr_sql_type_hint, user_attrno,
+    SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, expr_sql_type_hint,
+    user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -460,6 +461,8 @@ fn resolve_system_column_in_scope(
         (SELF_ITEM_POINTER_ATTR_NO, SqlType::new(SqlTypeKind::Tid))
     } else if column_name.eq_ignore_ascii_case("xmin") {
         (XMIN_ATTR_NO, SqlType::new(SqlTypeKind::Xid))
+    } else if column_name.eq_ignore_ascii_case("xmax") {
+        (XMAX_ATTR_NO, SqlType::new(SqlTypeKind::Xid))
     } else {
         return Ok(None);
     };
@@ -544,10 +547,14 @@ pub(super) fn resolve_column_with_outer(
     name: &str,
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<ResolvedColumn, ParseError> {
+    let mut hidden_invalid_error = None;
     match resolve_column(scope, name) {
         Ok(index) => return Ok(ResolvedColumn::Local(index)),
         Err(ParseError::AmbiguousColumn(name)) => return Err(ParseError::AmbiguousColumn(name)),
         Err(ParseError::UnknownColumn(_)) => {}
+        Err(err @ ParseError::InvalidFromClauseReference(_)) => {
+            hidden_invalid_error = Some(err);
+        }
         Err(other) => return Err(other),
     }
 
@@ -596,7 +603,7 @@ pub(super) fn resolve_column_with_outer(
         }
     }
 
-    Err(ParseError::UnknownColumn(name.to_string()))
+    Err(hidden_invalid_error.unwrap_or_else(|| ParseError::UnknownColumn(name.to_string())))
 }
 
 fn scope_has_visible_relation(scope: &BoundScope, name: &str) -> bool {
