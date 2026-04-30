@@ -13,7 +13,7 @@ use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::indexing::{
-    maintain_catalog_indexes_for_insert_in_db, rebuild_system_catalog_indexes_for_db,
+    catalog_index_insert_state_for_db, rebuild_system_catalog_indexes_for_db,
 };
 use crate::backend::catalog::rowcodec::{catalog_row_values_for_kind, decode_catalog_tuple_values};
 use crate::backend::catalog::rows::PhysicalCatalogRows;
@@ -91,10 +91,11 @@ pub(crate) fn insert_catalog_rows_subset_mvcc(
 ) -> Result<(), CatalogError> {
     for &kind in kinds {
         let desc = bootstrap_relation_desc(kind);
+        let index_state = catalog_index_insert_state_for_db(ctx, kind, db_oid)?;
         for values in catalog_row_values_for_kind(rows, kind) {
             let tid =
                 catalog_tuple_insert(ctx, bootstrap_catalog_rel(kind, db_oid), &desc, &values)?;
-            maintain_catalog_indexes_for_insert_in_db(ctx, kind, db_oid, tid, &values)?;
+            index_state.insert(tid, &values)?;
         }
     }
     Ok(())
