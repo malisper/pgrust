@@ -1625,9 +1625,10 @@ fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<State
         Statement::Select(select) => PreparedStatementQuery::Select(select),
         Statement::Insert(insert) => PreparedStatementQuery::Insert(insert),
         Statement::Update(update) => PreparedStatementQuery::Update(update),
+        Statement::Merge(merge) => PreparedStatementQuery::Merge(merge),
         other => {
             return Err(ParseError::UnexpectedToken {
-                expected: "SELECT, INSERT, or UPDATE",
+                expected: "SELECT, INSERT, UPDATE, or MERGE",
                 actual: format!("{other:?}"),
             });
         }
@@ -18837,9 +18838,10 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
                     Ok(Statement::Select(select)) => Some(PreparedStatementQuery::Select(select)),
                     Ok(Statement::Insert(insert)) => Some(PreparedStatementQuery::Insert(insert)),
                     Ok(Statement::Update(update)) => Some(PreparedStatementQuery::Update(update)),
+                    Ok(Statement::Merge(merge)) => Some(PreparedStatementQuery::Merge(merge)),
                     Ok(statement) => {
                         return Err(ParseError::UnexpectedToken {
-                            expected: "prepared SELECT, INSERT, or UPDATE statement",
+                            expected: "prepared SELECT, INSERT, UPDATE, or MERGE statement",
                             actual: format!("{statement:?}"),
                         });
                     }
