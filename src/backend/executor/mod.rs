@@ -226,6 +226,8 @@ pub struct ExprEvalBindings {
     pub inner_system_bindings: Vec<SystemVarBinding>,
     pub index_tuple: Option<Vec<Value>>,
     pub index_system_bindings: Vec<SystemVarBinding>,
+    pub rule_old_tuple: Option<Vec<Value>>,
+    pub rule_new_tuple: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

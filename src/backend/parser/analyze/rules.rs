@@ -1,5 +1,5 @@
 use super::*;
-use crate::include::nodes::primnodes::{INNER_VAR, OUTER_VAR, Var, user_attrno};
+use crate::include::nodes::primnodes::{RULE_NEW_VAR, RULE_OLD_VAR, Var, user_attrno};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BoundRuleAction {
@@ -65,13 +65,13 @@ pub(crate) fn bind_rule_qual(
     catalog: &dyn CatalogLookup,
 ) -> Result<Expr, ParseError> {
     let default_varno = match event {
-        RuleEvent::Delete => OUTER_VAR,
-        RuleEvent::Insert | RuleEvent::Update | RuleEvent::Select => INNER_VAR,
+        RuleEvent::Delete => RULE_OLD_VAR,
+        RuleEvent::Insert | RuleEvent::Update | RuleEvent::Select => RULE_NEW_VAR,
     };
     let local_scope = scope_for_special_rule_tuple(None, relation_desc, default_varno, false);
     let outer_scopes = vec![
-        scope_for_special_rule_tuple(Some("old"), relation_desc, OUTER_VAR, true),
-        scope_for_special_rule_tuple(Some("new"), relation_desc, INNER_VAR, true),
+        scope_for_special_rule_tuple(Some("old"), relation_desc, RULE_OLD_VAR, true),
+        scope_for_special_rule_tuple(Some("new"), relation_desc, RULE_NEW_VAR, true),
     ];
     bind_expr_with_outer_and_ctes(expr, &local_scope, catalog, &outer_scopes, None, &[])
 }
@@ -82,8 +82,8 @@ pub(crate) fn bind_rule_action_statement(
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundRuleAction, ParseError> {
     let outer_scopes = vec![
-        scope_for_special_rule_tuple(Some("old"), relation_desc, OUTER_VAR, true),
-        scope_for_special_rule_tuple(Some("new"), relation_desc, INNER_VAR, true),
+        scope_for_special_rule_tuple(Some("old"), relation_desc, RULE_OLD_VAR, true),
+        scope_for_special_rule_tuple(Some("new"), relation_desc, RULE_NEW_VAR, true),
     ];
     match statement {
         Statement::Insert(stmt) => Ok(BoundRuleAction::Insert(bind_insert_with_outer_scopes(

@@ -2305,7 +2305,9 @@ pub(super) fn validate_scalar_function_arity(
                     matches!(args.len(), 1 | 2)
                 }
             }
-            BuiltinScalarFunction::Int4Pl | BuiltinScalarFunction::Int4Mi => args.len() == 2,
+            BuiltinScalarFunction::Int4Pl
+            | BuiltinScalarFunction::Int4Mi
+            | BuiltinScalarFunction::Int4Smaller => args.len() == 2,
             BuiltinScalarFunction::Int8Inc => args.len() == 1,
             BuiltinScalarFunction::Int8IncAny => args.len() == 2,
             BuiltinScalarFunction::Int4AvgAccum => args.len() == 2,
@@ -5055,6 +5057,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("min_scale", BuiltinScalarFunction::MinScale),
         ("trim_scale", BuiltinScalarFunction::TrimScale),
         ("numeric_inc", BuiltinScalarFunction::NumericInc),
+        ("int4smaller", BuiltinScalarFunction::Int4Smaller),
         ("int4mi", BuiltinScalarFunction::Int4Mi),
         ("int4pl", BuiltinScalarFunction::Int4Pl),
         ("int8inc", BuiltinScalarFunction::Int8Inc),
@@ -5899,6 +5902,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::MinScale
             | BuiltinScalarFunction::TrimScale
             | BuiltinScalarFunction::NumericInc
+            | BuiltinScalarFunction::Int4Smaller
             | BuiltinScalarFunction::Factorial
             | BuiltinScalarFunction::PgLsn
             | BuiltinScalarFunction::Div

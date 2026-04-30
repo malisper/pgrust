@@ -3688,6 +3688,7 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::Substring => "substring",
         BuiltinScalarFunction::Overlay => "overlay",
         BuiltinScalarFunction::Reverse => "reverse",
+        BuiltinScalarFunction::Int4Smaller => "int4smaller",
         _ => "function",
     }
 }

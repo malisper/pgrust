@@ -1631,7 +1631,9 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
     }
     match expr {
         Expr::Var(mut var) => {
-            var.varlevelsup += levels;
+            if !crate::include::nodes::primnodes::is_rule_pseudo_varno(var.varno) {
+                var.varlevelsup += levels;
+            }
             Expr::Var(var)
         }
         Expr::Aggref(mut aggref) => {

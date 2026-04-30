@@ -187,8 +187,9 @@ use crate::include::nodes::datum::{
 };
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
-    OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
-    XMIN_ATTR_NO, attrno_index, is_executor_special_varno, is_system_attr,
+    OpExprKind, RULE_NEW_VAR, RULE_OLD_VAR, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr,
+    SubLinkType, TABLE_OID_ATTR_NO, XMIN_ATTR_NO, attrno_index, is_executor_special_varno,
+    is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::SequenceData;
@@ -8994,6 +8995,18 @@ pub fn eval_expr(
                 } else {
                     eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
                 }
+            } else if var.varno == RULE_OLD_VAR {
+                if is_system_attr(var.varattno) {
+                    Ok(Value::Null)
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.rule_old_tuple.as_ref(), var)
+                }
+            } else if var.varno == RULE_NEW_VAR {
+                if is_system_attr(var.varattno) {
+                    Ok(Value::Null)
+                } else {
+                    eval_bound_tuple_var(ctx.expr_bindings.rule_new_tuple.as_ref(), var)
+                }
             } else if var.varlevelsup == 1 {
                 let mut outer_var = var.clone();
                 outer_var.varno = OUTER_VAR;
@@ -10320,6 +10333,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::Int4Pl
         | BuiltinScalarFunction::Int4Mi
+        | BuiltinScalarFunction::Int4Smaller
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum
@@ -12358,6 +12372,7 @@ pub(crate) fn eval_builtin_function(
         },
         BuiltinScalarFunction::Int4Pl
         | BuiltinScalarFunction::Int4Mi
+        | BuiltinScalarFunction::Int4Smaller
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum

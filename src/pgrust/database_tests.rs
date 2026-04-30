@@ -20117,6 +20117,137 @@ fn insert_do_also_rule_reevaluates_new_default_expressions() {
 }
 
 #[test]
+fn numeric_add_preserves_display_scale_in_sql() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    let rows = query_rows(&db, 1, "select 4000.00::numeric + 1000.00::numeric");
+    let Value::Numeric(value) = &rows[0][0] else {
+        panic!("expected numeric result, got {:?}", rows[0][0]);
+    };
+    assert_eq!(value.render(), "5000.00");
+}
+
+#[test]
+fn int4smaller_function_returns_smaller_int4() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select int4smaller(4, 7), int4smaller(9, 2), int4smaller(null::int4, 2)"
+        ),
+        vec![vec![Value::Int32(4), Value::Int32(2), Value::Null]]
+    );
+}
+
+#[test]
+fn int4smaller_survives_view_rewrite() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table ready_items (shoe int4, lace int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view ready_view as select int4smaller(shoe, lace) as available from ready_items",
+    )
+    .unwrap();
+    db.execute(1, "insert into ready_items values (2, 5), (8, 3)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select available from ready_view order by available"
+        ),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn insert_select_rule_action_keeps_new_binding_through_nested_update_rule() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table base_items (id int4, qty int4)")
+        .unwrap();
+    db.execute(1, "create view item_view as select id, qty from base_items")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_upd as on update to item_view do instead \
+         update base_items set qty = new.qty where id = old.id",
+    )
+    .unwrap();
+    db.execute(1, "create table arrivals (id int4, delta int4)")
+        .unwrap();
+    db.execute(1, "create table ok_items (id int4, delta int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule ok_items_ins as on insert to ok_items do instead \
+         update item_view set qty = item_view.qty + new.delta where item_view.id = new.id",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into base_items values (1, 5), (2, 10)")
+        .unwrap();
+    db.execute(1, "insert into arrivals values (1, 3), (2, 4)")
+        .unwrap();
+    db.execute(1, "insert into ok_items select * from arrivals")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, qty from base_items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(8)],
+            vec![Value::Int32(2), Value::Int32(14)],
+        ]
+    );
+}
+
+#[test]
+fn update_rule_insert_select_uses_old_new_without_exec_params() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table pparent (pid int4, txt text)")
+        .unwrap();
+    db.execute(1, "insert into pparent values (1,'parent1'), (2,'parent2')")
+        .unwrap();
+    db.execute(1, "create table cchild (pid int4, descrip text)")
+        .unwrap();
+    db.execute(1, "insert into cchild values (1,'descrip1')")
+        .unwrap();
+    db.execute(
+        1,
+        "create view vview as \
+         select pparent.pid, txt, descrip from pparent left join cchild using (pid)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule rrule as on update to vview do instead \
+         (insert into cchild (pid, descrip) \
+            select old.pid, new.descrip where old.descrip isnull; \
+          update cchild set descrip = new.descrip where cchild.pid = old.pid;)",
+    )
+    .unwrap();
+
+    db.execute(1, "update vview set descrip='test1' where pid=1")
+        .unwrap();
+    db.execute(1, "update vview set descrip='test2' where pid=2")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select pid, descrip from cchild order by pid"),
+        vec![
+            vec![Value::Int32(1), Value::Text("test1".into())],
+            vec![Value::Int32(2), Value::Text("test2".into())],
+        ]
+    );
+}
+
+#[test]
 fn create_rule_rejects_unqualified_action_reference() {
     let base = temp_dir("rule_unqualified_action");
     let db = Database::open(&base, 16).unwrap();
