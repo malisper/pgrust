@@ -438,6 +438,7 @@ pub enum Statement {
     AlterMaterializedViewSetSchema(AlterRelationSetSchemaStatement),
     AlterMaterializedViewSetAccessMethod(AlterMaterializedViewSetAccessMethodStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
+    AlterLargeObjectOwner(AlterLargeObjectOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterSchemaRename(AlterSchemaRenameStatement),
     AlterTableSetPersistence(AlterTableSetPersistenceStatement),
@@ -489,6 +490,7 @@ pub enum Statement {
     CommentOnAggregate(CommentOnAggregateStatement),
     CommentOnFunction(CommentOnFunctionStatement),
     CommentOnOperator(CommentOnOperatorStatement),
+    CommentOnLargeObject(CommentOnLargeObjectStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
     CreateCollation(CreateCollationStatement),
@@ -3029,6 +3031,12 @@ pub struct AlterRelationOwnerStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterLargeObjectOwnerStatement {
+    pub oid: u32,
+    pub new_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterSchemaOwnerStatement {
     pub schema_name: String,
     pub new_owner: String,
@@ -3841,6 +3849,12 @@ pub struct CommentOnOperatorStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnLargeObjectStatement {
+    pub oid: u32,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantTableColumnPrivilege {
     pub privilege: GrantObjectPrivilege,
     pub columns: Vec<String>,
@@ -3869,6 +3883,10 @@ pub enum GrantObjectPrivilege {
     ExecuteOnFunction,
     ExecuteOnProcedure,
     ExecuteOnRoutine,
+    AllPrivilegesOnLargeObject,
+    SelectOnLargeObject,
+    UpdateOnLargeObject,
+    LargeObjectPrivileges(String),
     UsageOnForeignDataWrapper,
     UsageOnForeignServer,
     AllPrivilegesOnForeignDataWrapper,

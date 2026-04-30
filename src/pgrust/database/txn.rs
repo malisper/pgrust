@@ -278,6 +278,7 @@ impl Database {
                     .unlock_all_transaction(client_id, u64::from(xid));
                 self.row_locks
                     .unlock_all_transaction(client_id, u64::from(xid));
+                self.large_objects.close_all(client_id);
                 self.commit_enum_labels_created_by(xid);
                 self.txn_waiter.unregister_holder(xid);
                 self.txn_waiter.notify();
@@ -298,6 +299,7 @@ impl Database {
                     .unlock_all_transaction(client_id, u64::from(xid));
                 self.row_locks
                     .unlock_all_transaction(client_id, u64::from(xid));
+                self.large_objects.close_all(client_id);
                 self.txn_waiter.unregister_holder(xid);
                 self.txn_waiter.notify();
                 Err(e)

@@ -744,6 +744,15 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
+            GrantObjectPrivilege::AllPrivilegesOnLargeObject
+            | GrantObjectPrivilege::SelectOnLargeObject
+            | GrantObjectPrivilege::UpdateOnLargeObject
+            | GrantObjectPrivilege::LargeObjectPrivileges(_) => self
+                .execute_grant_large_object_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
             GrantObjectPrivilege::UsageOnForeignDataWrapper
             | GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
             | GrantObjectPrivilege::UsageOnForeignServer
@@ -829,6 +838,21 @@ impl Database {
                     xid,
                     cid,
                     configured_search_path,
+                    catalog_effects,
+                    true,
+                ),
+            GrantObjectPrivilege::AllPrivilegesOnLargeObject
+            | GrantObjectPrivilege::SelectOnLargeObject
+            | GrantObjectPrivilege::UpdateOnLargeObject
+            | GrantObjectPrivilege::LargeObjectPrivileges(_) => self
+                .execute_large_object_acl_stmt_in_transaction(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    false,
+                    xid,
+                    cid,
                     catalog_effects,
                     true,
                 ),
@@ -929,6 +953,21 @@ impl Database {
                     catalog_effects,
                     false,
                 ),
+            GrantObjectPrivilege::AllPrivilegesOnLargeObject
+            | GrantObjectPrivilege::SelectOnLargeObject
+            | GrantObjectPrivilege::UpdateOnLargeObject
+            | GrantObjectPrivilege::LargeObjectPrivileges(_) => self
+                .execute_large_object_acl_stmt_in_transaction(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    stmt.with_grant_option,
+                    xid,
+                    cid,
+                    catalog_effects,
+                    false,
+                ),
             GrantObjectPrivilege::UsageOnForeignDataWrapper
             | GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper
             | GrantObjectPrivilege::UsageOnForeignServer
@@ -998,6 +1037,15 @@ impl Database {
             | GrantObjectPrivilege::ExecuteOnProcedure
             | GrantObjectPrivilege::ExecuteOnRoutine => self
                 .execute_revoke_function_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
+            GrantObjectPrivilege::AllPrivilegesOnLargeObject
+            | GrantObjectPrivilege::SelectOnLargeObject
+            | GrantObjectPrivilege::UpdateOnLargeObject
+            | GrantObjectPrivilege::LargeObjectPrivileges(_) => self
+                .execute_revoke_large_object_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,

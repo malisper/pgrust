@@ -101,6 +101,30 @@ fn cast_integer_to_bit_string(
     BitString::new(target_len, bytes)
 }
 
+fn cast_bit_string_to_u64(
+    bits: &BitString,
+    target_width: i32,
+    type_name: &'static str,
+) -> Result<u64, ExecError> {
+    if bits.bit_len > target_width {
+        return Err(ExecError::DetailedError {
+            message: format!("{type_name} out of range"),
+            detail: None,
+            hint: None,
+            sqlstate: "22003",
+        });
+    }
+    let mut result = 0u64;
+    for byte in &bits.bytes {
+        result = (result << 8) | u64::from(*byte);
+    }
+    let pad_bits = bits.bytes.len() as i32 * 8 - bits.bit_len;
+    if pad_bits > 0 {
+        result >>= pad_bits;
+    }
+    Ok(result)
+}
+
 fn unsupported_anyarray_input() -> ExecError {
     ExecError::DetailedError {
         message: "cannot accept a value of type anyarray".into(),
@@ -6077,6 +6101,18 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         Value::Bit(bits) => match ty.kind {
             SqlTypeKind::Bit | SqlTypeKind::VarBit => {
                 Ok(Value::Bit(coerce_bit_string(bits, ty, true)?))
+            }
+            SqlTypeKind::Int2 => {
+                let value = cast_bit_string_to_u64(&bits, 16, "smallint")?;
+                Ok(Value::Int16(value as u16 as i16))
+            }
+            SqlTypeKind::Int4 => {
+                let value = cast_bit_string_to_u64(&bits, 32, "integer")?;
+                Ok(Value::Int32(value as u32 as i32))
+            }
+            SqlTypeKind::Int8 => {
+                let value = cast_bit_string_to_u64(&bits, 64, "bigint")?;
+                Ok(Value::Int64(value as i64))
             }
             SqlTypeKind::Text
             | SqlTypeKind::Name

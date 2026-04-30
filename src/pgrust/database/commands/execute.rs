@@ -71,6 +71,7 @@ fn direct_guc_default(name: &str) -> Option<&'static str> {
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
+        "lo_compat_privileges" => Some("off"),
         "max_parallel_workers_per_gather" => Some("2"),
         _ => None,
     }
@@ -696,6 +697,7 @@ fn oa_default_acl_objtype(name: &str) -> Result<char, ExecError> {
         "function" | "functions" | "routine" | "routines" => Ok('f'),
         "type" | "types" => Ok('T'),
         "schema" | "schemas" => Ok('n'),
+        "large" | "large object" | "large objects" => Ok('L'),
         _ => Err(ExecError::DetailedError {
             message: format!("unrecognized default ACL object type \"{name}\""),
             detail: None,
@@ -943,24 +945,78 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<(), ExecError> {
         // :HACK: Track only object-address identity rows, not default privilege enforcement.
+        if let Some(spec) = parse_large_object_default_privileges_sql(sql)? {
+            let xid = self.txns.write().begin();
+            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+            let catalog =
+                self.lazy_catalog_lookup(client_id, Some((xid, 0)), configured_search_path);
+            let role_oid = if let Some(role_name) = spec.role_name.as_deref() {
+                catalog
+                    .authid_rows()
+                    .into_iter()
+                    .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("role \"{role_name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42704",
+                    })?
+                    .oid
+            } else {
+                self.auth_state(client_id).current_user_oid()
+            };
+            let mut catalog_effects = Vec::new();
+            let result = self
+                .execute_alter_default_privileges_large_objects(
+                    client_id,
+                    role_oid,
+                    &spec.grantee_names,
+                    &spec.privilege_chars,
+                    spec.with_grant_option,
+                    spec.revoke,
+                    xid,
+                    0,
+                    &mut catalog_effects,
+                )
+                .map(|()| StatementResult::AffectedRows(0));
+            let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+            guard.disarm();
+            result.map(|_| ())?;
+            return Ok(());
+        }
         let tokens = oa_sql_tokens(sql);
-        let role_name = oa_token_after(&tokens, &["for", "role"])
-            .ok_or_else(|| oa_unsupported_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
+        let role_name = oa_token_after(&tokens, &["for", "role"]);
         let namespace_name = oa_token_after(&tokens, &["in", "schema"]);
         let object_kind = oa_token_after(&tokens, &["on"])
             .ok_or_else(|| oa_unsupported_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
         let objtype = oa_default_acl_objtype(&object_kind)?;
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let role = catalog
-            .authid_rows()
-            .into_iter()
-            .find(|row| row.rolname.eq_ignore_ascii_case(&role_name))
-            .ok_or_else(|| ExecError::DetailedError {
-                message: format!("role \"{role_name}\" does not exist"),
-                detail: None,
-                hint: None,
-                sqlstate: "42704",
-            })?;
+        let role = if let Some(role_name) = role_name {
+            catalog
+                .authid_rows()
+                .into_iter()
+                .find(|row| row.rolname.eq_ignore_ascii_case(&role_name))
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("role \"{role_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?
+        } else {
+            catalog
+                .authid_rows()
+                .into_iter()
+                .find(|row| row.oid == self.auth_state(client_id).current_user_oid())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "role with OID {} does not exist",
+                        self.auth_state(client_id).current_user_oid()
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?
+        };
         let namespace = namespace_name
             .as_deref()
             .map(|name| {
@@ -1720,6 +1776,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterLargeObjectOwner(ref alter_stmt) => self
+                .execute_alter_large_object_owner_stmt(
+                    client_id,
+                    alter_stmt.oid,
+                    &alter_stmt.new_owner,
+                ),
             Statement::AlterTableRename(ref rename_stmt) => self
                 .execute_alter_table_rename_stmt_with_search_path(
                     client_id,
@@ -2445,6 +2507,12 @@ impl Database {
                     client_id,
                     comment_stmt,
                     configured_search_path,
+                ),
+            Statement::CommentOnLargeObject(ref comment_stmt) => self
+                .execute_comment_on_large_object_stmt(
+                    client_id,
+                    comment_stmt.oid,
+                    comment_stmt.comment.as_deref(),
                 ),
             Statement::CommentOnConstraint(ref comment_stmt) => self
                 .execute_comment_on_constraint_stmt_with_search_path(

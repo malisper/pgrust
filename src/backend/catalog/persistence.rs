@@ -377,9 +377,12 @@ fn catalog_row_identity_key(kind: BootstrapCatalogKind, values: &[Value]) -> Cat
         | BootstrapCatalogKind::PgSequence
         | BootstrapCatalogKind::PgPublication
         | BootstrapCatalogKind::PgPublicationRel
-        | BootstrapCatalogKind::PgPublicationNamespace => {
+        | BootstrapCatalogKind::PgPublicationNamespace
+        | BootstrapCatalogKind::PgDefaultAcl
+        | BootstrapCatalogKind::PgLargeobjectMetadata => {
             catalog_identity_key_from_indexes(values, &[0])
         }
+        BootstrapCatalogKind::PgLargeobject => catalog_identity_key_from_indexes(values, &[0, 1]),
         BootstrapCatalogKind::PgAttribute => catalog_identity_key_from_indexes(values, &[0, 4]),
         BootstrapCatalogKind::PgDepend => {
             catalog_identity_key_from_indexes(values, &[0, 1, 2, 3, 4, 5, 6])
@@ -446,6 +449,8 @@ fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
         && rows.authids.is_empty()
         && rows.auth_members.is_empty()
         && rows.languages.is_empty()
+        && rows.largeobjects.is_empty()
+        && rows.largeobject_metadata.is_empty()
         && rows.ts_parsers.is_empty()
         && rows.ts_templates.is_empty()
         && rows.ts_dicts.is_empty()
@@ -460,6 +465,7 @@ fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
         && rows.casts.is_empty()
         && rows.conversions.is_empty()
         && rows.collations.is_empty()
+        && rows.default_acls.is_empty()
         && rows.databases.is_empty()
         && rows.tablespaces.is_empty()
         && rows.statistics.is_empty()

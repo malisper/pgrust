@@ -11,13 +11,14 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PG_STATISTIC_RELATION_OID, PG_STATISTIC_ROWTYPE_OID, PgAggregateRow,
     PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
     PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow,
-    PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow,
-    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
-    PgShdependRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
+    PgDefaultAclRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow,
+    PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgLargeobjectMetadataRow, PgLargeobjectRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow, PgShdependRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
 };
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
@@ -123,9 +124,18 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_collation_row_values)
             .collect(),
-        BootstrapCatalogKind::PgLargeobject | BootstrapCatalogKind::PgLargeobjectMetadata => {
-            Vec::new()
-        }
+        BootstrapCatalogKind::PgLargeobject => rows
+            .largeobjects
+            .iter()
+            .cloned()
+            .map(pg_largeobject_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgLargeobjectMetadata => rows
+            .largeobject_metadata
+            .iter()
+            .cloned()
+            .map(pg_largeobject_metadata_row_values)
+            .collect(),
         BootstrapCatalogKind::PgTablespace => rows
             .tablespaces
             .iter()
@@ -169,8 +179,13 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_depend_row_values)
             .collect(),
-        BootstrapCatalogKind::PgDefaultAcl
-        | BootstrapCatalogKind::PgExtension
+        BootstrapCatalogKind::PgDefaultAcl => rows
+            .default_acls
+            .iter()
+            .cloned()
+            .map(pg_default_acl_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgExtension
         | BootstrapCatalogKind::PgTransform
         | BootstrapCatalogKind::PgSubscription
         | BootstrapCatalogKind::PgParameterAcl
@@ -691,6 +706,38 @@ pub(crate) fn pg_language_row_from_values(
         lanplcallfoid: expect_oid(&values[5])?,
         laninline: expect_oid(&values[6])?,
         lanvalidator: expect_oid(&values[7])?,
+    })
+}
+
+pub(crate) fn pg_largeobject_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgLargeobjectRow, CatalogError> {
+    Ok(PgLargeobjectRow {
+        loid: expect_oid(&values[0])?,
+        pageno: expect_int32(&values[1])?,
+        data: expect_bytea(&values[2])?,
+    })
+}
+
+pub(crate) fn pg_largeobject_metadata_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgLargeobjectMetadataRow, CatalogError> {
+    Ok(PgLargeobjectMetadataRow {
+        oid: expect_oid(&values[0])?,
+        lomowner: expect_oid(&values[1])?,
+        lomacl: nullable_text_array(&values[2])?.unwrap_or_default(),
+    })
+}
+
+pub(crate) fn pg_default_acl_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgDefaultAclRow, CatalogError> {
+    Ok(PgDefaultAclRow {
+        oid: expect_oid(&values[0])?,
+        defaclrole: expect_oid(&values[1])?,
+        defaclnamespace: expect_oid(&values[2])?,
+        defaclobjtype: expect_char(&values[3], "defaclobjtype")?,
+        defaclacl: nullable_text_array(&values[4])?,
     })
 }
 
@@ -1754,6 +1801,36 @@ fn pg_language_row_values(row: PgLanguageRow) -> Vec<Value> {
     ]
 }
 
+fn pg_largeobject_row_values(row: PgLargeobjectRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.loid as i32),
+        Value::Int32(row.pageno),
+        Value::Bytea(row.data),
+    ]
+}
+
+fn pg_largeobject_metadata_row_values(row: PgLargeobjectMetadataRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.lomowner as i32),
+        if row.lomacl.is_empty() {
+            Value::Null
+        } else {
+            Value::PgArray(text_array_value(row.lomacl))
+        },
+    ]
+}
+
+fn pg_default_acl_row_values(row: PgDefaultAclRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.defaclrole as i32),
+        Value::Int32(row.defaclnamespace as i32),
+        Value::InternalChar(row.defaclobjtype as u8),
+        nullable_array_value(row.defaclacl.map(text_array_value)),
+    ]
+}
+
 fn pg_ts_parser_row_values(row: PgTsParserRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -2474,6 +2551,13 @@ fn expect_nullable_array(value: &Value) -> Result<Option<ArrayValue>, CatalogErr
         Value::Null => Ok(None),
         Value::PgArray(array) => Ok(Some(array.clone())),
         _ => Err(CatalogError::Corrupt("expected nullable array value")),
+    }
+}
+
+fn expect_bytea(value: &Value) -> Result<Vec<u8>, CatalogError> {
+    match value {
+        Value::Bytea(bytes) => Ok(bytes.clone()),
+        _ => Err(CatalogError::Corrupt("expected bytea value")),
     }
 }
 

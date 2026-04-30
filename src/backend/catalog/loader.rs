@@ -21,19 +21,20 @@ use crate::backend::catalog::rowcodec::{
     pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
     pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
     pg_constraint_row_from_values, pg_conversion_row_from_values, pg_database_row_from_values,
-    pg_depend_row_from_values, pg_description_row_from_values, pg_event_trigger_row_from_values,
-    pg_foreign_data_wrapper_row_from_values, pg_foreign_server_row_from_values,
-    pg_foreign_table_row_from_values, pg_index_row_from_values, pg_inherits_row_from_values,
-    pg_language_row_from_values, pg_opclass_row_from_values, pg_operator_row_from_values,
-    pg_opfamily_row_from_values, pg_partitioned_table_row_from_values, pg_policy_row_from_values,
-    pg_proc_row_from_values, pg_publication_namespace_row_from_values,
-    pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
-    pg_sequence_row_from_values, pg_shdepend_row_from_values,
-    pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
-    pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
-    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
-    pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
-    pg_user_mapping_row_from_values,
+    pg_default_acl_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
+    pg_event_trigger_row_from_values, pg_foreign_data_wrapper_row_from_values,
+    pg_foreign_server_row_from_values, pg_foreign_table_row_from_values, pg_index_row_from_values,
+    pg_inherits_row_from_values, pg_language_row_from_values,
+    pg_largeobject_metadata_row_from_values, pg_largeobject_row_from_values,
+    pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
+    pg_partitioned_table_row_from_values, pg_policy_row_from_values, pg_proc_row_from_values,
+    pg_publication_namespace_row_from_values, pg_publication_rel_row_from_values,
+    pg_publication_row_from_values, pg_rewrite_row_from_values, pg_sequence_row_from_values,
+    pg_shdepend_row_from_values, pg_statistic_ext_data_row_from_values,
+    pg_statistic_ext_row_from_values, pg_statistic_row_from_values, pg_tablespace_row_from_values,
+    pg_trigger_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
+    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
+    pg_type_row_from_values, pg_user_mapping_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -942,7 +943,18 @@ fn append_catalog_kind_rows(
                 .map(pg_collation_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
-        BootstrapCatalogKind::PgLargeobject | BootstrapCatalogKind::PgLargeobjectMetadata => {}
+        BootstrapCatalogKind::PgLargeobject => {
+            rows.largeobjects = values
+                .into_iter()
+                .map(pg_largeobject_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgLargeobjectMetadata => {
+            rows.largeobject_metadata = values
+                .into_iter()
+                .map(pg_largeobject_metadata_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         BootstrapCatalogKind::PgTablespace => {
             rows.tablespaces = values
                 .into_iter()
@@ -997,8 +1009,13 @@ fn append_catalog_kind_rows(
                 .map(pg_depend_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
-        BootstrapCatalogKind::PgDefaultAcl
-        | BootstrapCatalogKind::PgExtension
+        BootstrapCatalogKind::PgDefaultAcl => {
+            rows.default_acls = values
+                .into_iter()
+                .map(pg_default_acl_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgExtension
         | BootstrapCatalogKind::PgTransform
         | BootstrapCatalogKind::PgSubscription
         | BootstrapCatalogKind::PgParameterAcl
@@ -1651,6 +1668,30 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         .map(pg_description_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let default_acl_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgDefaultAcl],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgDefaultAcl),
+    )?
+    .into_iter()
+    .map(pg_default_acl_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let largeobject_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgLargeobject],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgLargeobject),
+    )?
+    .into_iter()
+    .map(pg_largeobject_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let largeobject_metadata_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgLargeobjectMetadata],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgLargeobjectMetadata),
+    )?
+    .into_iter()
+    .map(pg_largeobject_metadata_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
     let index_rows = if missing_index {
         Vec::new()
     } else {
@@ -1797,10 +1838,13 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         shdepends: Vec::new(),
         inherits: inherit_rows,
         descriptions: description_rows,
+        default_acls: default_acl_rows,
         foreign_data_wrappers: Vec::new(),
         foreign_servers: Vec::new(),
         foreign_tables: Vec::new(),
         user_mappings: Vec::new(),
+        largeobjects: largeobject_rows,
+        largeobject_metadata: largeobject_metadata_rows,
         indexes: index_rows,
         rewrites: rewrite_rows,
         sequences: sequence_rows,
@@ -2350,6 +2394,39 @@ fn load_physical_catalog_rows_visible_legacy(
         .map(pg_description_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let default_acl_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgDefaultAcl],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgDefaultAcl),
+    )?
+    .into_iter()
+    .map(pg_default_acl_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let largeobject_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgLargeobject],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgLargeobject),
+    )?
+    .into_iter()
+    .map(pg_largeobject_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let largeobject_metadata_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgLargeobjectMetadata],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgLargeobjectMetadata),
+    )?
+    .into_iter()
+    .map(pg_largeobject_metadata_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
     let index_rows = if missing_index {
         Vec::new()
     } else {
@@ -2535,10 +2612,13 @@ fn load_physical_catalog_rows_visible_legacy(
         shdepends: Vec::new(),
         inherits: inherit_rows,
         descriptions: description_rows,
+        default_acls: default_acl_rows,
         foreign_data_wrappers: Vec::new(),
         foreign_servers: Vec::new(),
         foreign_tables: Vec::new(),
         user_mappings: Vec::new(),
+        largeobjects: largeobject_rows,
+        largeobject_metadata: largeobject_metadata_rows,
         indexes: index_rows,
         rewrites: rewrite_rows,
         sequences: sequence_rows,
