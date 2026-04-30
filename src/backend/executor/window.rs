@@ -1516,7 +1516,7 @@ fn evaluate_offset_window(
                 }
             }
         };
-        values.push(value);
+        values.push(super::cast_value(value, func.result_type)?);
     }
     Ok(values)
 }
@@ -1642,7 +1642,7 @@ fn evaluate_value_window(
             }
             None => Value::Null,
         };
-        values.push(value);
+        values.push(super::cast_value(value, func.result_type)?);
     }
     Ok(values)
 }
