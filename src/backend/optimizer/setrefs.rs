@@ -5,10 +5,10 @@ use super::pathnodes::{
 };
 use super::plan::append_uncorrelated_planned_subquery;
 use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base_and_config};
-use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
+use crate::backend::parser::{CatalogLookup, SubqueryComparisonOp};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     Query, QueryRowMark, RangeTblEntryKind, TableSampleClause,
@@ -18,15 +18,15 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{
     ExecParamSource, IndexScanKey, IndexScanKeyArgument, PartitionPruneChildDomain,
-    PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark,
+    PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark, TidScanCond, TidScanSource,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, BuiltinScalarFunction, Expr, ExprArraySubscript, FuncExpr,
-    INNER_VAR, JoinType, OUTER_VAR, OpExpr, OrderByEntry, Param, ParamKind, QueryColumn,
-    RowsFromSource, ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SubPlan, TargetEntry,
-    Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
-    is_executor_special_varno, is_rule_pseudo_varno, is_special_varno, is_system_attr,
-    set_returning_call_exprs, user_attrno,
+    AggAccum, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript,
+    FuncExpr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind,
+    QueryColumn, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl,
+    SetReturningCall, SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind,
+    XmlExpr, attrno_index, is_executor_special_varno, is_rule_pseudo_varno, is_special_varno,
+    is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -4334,6 +4334,25 @@ fn collect_index_scan_key_external_exec_paramids(
     }
 }
 
+fn collect_tid_scan_external_exec_paramids(
+    tid_cond: &TidScanCond,
+    filter: Option<&Expr>,
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    for source in &tid_cond.sources {
+        match source {
+            TidScanSource::Scalar(expr) | TidScanSource::Array(expr) => {
+                collect_external_expr_exec_paramids(expr, bound, out);
+            }
+        }
+    }
+    collect_external_expr_exec_paramids(&tid_cond.display_expr, bound, out);
+    if let Some(filter) = filter {
+        collect_external_expr_exec_paramids(filter, bound, out);
+    }
+}
+
 fn collect_plan_external_exec_paramids(
     plan: &Plan,
     bound: &BTreeSet<usize>,
@@ -4341,6 +4360,9 @@ fn collect_plan_external_exec_paramids(
 ) {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => {}
+        Plan::TidScan {
+            tid_cond, filter, ..
+        } => collect_tid_scan_external_exec_paramids(tid_cond, filter.as_ref(), bound, out),
         Plan::Append { children, .. }
         | Plan::BitmapOr { children, .. }
         | Plan::BitmapAnd { children, .. }
@@ -4837,6 +4859,29 @@ fn validate_executable_plan(plan: &Plan) {
 fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTreeSet<usize>) {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } => {}
+        Plan::TidScan {
+            tid_cond, filter, ..
+        } => {
+            for source in &tid_cond.sources {
+                match source {
+                    TidScanSource::Scalar(expr) => {
+                        validate_executable_expr(expr, "TidScan", "tid_cond", allowed_exec_params)
+                    }
+                    TidScanSource::Array(expr) => {
+                        validate_executable_expr(expr, "TidScan", "tid_cond", allowed_exec_params)
+                    }
+                }
+            }
+            validate_executable_expr(
+                &tid_cond.display_expr,
+                "TidScan",
+                "display_expr",
+                allowed_exec_params,
+            );
+            if let Some(filter) = filter {
+                validate_executable_expr(filter, "TidScan", "filter", allowed_exec_params);
+            }
+        }
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             for child in children {
                 validate_executable_plan_with_params(child, allowed_exec_params);
@@ -5668,6 +5713,59 @@ fn set_filter_references(
         },
     );
     match input {
+        Path::SeqScan {
+            plan_info: seq_plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            disabled,
+            toast,
+            tablesample,
+            desc,
+            pathtarget: _,
+        } => {
+            if tablesample.is_none()
+                && let Some(spec) = extract_tid_scan_spec(&predicate, source_id)
+            {
+                Plan::TidScan {
+                    plan_info,
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    relkind,
+                    relispopulated,
+                    toast,
+                    desc,
+                    tid_cond: TidScanCond {
+                        sources: spec.sources,
+                        display_expr: spec.display_expr,
+                    },
+                    filter: spec.filter,
+                }
+            } else {
+                Plan::Filter {
+                    plan_info,
+                    input: Box::new(Plan::SeqScan {
+                        plan_info: seq_plan_info,
+                        source_id,
+                        rel,
+                        relation_name,
+                        relation_oid,
+                        relkind,
+                        relispopulated,
+                        disabled,
+                        toast,
+                        tablesample,
+                        desc,
+                    }),
+                    predicate,
+                }
+            }
+        }
         Path::SubqueryScan {
             rtindex,
             subroot,
@@ -5691,6 +5789,149 @@ fn set_filter_references(
             predicate,
         },
     }
+}
+
+#[derive(Debug)]
+struct TidScanSpec {
+    sources: Vec<TidScanSource>,
+    display_expr: Expr,
+    filter: Option<Expr>,
+}
+
+#[derive(Debug)]
+struct TidScanBranch {
+    sources: Vec<TidScanSource>,
+    display_expr: Expr,
+    residual: Option<Expr>,
+}
+
+fn extract_tid_scan_spec(predicate: &Expr, source_id: usize) -> Option<TidScanSpec> {
+    let disjuncts = flatten_or_disjuncts(predicate);
+    if disjuncts.len() > 1 {
+        let mut sources = Vec::new();
+        let mut display_exprs = Vec::new();
+        let mut needs_full_filter = false;
+        for disjunct in &disjuncts {
+            let branch = extract_tid_scan_branch(disjunct, source_id)?;
+            sources.extend(branch.sources);
+            display_exprs.push(branch.display_expr);
+            needs_full_filter |= branch.residual.is_some();
+        }
+        return Some(TidScanSpec {
+            sources,
+            display_expr: combine_bool_exprs(BoolExprType::Or, display_exprs),
+            filter: needs_full_filter.then(|| predicate.clone()),
+        });
+    }
+
+    extract_tid_scan_branch(predicate, source_id).map(|branch| TidScanSpec {
+        sources: branch.sources,
+        display_expr: branch.display_expr,
+        filter: branch.residual,
+    })
+}
+
+fn extract_tid_scan_branch(expr: &Expr, source_id: usize) -> Option<TidScanBranch> {
+    if let Some((source, display_expr)) = extract_tid_scan_source(expr, source_id) {
+        return Some(TidScanBranch {
+            sources: vec![source],
+            display_expr,
+            residual: None,
+        });
+    }
+
+    let conjuncts = flatten_and_conjuncts(expr);
+    if conjuncts.len() <= 1 {
+        return None;
+    }
+
+    let mut tid_parts = Vec::new();
+    let mut residual = Vec::new();
+    for conjunct in conjuncts {
+        if let Some((source, display_expr)) = extract_tid_scan_source(&conjunct, source_id) {
+            tid_parts.push((source, display_expr));
+        } else {
+            residual.push(conjunct);
+        }
+    }
+    if tid_parts.is_empty() {
+        return None;
+    }
+
+    let mut sources = Vec::new();
+    let mut display_exprs = Vec::new();
+    for (source, display_expr) in tid_parts {
+        sources.push(source);
+        display_exprs.push(display_expr);
+    }
+    let residual = if display_exprs.len() > 1 {
+        Some(expr.clone())
+    } else if residual.is_empty() {
+        None
+    } else {
+        Some(combine_bool_exprs(BoolExprType::And, residual))
+    };
+
+    Some(TidScanBranch {
+        sources,
+        display_expr: combine_bool_exprs(BoolExprType::And, display_exprs),
+        residual,
+    })
+}
+
+fn extract_tid_scan_source(expr: &Expr, source_id: usize) -> Option<(TidScanSource, Expr)> {
+    match expr {
+        Expr::Op(op) if op.op == OpExprKind::Eq && op.args.len() == 2 => {
+            let left = &op.args[0];
+            let right = &op.args[1];
+            if is_ctid_var(left, source_id) {
+                Some((TidScanSource::Scalar(right.clone()), expr.clone()))
+            } else if is_ctid_var(right, source_id) {
+                Some((TidScanSource::Scalar(left.clone()), expr.clone()))
+            } else {
+                None
+            }
+        }
+        Expr::ScalarArrayOp(saop)
+            if saop.use_or
+                && saop.op == SubqueryComparisonOp::Eq
+                && is_ctid_var(&saop.left, source_id) =>
+        {
+            Some((TidScanSource::Array((*saop.right).clone()), expr.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn is_ctid_var(expr: &Expr, source_id: usize) -> bool {
+    matches!(
+        expr,
+        Expr::Var(var)
+            if var.varlevelsup == 0
+                && var.varno == source_id
+                && var.varattno == SELF_ITEM_POINTER_ATTR_NO
+    )
+}
+
+fn flatten_or_disjuncts(expr: &Expr) -> Vec<Expr> {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => bool_expr
+            .args
+            .iter()
+            .flat_map(flatten_or_disjuncts)
+            .collect(),
+        other => vec![other.clone()],
+    }
+}
+
+fn combine_bool_exprs(boolop: BoolExprType, mut exprs: Vec<Expr>) -> Expr {
+    if exprs.len() == 1 {
+        return exprs.remove(0);
+    }
+    Expr::Bool(Box::new(BoolExpr {
+        boolop,
+        args: exprs,
+    }))
 }
 
 fn set_append_references(
@@ -5867,6 +6108,7 @@ fn append_source_alias(ctx: &SetRefsContext<'_>, source_id: usize) -> Option<Str
 fn apply_single_append_scan_alias(plan: &mut Plan, alias: &str) {
     match plan {
         Plan::SeqScan { relation_name, .. }
+        | Plan::TidScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => {
@@ -6350,15 +6592,7 @@ fn set_seq_scan_references(
 }
 
 fn lower_tablesample_metadata_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
-    // :HACK: TableSampleClause is EXPLAIN metadata while pgrust executes
-    // TABLESAMPLE through the lowered sampling qual. Lateral sample arguments
-    // can still contain same-level semantic Vars here, so keep those display
-    // expressions intact instead of forcing them through Scalar lowering.
-    if expr_contains_local_semantic_var(&expr) {
-        expr
-    } else {
-        lower_expr(ctx, expr, LowerMode::Scalar)
-    }
+    lower_expr(ctx, expr, LowerMode::Scalar)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6845,6 +7079,7 @@ fn plan_contains_values_scan(plan: &Plan) -> bool {
         }
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -6898,6 +7133,7 @@ fn plan_contains_sql_xml_table_scan(plan: &Plan) -> bool {
         }
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -6969,6 +7205,7 @@ fn annotate_runtime_index_labels(plan: &mut Plan, param_labels: &BTreeMap<usize,
         }
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::Values { .. }
         | Plan::WorkTableScan { .. } => {}
@@ -7039,6 +7276,7 @@ fn runtime_label_for_single_param(
             .or_else(|| runtime_label_for_single_param(recursive, paramid, param_labels)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::Values { .. }
         | Plan::WorkTableScan { .. } => None,
@@ -8137,7 +8375,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relation_oid,
             relkind,
             relispopulated,
-            disabled,
+            disabled || ctx.root.is_some_and(|root| !root.config.enable_seqscan),
             toast,
             tablesample,
             desc,

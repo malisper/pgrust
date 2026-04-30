@@ -1787,6 +1787,7 @@ pub enum CteBody {
     RecursiveUnion {
         all: bool,
         left_nested: bool,
+        anchor_with_is_subquery: bool,
         anchor: Box<CteBody>,
         recursive: Box<SelectStatement>,
     },
@@ -2468,6 +2469,7 @@ pub struct PrepareStatement {
     pub parameter_types: Vec<RawTypeName>,
     pub query: PreparedStatementQuery,
     pub query_sql: String,
+    pub source_sql: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -9380,6 +9380,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             vec![INTERNAL_TYPE_OID],
         ),
         (
+            3688,
+            "ts_typanalyze",
+            BOOL_TYPE_OID,
+            vec![INTERNAL_TYPE_OID],
+        ),
+        (
             2410,
             "int2vectorrecv",
             INT2VECTOR_TYPE_OID,
@@ -9547,6 +9553,7 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
                 | "brin_minmax_multi_summary_recv"
                 | "brin_minmax_multi_summary_send"
                 | "array_typanalyze"
+                | "ts_typanalyze"
                 | "range_typanalyze"
                 | "multirange_typanalyze"
         ) {
@@ -12809,6 +12816,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
         ("pg_numa_available", BuiltinScalarFunction::PgNumaAvailable),
+        (
+            "gin_clean_pending_list",
+            BuiltinScalarFunction::GinCleanPendingList,
+        ),
         (
             "brin_summarize_new_values",
             BuiltinScalarFunction::BrinSummarizeNewValues,
@@ -16557,6 +16568,18 @@ fn brin_support_proc_rows() -> Vec<PgProcRow> {
             false,
             'f',
             'i',
+        ),
+        proc_row(
+            3789,
+            "gin_clean_pending_list",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID]),
+            "gin_clean_pending_list",
+            1,
+            false,
+            false,
+            'f',
+            'v',
         ),
         proc_row(
             3952,

@@ -22,10 +22,11 @@ use crate::backend::executor::{
 use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::{
     AlterRuleRenameStatement, AlterTableRuleStateStatement, AlterTableTriggerMode,
-    BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement,
+    BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement, CteBody,
     DropRuleStatement, FromItem, ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement,
-    Statement, bind_rule_action_statement, bind_rule_qual, delete_statement_references_table,
-    insert_statement_references_table, rewrite_bound_delete_auto_view_target,
+    Statement, bind_rule_action_statement, bind_rule_qual, cte_body_references_table,
+    delete_statement_references_table, insert_statement_references_table,
+    merge_statement_references_table, rewrite_bound_delete_auto_view_target,
     rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
     select_statement_references_table, update_statement_references_table, validate_rule_definition,
 };
@@ -721,7 +722,7 @@ struct PreparedRule {
     qual: Option<crate::backend::executor::Expr>,
     qual_subplans: Vec<Plan>,
     actions: Vec<crate::backend::parser::BoundRuleAction>,
-    actions_reference_rule_tuples: bool,
+    actions_reference_old_new: bool,
 }
 
 #[derive(Default)]
@@ -1385,22 +1386,24 @@ pub(crate) fn execute_bound_delete_with_rules(
                     catalog,
                     ctx.session_replication_role,
                 )?;
-                if rules_are_unconditional_row_independent_instead(&rules) {
-                    let (target_affected_rows, mut target_returned_rows) =
-                        execute_row_independent_instead_rules_once(
-                            &rules,
-                            &target.desc,
-                            &stmt.returning,
-                            &target.relation_name,
-                            RuleEvent::Delete,
-                            catalog,
-                            ctx,
-                            xid,
-                            0,
-                            waiter,
-                        )?;
-                    affected_rows += target_affected_rows;
-                    returned_rows.append(&mut target_returned_rows);
+                if let Some(outcome) = execute_statement_level_instead_rules(
+                    &rules,
+                    target.desc.columns.len(),
+                    catalog,
+                    ctx,
+                    xid,
+                    0,
+                    waiter,
+                    !stmt.returning.is_empty(),
+                )? {
+                    affected_rows += append_statement_level_instead_result(
+                        RuleEvent::Delete,
+                        &target.relation_name,
+                        &stmt.returning,
+                        outcome,
+                        ctx,
+                        &mut returned_rows,
+                    )?;
                     return if stmt.returning.is_empty() {
                         Ok(StatementResult::AffectedRows(affected_rows))
                     } else {
@@ -1512,22 +1515,24 @@ pub(crate) fn execute_bound_delete_with_rules(
                 catalog,
                 ctx.session_replication_role,
             )?;
-            if target.relkind != 'v' && rules_are_unconditional_row_independent_instead(&rules) {
-                let (target_affected_rows, mut target_returned_rows) =
-                    execute_row_independent_instead_rules_once(
-                        &rules,
-                        &target.desc,
-                        &stmt.returning,
-                        &target.relation_name,
-                        RuleEvent::Delete,
-                        catalog,
-                        ctx,
-                        xid,
-                        0,
-                        waiter,
-                    )?;
-                affected_rows += target_affected_rows;
-                returned_rows.append(&mut target_returned_rows);
+            if let Some(outcome) = execute_statement_level_instead_rules(
+                &rules,
+                target.desc.columns.len(),
+                catalog,
+                ctx,
+                xid,
+                0,
+                waiter,
+                !stmt.returning.is_empty(),
+            )? {
+                affected_rows += append_statement_level_instead_result(
+                    RuleEvent::Delete,
+                    &target.relation_name,
+                    &stmt.returning,
+                    outcome,
+                    ctx,
+                    &mut returned_rows,
+                )?;
                 continue;
             }
             if target.relkind == 'v' {
@@ -1756,26 +1761,12 @@ fn append_rule_query_output(
             *column_names = std::mem::take(&mut outcome.query_column_names);
         }
     }
-    for row in outcome.query_rows.drain(..) {
-        if !rows.contains(&row) {
-            rows.push(row);
-        }
-    }
+    rows.append(&mut outcome.query_rows);
 }
 
-fn rules_are_unconditional_row_independent_instead(rules: &[PreparedRule]) -> bool {
-    !rules.is_empty()
-        && rules.iter().all(|rule| {
-            rule.is_instead && rule.qual.is_none() && !rule.actions_reference_rule_tuples
-        })
-}
-
-fn execute_row_independent_instead_rules_once(
+fn execute_statement_level_instead_rules(
     rules: &[PreparedRule],
-    target_desc: &RelationDesc,
-    statement_returning: &[TargetEntry],
-    relation_name: &str,
-    event: RuleEvent,
+    row_width: usize,
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
@@ -1785,30 +1776,49 @@ fn execute_row_independent_instead_rules_once(
         &TransactionWaiter,
         &crate::backend::utils::misc::interrupts::InterruptState,
     )>,
-) -> Result<(usize, Vec<Vec<Value>>), ExecError> {
-    let null_old = vec![Value::Null; target_desc.columns.len()];
-    let null_new = vec![Value::Null; target_desc.columns.len()];
-    let outcome = execute_matching_rules(
+    capture_returning: bool,
+) -> Result<Option<RuleMatchOutcome>, ExecError> {
+    if rules.is_empty()
+        || !rules
+            .iter()
+            .all(|rule| rule.is_instead && rule.qual.is_none() && !rule.actions_reference_old_new)
+    {
+        return Ok(None);
+    }
+    let null_tuple = vec![Value::Null; row_width];
+    execute_matching_rules(
         rules,
-        &null_old,
-        &null_new,
+        &null_tuple,
+        &null_tuple,
         catalog,
         ctx,
         xid,
         cid,
         waiter,
-        !statement_returning.is_empty(),
-    )?;
-    if !statement_returning.is_empty() {
+        capture_returning,
+    )
+    .map(Some)
+}
+
+fn append_statement_level_instead_result(
+    event: RuleEvent,
+    relation_name: &str,
+    returning: &[TargetEntry],
+    outcome: RuleMatchOutcome,
+    ctx: &mut ExecutorContext,
+    returned_rows: &mut Vec<Vec<Value>>,
+) -> Result<usize, ExecError> {
+    if !returning.is_empty() {
         if !outcome.returning_seen {
             return Err(missing_rule_returning_error(event, relation_name));
         }
-        return Ok((
-            usize::from(outcome.matched_actions),
-            project_statement_returning_rows(statement_returning, &outcome.returning_rows, ctx)?,
-        ));
+        returned_rows.extend(project_statement_returning_rows(
+            returning,
+            &outcome.returning_rows,
+            ctx,
+        )?);
     }
-    Ok((usize::from(outcome.matched_actions), Vec::new()))
+    Ok(usize::from(outcome.matched_actions))
 }
 
 fn execute_view_insert_with_triggers(
@@ -3388,6 +3398,49 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
             row_marks,
         },
+        Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond,
+            filter,
+        } => Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond: crate::include::nodes::plannodes::TidScanCond {
+                sources: tid_cond
+                    .sources
+                    .into_iter()
+                    .map(|source| match source {
+                        crate::include::nodes::plannodes::TidScanSource::Scalar(expr) => {
+                            crate::include::nodes::plannodes::TidScanSource::Scalar(
+                                substitute_rule_expr(expr, old_values, new_values),
+                            )
+                        }
+                        crate::include::nodes::plannodes::TidScanSource::Array(expr) => {
+                            crate::include::nodes::plannodes::TidScanSource::Array(
+                                substitute_rule_expr(expr, old_values, new_values),
+                            )
+                        }
+                    })
+                    .collect(),
+                display_expr: substitute_rule_expr(tid_cond.display_expr, old_values, new_values),
+            },
+            filter: filter.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        },
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => plan,
     }
 }
@@ -3753,10 +3806,10 @@ fn load_prepared_rules(
                 Some(bind_rule_qual(&parsed, relation_desc, event, catalog)?)
             };
             let mut actions = Vec::new();
-            let mut actions_reference_rule_tuples = false;
+            let mut actions_reference_old_new = false;
             for sql in split_stored_rule_action_sql(&row.ev_action) {
                 let statement = crate::backend::parser::parse_statement(sql)?;
-                actions_reference_rule_tuples |= statement_references_rule_tuple(&statement);
+                actions_reference_old_new |= statement_references_rule_tuple(&statement);
                 actions.push(bind_rule_action_statement(
                     &statement,
                     relation_desc,
@@ -3769,7 +3822,7 @@ fn load_prepared_rules(
                 qual,
                 qual_subplans: Vec::new(),
                 actions,
-                actions_reference_rule_tuples,
+                actions_reference_old_new,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()
@@ -3783,10 +3836,13 @@ fn statement_references_rule_tuple(statement: &Statement) -> bool {
 fn statement_references_table(statement: &Statement, table_name: &str) -> bool {
     match statement {
         Statement::Select(stmt) => select_statement_references_table(stmt, table_name),
+        Statement::Values(stmt) => {
+            cte_body_references_table(&CteBody::Values(stmt.clone()), table_name)
+        }
         Statement::Insert(stmt) => insert_statement_references_table(stmt, table_name),
         Statement::Update(stmt) => update_statement_references_table(stmt, table_name),
         Statement::Delete(stmt) => delete_statement_references_table(stmt, table_name),
-        Statement::Notify(_) => false,
+        Statement::Merge(stmt) => merge_statement_references_table(stmt, table_name),
         _ => false,
     }
 }

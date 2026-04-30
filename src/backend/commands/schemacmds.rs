@@ -13,7 +13,7 @@ pub(crate) struct ResolvedCreateSchema {
 
 pub(crate) enum CreateSchemaResolution {
     Create(ResolvedCreateSchema),
-    SkipExisting,
+    SkipExisting(String),
 }
 
 fn create_schema_mismatch_error(found: &str, target: &str) -> ExecError {
@@ -213,6 +213,17 @@ pub(crate) fn resolve_create_schema_stmt(
         .clone()
         .unwrap_or_else(|| target_owner.rolname.clone());
 
+    if stmt.if_not_exists && !stmt.elements.is_empty() {
+        return Err(ExecError::Parse(
+            crate::backend::parser::ParseError::DetailedError {
+                message: "CREATE SCHEMA IF NOT EXISTS cannot include schema elements".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            },
+        ));
+    }
+
     if schema_name.starts_with("pg_") {
         return Err(ExecError::DetailedError {
             message: format!("unacceptable schema name \"{schema_name}\""),
@@ -227,7 +238,7 @@ pub(crate) fn resolve_create_schema_stmt(
         .any(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
     {
         return if stmt.if_not_exists {
-            Ok(CreateSchemaResolution::SkipExisting)
+            Ok(CreateSchemaResolution::SkipExisting(schema_name))
         } else {
             Err(ExecError::DetailedError {
                 message: format!("schema \"{schema_name}\" already exists"),

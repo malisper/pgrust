@@ -42,28 +42,30 @@ use crate::backend::utils::cache::relcache::{
     IndexRelCacheEntry, RelCache, RelCacheEntry, relation_locator_for_class_row,
 };
 use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
+use crate::include::access::gin::GinOptions;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     BTREE_AM_OID, BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
-    PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID,
-    PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_DATABASE_RELATION_OID, PG_EVENT_TRIGGER_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_FOREIGN_SERVER_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID,
-    PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_SUBSCRIPTION_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
-    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
-    PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, policy_shdepend_rows, relkind_has_storage,
+    GIN_AM_OID, PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID,
+    PG_AUTHID_RELATION_OID, PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID,
+    PG_CONSTRAINT_RELATION_OID, PG_DATABASE_RELATION_OID, PG_EVENT_TRIGGER_RELATION_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID,
+    PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
+    PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
+    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_SUBSCRIPTION_RELATION_OID, PG_TRIGGER_RELATION_OID,
+    PG_TYPE_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow,
+    PgForeignServerRow, PgForeignTableRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
+    policy_shdepend_rows, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -8646,6 +8648,13 @@ impl CatalogStore {
                 {
                     index_meta.btree_options = btree_options_from_reloptions(reloptions.as_deref());
                 }
+                if entry.relkind == 'i'
+                    && entry.am_oid == GIN_AM_OID
+                    && let Some(index_meta) = entry.index_meta.as_mut()
+                {
+                    index_meta.gin_options =
+                        Some(gin_options_from_reloptions(reloptions.as_deref()));
+                }
                 Ok(((), vec![BootstrapCatalogKind::PgClass]))
             })?;
 
@@ -9573,6 +9582,81 @@ impl CatalogStore {
         }
         Ok(effect)
     }
+
+    pub fn replace_type_rows_and_support_dependencies_mvcc(
+        &mut self,
+        rows: Vec<PgTypeRow>,
+        type_oid: u32,
+        support_proc_oids: &[u32],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut old_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            old_rows.push(
+                type_row_by_oid_mvcc(self, ctx, row.oid)?
+                    .ok_or_else(|| CatalogError::UnknownType(row.oid.to_string()))?,
+            );
+        }
+
+        let old_support_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_TYPE_RELATION_OID, type_oid)?
+                .into_iter()
+                .filter(type_support_proc_depend_row)
+                .collect::<Vec<_>>();
+        let mut new_support_depends = support_proc_oids
+            .iter()
+            .copied()
+            .filter(|proc_oid| *proc_oid != 0)
+            .map(|proc_oid| PgDependRow {
+                classid: PG_TYPE_RELATION_OID,
+                objid: type_oid,
+                objsubid: 0,
+                refclassid: PG_PROC_RELATION_OID,
+                refobjid: proc_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            })
+            .collect::<Vec<_>>();
+        sort_pg_depend_rows(&mut new_support_depends);
+        new_support_depends.dedup();
+
+        let kinds = [BootstrapCatalogKind::PgType, BootstrapCatalogKind::PgDepend];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: old_rows,
+                depends: old_support_depends,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: rows.clone(),
+                depends: new_support_depends,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        for row in rows {
+            effect_record_oid(&mut effect.type_oids, row.oid);
+        }
+        Ok(effect)
+    }
+}
+
+fn type_support_proc_depend_row(row: &PgDependRow) -> bool {
+    row.classid == PG_TYPE_RELATION_OID
+        && row.objsubid == 0
+        && row.refclassid == PG_PROC_RELATION_OID
+        && row.refobjsubid == 0
+        && row.deptype == DEPENDENCY_NORMAL
 }
 
 fn visible_catalog_caches_for_ctx(
@@ -9773,6 +9857,29 @@ fn btree_options_from_reloptions(reloptions: Option<&[String]>) -> Option<BtreeO
         }
     }
     found.then_some(options)
+}
+
+fn gin_options_from_reloptions(reloptions: Option<&[String]>) -> GinOptions {
+    let mut options = GinOptions::default();
+    let Some(reloptions) = reloptions else {
+        return options;
+    };
+    for option in reloptions {
+        let Some((name, value)) = option.split_once('=') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("fastupdate") {
+            options.fastupdate = matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "on" | "yes" | "1"
+            );
+        } else if name.eq_ignore_ascii_case("gin_pending_list_limit")
+            && let Ok(limit) = value.parse::<u32>()
+        {
+            options.pending_list_limit_kb = limit;
+        }
+    }
+    options
 }
 
 fn explicit_opclass_oid(am_oid: u32, opclass_name: &str, type_oid: u32) -> Option<u32> {

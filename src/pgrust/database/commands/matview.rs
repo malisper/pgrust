@@ -561,7 +561,7 @@ impl Database {
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             statement_timestamp_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
+            gucs: super::maintenance_safe_gucs(),
             interrupts,
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),

@@ -92,35 +92,37 @@ fn bind_select_item_once(
         grouped_outer,
         ctes,
     )?;
+    let output_name = select_item_output_name(item, &typed.expr);
     let input_resno = input_resno_for_scope_expr(scope, &typed.expr);
     Ok(vec![BoundScalarSelectTarget {
-        output_name: select_item_output_name(item, &typed.expr),
+        output_name,
         expr: typed.expr,
         sql_type: typed.sql_type,
         input_resno,
     }])
 }
 
-fn select_item_output_name(item: &SelectItem, expr: &Expr) -> String {
+fn select_item_output_name(item: &SelectItem, bound_expr: &Expr) -> String {
     if item.output_name == "?column?"
-        && let Some(name) = bound_expr_output_name(expr)
+        && let Some(name) = scalar_subquery_output_name(bound_expr)
     {
         return name;
     }
     item.output_name.clone()
 }
 
-fn bound_expr_output_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::SubLink(sublink) if matches!(sublink.sublink_type, SubLinkType::ExprSubLink) => {
-            sublink.subselect.target_list.first().map(|target| {
-                match bound_expr_output_name(&target.expr) {
-                    Some(inner_name) if target.name == "?column?" => inner_name,
-                    _ => target.name.clone(),
-                }
-            })
-        }
-        _ => None,
+fn scalar_subquery_output_name(expr: &Expr) -> Option<String> {
+    let Expr::SubLink(sublink) = expr else {
+        return None;
+    };
+    if !matches!(sublink.sublink_type, SubLinkType::ExprSubLink) {
+        return None;
+    }
+    let target = sublink.subselect.target_list.first()?;
+    if target.name == "?column?" {
+        scalar_subquery_output_name(&target.expr)
+    } else {
+        Some(target.name.clone())
     }
 }
 

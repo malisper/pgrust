@@ -58,6 +58,7 @@ impl RowLockOwner {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub enum RowLockMode {
+    SIRead,
     KeyShare,
     Share,
     NoKeyExclusive,
@@ -76,6 +77,7 @@ impl RowLockMode {
 
     pub fn pg_name(self) -> &'static str {
         match self {
+            Self::SIRead => "SIReadLock",
             Self::KeyShare => "For Key Share",
             Self::Share => "For Share",
             Self::NoKeyExclusive => "For No Key Update",
@@ -85,6 +87,7 @@ impl RowLockMode {
 
     pub fn pg_lock_mode_name(self) -> &'static str {
         match self {
+            Self::SIRead => "SIReadLock",
             Self::KeyShare => "AccessShareLock",
             Self::Share => "RowShareLock",
             Self::NoKeyExclusive => "ExclusiveLock",
@@ -93,6 +96,9 @@ impl RowLockMode {
     }
 
     fn conflicts_with(self, other: RowLockMode) -> bool {
+        if matches!(self, RowLockMode::SIRead) || matches!(other, RowLockMode::SIRead) {
+            return false;
+        }
         matches!(
             (self, other),
             (RowLockMode::Exclusive, _)

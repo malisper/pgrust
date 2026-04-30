@@ -7,8 +7,9 @@ use parking_lot::RwLock;
 use crate::backend::access::heap::HeapWalPolicy;
 use crate::backend::access::heap::heapam::{
     HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
-    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid, heap_scan_begin_visible,
-    heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_update_with_waiter,
+    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid_and_fillfactor,
+    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+    heap_update_with_waiter,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -57,7 +58,7 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    apply_runtime_pruning_for_explain_plan, format_buffer_usage,
+    apply_runtime_pruning_for_explain_plan, format_buffer_usage, format_explain_analyze_json,
     format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
     format_explain_lines_with_options, format_explain_plan_with_subplans,
     format_explain_plan_with_subplans_and_catalog, format_modify_expr_subplans,
@@ -123,8 +124,9 @@ use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, OpExprKind, ParamKind, QueryColumn, RULE_OLD_VAR,
-    RelationPrivilegeMask, RelationPrivilegeRequirement, SubLinkType, SubPlan, TargetEntry, Var,
-    XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, expr_sql_type_hint, user_attrno,
+    RelationPrivilegeMask, RelationPrivilegeRequirement, SELF_ITEM_POINTER_ATTR_NO, SubLinkType,
+    SubPlan, TargetEntry, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, expr_sql_type_hint,
+    user_attrno,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -543,7 +545,15 @@ pub(crate) fn execute_explain(
     } = stmt;
     let statement = *statement;
     if !analyze && explain_statement_has_writable_ctes(&statement) {
-        return Ok(explain_placeholder_result("Result"));
+        return execute_explain_writable_ctes(
+            statement,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        );
     }
     if let Statement::Update(update) = statement {
         return execute_explain_update(
@@ -717,29 +727,33 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
-        format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
-        if !buffers {
-            lines.retain(|line| !line.trim_start().starts_with("Buffers:"));
-        }
-        if buffers {
-            lines.push("Planning:".into());
-            lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
-        }
-        if summary {
-            lines.push(format!(
-                "Planning Time: {:.3} ms",
-                planning_elapsed.as_secs_f64() * 1000.0
-            ));
-            lines.push(format!(
-                "Execution Time: {:.3} ms",
-                elapsed.as_secs_f64() * 1000.0
-            ));
-        }
-        if buffers {
-            lines.push(format_buffer_usage(execution_buffer_stats));
-        }
-        if summary {
-            lines.push(format!("Result Rows: {}", row_count));
+        if matches!(format, ExplainFormat::Json) {
+            lines.push(format_explain_analyze_json(state.as_ref()));
+        } else {
+            format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
+            if !buffers {
+                lines.retain(|line| !line.trim_start().starts_with("Buffers:"));
+            }
+            if buffers {
+                lines.push("Planning:".into());
+                lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
+            }
+            if summary {
+                lines.push(format!(
+                    "Planning Time: {:.3} ms",
+                    planning_elapsed.as_secs_f64() * 1000.0
+                ));
+                lines.push(format!(
+                    "Execution Time: {:.3} ms",
+                    elapsed.as_secs_f64() * 1000.0
+                ));
+            }
+            if buffers {
+                lines.push(format_buffer_usage(execution_buffer_stats));
+            }
+            if summary {
+                lines.push(format!("Result Rows: {}", row_count));
+            }
         }
     } else {
         let plan_tree =
@@ -979,6 +993,137 @@ fn explain_placeholder_result(label: &str) -> StatementResult {
     }
 }
 
+fn execute_explain_writable_ctes(
+    statement: Statement,
+    costs: bool,
+    format: ExplainFormat,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    let ctes = statement_top_level_ctes(&statement);
+    let mut lines = Vec::new();
+    for cte in ctes.iter().filter(|cte| cte_body_is_writable(&cte.body)) {
+        if !matches!(
+            cte.body,
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_)
+        ) {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "WITH clause containing a data-modifying statement must be at the top level".into(),
+            )));
+        }
+        lines.push(format!("CTE {}", cte.name));
+        let producer_lines = explain_writable_cte_producer_lines(
+            &cte.body,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?;
+        for (index, line) in producer_lines.into_iter().enumerate() {
+            if index == 0 {
+                lines.push(format!("  ->  {line}"));
+            } else {
+                lines.push(format!("    {line}"));
+            }
+        }
+    }
+    if let Some(cte) = ctes.iter().find(|cte| cte_body_is_writable(&cte.body)) {
+        lines.push(format!("  ->  CTE Scan on {}", cte.name));
+    }
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn explain_writable_cte_producer_lines(
+    body: &CteBody,
+    costs: bool,
+    format: ExplainFormat,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<Vec<String>, ExecError> {
+    let result = match body {
+        CteBody::Insert(stmt) => execute_explain_insert(
+            (**stmt).clone(),
+            false,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?,
+        CteBody::Update(stmt) => execute_explain_update(
+            (**stmt).clone(),
+            false,
+            costs,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?,
+        CteBody::Delete(stmt) => execute_explain_delete(
+            (**stmt).clone(),
+            false,
+            costs,
+            verbose,
+            catalog,
+            planner_config,
+        )?,
+        CteBody::Merge(stmt) => {
+            let bound = crate::backend::parser::plan_merge(stmt, catalog)?;
+            let mut lines = Vec::new();
+            let state = executor_start(bound.input_plan.plan_tree);
+            push_explain_line(
+                &format!("Merge on {}", bound.explain_target_name),
+                state.plan_info(),
+                costs,
+                &mut lines,
+            );
+            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, true, &mut lines);
+            return Ok(lines);
+        }
+        _ => return Ok(vec!["Result".into()]),
+    };
+    Ok(statement_result_text_lines(result))
+}
+
+fn statement_result_text_lines(result: StatementResult) -> Vec<String> {
+    match result {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .filter_map(|row| match row.into_iter().next() {
+                Some(Value::Text(text)) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect(),
+        StatementResult::AffectedRows(_) => Vec::new(),
+    }
+}
+
+fn statement_top_level_ctes(statement: &Statement) -> Vec<CommonTableExpr> {
+    match statement {
+        Statement::Select(stmt) => stmt.with.clone(),
+        Statement::Insert(stmt) => stmt.with.clone(),
+        Statement::Update(stmt) => stmt.with.clone(),
+        Statement::Delete(stmt) => stmt.with.clone(),
+        Statement::Merge(stmt) => stmt.with.clone(),
+        Statement::Values(stmt) => stmt.with.clone(),
+        _ => Vec::new(),
+    }
+}
+
 fn explain_statement_has_writable_ctes(statement: &Statement) -> bool {
     match statement {
         Statement::Select(stmt) => select_statement_has_writable_ctes(stmt),
@@ -1068,12 +1213,14 @@ fn execute_explain_update(
         .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
     let bound = finalize_bound_update_stmt(bound, catalog);
     let bound = apply_update_constraint_exclusion(bound, catalog, planner_config);
+    let mut analyze_rows = None;
     if analyze {
         let xid = ctx.ensure_write_xid()?;
         let cid = ctx.next_command_id;
-        execute_update(bound.clone(), catalog, ctx, xid, cid)?;
+        let result = execute_update(bound.clone(), catalog, ctx, xid, cid)?;
+        analyze_rows = Some(statement_result_processed_rows_local(&result));
     }
-    let lines = explain_update_lines(&stmt, &bound, costs, verbose, catalog, ctx);
+    let lines = explain_update_lines(&stmt, &bound, costs, verbose, catalog, ctx, analyze_rows);
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
@@ -1112,6 +1259,13 @@ fn execute_explain_delete(
             .map(|line| vec![Value::Text(line.into())])
             .collect(),
     })
+}
+
+fn statement_result_processed_rows_local(result: &StatementResult) -> usize {
+    match result {
+        StatementResult::AffectedRows(rows) => *rows,
+        StatementResult::Query { rows, .. } => rows.len(),
+    }
 }
 
 fn apply_update_constraint_exclusion(
@@ -3325,6 +3479,7 @@ fn explain_update_lines(
     verbose: bool,
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
+    analyze_rows: Option<usize>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     let partition_targets = partitioned_update_explain_targets(bound);
@@ -3332,15 +3487,32 @@ fn explain_update_lines(
         .first()
         .map(|target| target.relation_name.as_str())
         .unwrap_or(&bound.target_relation_name);
-    push_explain_line(
-        &format!(
-            "Update on {}",
-            explain_update_target_name(&bound.explain_target_name, verbose)
-        ),
-        crate::include::nodes::plannodes::PlanEstimate::default(),
-        show_costs,
-        &mut lines,
+    let update_label = format!(
+        "Update on {}",
+        explain_update_target_name(&bound.explain_target_name, verbose)
     );
+    if let Some(rows) = analyze_rows {
+        if show_costs {
+            push_explain_line(
+                &update_label,
+                crate::include::nodes::plannodes::PlanEstimate::default(),
+                show_costs,
+                &mut lines,
+            );
+        } else {
+            lines.push(format!(
+                "{update_label} (actual rows={:.2} loops=1)",
+                rows as f64
+            ));
+        }
+    } else {
+        push_explain_line(
+            &update_label,
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+    }
     if verbose && !bound.returning.is_empty() {
         lines.push(format!(
             "  Output: {}",
@@ -3389,6 +3561,28 @@ fn explain_update_lines(
         .filter(|target| target.relation_name != stmt.table_name)
         .collect::<Vec<_>>();
     if let Some(target) = explain_update_scan_target(&stmt.table_name, &bound.targets) {
+        if !verbose
+            && let Some(cursor_name) = current_of_tidscan_display_cursor(target.predicate.as_ref())
+        {
+            // :HACK: Session lowering rewrites WHERE CURRENT OF to a physical
+            // ctid predicate. Render PostgreSQL's TidScan-shaped positioned
+            // update plan until update/delete own native CurrentOf plan nodes.
+            let scan_label = format!("Tid Scan on {}", target.relation_name);
+            match analyze_rows {
+                Some(rows) if !show_costs => lines.push(format!(
+                    "  ->  {scan_label} (actual rows={:.2} loops=1)",
+                    rows as f64
+                )),
+                _ => push_explain_line(
+                    &format!("  ->  {scan_label}"),
+                    crate::include::nodes::plannodes::PlanEstimate::default(),
+                    show_costs,
+                    &mut lines,
+                ),
+            }
+            lines.push(format!("        TID Cond: CURRENT OF {cursor_name}"));
+            return lines;
+        }
         let alias = child_targets
             .iter()
             .position(|candidate| candidate.relation_oid == target.relation_oid)
@@ -3493,6 +3687,69 @@ fn explain_update_lines(
         lines.push("        One-Time Filter: false".into());
     }
     lines
+}
+
+fn current_of_tidscan_display_cursor(predicate: Option<&Expr>) -> Option<String> {
+    let predicate = predicate?;
+    let conjuncts = current_of_flatten_and(predicate);
+    let mut cursor = None;
+    let mut has_ctid_eq = false;
+    for conjunct in conjuncts {
+        if let Some(marker_cursor) = current_of_marker_cursor(conjunct) {
+            cursor = Some(marker_cursor);
+        } else if current_of_ctid_equality(conjunct) {
+            has_ctid_eq = true;
+        } else {
+            return None;
+        }
+    }
+    if has_ctid_eq { cursor } else { None }
+}
+
+fn current_of_flatten_and(expr: &Expr) -> Vec<&Expr> {
+    match expr {
+        Expr::Bool(bool_expr) if matches!(bool_expr.boolop, BoolExprType::And) => bool_expr
+            .args
+            .iter()
+            .flat_map(current_of_flatten_and)
+            .collect(),
+        _ => vec![expr],
+    }
+}
+
+fn current_of_marker_cursor(predicate: &Expr) -> Option<String> {
+    match predicate {
+        Expr::Op(op) if matches!(op.op, OpExprKind::Eq) && op.args.len() == 2 => {
+            let left = current_of_marker_text(&op.args[0])?;
+            let right = current_of_marker_text(&op.args[1])?;
+            (left == right).then(|| left.trim_start_matches("__pgrust_current_of:").to_string())
+        }
+        _ => None,
+    }
+}
+
+fn current_of_ctid_equality(predicate: &Expr) -> bool {
+    let Expr::Op(op) = predicate else {
+        return false;
+    };
+    matches!(op.op, OpExprKind::Eq) && op.args.len() == 2 && op.args.iter().any(expr_is_ctid_var)
+}
+
+fn expr_is_ctid_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varattno == SELF_ITEM_POINTER_ATTR_NO,
+        Expr::Cast(inner, _) => expr_is_ctid_var(inner),
+        _ => false,
+    }
+}
+
+fn current_of_marker_text(expr: &Expr) -> Option<&str> {
+    let Expr::Const(value) = expr else {
+        return None;
+    };
+    let text = value.as_text()?;
+    text.strip_prefix("__pgrust_current_of:")?;
+    Some(text)
 }
 
 fn explain_update_verbose_onetime_result(
@@ -5285,6 +5542,7 @@ pub(crate) fn cleanup_toast_attempt(
 pub(crate) fn write_insert_heap_row(
     relation_name: &str,
     rls_relation_name: &str,
+    relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
@@ -5339,7 +5597,34 @@ pub(crate) fn write_insert_heap_row(
         ctx,
     )?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
-    heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple).map_err(Into::into)
+    let fillfactor = heap_fillfactor_for_relation(relation_oid, ctx);
+    heap_insert_mvcc_with_cid_and_fillfactor(
+        &*ctx.pool,
+        ctx.client_id,
+        rel,
+        xid,
+        cid,
+        &tuple,
+        fillfactor,
+    )
+    .map_err(Into::into)
+}
+
+fn heap_fillfactor_for_relation(relation_oid: u32, ctx: &ExecutorContext) -> u16 {
+    ctx.catalog
+        .as_deref()
+        .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
+        .and_then(|row| row.reloptions)
+        .and_then(|options| {
+            options.into_iter().find_map(|option| {
+                let (name, value) = option.split_once('=')?;
+                name.eq_ignore_ascii_case("fillfactor")
+                    .then(|| value.parse::<u16>().ok())
+                    .flatten()
+            })
+        })
+        .filter(|fillfactor| (10..=100).contains(fillfactor))
+        .unwrap_or(100)
 }
 
 pub(crate) fn rollback_inserted_row(
@@ -5617,6 +5902,7 @@ fn move_updated_row_to_partition(
     let inserted_tid = write_insert_heap_row(
         &destination.relation_info.relation_name,
         &destination.relation_info.relation_name,
+        destination.relation_info.relation.relation_oid,
         destination.relation_info.relation.rel,
         destination.relation_info.relation.toast,
         destination.relation_info.toast_index.as_ref(),
@@ -10478,6 +10764,7 @@ fn check_relation_privilege_requirements_for_update(
 fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
     match plan {
         Plan::SeqScan { relation_oid, .. }
+        | Plan::TidScan { relation_oid, .. }
         | Plan::IndexOnlyScan { relation_oid, .. }
         | Plan::IndexScan { relation_oid, .. }
         | Plan::BitmapHeapScan { relation_oid, .. } => {
@@ -10574,6 +10861,7 @@ fn plan_contains_lock_rows(plan: &Plan) -> bool {
         Plan::CteScan { cte_plan, .. } => plan_contains_lock_rows(cte_plan),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -10945,6 +11233,7 @@ fn execute_merge_insert_action(
         let heap_tid = write_insert_heap_row(
             &stmt.relation_name,
             &stmt.relation_name,
+            stmt.relation_oid,
             stmt.rel,
             stmt.toast,
             stmt.toast_index.as_ref(),
@@ -13833,6 +14122,7 @@ pub(crate) fn execute_insert_rows(
             let heap_tid = write_insert_heap_row(
                 relation_name,
                 rls_relation_name,
+                relation_oid,
                 rel,
                 toast,
                 toast_index,
@@ -14104,6 +14394,7 @@ pub fn execute_prepared_insert_row(
     let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
         &prepared.relation_name,
+        prepared.relation_oid,
         prepared.rel,
         prepared.toast,
         prepared.toast_index.as_ref(),

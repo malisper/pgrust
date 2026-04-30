@@ -8,7 +8,8 @@ use crate::include::nodes::execnodes::{
     LockRowsState, MaterializeState, MemoizeState, MergeAppendState, MergeJoinState,
     NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
     RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState, SetOpState,
-    SubqueryScanState, UniqueState, ValuesState, WindowAggState, WorkTableScanState,
+    SubqueryScanState, TableSampleState, TidScanState, UniqueState, ValuesState, WindowAggState,
+    WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
@@ -28,6 +29,7 @@ fn append_alias_prefix_from_relation_name(relation_name: &str) -> Option<String>
 fn append_sort_key_qualifier_from_plan(plan: &Plan) -> Option<String> {
     match plan {
         Plan::SeqScan { relation_name, .. }
+        | Plan::TidScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => {
@@ -187,6 +189,61 @@ fn plan_needs_network_strict_less_tiebreak(plan: &Plan) -> bool {
     }
 }
 
+fn plan_depends_on_worktable(plan: &Plan, worktable_id: usize) -> bool {
+    match plan {
+        Plan::WorkTableScan {
+            worktable_id: scan_id,
+            ..
+        } => *scan_id == worktable_id,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children
+            .iter()
+            .any(|child| plan_depends_on_worktable(child, worktable_id)),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_depends_on_worktable(input, worktable_id),
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            plan_depends_on_worktable(bitmapqual, worktable_id)
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_depends_on_worktable(left, worktable_id)
+                || plan_depends_on_worktable(right, worktable_id)
+        }
+        Plan::CteScan { cte_plan, .. } => plan_depends_on_worktable(cte_plan, worktable_id),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            plan_depends_on_worktable(anchor, worktable_id)
+                || plan_depends_on_worktable(recursive, worktable_id)
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. } => false,
+    }
+}
+
 fn recursive_union_distinct_hashable(sql_type: SqlType) -> bool {
     !matches!(
         sql_type.element_type().kind,
@@ -254,6 +311,7 @@ fn plan_references_worktable(
         }
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -321,6 +379,7 @@ fn collect_worktable_dependent_cte_ids(
         Plan::Result { .. }
         | Plan::WorkTableScan { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -439,6 +498,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -682,7 +742,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             relispopulated,
             disabled,
             toast,
-            tablesample: _,
+            tablesample,
             desc,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -706,12 +766,62 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 desc,
                 attr_descs,
                 scan: None,
+                tablesample: tablesample.map(TableSampleState::new),
                 scan_rows: Vec::new(),
                 scan_index: 0,
                 sequence_emitted: false,
                 slot,
                 qual: None,
                 qual_expr: None,
+                source_id,
+                relation_oid,
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond,
+            filter,
+        } => {
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let desc = Rc::new(desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
+                &desc,
+                &attr_descs,
+            ));
+            let qual = filter
+                .as_ref()
+                .map(|predicate| expr::compile_predicate_with_decoder(predicate, &decoder));
+            let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder);
+            Box::new(TidScanState {
+                rel,
+                relation_name,
+                relkind,
+                relispopulated,
+                toast_relation: toast,
+                column_names,
+                desc,
+                attr_descs,
+                tid_cond,
+                candidates: Vec::new(),
+                candidate_index: 0,
+                candidates_initialized: false,
+                slot,
+                qual,
+                qual_expr: filter,
                 source_id,
                 relation_oid,
                 current_bindings: Vec::new(),
@@ -1224,7 +1334,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relispopulated,
                 disabled,
                 toast,
-                tablesample: _,
+                tablesample,
                 desc,
             } = *input
             else {
@@ -1252,6 +1362,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 desc,
                 attr_descs,
                 scan: None,
+                tablesample: tablesample.map(TableSampleState::new),
                 scan_rows: Vec::new(),
                 scan_index: 0,
                 sequence_emitted: false,

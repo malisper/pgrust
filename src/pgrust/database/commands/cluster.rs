@@ -10,7 +10,7 @@ use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, Value, pg_sql_sort_by,
 };
 use crate::backend::parser::{BoundIndexRelation, BoundRelation, CatalogLookup, ParseError};
-use crate::include::access::amapi::IndexBuildContext;
+use crate::include::access::amapi::{IndexBuildContext, IndexBuildExprContext};
 use crate::include::access::htup::AttributeCompression;
 use crate::include::catalog::BTREE_AM_OID;
 use crate::include::nodes::parsenodes::ClusterStatement;
@@ -135,7 +135,7 @@ impl Database {
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             statement_timestamp_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
+            gucs: super::maintenance_safe_gucs(),
             interrupts,
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
@@ -380,11 +380,6 @@ fn validate_cluster_index(index: &BoundIndexRelation) -> Result<(), ExecError> {
             "CLUSTER using non-btree indexes is not supported yet".into(),
         )));
     }
-    if index.index_meta.indexprs.is_some() || !index.index_exprs.is_empty() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "CLUSTER using expression indexes is not supported yet".into(),
-        )));
-    }
     if index.index_meta.indpred.is_some() || index.index_predicate.is_some() {
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "CLUSTER using partial indexes is not supported yet".into(),
@@ -463,11 +458,6 @@ fn validate_cluster_rebuild_indexes(indexes: &[BoundIndexRelation]) -> Result<()
                 "CLUSTER rebuilding non-btree indexes is not supported yet".into(),
             )));
         }
-        if index.index_meta.indexprs.is_some() || !index.index_exprs.is_empty() {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "CLUSTER rebuilding expression indexes is not supported yet".into(),
-            )));
-        }
         if index.index_meta.indpred.is_some() || index.index_predicate.is_some() {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "CLUSTER rebuilding partial indexes is not supported yet".into(),
@@ -505,6 +495,12 @@ fn rebuild_cluster_index(
             )
         })
         .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+    let has_expression_eval = index.index_meta.indexprs.as_ref().is_some()
+        || index
+            .index_meta
+            .indpred
+            .as_deref()
+            .is_some_and(|predicate| !predicate.trim().is_empty());
     let build_ctx = IndexBuildContext {
         pool: ctx.pool.clone(),
         txns: ctx.txns.clone(),
@@ -520,7 +516,22 @@ fn rebuild_cluster_index(
         index_meta: index.index_meta.clone(),
         default_toast_compression: AttributeCompression::Pglz,
         maintenance_work_mem_kb: 65_536,
-        expr_eval: None,
+        expr_eval: has_expression_eval.then_some(IndexBuildExprContext {
+            txn_waiter: ctx.txn_waiter.clone(),
+            sequences: ctx.sequences.clone(),
+            large_objects: ctx.large_objects.clone(),
+            advisory_locks: ctx.advisory_locks.clone(),
+            datetime_config: ctx.datetime_config.clone(),
+            stats: ctx.stats.clone(),
+            session_stats: ctx.session_stats.clone(),
+            current_database_name: ctx.current_database_name.clone(),
+            session_user_oid: ctx.session_user_oid,
+            current_user_oid: ctx.current_user_oid,
+            current_xid: ctx.snapshot.current_xid,
+            statement_lock_scope_id: ctx.statement_lock_scope_id,
+            session_replication_role: ctx.session_replication_role,
+            visible_catalog: ctx.catalog.clone(),
+        }),
     };
     crate::backend::access::index::indexam::index_build_stub(&build_ctx, index.index_meta.am_oid)
         .map_err(map_cluster_index_build_error)?;

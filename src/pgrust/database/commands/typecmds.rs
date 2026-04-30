@@ -22,7 +22,8 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     CSTRING_TYPE_OID, DEPENDENCY_INTERNAL, FLOAT8_TYPE_OID, PG_CLASS_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgProcRow, UNKNOWN_TYPE_OID, builtin_range_specs,
+    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgProcRow, PgTypeRow, UNKNOWN_TYPE_OID,
+    builtin_range_specs,
 };
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, format_sql_type_name, is_system_column_name, map_catalog_error,
@@ -1129,7 +1130,12 @@ impl Database {
         let effect = self
             .catalog
             .write()
-            .replace_type_rows_mvcc(replacement_rows, &ctx)
+            .replace_type_rows_and_support_dependencies_mvcc(
+                replacement_rows,
+                row.oid,
+                &base_type_support_proc_oids(&updated_row),
+                &ctx,
+            )
             .map_err(map_catalog_error)?;
         self.base_types.write().insert(row.oid, updated_entry);
         catalog_effects.push(effect);
@@ -2112,6 +2118,19 @@ fn resolve_proc_oid_by_name(catalog: &dyn CatalogLookup, name: &str) -> Option<u
         .proc_rows_by_name(&proc_name)
         .first()
         .map(|row| row.oid)
+}
+
+fn base_type_support_proc_oids(row: &PgTypeRow) -> Vec<u32> {
+    vec![
+        row.typinput,
+        row.typoutput,
+        row.typreceive,
+        row.typsend,
+        row.typmodin,
+        row.typmodout,
+        row.typanalyze,
+        row.typsubscript,
+    ]
 }
 
 fn resolve_required_proc_oid_by_name(
