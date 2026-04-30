@@ -13925,7 +13925,9 @@ fn parse_select_for_update_of_clause() {
 fn parse_select_for_update_nowait_clause() {
     match parse_statement("select * from people for update of people nowait").unwrap() {
         Statement::Select(SelectStatement {
-            from: Some(FromItem::Table { name, only: false }),
+            from: Some(FromItem::Table {
+                name, only: false, ..
+            }),
             locking_clause: Some(SelectLockingClause::ForUpdate),
             locking_targets,
             locking_nowait: true,
