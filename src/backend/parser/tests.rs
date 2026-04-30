@@ -17900,6 +17900,142 @@ fn pg_locks_expected_columns_and_types() -> Vec<(String, SqlType)> {
 }
 
 #[test]
+fn analyze_sysviews_srf_backed_views_and_functions_bind() {
+    let catalog = catalog();
+    for sql in [
+        "select count(*) from pg_available_extension_versions",
+        "select count(*) from pg_available_extensions",
+        "select count(*) from pg_backend_memory_contexts",
+        "select count(*) from pg_config",
+        "select count(*) from pg_cursors",
+        "select count(*) from pg_file_settings",
+        "select count(*) from pg_hba_file_rules",
+        "select count(*) from pg_ident_file_mappings",
+        "select count(*) from pg_prepared_xacts",
+        "select count(*) from pg_prepared_statements",
+        "select count(*) from pg_stat_wal_receiver",
+        "select count(*) from pg_wait_events",
+        "select count(*) from pg_timezone_names",
+        "select count(*) from pg_timezone_abbrevs",
+        "select count(*) from pg_available_extension_versions()",
+        "select count(*) from pg_available_extensions()",
+        "select count(*) from pg_get_backend_memory_contexts()",
+        "select count(*) from pg_config()",
+        "select count(*) from pg_cursor()",
+        "select count(*) from pg_show_all_file_settings()",
+        "select count(*) from pg_hba_file_rules()",
+        "select count(*) from pg_ident_file_mappings()",
+        "select count(*) from pg_prepared_xact()",
+        "select count(*) from pg_prepared_statement()",
+        "select count(*) from pg_stat_get_wal_receiver()",
+        "select count(*) from pg_get_wait_events()",
+        "select count(*) from pg_timezone_names()",
+        "select count(*) from pg_timezone_abbrevs_zone()",
+        "select count(*) from pg_timezone_abbrevs_abbrevs()",
+    ] {
+        let stmt = parse_select(sql).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+            .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
+    }
+}
+
+#[test]
+fn analyze_sysviews_srf_backed_views_use_expected_columns_and_types() {
+    let cases = [
+        (
+            "select * from pg_settings",
+            vec![
+                ("name".into(), SqlType::new(SqlTypeKind::Text)),
+                ("setting".into(), SqlType::new(SqlTypeKind::Text)),
+                ("unit".into(), SqlType::new(SqlTypeKind::Text)),
+                ("category".into(), SqlType::new(SqlTypeKind::Text)),
+                ("short_desc".into(), SqlType::new(SqlTypeKind::Text)),
+                ("extra_desc".into(), SqlType::new(SqlTypeKind::Text)),
+                ("context".into(), SqlType::new(SqlTypeKind::Text)),
+                ("vartype".into(), SqlType::new(SqlTypeKind::Text)),
+                ("source".into(), SqlType::new(SqlTypeKind::Text)),
+                ("min_val".into(), SqlType::new(SqlTypeKind::Text)),
+                ("max_val".into(), SqlType::new(SqlTypeKind::Text)),
+                (
+                    "enumvals".into(),
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                ),
+                ("boot_val".into(), SqlType::new(SqlTypeKind::Text)),
+                ("reset_val".into(), SqlType::new(SqlTypeKind::Text)),
+                ("sourcefile".into(), SqlType::new(SqlTypeKind::Text)),
+                ("sourceline".into(), SqlType::new(SqlTypeKind::Int4)),
+                ("pending_restart".into(), SqlType::new(SqlTypeKind::Bool)),
+            ],
+        ),
+        (
+            "select * from pg_backend_memory_contexts",
+            vec![
+                ("name".into(), SqlType::new(SqlTypeKind::Text)),
+                ("ident".into(), SqlType::new(SqlTypeKind::Text)),
+                ("type".into(), SqlType::new(SqlTypeKind::Text)),
+                ("level".into(), SqlType::new(SqlTypeKind::Int4)),
+                (
+                    "path".into(),
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
+                ),
+                ("total_bytes".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("total_nblocks".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("free_bytes".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("free_chunks".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("used_bytes".into(), SqlType::new(SqlTypeKind::Int8)),
+            ],
+        ),
+        (
+            "select * from pg_prepared_statements",
+            vec![
+                ("name".into(), SqlType::new(SqlTypeKind::Text)),
+                ("statement".into(), SqlType::new(SqlTypeKind::Text)),
+                (
+                    "prepare_time".into(),
+                    SqlType::new(SqlTypeKind::TimestampTz),
+                ),
+                (
+                    "parameter_types".into(),
+                    SqlType::array_of(SqlType::new(SqlTypeKind::RegType)),
+                ),
+                (
+                    "result_types".into(),
+                    SqlType::array_of(SqlType::new(SqlTypeKind::RegType)),
+                ),
+                ("from_sql".into(), SqlType::new(SqlTypeKind::Bool)),
+                ("generic_plans".into(), SqlType::new(SqlTypeKind::Int8)),
+                ("custom_plans".into(), SqlType::new(SqlTypeKind::Int8)),
+            ],
+        ),
+        (
+            "select * from pg_wait_events",
+            vec![
+                ("type".into(), SqlType::new(SqlTypeKind::Text)),
+                ("name".into(), SqlType::new(SqlTypeKind::Text)),
+                ("description".into(), SqlType::new(SqlTypeKind::Text)),
+            ],
+        ),
+        (
+            "select * from pg_timezone_abbrevs",
+            vec![
+                ("abbrev".into(), SqlType::new(SqlTypeKind::Text)),
+                ("utc_offset".into(), SqlType::new(SqlTypeKind::Interval)),
+                ("is_dst".into(), SqlType::new(SqlTypeKind::Bool)),
+            ],
+        ),
+    ];
+
+    let catalog = catalog();
+    for (sql, expected) in cases {
+        let stmt = parse_select(sql).unwrap();
+        let (query, _) =
+            analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+
+        assert_eq!(query_column_names_and_types(&query), expected, "{sql}");
+    }
+}
+
+#[test]
 fn analyze_pg_policies_uses_expected_columns_and_types() {
     let stmt = parse_select("select * from pg_policies").unwrap();
     let (query, _) =
