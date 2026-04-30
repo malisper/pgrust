@@ -1447,14 +1447,24 @@ fn bind_scalar_function_call_from_bound_args(
         }
         BuiltinScalarFunction::TsVectorIn | BuiltinScalarFunction::TsQueryIn => {
             // :HACK: pgrust uses text values for SQL cstring input shims.
-            Ok(build_func(
-                false,
-                vec![coerce_bound_expr(
-                    bound_args[0].clone(),
-                    arg_types[0],
-                    SqlType::new(SqlTypeKind::Text),
-                )],
-            ))
+            let mut args = vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::new(SqlTypeKind::Text),
+            )];
+            if bound_args.len() == 3 {
+                args.push(coerce_bound_expr(
+                    bound_args[1].clone(),
+                    arg_types[1],
+                    SqlType::new(SqlTypeKind::Oid),
+                ));
+                args.push(coerce_bound_expr(
+                    bound_args[2].clone(),
+                    arg_types[2],
+                    SqlType::new(SqlTypeKind::Int4),
+                ));
+            }
+            Ok(build_func(false, args))
         }
         BuiltinScalarFunction::TsVectorOut => Ok(build_func(
             false,

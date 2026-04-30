@@ -3687,7 +3687,7 @@ fn timestamp_parse_error(
         return ExecError::DetailedError {
             message: datetime_parse_error_details(ty, text, err),
             detail: None,
-            hint: Some("Perhaps you need a different \"DateStyle\" setting.".into()),
+            hint: timestamp_field_out_of_range_datestyle_hint(text),
             sqlstate: "22008",
         };
     }
@@ -3695,6 +3695,47 @@ fn timestamp_parse_error(
         column: column.into(),
         details: datetime_parse_error_details(ty, text, err),
     }
+}
+
+fn timestamp_field_out_of_range_datestyle_hint(text: &str) -> Option<String> {
+    if timestamp_input_has_month_name(text) {
+        None
+    } else {
+        Some("Perhaps you need a different \"DateStyle\" setting.".into())
+    }
+}
+
+fn timestamp_input_has_month_name(text: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "jan"
+                    | "january"
+                    | "feb"
+                    | "february"
+                    | "mar"
+                    | "march"
+                    | "apr"
+                    | "april"
+                    | "may"
+                    | "jun"
+                    | "june"
+                    | "jul"
+                    | "july"
+                    | "aug"
+                    | "august"
+                    | "sep"
+                    | "sept"
+                    | "september"
+                    | "oct"
+                    | "october"
+                    | "nov"
+                    | "november"
+                    | "dec"
+                    | "december"
+            )
+        })
 }
 
 fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
@@ -7478,6 +7519,26 @@ mod tests {
                 ..
             } if message == "date/time field value out of range: \"13/01/2000\""
                 && hint == "Perhaps you need a different \"DateStyle\" setting."
+        ));
+    }
+
+    #[test]
+    fn timestamp_month_name_field_out_of_range_omits_datestyle_hint() {
+        let err = cast_text_value_with_config(
+            "Feb 29 17:32:01 1997",
+            SqlType::new(SqlTypeKind::Timestamp),
+            true,
+            &DateTimeConfig::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                hint: None,
+                sqlstate: "22008",
+                ..
+            } if message == "date/time field value out of range: \"Feb 29 17:32:01 1997\""
         ));
     }
 

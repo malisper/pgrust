@@ -2338,7 +2338,7 @@ pub(super) fn eval_quote_ident_function(values: &[Value]) -> Result<Value, ExecE
     ))))
 }
 
-pub(super) fn eval_parse_ident_function(values: &[Value]) -> Result<Value, ExecError> {
+pub(crate) fn eval_parse_ident_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null] | [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [input] => parse_ident_text(input, true),
@@ -2376,7 +2376,8 @@ fn parse_ident_text(input: &Value, strict: bool) -> Result<Value, ExecError> {
                 .into_iter()
                 .map(|part| Value::Text(part.into()))
                 .collect(),
-        ),
+        )
+        .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
     ))
 }
 

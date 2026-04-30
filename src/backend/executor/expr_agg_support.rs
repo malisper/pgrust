@@ -7,7 +7,7 @@ use super::exec_expr::{
 use super::expr_casts::cast_value;
 use super::expr_math::eval_abs_function;
 use super::expr_ops::{add_values, compare_order_values, div_values, sub_values};
-use super::expr_string::eval_quote_nullable_function;
+use super::expr_string::{eval_parse_ident_function, eval_quote_nullable_function};
 use super::sqlfunc::{
     execute_user_defined_sql_scalar_function_values,
     execute_user_defined_sql_scalar_function_values_with_arg_type_oids,
@@ -414,6 +414,33 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
         BuiltinScalarFunction::HashValueExtended(kind) => {
             execute_builtin_hash_value_call(kind, true, arg_values)
         }
+        BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(arg_values),
+        BuiltinScalarFunction::TsVectorIn => match arg_values {
+            [Value::Null] | [Value::Null, _, _] => Ok(Value::Null),
+            [_] | [_, _, _] => {
+                let Some(text) = arg_values[0].as_text() else {
+                    return Err(ExecError::TypeMismatch {
+                        op: "tsvectorin",
+                        left: arg_values[0].clone(),
+                        right: Value::Text("".into()),
+                    });
+                };
+                crate::backend::executor::parse_tsvector_text(text).map(Value::TsVector)
+            }
+            _ => malformed_aggregate_support_call("tsvectorin"),
+        },
+        BuiltinScalarFunction::TsVectorOut => match arg_values {
+            [Value::Null] => Ok(Value::Null),
+            [Value::TsVector(vector)] => Ok(Value::Text(
+                crate::backend::executor::render_tsvector_text(vector).into(),
+            )),
+            [other] => Err(ExecError::TypeMismatch {
+                op: "tsvectorout",
+                left: other.clone(),
+                right: Value::Null,
+            }),
+            _ => malformed_aggregate_support_call("tsvectorout"),
+        },
         other => Err(ExecError::DetailedError {
             message: format!(
                 "builtin function {:?} is not supported by aggregate value execution",

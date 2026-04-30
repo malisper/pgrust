@@ -16409,14 +16409,15 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
         }
         if lower.starts_with("header") && copy_keyword_boundary(rest, 6) {
             let after_header = rest[6..].trim_start();
-            let (word, after) = if let Some((value, after)) = parse_copy_string_token(after_header)
-            {
-                (value, after)
-            } else {
-                let (word, after) = take_copy_word(after_header);
-                (word.to_string(), after)
-            };
-            match word.to_ascii_lowercase().as_str() {
+            let (word, after, quoted) =
+                if let Some((value, after)) = parse_copy_string_token(after_header) {
+                    (value, after, true)
+                } else {
+                    let (word, after) = take_copy_word(after_header);
+                    (word.to_string(), after, false)
+                };
+            let word_lower = word.to_ascii_lowercase();
+            match word_lower.as_str() {
                 "true" | "on" | "1" => {
                     options.header = CopyHeader::Present;
                     rest = after;
@@ -16430,6 +16431,10 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
                     rest = after;
                 }
                 "" => {
+                    options.header = CopyHeader::Present;
+                    rest = after_header;
+                }
+                option if !quoted && copy_header_value_starts_next_option(option) => {
                     options.header = CopyHeader::Present;
                     rest = after_header;
                 }
@@ -16553,6 +16558,27 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
         }));
     }
     Ok(options)
+}
+
+fn copy_header_value_starts_next_option(word: &str) -> bool {
+    matches!(
+        word,
+        "with"
+            | "csv"
+            | "format"
+            | "encoding"
+            | "header"
+            | "force"
+            | "force_quote"
+            | "quote"
+            | "delimiter"
+            | "escape"
+            | "null"
+            | "default"
+            | "freeze"
+            | "on_error"
+            | "reject_limit"
+    )
 }
 
 fn parse_copy_force_quote_option<'a>(
