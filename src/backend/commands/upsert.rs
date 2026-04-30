@@ -245,7 +245,12 @@ fn run_conflict_update(
     transition_capture: Option<&mut TriggerTransitionCapture>,
 ) -> Result<ConflictActionResult, ExecError> {
     if conflict_tuple.header.xmin == xid && conflict_tuple.header.cid_or_xvac == cid {
-        return Err(cardinality_violation());
+        // :HACK: Duplicate rows proposed by this INSERT are rejected during
+        // preflight.  A writable CTE producer currently uses the same command
+        // id as the outer statement, so its already-updated conflict row also
+        // reaches this branch.  PostgreSQL treats that cross-wCTE case as a
+        // completed no-op for the outer ON CONFLICT UPDATE.
+        return Ok(ConflictActionResult::Skipped);
     }
 
     let current_old_values =

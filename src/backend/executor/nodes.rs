@@ -10146,10 +10146,13 @@ impl PlanNode for CteScanState {
             None
         };
         begin_node(&mut self.stats, ctx)?;
+        let pinned_table = ctx.pinned_cte_tables.get(&self.cte_id).cloned();
         let table = ctx
             .cte_tables
             .entry(self.cte_id)
-            .or_insert_with(|| Rc::new(RefCell::new(Default::default())))
+            .or_insert_with(|| {
+                pinned_table.unwrap_or_else(|| Rc::new(RefCell::new(Default::default())))
+            })
             .clone();
         loop {
             ctx.check_for_interrupts()?;
@@ -10212,6 +10215,16 @@ impl PlanNode for CteScanState {
     }
 }
 
+fn reset_recursive_union_iteration_ctes(state: &RecursiveUnionState, ctx: &mut ExecutorContext) {
+    for cte_id in &state.recursive_iteration_cte_ids {
+        if ctx.pinned_cte_tables.contains_key(cte_id) {
+            continue;
+        }
+        ctx.cte_tables.remove(cte_id);
+        ctx.cte_producers.remove(cte_id);
+    }
+}
+
 impl PlanNode for RecursiveUnionState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -10252,6 +10265,7 @@ impl PlanNode for RecursiveUnionState {
                     return Ok(Some(&mut self.slot));
                 } else {
                     self.anchor_done = true;
+                    reset_recursive_union_iteration_ctes(self, ctx);
                     self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
                     continue;
                 }
@@ -10284,6 +10298,7 @@ impl PlanNode for RecursiveUnionState {
                     return Ok(None);
                 }
                 self.worktable.borrow_mut().rows = std::mem::take(&mut self.intermediate_rows);
+                reset_recursive_union_iteration_ctes(self, ctx);
                 self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
             }
         }

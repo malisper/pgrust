@@ -83,6 +83,20 @@ pub(crate) struct BoundCte {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct BoundWritableCte {
+    pub(crate) cte: BoundCte,
+    pub(crate) source: BoundModifyingCte,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum BoundModifyingCte {
+    Insert(BoundInsertStatement),
+    Update(BoundUpdateStatement),
+    Delete(BoundDeleteStatement),
+    Merge(BoundMergeStatement),
+}
+
+#[derive(Debug, Clone)]
 pub struct BoundRelation {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
@@ -890,7 +904,9 @@ fn passthrough_cte_target<'a>(cte: &'a BoundCte, ctes: &'a [BoundCte]) -> Option
             return None;
         }
     }
-    ctes.iter().find(|candidate| candidate.cte_id == cte_id)
+    ctes.iter().find(|candidate| {
+        candidate.cte_id == cte_id && candidate.desc.columns.len() == cte.desc.columns.len()
+    })
 }
 
 pub(super) fn bind_from_item_with_ctes(
@@ -5679,10 +5695,7 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: false,
             qualified_only: false,
-            relation_names: join_using_relation_names(
-                &left_scope.columns[*left_index],
-                &right_scope.columns[*right_index],
-            ),
+            relation_names: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: None,
@@ -5691,6 +5704,48 @@ fn bind_join_using_projection(
                 &left_scope.columns[*left_index],
                 &right_scope.columns[*right_index],
             ),
+        });
+    }
+
+    for (name, left_index, right_index) in &using_pairs {
+        let left_ty = left_scope.desc.columns[*left_index].sql_type;
+        alias_exprs.push(left_scope.output_exprs[*left_index].clone());
+        output_columns.push(QueryColumn {
+            name: name.clone(),
+            sql_type: left_ty,
+            wire_type_oid: None,
+        });
+        desc_columns.push(column_desc(name.clone(), left_ty, true));
+        scope_columns.push(ScopeColumn {
+            output_name: name.clone(),
+            hidden: true,
+            qualified_only: true,
+            relation_names: left_scope.columns[*left_index].relation_names.clone(),
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
+            source_relation_oid: left_scope.columns[*left_index].source_relation_oid,
+            source_attno: left_scope.columns[*left_index].source_attno,
+            source_columns: scope_column_sources(&left_scope.columns[*left_index]),
+        });
+
+        let right_ty = right_scope.desc.columns[*right_index].sql_type;
+        alias_exprs.push(right_scope.output_exprs[*right_index].clone());
+        output_columns.push(QueryColumn {
+            name: name.clone(),
+            sql_type: right_ty,
+            wire_type_oid: None,
+        });
+        desc_columns.push(column_desc(name.clone(), right_ty, true));
+        scope_columns.push(ScopeColumn {
+            output_name: name.clone(),
+            hidden: true,
+            qualified_only: true,
+            relation_names: right_scope.columns[*right_index].relation_names.clone(),
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
+            source_relation_oid: right_scope.columns[*right_index].source_relation_oid,
+            source_attno: right_scope.columns[*right_index].source_attno,
+            source_columns: scope_column_sources(&right_scope.columns[*right_index]),
         });
     }
 

@@ -20436,6 +20436,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             Ok(CteBody::RecursiveUnion {
                 all,
                 left_nested: false,
+                anchor_with_is_subquery: true,
                 anchor: Box::new(anchor),
                 recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
             })
@@ -20452,6 +20453,7 @@ fn select_statement_as_cte_body(stmt: SelectStatement) -> CteBody {
         return CteBody::RecursiveUnion {
             all,
             left_nested,
+            anchor_with_is_subquery: false,
             anchor: Box::new(select_term_as_cte_body(anchor)),
             recursive: Box::new(recursive),
         };

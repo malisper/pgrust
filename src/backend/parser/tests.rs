@@ -14036,11 +14036,13 @@ fn parse_with_recursive_cte_union_all() {
                 crate::backend::parser::CteBody::RecursiveUnion {
                     all,
                     left_nested,
+                    anchor_with_is_subquery,
                     anchor,
                     recursive,
                 } => {
                     assert!(*all);
                     assert!(!*left_nested);
+                    assert!(*anchor_with_is_subquery);
                     assert!(matches!(
                         anchor.as_ref(),
                         crate::backend::parser::CteBody::Values(_)
@@ -17630,6 +17632,20 @@ fn aggregate_rejects_nested_subquery_reference_to_local_cte() {
 }
 
 #[test]
+fn outer_level_aggregate_rejects_nested_cte_reference() {
+    let stmt = parse_select(
+        "select id, (with cte1(x,y) as (select 1,2)
+                    select count((select p.id from cte1))) as ss
+         from people p",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::OuterLevelAggregateNestedCte(name)) if name == "cte1"
+    ));
+}
+
+#[test]
 fn recursive_cte_allows_self_reference_inside_intermediate_setop_with() {
     let stmt = parse_select(
         "with recursive outermost(x) as (
@@ -17715,11 +17731,58 @@ fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() 
         select * from outermost order by 1",
     )
     .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    let unpositioned = err.unpositioned();
+    assert!(
+        matches!(
+            unpositioned,
+            ParseError::InvalidRecursion(message)
+                if message
+                    == "recursive reference to query \"outermost\" must not appear within a subquery"
+        ),
+        "got {unpositioned:?}"
+    );
+}
+
+#[test]
+fn recursive_cte_rejects_parenthesized_left_with_self_reference_as_non_recursive_term() {
+    let stmt = parse_select(
+        "with recursive x(n) as (
+            (with x1 as (select 1 from x) select * from x1)
+            union
+            select 0
+        )
+        select * from x",
+    )
+    .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
     assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::InvalidRecursion(message))
+        err.unpositioned(),
+        ParseError::InvalidRecursion(message)
             if message
-                == "recursive reference to query \"outermost\" must not appear within a subquery"
+                == "recursive reference to query \"x\" must not appear within its non-recursive term"
+    ));
+}
+
+#[test]
+fn recursive_cte_reports_target_operator_error_before_filter_operator_error() {
+    let stmt = parse_select(
+        "with recursive t(n) as (
+            select '7'
+            union all
+            select n + 1 from t where n < 10
+        )
+        select n, pg_typeof(n) from t",
+    )
+    .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::UndefinedOperator {
+            op: "+",
+            left_type,
+            right_type
+        } if left_type == "text" && right_type == "integer"
     ));
 }
 
