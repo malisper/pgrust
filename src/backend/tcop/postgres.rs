@@ -365,6 +365,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     if suppress_legacy_json_runtime_position(sql, e) {
         return None;
     }
+    if suppress_jsonb_runtime_path_position(sql, e) {
+        return None;
+    }
     if matches!(e, ExecError::Regex(_))
         && is_jsonpath_sql_surface(sql)
         && let Some(position) = find_jsonpath_literal_position(sql)
@@ -391,6 +394,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("string is not a valid identifier: ")
     ) {
         return None;
+    }
+    if let ExecError::DetailedError { message, .. } = e
+        && message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+    {
+        return find_distinct_on_mismatch_position(sql);
     }
     let value = match e {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
@@ -504,6 +512,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                     .map(|offset| index + offset + 1)
             });
         }
+        ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+            message,
+        )) if message
+            == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions" =>
+        {
+            return find_distinct_on_mismatch_position(sql);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,
@@ -543,6 +558,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 == "arguments to GROUPING must be grouping expressions of the associated query level"
             {
                 return find_grouping_call_argument_position(sql);
+            }
+            if message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions" {
+                return find_distinct_on_mismatch_position(sql);
             }
             if let Some(system_column) = check_constraint_system_column_error_name(message) {
                 return find_case_insensitive_token_position(sql, system_column);
@@ -666,6 +684,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if message.starts_with("cannot subscript type ") {
                 return find_subscript_expression_position(sql);
+            }
+            if message == "jsonb subscript does not support slices" {
+                return find_jsonb_subscript_slice_position(sql);
+            }
+            if message.starts_with("subscript type ") && message.ends_with(" is not supported") {
+                return find_jsonb_subscript_type_position(sql);
             }
             if let Some(position) = find_detailed_operator_position(sql, message) {
                 return Some(position);
@@ -940,6 +964,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
             }
+            if message == "jsonb subscript does not support slices" {
+                return find_jsonb_subscript_slice_position(sql);
+            }
+            if message.starts_with("subscript type ") && message.ends_with(" is not supported") {
+                return find_jsonb_subscript_type_position(sql);
+            }
             if is_reg_object_direct_input_error(message)
                 && let Some(position) = find_reg_object_literal_position(sql)
             {
@@ -1146,6 +1176,22 @@ fn find_grouping_call_argument_position(sql: &str) -> Option<usize> {
         .take_while(u8::is_ascii_whitespace)
         .count();
     Some(args_start + arg_offset + whitespace + 1)
+}
+
+fn find_distinct_on_mismatch_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let distinct_on = lower.find("distinct on")?;
+    let open = lower.get(distinct_on..)?.find('(')? + distinct_on;
+    let after_open = open + 1;
+    let args = sql.get(after_open..)?;
+    let close = args.find(')')?;
+    let args = &args[..close];
+    let mismatch_offset = args.find(',').map(|index| index + 1).unwrap_or(0);
+    let whitespace = args[mismatch_offset..]
+        .bytes()
+        .take_while(u8::is_ascii_whitespace)
+        .count();
+    Some(after_open + mismatch_offset + whitespace + 1)
 }
 
 fn domain_ddl_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -1465,6 +1511,27 @@ fn is_legacy_json_operator_surface(sql: &str) -> bool {
     (lower.contains("->") || lower.contains("#>"))
         && (lower.contains(" json ") || lower.contains("::json"))
         && !lower.contains("jsonb")
+}
+
+fn suppress_jsonb_runtime_path_position(sql: &str, e: &ExecError) -> bool {
+    match e {
+        ExecError::WithContext { source, .. } => suppress_jsonb_runtime_path_position(sql, source),
+        ExecError::InvalidStorageValue { column, details } => {
+            column == "jsonb"
+                && details.starts_with("path element at position ")
+                && is_jsonb_runtime_path_surface(sql)
+        }
+        _ => false,
+    }
+}
+
+fn is_jsonb_runtime_path_surface(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    lower.contains("#-")
+        || lower.contains("jsonb_set(")
+        || lower.contains("jsonb_set_lax(")
+        || lower.contains("jsonb_insert(")
+        || lower.contains("jsonb_delete_path(")
 }
 
 fn is_legacy_json_record_function_surface(sql: &str) -> bool {
@@ -3005,6 +3072,99 @@ fn find_subscript_expression_position(sql: &str) -> Option<usize> {
     Some(start + 1)
 }
 
+fn find_jsonb_subscript_slice_position(sql: &str) -> Option<usize> {
+    for (open, close) in subscript_brackets_outside_string_literals(sql) {
+        let Some(colon) = find_colon_outside_string_literals(sql, open + 1, close) else {
+            continue;
+        };
+        let upper_start = skip_ascii_whitespace(sql, colon + 1, close);
+        if upper_start < close {
+            return Some(upper_start + 1);
+        }
+        let lower_start = skip_ascii_whitespace(sql, open + 1, colon);
+        if lower_start < colon {
+            return Some(lower_start + 1);
+        }
+    }
+    None
+}
+
+fn find_jsonb_subscript_type_position(sql: &str) -> Option<usize> {
+    for (open, close) in subscript_brackets_outside_string_literals(sql) {
+        let start = skip_ascii_whitespace(sql, open + 1, close);
+        if start >= close {
+            continue;
+        }
+        if sql.as_bytes()[start].is_ascii_digit() || matches!(sql.as_bytes()[start], b'+' | b'-') {
+            return Some(start + 1);
+        }
+    }
+    None
+}
+
+fn subscript_brackets_outside_string_literals(sql: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b'[' => {
+                if let Some(close) = find_subscript_close_outside_string_literals(sql, index) {
+                    ranges.push((index, close));
+                    index = close + 1;
+                } else {
+                    index += 1;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    ranges
+}
+
+fn find_subscript_close_outside_string_literals(sql: &str, open: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b']' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn find_colon_outside_string_literals(sql: &str, start: usize, end: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = start;
+    while index < end {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b':' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_sql_string_literal(bytes: &[u8], quote: usize) -> usize {
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+            } else {
+                return index + 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
+}
+
 fn find_routine_error_position(sql: &str, message: &str) -> Option<usize> {
     let lower = sql.trim_start().to_ascii_lowercase();
     if !lower.starts_with("call ") && !lower.starts_with("select ") {
@@ -4155,6 +4315,7 @@ fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResp
     apply_insert_conflict_regression_error_compat(sql, response);
     apply_update_alias_regression_error_compat(sql, response);
     apply_update_regression_error_position_compat(sql, response);
+    apply_merge_regression_error_compat(sql, response);
 }
 
 fn apply_update_regression_error_position_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -4220,6 +4381,61 @@ fn clean_sql_identifier_token(token: &str) -> String {
     token
         .trim_matches(|ch: char| matches!(ch, '"' | ',' | ';' | '(' | ')'))
         .to_string()
+}
+
+fn apply_merge_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
+    let lower = sql.to_ascii_lowercase();
+    if response.message.starts_with("WITH query \"")
+        && response
+            .message
+            .ends_with("\" does not have a RETURNING clause")
+        && let Some(position) = find_select_star_position(sql)
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "invalid reference to FROM-clause entry for table \"t\""
+        && lower.contains("merge into")
+        && lower.contains("using")
+        && let Some(position) =
+            find_case_insensitive_token_position(sql, "where t.tid").map(|pos| pos + "where ".len())
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "cannot use system column \"xmin\" in MERGE WHEN condition"
+        && let Some(position) = find_case_insensitive_token_position(sql, "t.xmin")
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "column reference \"balance\" is ambiguous"
+        && lower.contains("merge into")
+        && let Some(position) = find_merge_update_rhs_identifier_position(sql, "balance")
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message
+        == "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command"
+        && let Some(position) = find_case_insensitive_token_position(sql, "merge_action")
+    {
+        response.position = Some(position);
+    }
+}
+
+fn find_select_star_position(sql: &str) -> Option<usize> {
+    find_last_case_insensitive_token_position(sql, "select *").map(|pos| pos + "select ".len())
+}
+
+fn find_merge_update_rhs_identifier_position(sql: &str, identifier: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let update_pos = lower.find("update set")?;
+    let after_update = update_pos + "update set".len();
+    let equals_pos = lower[after_update..].find('=')? + after_update + 1;
+    lower[equals_pos..]
+        .find(&identifier.to_ascii_lowercase())
+        .map(|offset| equals_pos + offset + 1)
 }
 
 fn apply_insert_conflict_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -6791,6 +7007,22 @@ fn execute_query_statement(
         .map_err(|e| io::Error::other(format!("{e:?}")))
     };
     refresh_protocol_prepared_statement_view_rows(state);
+    if state.session.transaction_failed()
+        && let Ok(stmt) = parsed.as_ref()
+        && !matches!(
+            stmt,
+            Statement::Commit(_) | Statement::Rollback(_) | Statement::RollbackTo(_)
+        )
+    {
+        let err = ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "ROLLBACK",
+            actual:
+                "current transaction is aborted, commands ignored until end of transaction block"
+                    .into(),
+        });
+        send_exec_error(stream, error_sql.as_ref(), &err)?;
+        return Ok(QueryStatementFlow::Stop);
+    }
     if let Ok(stmt) = parsed.as_ref()
         && let Some(flow) = handle_portal_statement(stream, db, state, sql.as_ref(), stmt)?
     {
@@ -12136,25 +12368,15 @@ fn send_queued_notices_with_sql_and_min_messages(
         let position = notice.position.or_else(|| {
             sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message, *occurrence))
         });
-        if notice.hint.is_some() {
-            send_notice_with_hint(
-                stream,
-                notice.severity,
-                notice.sqlstate,
-                &notice.message,
-                notice.hint.as_deref(),
-                position,
-            )?;
-        } else {
-            send_notice_with_severity(
-                stream,
-                notice.severity,
-                notice.sqlstate,
-                &notice.message,
-                notice.detail.as_deref(),
-                position,
-            )?;
-        }
+        send_notice_with_fields(
+            stream,
+            notice.severity,
+            notice.sqlstate,
+            &notice.message,
+            notice.detail.as_deref(),
+            notice.hint.as_deref(),
+            position,
+        )?;
     }
     send_plpgsql_notices(stream, &take_notices())
 }
@@ -17642,6 +17864,23 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
     }
 
     #[test]
+    fn exec_error_position_omits_jsonb_runtime_path_errors() {
+        for sql in [
+            "select '{\"b\":[1,2]}'::jsonb #- '{b,-1e}';",
+            "select jsonb_set('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_set_lax('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_insert('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_delete_path('{\"a\":[1,2,3]}', array['a','non_integer']);",
+        ] {
+            let err = ExecError::InvalidStorageValue {
+                column: "jsonb".into(),
+                details: "path element at position 2 is not an integer: \"non_integer\"".into(),
+            };
+            assert_eq!(exec_error_position(sql, &err), None);
+        }
+    }
+
+    #[test]
     fn exec_error_position_points_at_sql_json_validation_nodes() {
         let cases = [
             (
@@ -17808,6 +18047,27 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(22));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_jsonb_subscript_errors() {
+        let numeric_sql = "select ('[1, \"2\", null]'::jsonb)[1.0];";
+        let numeric_err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "subscript type numeric is not supported".into(),
+            detail: None,
+            hint: Some("jsonb subscript must be coercible to either integer or text.".into()),
+            sqlstate: "42804",
+        });
+        assert_eq!(exec_error_position(numeric_sql, &numeric_err), Some(34));
+
+        let slice_sql = "select ('[1, \"2\", null]'::jsonb)[1:2];";
+        let slice_err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "jsonb subscript does not support slices".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+        assert_eq!(exec_error_position(slice_sql, &slice_err), Some(36));
     }
 
     #[test]

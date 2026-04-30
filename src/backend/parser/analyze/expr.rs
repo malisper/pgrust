@@ -5583,6 +5583,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
             }
+            if name.eq_ignore_ascii_case("merge_action") {
+                return Err(ParseError::DetailedError {
+                    message:
+                        "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command"
+                            .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
             if !order_by.is_empty() || *distinct || filter.is_some() || args.is_star() {
                 return Err(ParseError::UnexpectedToken {
                     expected: "supported scalar function",

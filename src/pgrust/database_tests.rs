@@ -665,6 +665,173 @@ fn generated_columns_compute_on_insert_update_and_read() {
 }
 
 #[test]
+fn generated_columns_keep_view_dml_and_merge_returning_semantics() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table stored_view_base (a int4 primary key, b int4 generated always as (a * 2) stored)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view stored_view as select * from stored_view_base",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into stored_view values (1, default)")
+        .unwrap();
+    let stored_explicit = session
+        .execute(&db, "insert into stored_view values (2, 4)")
+        .unwrap_err();
+    assert!(matches!(
+        stored_explicit,
+        ExecError::Parse(ParseError::DetailedError {
+            sqlstate: "428C9",
+            ..
+        })
+    ));
+    let stored_multi = session
+        .execute(&db, "insert into stored_view values (2, default), (3, 6)")
+        .unwrap_err();
+    assert!(matches!(
+        stored_multi,
+        ExecError::Parse(ParseError::DetailedError {
+            sqlstate: "428C9",
+            ..
+        })
+    ));
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select * from stored_view order by a"),
+        vec![vec![Value::Int32(1), Value::Int32(2)]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table virtual_view_base (a int4 primary key, b int4 generated always as (a * 2) virtual)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view virtual_view as select * from virtual_view_base",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into virtual_view values (1, default)")
+        .unwrap();
+    let virtual_explicit = session
+        .execute(&db, "insert into virtual_view values (2, 4)")
+        .unwrap_err();
+    assert!(matches!(
+        virtual_explicit,
+        ExecError::Parse(ParseError::DetailedError {
+            sqlstate: "428C9",
+            ..
+        })
+    ));
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select * from virtual_view order by a"),
+        vec![vec![Value::Int32(1), Value::Int32(2)]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table merge_virtual (
+                id int4 primary key,
+                f1 int4,
+                f2 int4,
+                f3 int4 generated always as (f1 * 2) virtual,
+                f4 int4 generated always as (f2 * 2) virtual
+            )",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into merge_virtual values (1, 5, 100)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_virtual t using (values (1, 10), (2, 20)) v(id, f1) on t.id = v.id
+               when matched then update set f1 = v.f1
+               when not matched then insert values (v.id, v.f1, 200)
+               returning merge_action(), old.f3, old.f4, new.f3, new.f4"
+        ),
+        vec![
+            vec![
+                Value::Text("UPDATE".into()),
+                Value::Int32(10),
+                Value::Int32(200),
+                Value::Int32(20),
+                Value::Int32(200),
+            ],
+            vec![
+                Value::Text("INSERT".into()),
+                Value::Null,
+                Value::Null,
+                Value::Int32(40),
+                Value::Int32(400),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn truncate_inherited_parent_clears_children_and_indexes() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table trunc_inherit_parent (a int4 primary key)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table trunc_inherit_child () inherits (trunc_inherit_parent)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into trunc_inherit_parent values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into trunc_inherit_child values (2)")
+        .unwrap();
+
+    session
+        .execute(&db, "truncate trunc_inherit_parent")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from trunc_inherit_parent"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    session
+        .execute(&db, "insert into trunc_inherit_child values (2)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from trunc_inherit_parent"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
 fn pg_backend_pid_returns_session_client_id() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
 
@@ -14888,7 +15055,7 @@ fn inherited_update_delete_follow_postgres_targeting_rules() {
 }
 
 #[test]
-fn inheritance_guardrails_reject_truncate_but_allow_column_alter() {
+fn inheritance_guardrails_truncate_parent_and_allow_column_alter() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
@@ -14900,12 +15067,17 @@ fn inheritance_guardrails_reject_truncate_but_allow_column_alter() {
         .execute(&db, "create table child_guard() inherits (parent_guard)")
         .unwrap();
 
-    let truncate_err = session.execute(&db, "truncate parent_guard").unwrap_err();
-    assert!(matches!(
-        truncate_err,
-        ExecError::Parse(ParseError::FeatureNotSupported(message))
-            if message.contains("TRUNCATE on inherited parents")
-    ));
+    session
+        .execute(&db, "insert into parent_guard values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child_guard values (2)")
+        .unwrap();
+    session.execute(&db, "truncate parent_guard").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a from parent_guard order by a"),
+        Vec::<Vec<Value>>::new()
+    );
 
     session
         .execute(&db, "insert into parent_guard values (1)")
@@ -25616,6 +25788,114 @@ fn create_gin_jsonb_index_uses_bitmap_scan_and_rechecks() {
             "select count(*) from docs where j ?& array['a','b']::text[]",
         ),
         vec![vec![Value::Int64(201)]]
+    );
+}
+
+#[test]
+fn gin_jsonb_numeric_keys_use_jsonb_equality() {
+    let base = temp_dir("gin_jsonb_numeric_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table docs (id int4, j jsonb)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into docs values \
+         (1, '{\"age\":25}'::jsonb), \
+         (2, '{\"age\":25.0}'::jsonb), \
+         (3, '{\"age\":26}'::jsonb)",
+    )
+    .unwrap();
+    db.execute(1, "create index docs_j_gin on docs using gin (j)")
+        .unwrap();
+    db.execute(1, "set enable_seqscan = off").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j @> '{\"age\":25}'::jsonb",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j @> '{\"age\":25.0}'::jsonb",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn gin_jsonb_path_ops_and_jsonpath_ops_use_bitmap_recheck() {
+    let base = temp_dir("gin_jsonb_path_ops");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table docs (id int4, j jsonb)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into docs values \
+         (1, '{\"wait\":null,\"a\":1}'::jsonb), \
+         (2, '{\"wait\":1,\"a\":1}'::jsonb), \
+         (3, '{\"a\":2}'::jsonb)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index docs_j_path_gin on docs using gin (j jsonb_path_ops)",
+    )
+    .unwrap();
+    db.execute(1, "analyze docs").unwrap();
+    db.execute(1, "set enable_seqscan = off").unwrap();
+    let relfilenode = relfilenode_for(&db, 1, "docs_j_path_gin");
+
+    let path_exists = explain_lines(
+        &db,
+        1,
+        "select id from docs where j @? '$.wait ? (@ == null)'",
+    );
+    assert!(
+        path_exists
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on docs")),
+        "expected Bitmap Heap Scan for @?, got {path_exists:?}"
+    );
+    assert!(
+        path_exists.iter().any(|line| line
+            .contains(&format!("Bitmap Index Scan using rel {relfilenode} "))
+            || line.contains("Bitmap Index Scan on docs_j_path_gin")),
+        "expected Bitmap Index Scan for @?, got {path_exists:?}"
+    );
+
+    let path_match = explain_lines(&db, 1, "select id from docs where j @@ '$.wait == null'");
+    assert!(
+        path_match.iter().any(|line| line
+            .contains(&format!("Bitmap Index Scan using rel {relfilenode} "))
+            || line.contains("Bitmap Index Scan on docs_j_path_gin")),
+        "expected Bitmap Index Scan for @@, got {path_match:?}"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j @> '{\"a\":1}'::jsonb",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn scalar_repeat_in_from_returns_single_row() {
+    let base = temp_dir("scalar_repeat_from");
+    let db = Database::open(&base, 16).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select s from repeat('xyzzy', 2) s"),
+        vec![vec![Value::Text("xyzzyxyzzy".into())]]
     );
 }
 
@@ -45952,6 +46232,125 @@ fn copy_from_uses_defaults_for_omitted_columns() {
         session_query_rows(&mut session, &db, "select a, b from copy_defaults"),
         vec![vec![Value::Int32(1), Value::Int32(7)]]
     );
+}
+
+#[test]
+fn copy_uses_postgres_generated_column_rules() {
+    let base = temp_dir("copy_generated_columns");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table copy_generated (a int4, b int4 generated always as (a * 2) stored)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into copy_generated (a) values (1), (2)")
+        .unwrap();
+
+    let copy_to = crate::pgrust::session::parse_copy_command("copy copy_generated to stdout")
+        .unwrap()
+        .unwrap();
+    match session.execute_copy_command(&db, &copy_to).unwrap() {
+        crate::pgrust::session::CopyExecutionResult::Output { data, rows } => {
+            assert_eq!(rows, 2);
+            assert_eq!(String::from_utf8(data).unwrap(), "1\n2\n");
+        }
+        other => panic!("expected COPY output, got {other:?}"),
+    }
+
+    let copy_to_generated =
+        crate::pgrust::session::parse_copy_command("copy copy_generated(a, b) to stdout")
+            .unwrap()
+            .unwrap();
+    match session.execute_copy_command(&db, &copy_to_generated) {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(message, "column \"b\" is a generated column");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Generated columns cannot be used in COPY.")
+            );
+        }
+        other => panic!("expected generated COPY TO error, got {other:?}"),
+    }
+
+    let copy_from = crate::pgrust::session::parse_copy_command("copy copy_generated from stdin")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        session.copy_from_text(&db, &copy_from, "3\n\\.").unwrap(),
+        1
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select * from copy_generated where a = 3"
+        ),
+        vec![vec![Value::Int32(3), Value::Int32(6)]]
+    );
+
+    let copy_from_generated =
+        crate::pgrust::session::parse_copy_command("copy copy_generated(a, b) from stdin")
+            .unwrap()
+            .unwrap();
+    match session.copy_from_text(&db, &copy_from_generated, "4\t8\n\\.") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(message, "column \"b\" is a generated column");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Generated columns cannot be used in COPY.")
+            );
+        }
+        other => panic!("expected generated COPY FROM error, got {other:?}"),
+    }
+
+    let copy_where_generated =
+        crate::pgrust::session::parse_copy_command("copy copy_generated from stdin where b <> 10")
+            .unwrap()
+            .unwrap();
+    match session.validate_copy_from_stdin_start(&db, &copy_where_generated) {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(
+                message,
+                "generated columns are not supported in COPY FROM WHERE conditions"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("Column \"b\" is a generated column.")
+            );
+        }
+        other => panic!("expected generated COPY WHERE error, got {other:?}"),
+    }
+
+    let copy_where_whole_row = crate::pgrust::session::parse_copy_command(
+        "copy copy_generated from stdin where copy_generated is null",
+    )
+    .unwrap()
+    .unwrap();
+    match session.validate_copy_from_stdin_start(&db, &copy_where_whole_row) {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(
+                message,
+                "generated columns are not supported in COPY FROM WHERE conditions"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("Column \"b\" is a generated column.")
+            );
+        }
+        other => panic!("expected generated COPY whole-row WHERE error, got {other:?}"),
+    }
 }
 
 #[test]

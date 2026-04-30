@@ -2464,6 +2464,7 @@ pub enum PreparedStatementQuery {
     Select(SelectStatement),
     Insert(InsertStatement),
     Update(UpdateStatement),
+    Merge(MergeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3745,6 +3746,7 @@ pub struct AlterRoleStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterRoleAction {
     Rename { new_name: String },
+    SetConfig { name: String, value: Option<String> },
     Options(Vec<RoleOption>),
 }
 
@@ -4223,9 +4225,16 @@ pub struct AlterUserMappingStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockTableStatement {
-    pub table_names: Vec<String>,
+    pub targets: Vec<LockTableTarget>,
     pub mode: LockTableMode,
     pub nowait: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockTableTarget {
+    pub name: String,
+    pub only: bool,
+    pub recurse: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

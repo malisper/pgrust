@@ -2,9 +2,10 @@ use super::*;
 use crate::backend::parser::analyze::multiranges::bind_maybe_multirange_overlap_or_adjacent;
 use crate::backend::parser::analyze::ranges::bind_maybe_range_overlap_or_adjacent;
 use crate::include::catalog::{
-    C_COLLATION_OID, RECORD_TYPE_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID,
-    TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID, TEXT_PATTERN_GE_OPERATOR_OID,
-    TEXT_PATTERN_GT_OPERATOR_OID, TEXT_PATTERN_LE_OPERATOR_OID, TEXT_PATTERN_LT_OPERATOR_OID,
+    C_COLLATION_OID, JSONB_PATH_MATCH_OPERATOR_OID, JSONB_PATH_MATCH_PROC_OID, RECORD_TYPE_OID,
+    TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID,
+    TEXT_PATTERN_GE_OPERATOR_OID, TEXT_PATTERN_GT_OPERATOR_OID, TEXT_PATTERN_LE_OPERATOR_OID,
+    TEXT_PATTERN_LT_OPERATOR_OID,
 };
 use crate::include::nodes::primnodes::OpExpr;
 
@@ -1837,9 +1838,12 @@ pub(super) fn bind_overloaded_binary_expr(
     match op {
         "@@" => {
             if left_type.kind == SqlTypeKind::Jsonb && right_type.kind == SqlTypeKind::JsonPath {
-                return Ok(Expr::op_auto(
-                    crate::include::nodes::primnodes::OpExprKind::JsonbPathMatch,
-                    vec![
+                return Ok(Expr::Op(Box::new(OpExpr {
+                    opno: JSONB_PATH_MATCH_OPERATOR_OID,
+                    opfuncid: JSONB_PATH_MATCH_PROC_OID,
+                    op: crate::include::nodes::primnodes::OpExprKind::JsonbPathMatch,
+                    opresulttype: SqlType::new(SqlTypeKind::Bool),
+                    args: vec![
                         coerce_bound_expr(
                             left_bound,
                             raw_left_type,
@@ -1851,7 +1855,8 @@ pub(super) fn bind_overloaded_binary_expr(
                             SqlType::new(SqlTypeKind::JsonPath),
                         ),
                     ],
-                ));
+                    collation_oid: None,
+                })));
             }
             if is_text_like_type(left_type) && matches!(right_type.kind, SqlTypeKind::TsQuery) {
                 return Ok(Expr::builtin_func(

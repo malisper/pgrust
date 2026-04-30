@@ -795,7 +795,7 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         });
         oid = oid.saturating_add(1);
     }
-    for (strategy, righttype, operator_oid) in [
+    for (family, strategy, righttype, operator_oid) in [
         (7_i16, JSONB_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID),
         (9, TEXT_TYPE_OID, JSONB_EXISTS_OPERATOR_OID),
         (10, TEXT_ARRAY_TYPE_OID, JSONB_EXISTS_ANY_OPERATOR_OID),
@@ -810,10 +810,32 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
             JSONPATH_TYPE_OID,
             operator_oid(&operators, "@@", JSONB_TYPE_OID, JSONPATH_TYPE_OID),
         ),
-    ] {
+    ]
+    .map(|(strategy, righttype, operator_oid)| {
+        (GIN_JSONB_FAMILY_OID, strategy, righttype, operator_oid)
+    })
+    .into_iter()
+    .chain(
+        [
+            (7_i16, JSONB_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID),
+            (
+                15,
+                JSONPATH_TYPE_OID,
+                operator_oid(&operators, "@?", JSONB_TYPE_OID, JSONPATH_TYPE_OID),
+            ),
+            (
+                16,
+                JSONPATH_TYPE_OID,
+                operator_oid(&operators, "@@", JSONB_TYPE_OID, JSONPATH_TYPE_OID),
+            ),
+        ]
+        .map(|(strategy, righttype, operator_oid)| {
+            (GIN_JSONB_PATH_FAMILY_OID, strategy, righttype, operator_oid)
+        }),
+    ) {
         rows.push(PgAmopRow {
             oid,
-            amopfamily: GIN_JSONB_FAMILY_OID,
+            amopfamily: family,
             amoplefttype: JSONB_TYPE_OID,
             amoprighttype: righttype,
             amopstrategy: strategy,

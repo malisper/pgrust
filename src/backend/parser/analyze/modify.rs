@@ -13,7 +13,7 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
-    attrno_index, expr_contains_set_returning,
+    attrno_index, expr_contains_set_returning, expr_sql_type_hint,
 };
 use crate::include::nodes::primnodes::{
     JoinType, QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement,
@@ -935,6 +935,77 @@ fn resolve_assignment_indirection_sql_type(
     Ok(current)
 }
 
+fn validate_jsonb_assignment_target_subscripts(
+    column_type: SqlType,
+    target: &BoundAssignmentTarget,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    let mut current = column_type;
+    for subscript in &target.subscripts {
+        current = validate_jsonb_assignment_subscript_step(current, subscript, catalog)?;
+    }
+    for step in &target.indirection {
+        current = assignment_navigation_sql_type(current, catalog);
+        match step {
+            BoundAssignmentTargetIndirection::Subscript(subscript) => {
+                current = validate_jsonb_assignment_subscript_step(current, subscript, catalog)?;
+            }
+            BoundAssignmentTargetIndirection::Field(field) => {
+                current = resolve_assignment_field_type(current, field, catalog)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_jsonb_assignment_subscript_step(
+    current: SqlType,
+    subscript: &BoundArraySubscript,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let current = assignment_navigation_sql_type(current, catalog);
+    if current.kind == SqlTypeKind::Jsonb && !current.is_array {
+        if subscript.is_slice {
+            return Err(ParseError::DetailedError {
+                message: "jsonb subscript does not support slices".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if let Some(sql_type) = subscript.lower.as_ref().and_then(expr_sql_type_hint) {
+            validate_jsonb_subscript_sql_type(sql_type)?;
+        }
+        return Ok(SqlType::new(SqlTypeKind::Jsonb));
+    }
+    if current.kind == SqlTypeKind::Point && !current.is_array {
+        return Ok(SqlType::new(SqlTypeKind::Float8));
+    }
+    if current.is_array {
+        return Ok(if subscript.is_slice {
+            SqlType::array_of(current.element_type())
+        } else {
+            current.element_type()
+        });
+    }
+    Ok(current)
+}
+
+fn validate_jsonb_subscript_sql_type(sql_type: SqlType) -> Result<(), ParseError> {
+    if !sql_type.is_array && (is_integer_family(sql_type) || is_text_like_type(sql_type)) {
+        return Ok(());
+    }
+    Err(ParseError::DetailedError {
+        message: format!(
+            "subscript type {} is not supported",
+            sql_type_name(sql_type)
+        ),
+        detail: None,
+        hint: Some("jsonb subscript must be coercible to either integer or text.".into()),
+        sqlstate: "42804",
+    })
+}
+
 fn merge_explain_target_name(stmt: &MergeStatement) -> String {
     stmt.target_alias
         .as_ref()
@@ -978,6 +1049,208 @@ fn merge_join_type(clauses: &[MergeWhenClause]) -> JoinType {
         (false, true) => JoinType::Right,
         (true, true) => JoinType::Full,
     }
+}
+
+fn validate_merge_when_clauses(clauses: &[MergeWhenClause]) -> Result<(), ParseError> {
+    let mut matched_terminal = false;
+    let mut not_matched_by_source_terminal = false;
+    let mut not_matched_by_target_terminal = false;
+
+    for clause in clauses {
+        let terminal_seen = match clause.match_kind {
+            MergeMatchKind::Matched => &mut matched_terminal,
+            MergeMatchKind::NotMatchedBySource => &mut not_matched_by_source_terminal,
+            MergeMatchKind::NotMatchedByTarget => &mut not_matched_by_target_terminal,
+        };
+        if *terminal_seen {
+            return Err(ParseError::DetailedError {
+                message: "unreachable WHEN clause specified after unconditional WHEN clause".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        if clause.condition.is_none() {
+            *terminal_seen = true;
+        }
+    }
+
+    Ok(())
+}
+
+fn first_scope_relation_name(scope: &BoundScope) -> Option<&str> {
+    scope
+        .relations
+        .iter()
+        .flat_map(|relation| relation.relation_names.iter())
+        .find(|name| !name.is_empty())
+        .map(String::as_str)
+}
+
+fn merge_when_system_column_name(expr: &SqlExpr) -> Option<&str> {
+    fn system_name(column: &str) -> Option<&str> {
+        let name = column.rsplit('.').next().unwrap_or(column);
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "ctid" | "xmin" | "xmax" | "cmin" | "cmax"
+        ) {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    fn first<'a>(left: &'a SqlExpr, right: &'a SqlExpr) -> Option<&'a str> {
+        merge_when_system_column_name(left).or_else(|| merge_when_system_column_name(right))
+    }
+
+    match expr {
+        SqlExpr::Column(name) => system_name(name),
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right) => first(left, right),
+        SqlExpr::BinaryOperator { left, right, .. }
+        | SqlExpr::GeometryBinaryOp { left, right, .. } => first(left, right),
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. }
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => merge_when_system_column_name(inner),
+        SqlExpr::Collate { expr, .. } => merge_when_system_column_name(expr),
+        SqlExpr::AtTimeZone { expr, zone } => first(expr, zone),
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => merge_when_system_column_name(expr)
+            .or_else(|| merge_when_system_column_name(pattern))
+            .or_else(|| escape.as_deref().and_then(merge_when_system_column_name)),
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => arg
+            .as_deref()
+            .and_then(merge_when_system_column_name)
+            .or_else(|| {
+                args.iter().find_map(|case_when| {
+                    merge_when_system_column_name(&case_when.expr)
+                        .or_else(|| merge_when_system_column_name(&case_when.result))
+                })
+            })
+            .or_else(|| defresult.as_deref().and_then(merge_when_system_column_name)),
+        SqlExpr::ArrayLiteral(exprs) | SqlExpr::Row(exprs) => {
+            exprs.iter().find_map(merge_when_system_column_name)
+        }
+        SqlExpr::InSubquery { expr, .. } => merge_when_system_column_name(expr),
+        SqlExpr::QuantifiedSubquery { left, .. } => merge_when_system_column_name(left),
+        SqlExpr::QuantifiedArray { left, array, .. } => first(left, array),
+        SqlExpr::ArraySubscript { array, subscripts } => merge_when_system_column_name(array)
+            .or_else(|| {
+                subscripts.iter().find_map(|subscript| {
+                    subscript
+                        .lower
+                        .as_deref()
+                        .and_then(merge_when_system_column_name)
+                        .or_else(|| {
+                            subscript
+                                .upper
+                                .as_deref()
+                                .and_then(merge_when_system_column_name)
+                        })
+                })
+            }),
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            ..
+        } => match args {
+            SqlCallArgs::Star => None,
+            SqlCallArgs::Args(args) => args
+                .iter()
+                .find_map(|arg| merge_when_system_column_name(&arg.value))
+                .or_else(|| {
+                    order_by
+                        .iter()
+                        .find_map(|item| merge_when_system_column_name(&item.expr))
+                })
+                .or_else(|| {
+                    within_group.as_ref().and_then(|items| {
+                        items
+                            .iter()
+                            .find_map(|item| merge_when_system_column_name(&item.expr))
+                    })
+                })
+                .or_else(|| filter.as_deref().and_then(merge_when_system_column_name)),
+        },
+        SqlExpr::Xml(xml) => xml.child_exprs().find_map(merge_when_system_column_name),
+        SqlExpr::JsonQueryFunction(json) => json
+            .child_exprs()
+            .into_iter()
+            .find_map(merge_when_system_column_name),
+        _ => None,
+    }
+}
+
+fn reject_merge_when_system_columns(expr: &SqlExpr) -> Result<(), ParseError> {
+    if let Some(name) = merge_when_system_column_name(expr) {
+        return Err(ParseError::DetailedError {
+            message: format!("cannot use system column \"{name}\" in MERGE WHEN condition"),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
 }
 
 fn unsupported_with_row_security(feature: &str) -> ParseError {
@@ -1039,20 +1312,44 @@ fn bind_merge_when_clause(
     source_scope: &BoundScope,
     merged_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
     local_ctes: &[BoundCte],
     target_desc: &RelationDesc,
     column_defaults: &[Expr],
+    target_relation_name: &str,
+    source_relation_name: Option<&str>,
 ) -> Result<BoundMergeWhenClause, ParseError> {
     let action_scope = match clause.match_kind {
-        MergeMatchKind::Matched => merged_scope,
-        MergeMatchKind::NotMatchedBySource => target_scope,
-        MergeMatchKind::NotMatchedByTarget => source_scope,
+        MergeMatchKind::Matched => merged_scope.clone(),
+        MergeMatchKind::NotMatchedBySource => source_relation_name.map_or_else(
+            || target_scope.clone(),
+            |relation_name| {
+                scope_with_hidden_invalid_relation(
+                    target_scope.clone(),
+                    relation_name,
+                    &source_scope.desc,
+                )
+            },
+        ),
+        MergeMatchKind::NotMatchedByTarget => scope_with_hidden_invalid_relation(
+            source_scope.clone(),
+            target_relation_name,
+            target_desc,
+        ),
     };
     let condition = clause
         .condition
         .as_ref()
         .map(|condition| {
-            bind_expr_with_outer_and_ctes(condition, action_scope, catalog, &[], None, local_ctes)
+            reject_merge_when_system_columns(condition)?;
+            bind_expr_with_outer_and_ctes(
+                condition,
+                &action_scope,
+                catalog,
+                outer_scopes,
+                None,
+                local_ctes,
+            )
         })
         .transpose()?;
     let action = match &clause.action {
@@ -1089,6 +1386,11 @@ fn bind_merge_when_clause(
                             catalog,
                         )?,
                     };
+                    validate_jsonb_assignment_target_subscripts(
+                        target_desc.columns[column_index].sql_type,
+                        &target,
+                        catalog,
+                    )?;
                     ensure_generated_assignment_allowed(
                         target_desc,
                         &target,
@@ -1112,9 +1414,9 @@ fn bind_merge_when_clause(
                         } else {
                             bind_expr_with_outer_and_ctes(
                                 &assignment.expr,
-                                action_scope,
+                                &action_scope,
                                 catalog,
-                                &[],
+                                outer_scopes,
                                 None,
                                 local_ctes,
                             )?
@@ -1129,6 +1431,14 @@ fn bind_merge_when_clause(
             overriding,
             source,
         } => {
+            let expanded_values = match source {
+                MergeInsertSource::Values(values) => Some(expand_insert_values_row_exprs(
+                    values,
+                    &action_scope,
+                    outer_scopes,
+                )?),
+                MergeInsertSource::DefaultValues => None,
+            };
             let target_columns = if let Some(columns) = columns {
                 columns
                     .iter()
@@ -1136,57 +1446,84 @@ fn bind_merge_when_clause(
                     .collect::<Result<Vec<_>, ParseError>>()?
             } else {
                 let width = match source {
-                    MergeInsertSource::Values(values) => values.len(),
+                    MergeInsertSource::Values(_) => {
+                        expanded_values.as_ref().map(Vec::len).unwrap_or(0)
+                    }
                     MergeInsertSource::DefaultValues => target_desc.visible_column_indexes().len(),
                 };
                 merge_visible_insert_targets(target_desc, width)?
             };
             let values = match source {
-                MergeInsertSource::Values(values) => {
-                    if values.len() != target_columns.len() {
+                MergeInsertSource::Values(_) => {
+                    let expanded_values = expanded_values.expect("MERGE VALUES row was expanded");
+                    if expanded_values.len() != target_columns.len() {
                         return Err(ParseError::InvalidInsertTargetCount {
                             expected: target_columns.len(),
-                            actual: values.len(),
+                            actual: expanded_values.len(),
                         });
                     }
                     Some(
-                        values
+                        expanded_values
                             .iter()
                             .zip(target_columns.iter())
-                            .map(|(expr, target)| {
-                                ensure_generated_assignment_allowed(
-                                    target_desc,
-                                    target,
-                                    Some(expr),
-                                )?;
-                                if matches!(expr, SqlExpr::Default) {
-                                    reject_default_indirection_assignment(target)?;
-                                    return Ok(column_defaults[target.column_index].clone());
-                                }
-                                let normalized = normalize_identity_insert_expr(
-                                    target_desc,
-                                    target,
-                                    expr,
-                                    *overriding,
-                                )?;
-                                if matches!(normalized, NormalizedInsertExpr::Default) {
-                                    reject_default_indirection_assignment(target)?;
-                                    return Ok(column_defaults[target.column_index].clone());
-                                }
-                                if matches!(expr, SqlExpr::Default)
-                                    && target_desc.columns[target.column_index].generated.is_some()
-                                {
-                                    Ok(Expr::Const(Value::Null))
-                                } else {
-                                    bind_insert_assignment_expr(
-                                        expr,
+                            .map(|(cell, target)| match cell {
+                                InsertValuesCell::Raw(expr) => {
+                                    ensure_generated_assignment_allowed(
                                         target_desc,
                                         target,
-                                        action_scope,
+                                        Some(expr),
+                                    )?;
+                                    if matches!(expr, SqlExpr::Default) {
+                                        reject_default_indirection_assignment(target)?;
+                                        return Ok(column_defaults[target.column_index].clone());
+                                    }
+                                    match normalize_identity_insert_expr(
+                                        target_desc,
+                                        target,
+                                        expr,
+                                        *overriding,
+                                    )? {
+                                        NormalizedInsertExpr::Default => {
+                                            reject_default_indirection_assignment(target)?;
+                                            Ok(column_defaults[target.column_index].clone())
+                                        }
+                                        NormalizedInsertExpr::Expr(expr) => {
+                                            bind_insert_assignment_expr(
+                                                expr,
+                                                target_desc,
+                                                target,
+                                                &action_scope,
+                                                catalog,
+                                                outer_scopes,
+                                                local_ctes,
+                                            )
+                                        }
+                                    }
+                                }
+                                InsertValuesCell::Bound(expr) => {
+                                    ensure_generated_assignment_allowed(
+                                        target_desc,
+                                        target,
+                                        Some(&SqlExpr::Const(Value::Null)),
+                                    )?;
+                                    ensure_identity_select_insert_allowed(
+                                        target_desc,
+                                        target,
+                                        *overriding,
+                                    )?;
+                                    let source_type = expr_sql_type_hint(expr)
+                                        .unwrap_or(SqlType::new(SqlTypeKind::Text));
+                                    reject_invalid_domain_array_assignment(
+                                        target_desc,
+                                        target,
+                                        source_type,
                                         catalog,
-                                        &[],
-                                        local_ctes,
-                                    )
+                                    )?;
+                                    Ok(coerce_bound_expr(
+                                        expr.clone(),
+                                        source_type,
+                                        target.target_sql_type,
+                                    ))
                                 }
                             })
                             .collect::<Result<Vec<_>, ParseError>>()?,
@@ -1262,13 +1599,33 @@ fn returning_pseudo_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr>
         .collect()
 }
 
-fn scope_with_returning_pseudo_rows(scope: BoundScope, desc: &RelationDesc) -> BoundScope {
-    scope_with_returning_pseudo_row_exprs(
+fn returning_pseudo_output_exprs_with_generated(
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    varno: usize,
+) -> Result<Vec<Expr>, ParseError> {
+    let base_output_exprs = returning_pseudo_output_exprs(desc, varno);
+    generated_relation_output_exprs(desc, catalog).map(|output_exprs| {
+        output_exprs
+            .into_iter()
+            .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_output_exprs))
+            .collect()
+    })
+}
+
+fn scope_with_returning_pseudo_rows_with_generated(
+    scope: BoundScope,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    relation_oid: Option<u32>,
+) -> Result<BoundScope, ParseError> {
+    Ok(scope_with_returning_pseudo_row_exprs(
         scope,
         desc,
-        returning_pseudo_output_exprs(desc, OUTER_VAR),
-        returning_pseudo_output_exprs(desc, INNER_VAR),
-    )
+        returning_pseudo_output_exprs_with_generated(desc, catalog, OUTER_VAR)?,
+        returning_pseudo_output_exprs_with_generated(desc, catalog, INNER_VAR)?,
+        relation_oid,
+    ))
 }
 
 fn scope_with_hidden_invalid_relation(
@@ -1335,6 +1692,7 @@ fn scope_with_returning_pseudo_row_exprs(
     desc: &RelationDesc,
     old_output_exprs: Vec<Expr>,
     new_output_exprs: Vec<Expr>,
+    relation_oid: Option<u32>,
 ) -> BoundScope {
     for (relation_name, varno) in [("old", OUTER_VAR), ("new", INNER_VAR)] {
         scope.desc.columns.extend(desc.columns.iter().cloned());
@@ -1352,7 +1710,7 @@ fn scope_with_returning_pseudo_row_exprs(
                 relation_names: vec![relation_name.to_string()],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
-                source_relation_oid: None,
+                source_relation_oid: relation_oid,
                 source_attno: None,
                 source_columns: Vec::new(),
             }));
@@ -1361,7 +1719,7 @@ fn scope_with_returning_pseudo_row_exprs(
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             system_varno: None,
-            relation_oid: None,
+            relation_oid,
         });
     }
     scope
@@ -1825,15 +2183,355 @@ fn is_merge_action_returning_call(expr: &SqlExpr) -> bool {
     }
 }
 
+const MERGE_ACTION_RETURNING_COLUMN: &str = "__pgrust_merge_action";
+
+fn scope_with_merge_action_column(mut scope: BoundScope, merge_action_index: usize) -> BoundScope {
+    let sql_type = SqlType::new(SqlTypeKind::Text);
+    scope
+        .desc
+        .columns
+        .push(column_desc(MERGE_ACTION_RETURNING_COLUMN, sql_type, true));
+    scope.output_exprs.push(Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(merge_action_index),
+        varlevelsup: 0,
+        vartype: sql_type,
+    }));
+    scope.columns.push(ScopeColumn {
+        output_name: MERGE_ACTION_RETURNING_COLUMN.into(),
+        hidden: false,
+        qualified_only: false,
+        relation_names: Vec::new(),
+        hidden_invalid_relation_names: Vec::new(),
+        hidden_missing_relation_names: Vec::new(),
+        source_relation_oid: None,
+        source_attno: None,
+        source_columns: Vec::new(),
+    });
+    scope
+}
+
+fn rewrite_merge_action_select_item(
+    item: &crate::include::nodes::parsenodes::SelectItem,
+) -> (crate::include::nodes::parsenodes::SelectItem, bool) {
+    let (expr, changed) = rewrite_merge_action_expr(&item.expr);
+    (
+        crate::include::nodes::parsenodes::SelectItem {
+            output_name: item.output_name.clone(),
+            expr,
+        },
+        changed,
+    )
+}
+
+fn rewrite_merge_action_order_by(item: &OrderByItem) -> (OrderByItem, bool) {
+    let (expr, changed) = rewrite_merge_action_expr(&item.expr);
+    (
+        OrderByItem {
+            expr,
+            descending: item.descending,
+            nulls_first: item.nulls_first,
+            using_operator: item.using_operator.clone(),
+        },
+        changed,
+    )
+}
+
+fn rewrite_merge_action_select(stmt: &SelectStatement) -> (SelectStatement, bool) {
+    let mut changed = false;
+    let targets = stmt
+        .targets
+        .iter()
+        .map(|item| {
+            let (item, item_changed) = rewrite_merge_action_select_item(item);
+            changed |= item_changed;
+            item
+        })
+        .collect();
+    let where_clause = stmt.where_clause.as_ref().map(|expr| {
+        let (expr, expr_changed) = rewrite_merge_action_expr(expr);
+        changed |= expr_changed;
+        expr
+    });
+    let having = stmt.having.as_ref().map(|expr| {
+        let (expr, expr_changed) = rewrite_merge_action_expr(expr);
+        changed |= expr_changed;
+        expr
+    });
+    let distinct_on = stmt
+        .distinct_on
+        .iter()
+        .map(|expr| {
+            let (expr, expr_changed) = rewrite_merge_action_expr(expr);
+            changed |= expr_changed;
+            expr
+        })
+        .collect();
+    let order_by = stmt
+        .order_by
+        .iter()
+        .map(|item| {
+            let (item, item_changed) = rewrite_merge_action_order_by(item);
+            changed |= item_changed;
+            item
+        })
+        .collect();
+
+    (
+        SelectStatement {
+            with_recursive: stmt.with_recursive,
+            with: stmt.with.clone(),
+            distinct: stmt.distinct,
+            distinct_on,
+            from: stmt.from.clone(),
+            targets,
+            where_clause,
+            group_by: stmt.group_by.clone(),
+            group_by_distinct: stmt.group_by_distinct,
+            having,
+            window_clauses: stmt.window_clauses.clone(),
+            order_by,
+            limit: stmt.limit,
+            offset: stmt.offset,
+            locking_clause: stmt.locking_clause,
+            locking_nowait: stmt.locking_nowait,
+            locking_targets: stmt.locking_targets.clone(),
+            set_operation: stmt.set_operation.clone(),
+        },
+        changed,
+    )
+}
+
+fn rewrite_merge_action_expr(expr: &SqlExpr) -> (SqlExpr, bool) {
+    if is_merge_action_returning_call(expr) {
+        return (SqlExpr::Column(MERGE_ACTION_RETURNING_COLUMN.into()), true);
+    }
+
+    fn boxed(expr: &SqlExpr) -> (Box<SqlExpr>, bool) {
+        let (expr, changed) = rewrite_merge_action_expr(expr);
+        (Box::new(expr), changed)
+    }
+
+    fn binary(
+        left: &SqlExpr,
+        right: &SqlExpr,
+        make: impl FnOnce(Box<SqlExpr>, Box<SqlExpr>) -> SqlExpr,
+    ) -> (SqlExpr, bool) {
+        let (left, left_changed) = boxed(left);
+        let (right, right_changed) = boxed(right);
+        (make(left, right), left_changed || right_changed)
+    }
+
+    match expr {
+        SqlExpr::Add(left, right) => binary(left, right, SqlExpr::Add),
+        SqlExpr::Sub(left, right) => binary(left, right, SqlExpr::Sub),
+        SqlExpr::BitAnd(left, right) => binary(left, right, SqlExpr::BitAnd),
+        SqlExpr::BitOr(left, right) => binary(left, right, SqlExpr::BitOr),
+        SqlExpr::BitXor(left, right) => binary(left, right, SqlExpr::BitXor),
+        SqlExpr::Shl(left, right) => binary(left, right, SqlExpr::Shl),
+        SqlExpr::Shr(left, right) => binary(left, right, SqlExpr::Shr),
+        SqlExpr::Mul(left, right) => binary(left, right, SqlExpr::Mul),
+        SqlExpr::Div(left, right) => binary(left, right, SqlExpr::Div),
+        SqlExpr::Mod(left, right) => binary(left, right, SqlExpr::Mod),
+        SqlExpr::Concat(left, right) => binary(left, right, SqlExpr::Concat),
+        SqlExpr::Eq(left, right) => binary(left, right, SqlExpr::Eq),
+        SqlExpr::NotEq(left, right) => binary(left, right, SqlExpr::NotEq),
+        SqlExpr::Lt(left, right) => binary(left, right, SqlExpr::Lt),
+        SqlExpr::LtEq(left, right) => binary(left, right, SqlExpr::LtEq),
+        SqlExpr::Gt(left, right) => binary(left, right, SqlExpr::Gt),
+        SqlExpr::GtEq(left, right) => binary(left, right, SqlExpr::GtEq),
+        SqlExpr::And(left, right) => binary(left, right, SqlExpr::And),
+        SqlExpr::Or(left, right) => binary(left, right, SqlExpr::Or),
+        SqlExpr::BinaryOperator { op, left, right } => {
+            binary(left, right, |left, right| SqlExpr::BinaryOperator {
+                op: op.clone(),
+                left,
+                right,
+            })
+        }
+        SqlExpr::UnaryPlus(inner) => {
+            let (inner, changed) = boxed(inner);
+            (SqlExpr::UnaryPlus(inner), changed)
+        }
+        SqlExpr::Negate(inner) => {
+            let (inner, changed) = boxed(inner);
+            (SqlExpr::Negate(inner), changed)
+        }
+        SqlExpr::Not(inner) => {
+            let (inner, changed) = boxed(inner);
+            (SqlExpr::Not(inner), changed)
+        }
+        SqlExpr::Cast(inner, ty) => {
+            let (inner, changed) = boxed(inner);
+            (SqlExpr::Cast(inner, ty.clone()), changed)
+        }
+        SqlExpr::FieldSelect { expr, field } => {
+            let (expr, changed) = boxed(expr);
+            (
+                SqlExpr::FieldSelect {
+                    expr,
+                    field: field.clone(),
+                },
+                changed,
+            )
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            let mut changed = false;
+            let arg = arg.as_ref().map(|expr| {
+                let (expr, expr_changed) = boxed(expr);
+                changed |= expr_changed;
+                expr
+            });
+            let args = args
+                .iter()
+                .map(|case_when| {
+                    let (expr, expr_changed) = rewrite_merge_action_expr(&case_when.expr);
+                    let (result, result_changed) = rewrite_merge_action_expr(&case_when.result);
+                    changed |= expr_changed || result_changed;
+                    SqlCaseWhen { expr, result }
+                })
+                .collect();
+            let defresult = defresult.as_ref().map(|expr| {
+                let (expr, expr_changed) = boxed(expr);
+                changed |= expr_changed;
+                expr
+            });
+            (
+                SqlExpr::Case {
+                    arg,
+                    args,
+                    defresult,
+                },
+                changed,
+            )
+        }
+        SqlExpr::ScalarSubquery(select) => {
+            let (select, changed) = rewrite_merge_action_select(select);
+            (SqlExpr::ScalarSubquery(Box::new(select)), changed)
+        }
+        SqlExpr::ArraySubquery(select) => {
+            let (select, changed) = rewrite_merge_action_select(select);
+            (SqlExpr::ArraySubquery(Box::new(select)), changed)
+        }
+        SqlExpr::Exists(select) => {
+            let (select, changed) = rewrite_merge_action_select(select);
+            (SqlExpr::Exists(Box::new(select)), changed)
+        }
+        SqlExpr::InSubquery {
+            expr,
+            subquery,
+            negated,
+        } => {
+            let (expr, expr_changed) = boxed(expr);
+            let (subquery, query_changed) = rewrite_merge_action_select(subquery);
+            (
+                SqlExpr::InSubquery {
+                    expr,
+                    subquery: Box::new(subquery),
+                    negated: *negated,
+                },
+                expr_changed || query_changed,
+            )
+        }
+        SqlExpr::ArrayLiteral(exprs) => {
+            let mut changed = false;
+            let exprs = exprs
+                .iter()
+                .map(|expr| {
+                    let (expr, expr_changed) = rewrite_merge_action_expr(expr);
+                    changed |= expr_changed;
+                    expr
+                })
+                .collect();
+            (SqlExpr::ArrayLiteral(exprs), changed)
+        }
+        SqlExpr::Row(exprs) => {
+            let mut changed = false;
+            let exprs = exprs
+                .iter()
+                .map(|expr| {
+                    let (expr, expr_changed) = rewrite_merge_action_expr(expr);
+                    changed |= expr_changed;
+                    expr
+                })
+                .collect();
+            (SqlExpr::Row(exprs), changed)
+        }
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            distinct,
+            func_variadic,
+            filter,
+            null_treatment,
+            over,
+        } => {
+            let mut changed = false;
+            let args = match args {
+                SqlCallArgs::Star => SqlCallArgs::Star,
+                SqlCallArgs::Args(args) => SqlCallArgs::Args(
+                    args.iter()
+                        .map(|arg| {
+                            let (value, arg_changed) = rewrite_merge_action_expr(&arg.value);
+                            changed |= arg_changed;
+                            SqlFunctionArg {
+                                name: arg.name.clone(),
+                                value,
+                            }
+                        })
+                        .collect(),
+                ),
+            };
+            let order_by = order_by
+                .iter()
+                .map(|item| {
+                    let (item, item_changed) = rewrite_merge_action_order_by(item);
+                    changed |= item_changed;
+                    item
+                })
+                .collect();
+            let filter = filter.as_ref().map(|expr| {
+                let (expr, expr_changed) = boxed(expr);
+                changed |= expr_changed;
+                expr
+            });
+            (
+                SqlExpr::FuncCall {
+                    name: name.clone(),
+                    args,
+                    order_by,
+                    within_group: within_group.clone(),
+                    distinct: *distinct,
+                    func_variadic: *func_variadic,
+                    filter,
+                    null_treatment: *null_treatment,
+                    over: over.clone(),
+                },
+                changed,
+            )
+        }
+        _ => (expr.clone(), false),
+    }
+}
+
 fn bind_merge_returning_targets(
     targets: &[crate::include::nodes::parsenodes::SelectItem],
     scope: &BoundScope,
     merge_action_index: usize,
     catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
     local_ctes: &[BoundCte],
 ) -> Result<Vec<TargetEntry>, ParseError> {
     let mut entries = Vec::new();
+    let scope_with_merge_action = scope_with_merge_action_column(scope.clone(), merge_action_index);
     for item in targets {
+        let (rewritten_item, rewritten) = rewrite_merge_action_select_item(item);
         if is_merge_action_returning_call(&item.expr) {
             entries.push(
                 TargetEntry::new(
@@ -1852,10 +2550,14 @@ fn bind_merge_returning_targets(
             continue;
         }
         let BoundSelectTargets::Plain(bound) = bind_select_targets(
-            std::slice::from_ref(item),
-            scope,
+            std::slice::from_ref(if rewritten { &rewritten_item } else { item }),
+            if rewritten {
+                &scope_with_merge_action
+            } else {
+                scope
+            },
             catalog,
-            &[],
+            outer_scopes,
             None,
             local_ctes,
         )?;
@@ -1892,18 +2594,28 @@ pub(crate) fn plan_merge_with_outer_ctes(
     catalog: &dyn CatalogLookup,
     outer_ctes: &[BoundCte],
 ) -> Result<BoundMergeStatement, ParseError> {
+    plan_merge_with_outer_scopes_and_ctes(stmt, catalog, &[], outer_ctes)
+}
+
+pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
+    stmt: &MergeStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<BoundMergeStatement, ParseError> {
+    validate_merge_when_clauses(&stmt.when_clauses)?;
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
-        &[],
+        outer_scopes,
         None,
         outer_ctes,
         &[],
     )?;
     let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
-    let entry = lookup_modify_relation(catalog, &stmt.target_table)?;
+    let entry = lookup_merge_relation(catalog, &stmt.target_table)?;
     let auto_view_target = if entry.relkind == 'v'
         && let Some(event) = merge_mutating_event(stmt)
     {
@@ -1947,6 +2659,12 @@ pub(crate) fn plan_merge_with_outer_ctes(
         !stmt.target_only && matches!(execution_relation.relkind, 'r' | 'p'),
         execution_relation.desc.clone(),
     );
+    if let Some(alias) = &stmt.target_alias
+        && let Some(rte) = target_base.rtable.get_mut(0)
+    {
+        rte.alias = Some(alias.clone());
+        rte.eref.aliasname = alias.clone();
+    }
     if auto_view_target.is_some()
         && let Some(permission) = target_base
             .rtable
@@ -1967,8 +2685,19 @@ pub(crate) fn plan_merge_with_outer_ctes(
     if let Some(resolved) = auto_view_target.as_ref() {
         target_scope.output_exprs = resolved.visible_output_exprs.clone();
     }
-    let (source_base, source_scope_raw) =
-        bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &visible_ctes, &[])?;
+    let invalid_target_outer_scope =
+        scope_with_hidden_invalid_relation(empty_scope(), &target_relation_name, &entry.desc);
+    let mut source_outer_scopes = Vec::with_capacity(outer_scopes.len() + 1);
+    source_outer_scopes.push(invalid_target_outer_scope);
+    source_outer_scopes.extend_from_slice(outer_scopes);
+    let (source_base, source_scope_raw) = bind_from_item_with_ctes(
+        &stmt.source,
+        catalog,
+        &source_outer_scopes,
+        None,
+        &visible_ctes,
+        &[],
+    )?;
     let (source_from, source_visible_count) = with_merge_source_present(source_base);
 
     if source_scope_raw.relations.iter().any(|relation| {
@@ -1977,7 +2706,7 @@ pub(crate) fn plan_merge_with_outer_ctes(
             .iter()
             .any(|name| name.eq_ignore_ascii_case(&target_relation_name))
     }) {
-        return Err(ParseError::DuplicateTableName(target_relation_name.clone()));
+        return Err(merge_duplicate_source_target_error(&target_relation_name));
     }
 
     // PostgreSQL's setrefs.c handles MERGE actions by rewriting source Vars
@@ -2002,7 +2731,7 @@ pub(crate) fn plan_merge_with_outer_ctes(
         &stmt.join_condition,
         &merged_scope,
         catalog,
-        &[],
+        outer_scopes,
         None,
         &visible_ctes,
     )?;
@@ -2039,6 +2768,7 @@ pub(crate) fn plan_merge_with_outer_ctes(
     );
     let action_merged_scope = combine_scopes(&action_target_scope, &action_source_scope);
     let returning_merged_scope = combine_scopes(&action_source_scope, &action_target_scope);
+    let source_relation_name = first_scope_relation_name(&source_scope).map(str::to_string);
 
     let returning_visible_column_count =
         execution_relation.desc.columns.len() + source_visible_count;
@@ -2056,15 +2786,22 @@ pub(crate) fn plan_merge_with_outer_ctes(
                 &resolved.base_relation.desc,
                 INNER_VAR,
             ),
+            Some(entry.relation_oid),
         )
     } else {
-        scope_with_returning_pseudo_rows(returning_merged_scope, &execution_relation.desc)
+        scope_with_returning_pseudo_rows_with_generated(
+            returning_merged_scope,
+            &execution_relation.desc,
+            catalog,
+            Some(execution_relation.relation_oid),
+        )?
     };
     let returning = bind_merge_returning_targets(
         &stmt.returning,
         &returning_scope,
         returning_visible_column_count,
         catalog,
+        outer_scopes,
         &visible_ctes,
     )?;
     let merge_update_rls = build_target_relation_row_security(
@@ -2105,9 +2842,12 @@ pub(crate) fn plan_merge_with_outer_ctes(
                 &action_source_scope,
                 &action_merged_scope,
                 catalog,
+                outer_scopes,
                 &visible_ctes,
                 &entry.desc,
                 &column_defaults,
+                &target_relation_name,
+                source_relation_name.as_deref(),
             )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -2264,6 +3004,35 @@ fn relation_display_name(catalog: &dyn CatalogLookup, relation_oid: u32, fallbac
         .class_row_by_oid(relation_oid)
         .map(|row| row.relname)
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn merge_duplicate_source_target_error(name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("name \"{name}\" specified more than once"),
+        detail: Some("The name is used both as MERGE target table and data source.".into()),
+        hint: None,
+        sqlstate: "42712",
+    }
+}
+
+fn lookup_merge_relation(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<BoundRelation, ParseError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => Ok(entry),
+        Some(entry) if entry.relkind == 'm' => Err(ParseError::DetailedError {
+            message: format!("cannot execute MERGE on relation \"{name}\""),
+            detail: Some("This operation is not supported for materialized views.".into()),
+            hint: None,
+            sqlstate: "42809",
+        }),
+        Some(_) => Err(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table or view",
+        }),
+        None => Err(ParseError::UnknownTable(name.to_string())),
+    }
 }
 
 fn lookup_modify_relation(
@@ -3563,13 +4332,14 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         .target_columns
         .iter()
         .map(|target| {
+            let column_index = map_auto_view_column_index(
+                &stmt.desc,
+                &resolved.updatable_column_map,
+                &resolved.non_updatable_column_reasons,
+                target.column_index,
+            )?;
             Ok(BoundAssignmentTarget {
-                column_index: map_auto_view_column_index(
-                    &stmt.desc,
-                    &resolved.updatable_column_map,
-                    &resolved.non_updatable_column_reasons,
-                    target.column_index,
-                )?,
+                column_index,
                 subscripts: rewrite_assignment_subscripts(
                     &target.subscripts,
                     &resolved.visible_output_exprs,
@@ -3579,7 +4349,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
                     &target.indirection,
                     &resolved.visible_output_exprs,
                 ),
-                target_sql_type: target.target_sql_type,
+                target_sql_type: resolved.base_relation.desc.columns[column_index].sql_type,
             })
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
@@ -3686,6 +4456,84 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         required_privileges,
         subplans: stmt.subplans,
     })
+}
+
+struct AutoViewInsertContext {
+    base_desc: RelationDesc,
+    base_column_defaults: Vec<Expr>,
+    updatable_column_map: Vec<Option<usize>>,
+}
+
+fn build_auto_view_insert_context(
+    entry: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+) -> Result<Option<AutoViewInsertContext>, ParseError> {
+    if entry.relkind != 'v' {
+        return Ok(None);
+    }
+    let resolved = match resolve_auto_updatable_view_target(
+        entry.relation_oid,
+        &entry.desc,
+        ViewDmlEvent::Insert,
+        catalog,
+        &[],
+    ) {
+        Ok(resolved) => resolved,
+        Err(_) => return Ok(None),
+    };
+    let base_column_defaults =
+        bind_insert_column_defaults(&resolved.base_relation.desc, catalog, local_ctes)?;
+    Ok(Some(AutoViewInsertContext {
+        base_desc: resolved.base_relation.desc,
+        base_column_defaults,
+        updatable_column_map: resolved.updatable_column_map,
+    }))
+}
+
+fn auto_view_base_target(
+    ctx: &AutoViewInsertContext,
+    target: &BoundAssignmentTarget,
+) -> Option<BoundAssignmentTarget> {
+    let column_index = ctx
+        .updatable_column_map
+        .get(target.column_index)
+        .copied()
+        .flatten()?;
+    Some(BoundAssignmentTarget {
+        column_index,
+        subscripts: target.subscripts.clone(),
+        field_path: target.field_path.clone(),
+        indirection: target.indirection.clone(),
+        target_sql_type: ctx.base_desc.columns[column_index].sql_type,
+    })
+}
+
+fn ensure_auto_view_insert_generated_assignment_allowed(
+    ctx: Option<&AutoViewInsertContext>,
+    target: &BoundAssignmentTarget,
+    expr: Option<&SqlExpr>,
+) -> Result<(), ParseError> {
+    let Some(ctx) = ctx else {
+        return Ok(());
+    };
+    let Some(base_target) = auto_view_base_target(ctx, target) else {
+        return Ok(());
+    };
+    ensure_generated_assignment_allowed(&ctx.base_desc, &base_target, expr)
+}
+
+fn insert_default_expr_for_target(
+    column_defaults: &[Expr],
+    auto_view_ctx: Option<&AutoViewInsertContext>,
+    target: &BoundAssignmentTarget,
+) -> Expr {
+    auto_view_ctx
+        .and_then(|ctx| {
+            auto_view_base_target(ctx, target)
+                .map(|base_target| ctx.base_column_defaults[base_target.column_index].clone())
+        })
+        .unwrap_or_else(|| column_defaults[target.column_index].clone())
 }
 
 fn normalize_auto_view_identity_values(
@@ -4638,11 +5486,17 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         catalog,
     )?;
     let expr_scope = empty_scope();
-    let mut returning_scope = scope_with_returning_pseudo_rows(target_scope.clone(), &entry.desc);
+    let mut returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        target_scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
     if stmt.on_conflict.is_some() {
         returning_scope =
             scope_with_hidden_invalid_relation(returning_scope, "excluded", &entry.desc);
     }
+    let auto_view_insert_context = build_auto_view_insert_context(&entry, catalog, &visible_ctes)?;
     let returning = bind_returning_targets(
         &stmt.returning,
         &returning_scope,
@@ -4690,6 +5544,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                         .zip(target_columns.iter())
                         .map(|(cell, target)| match cell {
                             InsertValuesCell::Raw(expr) => {
+                                ensure_auto_view_insert_generated_assignment_allowed(
+                                    auto_view_insert_context.as_ref(),
+                                    target,
+                                    Some(expr),
+                                )?;
                                 ensure_generated_assignment_allowed(
                                     &entry.desc,
                                     target,
@@ -4697,7 +5556,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                                 )?;
                                 if matches!(expr, SqlExpr::Default) {
                                     reject_default_indirection_assignment(target)?;
-                                    return Ok(column_defaults[target.column_index].clone());
+                                    return Ok(insert_default_expr_for_target(
+                                        &column_defaults,
+                                        auto_view_insert_context.as_ref(),
+                                        target,
+                                    ));
                                 }
                                 match normalize_identity_insert_expr(
                                     &entry.desc,
@@ -4722,6 +5585,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                                 }
                             }
                             InsertValuesCell::Bound(expr) => {
+                                ensure_auto_view_insert_generated_assignment_allowed(
+                                    auto_view_insert_context.as_ref(),
+                                    target,
+                                    Some(&SqlExpr::Const(Value::Null)),
+                                )?;
                                 ensure_generated_assignment_allowed(
                                     &entry.desc,
                                     target,
@@ -4803,6 +5671,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                 });
             }
             for target in &target_columns {
+                ensure_auto_view_insert_generated_assignment_allowed(
+                    auto_view_insert_context.as_ref(),
+                    target,
+                    Some(&SqlExpr::Const(Value::Null)),
+                )?;
                 if entry.desc.columns[target.column_index].generated.is_some() {
                     ensure_generated_assignment_allowed(
                         &entry.desc,
@@ -5017,7 +5890,12 @@ fn bind_simple_update(
     if stmt.target_alias.is_some() {
         scope = mark_scope_hidden_invalid_relation(scope, &stmt.table_name);
     }
-    let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
+    let returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let predicate = stmt
         .where_clause
@@ -5080,6 +5958,11 @@ fn bind_simple_update(
                     catalog,
                 )?,
             };
+            validate_jsonb_assignment_target_subscripts(
+                entry.desc.columns[column_index].sql_type,
+                &target,
+                catalog,
+            )?;
             ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
             ensure_identity_update_assignment_allowed(&entry.desc, &target, &assignment.expr)?;
             Ok(BoundAssignment {
@@ -5209,7 +6092,12 @@ fn bind_update_from(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
-    let returning_scope = scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc);
+    let returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        eval_scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
 
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
@@ -5271,6 +6159,11 @@ fn bind_update_from(
                     catalog,
                 )?,
             };
+            validate_jsonb_assignment_target_subscripts(
+                entry.desc.columns[column_index].sql_type,
+                &target,
+                catalog,
+            )?;
             ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
             ensure_identity_update_assignment_allowed(&entry.desc, &target, &assignment.expr)?;
             Ok(BoundAssignment {
@@ -5372,7 +6265,7 @@ pub(super) fn bind_assignment_target(
     let column_index = resolve_column(scope, &target.column)?;
     let indirection =
         bind_assignment_indirection(&target.indirection, scope, catalog, local_ctes, &[])?;
-    Ok(BoundAssignmentTarget {
+    let bound = BoundAssignmentTarget {
         column_index,
         subscripts: bind_assignment_subscripts(
             &target.subscripts,
@@ -5388,7 +6281,13 @@ pub(super) fn bind_assignment_target(
             &target.indirection,
             catalog,
         )?,
-    })
+    };
+    validate_jsonb_assignment_target_subscripts(
+        scope.desc.columns[column_index].sql_type,
+        &bound,
+        catalog,
+    )?;
+    Ok(bound)
 }
 
 fn bind_assignment_indirection(
@@ -5519,7 +6418,12 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
             stmt.table_name.clone(),
         ));
     }
-    let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
+    let returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
     let predicate = stmt
         .where_clause
         .as_ref()
@@ -5643,7 +6547,12 @@ fn bind_delete_using(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
-    let returning_scope = scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc);
+    let returning_scope = scope_with_returning_pseudo_rows_with_generated(
+        eval_scope.clone(),
+        &entry.desc,
+        catalog,
+        Some(entry.relation_oid),
+    )?;
 
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,

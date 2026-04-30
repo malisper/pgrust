@@ -1106,6 +1106,9 @@ pub(super) fn normalize_builtin_function_name(name: &str) -> &str {
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
     let builtin_by_src = builtin_scalar_function_for_proc_src(&row.prosrc);
+    if row.prosrc.eq_ignore_ascii_case("test_atomic_ops") {
+        return Some(BuiltinScalarFunction::PgRustTestAtomicOps);
+    }
     if row.pronamespace != PG_CATALOG_NAMESPACE_OID {
         return builtin_by_src.filter(|func| is_dynamic_range_scalar_function(*func));
     }
@@ -1140,6 +1143,7 @@ fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RangeIntersect
             | BuiltinScalarFunction::RangeDifference
             | BuiltinScalarFunction::RangeMerge
+            | BuiltinScalarFunction::PgRustTestAtomicOps
     )
 }
 
@@ -2451,6 +2455,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
+            BuiltinScalarFunction::PgRustTestAtomicOps => args.is_empty(),
             BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => args.len() == 1,
             BuiltinScalarFunction::PgRustTestWidgetIn
             | BuiltinScalarFunction::PgRustTestWidgetOut
@@ -3241,6 +3246,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TextStartsWith => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
+        BuiltinScalarFunction::Repeat => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
         BuiltinScalarFunction::ParseIdent => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
         }
@@ -3898,6 +3906,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
+        ),
+        (
+            "test_atomic_ops",
+            BuiltinScalarFunction::PgRustTestAtomicOps,
         ),
         (
             "pg_rust_is_catalog_text_unique_index_oid",
@@ -5846,6 +5858,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgEncodingToChar
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler
+            | BuiltinScalarFunction::PgRustTestAtomicOps
             | BuiltinScalarFunction::AmValidate
             | BuiltinScalarFunction::BtEqualImage
             | BuiltinScalarFunction::PgNotify

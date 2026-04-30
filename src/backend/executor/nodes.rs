@@ -14,7 +14,7 @@ use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::expr_casts::cast_value;
 use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::expr_ops::compare_order_values;
-use crate::backend::executor::jsonb::{compare_jsonb, decode_jsonb};
+use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb};
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_project_set_returning_call, eval_set_returning_call,
@@ -234,6 +234,35 @@ fn aggregate_key_values_equal(left: &[Value], right: &[Value]) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| aggregate_key_value_equal(left, right))
+}
+
+fn aggregate_group_lookup_key(values: &[Value]) -> Vec<Value> {
+    values.iter().map(aggregate_group_lookup_value).collect()
+}
+
+fn aggregate_group_lookup_value(value: &Value) -> Value {
+    match value {
+        Value::Jsonb(bytes) => decode_jsonb(bytes)
+            .map(|json| Value::Jsonb(encode_jsonb(&normalize_jsonb_group_key(json))))
+            .unwrap_or_else(|_| value.clone()),
+        _ => value.clone(),
+    }
+}
+
+fn normalize_jsonb_group_key(value: JsonbValue) -> JsonbValue {
+    match value {
+        JsonbValue::Numeric(value) => JsonbValue::Numeric(value.normalize_display_scale()),
+        JsonbValue::Array(items) => {
+            JsonbValue::Array(items.into_iter().map(normalize_jsonb_group_key).collect())
+        }
+        JsonbValue::Object(items) => JsonbValue::Object(
+            items
+                .into_iter()
+                .map(|(key, value)| (key, normalize_jsonb_group_key(value)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -1450,6 +1479,25 @@ fn renumber_relation_alias(relation_name: &str, ordinal: usize) -> String {
     format!("{relation} {prefix}_{ordinal}")
 }
 
+fn explain_relation_name(relation_name: &str) -> String {
+    let (base_name, alias) = relation_name
+        .rsplit_once(' ')
+        .map(|(name, alias)| (name, Some(alias)))
+        .unwrap_or((relation_name, None));
+    let display_base = if let Some((schema_name, local_name)) = base_name.split_once('.')
+        && schema_name.starts_with("pg_temp_")
+    {
+        local_name
+    } else {
+        base_name
+    };
+    if let Some(alias) = alias {
+        format!("{display_base} {alias}")
+    } else {
+        display_base.to_string()
+    }
+}
+
 fn ensure_append_runtime_pruned(
     children: &mut [PlanState],
     active_children: &mut Option<Vec<usize>>,
@@ -2211,7 +2259,7 @@ impl PlanNode for SeqScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        format!("Seq Scan on {}", self.relation_name)
+        format!("Seq Scan on {}", explain_relation_name(&self.relation_name))
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
         self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
@@ -2515,7 +2563,8 @@ impl PlanNode for IndexOnlyScanState {
         };
         format!(
             "Index Only Scan{direction} using {} on {}",
-            self.index_name, self.relation_name
+            self.index_name,
+            explain_relation_name(&self.relation_name)
         )
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
@@ -3775,7 +3824,10 @@ impl PlanNode for BitmapHeapScanState {
     }
 
     fn node_label(&self) -> String {
-        format!("Bitmap Heap Scan on {}", self.relation_name)
+        format!(
+            "Bitmap Heap Scan on {}",
+            explain_relation_name(&self.relation_name)
+        )
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
         self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
@@ -4103,7 +4155,14 @@ fn render_explain_expr_inner_with_qualifier(
             | crate::include::nodes::primnodes::OpExprKind::RegexMatch
             | crate::include::nodes::primnodes::OpExprKind::ArrayOverlap
             | crate::include::nodes::primnodes::OpExprKind::ArrayContains
-            | crate::include::nodes::primnodes::OpExprKind::ArrayContained => {
+            | crate::include::nodes::primnodes::OpExprKind::ArrayContained
+            | crate::include::nodes::primnodes::OpExprKind::JsonbContains
+            | crate::include::nodes::primnodes::OpExprKind::JsonbContained
+            | crate::include::nodes::primnodes::OpExprKind::JsonbExists
+            | crate::include::nodes::primnodes::OpExprKind::JsonbExistsAny
+            | crate::include::nodes::primnodes::OpExprKind::JsonbExistsAll
+            | crate::include::nodes::primnodes::OpExprKind::JsonbPathExists
+            | crate::include::nodes::primnodes::OpExprKind::JsonbPathMatch => {
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
@@ -4120,6 +4179,12 @@ fn render_explain_expr_inner_with_qualifier(
                     return format!("{left} {op_text} {right}");
                 }
                 let display_type = comparison_display_type(left, right, op.collation_oid);
+                let right_collation_oid =
+                    if text_pattern_operator_suppresses_explain_collation(op.opno) {
+                        None
+                    } else {
+                        op.collation_oid
+                    };
                 format!(
                     "{} {} {}",
                     render_explain_infix_operand_with_display_type(
@@ -4133,7 +4198,7 @@ fn render_explain_expr_inner_with_qualifier(
                     render_explain_infix_operand_with_display_type(
                         right,
                         display_type,
-                        op.collation_oid,
+                        right_collation_oid,
                         qualifier,
                         column_names
                     )
@@ -5375,10 +5440,27 @@ fn infix_operator_text(
         crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
+        crate::include::nodes::primnodes::OpExprKind::JsonbContains => Some("@>"),
+        crate::include::nodes::primnodes::OpExprKind::JsonbContained => Some("<@"),
+        crate::include::nodes::primnodes::OpExprKind::JsonbExists => Some("?"),
+        crate::include::nodes::primnodes::OpExprKind::JsonbExistsAny => Some("?|"),
+        crate::include::nodes::primnodes::OpExprKind::JsonbExistsAll => Some("?&"),
+        crate::include::nodes::primnodes::OpExprKind::JsonbPathExists => Some("@?"),
+        crate::include::nodes::primnodes::OpExprKind::JsonbPathMatch => Some("@@"),
         crate::include::nodes::primnodes::OpExprKind::JsonGet => Some("->"),
         crate::include::nodes::primnodes::OpExprKind::JsonGetText => Some("->>"),
         _ => None,
     }
+}
+
+fn text_pattern_operator_suppresses_explain_collation(opno: u32) -> bool {
+    matches!(
+        opno,
+        crate::include::catalog::TEXT_PATTERN_LT_OPERATOR_OID
+            | crate::include::catalog::TEXT_PATTERN_LE_OPERATOR_OID
+            | crate::include::catalog::TEXT_PATTERN_GE_OPERATOR_OID
+            | crate::include::catalog::TEXT_PATTERN_GT_OPERATOR_OID
+    )
 }
 
 fn collect_bool_explain_args<'a>(
@@ -6333,6 +6415,7 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
             let rendered = crate::backend::executor::render_tsvector_text(vector);
             format!("'{}'", rendered.replace('\'', "''"))
         }
+        Value::JsonPath(path) => format!("'{}'", path.replace('\'', "''")),
         Value::PgArray(array) => {
             let rendered = crate::backend::executor::value_io::format_array_value_text(array);
             format!("'{}'", rendered.replace('\'', "''"))
@@ -6570,6 +6653,7 @@ fn render_explain_sql_type_name(ty: SqlType) -> String {
             .unwrap_or_else(|| "character varying".into()),
         SqlTypeKind::Json => "json".into(),
         SqlTypeKind::Jsonb => "jsonb".into(),
+        SqlTypeKind::JsonPath => "jsonpath".into(),
         SqlTypeKind::TsQuery => "tsquery".into(),
         SqlTypeKind::TsVector => "tsvector".into(),
         SqlTypeKind::Line => "line".into(),
@@ -8717,6 +8801,7 @@ impl PlanNode for AggregateState {
                 return Ok(Some(&mut rows[idx].slot));
             }
             let mut groups: Vec<(usize, AggGroup)> = Vec::new();
+            let mut group_lookup: HashMap<(usize, Vec<Value>), usize> = HashMap::new();
             let mut mixed_group = (self.grouping_sets.is_empty()
                 && self.strategy == AggregateStrategy::Mixed)
                 .then(|| {
@@ -8759,11 +8844,14 @@ impl PlanNode for AggregateState {
                             &grouping_set,
                         )
                     };
-                    let group_idx = if let Some(index) =
-                        groups.iter().position(|(set_index, group)| {
-                            *set_index == grouping_set_index
-                                && aggregate_key_values_equal(&group.key_values, &key_values)
-                        }) {
+                    let lookup_key = (grouping_set_index, aggregate_group_lookup_key(&key_values));
+                    let group_idx = if let Some(index) = group_lookup.get(&lookup_key).copied() {
+                        index
+                    } else if let Some(index) = groups.iter().position(|(set_index, group)| {
+                        *set_index == grouping_set_index
+                            && aggregate_key_values_equal(&group.key_values, &key_values)
+                    }) {
+                        group_lookup.insert(lookup_key, index);
                         index
                     } else {
                         let passthrough_values = self
@@ -8780,7 +8868,9 @@ impl PlanNode for AggregateState {
                                 &self.accumulators,
                             ),
                         ));
-                        groups.len() - 1
+                        let index = groups.len() - 1;
+                        group_lookup.insert(lookup_key, index);
+                        index
                     };
 
                     let group = &mut groups[group_idx].1;
