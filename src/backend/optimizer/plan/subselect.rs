@@ -159,6 +159,8 @@ fn expr_is_volatile_for_dedup(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole => false,
         Expr::Random
         | Expr::CurrentDate
@@ -247,6 +249,8 @@ pub(super) fn finalize_expr_subqueries(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -859,6 +863,8 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

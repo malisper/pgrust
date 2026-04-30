@@ -191,6 +191,8 @@ fn validate_generated_expr_inner(
         Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -476,7 +478,9 @@ fn expr_uses_user_defined_function(expr: &Expr, catalog: &dyn CatalogLookup) -> 
             .any(|expr| expr_uses_user_defined_function(expr, catalog)),
         Expr::Var(_) | Expr::Const(_) | Expr::Param(_) | Expr::CaseTest(_) | Expr::Random => false,
         Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -632,6 +636,8 @@ fn expr_references_column_inner(expr: &Expr, column_index: usize) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

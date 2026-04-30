@@ -2083,12 +2083,14 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
     match &query.rtable[2].kind {
         RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => {
             assert_eq!(*jointype, JoinType::Inner);
+            assert!(!from_list);
             assert_eq!(*joinmergedcols, 1);
             assert_eq!(joinleftcols, &vec![1, 2, 3]);
             assert_eq!(joinrightcols, &vec![1, 2]);
@@ -8549,7 +8551,7 @@ fn parse_cross_join_select() {
                 name: "pets".into(),
                 only: false,
             }),
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         })
     );
@@ -9506,7 +9508,7 @@ fn parse_cross_join_with_aliases() {
                 column_aliases: AliasColumnSpec::None,
                 preserve_source_names: false,
             }),
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         })
     );
@@ -18990,7 +18992,7 @@ fn parse_cross_join_with_derived_table() {
             kind,
             constraint,
         }) => {
-            assert_eq!(kind, JoinKind::Cross);
+            assert_eq!(kind, JoinKind::Comma);
             assert!(matches!(constraint, JoinConstraint::None));
             assert!(matches!(*left, FromItem::Alias { .. }));
             assert!(matches!(*right, FromItem::Alias { .. }));
@@ -19006,7 +19008,7 @@ fn parse_join_precedence_binds_tighter_than_comma() {
         Some(FromItem::Join {
             left,
             right,
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         }) => {
             assert!(matches!(*left, FromItem::Table { name, .. } if name == "a"));

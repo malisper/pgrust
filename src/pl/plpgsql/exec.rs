@@ -6473,6 +6473,7 @@ fn render_dynamic_query_param_base_sql(
         Value::PgArray(array) => {
             render_dynamic_query_array_sql(array, declared_type_oid, catalog, ctx)?
         }
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".into(),
     })
 }
 
@@ -6654,8 +6655,21 @@ fn coerce_function_result_row(
                 "42804",
             )),
         },
-        FunctionReturnContract::FixedRow { columns, .. } => {
-            coerce_row_to_columns(row, expected_record_shape.unwrap_or(columns), ctx)
+        FunctionReturnContract::FixedRow {
+            columns,
+            composite_typrelid,
+            ..
+        } => {
+            let expected_columns = expected_record_shape.unwrap_or(columns);
+            if let Some(typrelid) = composite_typrelid {
+                return coerce_named_composite_row_to_columns(
+                    row,
+                    expected_columns,
+                    *typrelid,
+                    ctx,
+                );
+            }
+            coerce_row_to_columns(row, expected_columns, ctx)
         }
         FunctionReturnContract::AnonymousRecord { .. } => coerce_row_to_columns(
             row,
@@ -6704,6 +6718,113 @@ fn coerce_row_to_columns(
         )?);
     }
     Ok(TupleSlot::virtual_row(values))
+}
+
+fn coerce_named_composite_row_to_columns(
+    row: Vec<Value>,
+    expected_columns: &[QueryColumn],
+    typrelid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<TupleSlot, ExecError> {
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return coerce_row_to_columns(row, expected_columns, ctx);
+    };
+    let Some(relation) = catalog.lookup_relation_by_oid(typrelid) else {
+        return coerce_row_to_columns(row, expected_columns, ctx);
+    };
+    let relation_desc = relation.desc.clone();
+    let live_columns = relation_desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !column.dropped)
+        .collect::<Vec<_>>();
+    if row.len() != live_columns.len() {
+        return coerce_row_to_columns(row, expected_columns, ctx);
+    }
+
+    let mut values = Vec::with_capacity(expected_columns.len());
+    let mut live_cursor = 0usize;
+    let mut physical_cursor = 0usize;
+    for (expected_index, expected) in expected_columns.iter().enumerate() {
+        let found = live_columns
+            .iter()
+            .enumerate()
+            .skip(live_cursor)
+            .find(|(_, (_, column))| column.name.eq_ignore_ascii_case(&expected.name));
+        if let Some((live_index, (physical_index, column))) = found {
+            live_cursor = live_index.saturating_add(1);
+            physical_cursor = physical_index.saturating_add(1);
+            let value = row.get(live_index).cloned().unwrap_or(Value::Null);
+            if column.sql_type == expected.sql_type {
+                values.push(cast_function_value(
+                    value,
+                    Some(column.sql_type),
+                    expected.sql_type,
+                    ctx,
+                )?);
+            } else {
+                values.push(Value::WrongTypeColumn {
+                    attnum: physical_index.saturating_add(1),
+                    table_type: column.sql_type,
+                    query_type: expected.sql_type,
+                });
+            }
+            continue;
+        }
+
+        let dropped_attr = dropped_named_composite_attr_index(
+            &relation_desc,
+            &live_columns,
+            expected_columns,
+            expected_index,
+            live_cursor,
+            physical_cursor,
+        );
+        if let Some(attr_index) = dropped_attr {
+            physical_cursor = attr_index.saturating_add(1);
+            values.push(Value::DroppedColumn(attr_index.saturating_add(1)));
+            continue;
+        }
+
+        return coerce_row_to_columns(row, expected_columns, ctx);
+    }
+    Ok(TupleSlot::virtual_row(values))
+}
+
+fn dropped_named_composite_attr_index(
+    desc: &RelationDesc,
+    live_columns: &[(usize, &crate::include::nodes::primnodes::ColumnDesc)],
+    expected_columns: &[QueryColumn],
+    expected_index: usize,
+    live_cursor: usize,
+    physical_cursor: usize,
+) -> Option<usize> {
+    let next_live_physical = expected_columns
+        .iter()
+        .skip(expected_index.saturating_add(1))
+        .find_map(|expected| {
+            live_columns
+                .iter()
+                .skip(live_cursor)
+                .find(|(_, column)| column.name.eq_ignore_ascii_case(&expected.name))
+                .map(|(index, _)| *index)
+        })
+        .unwrap_or(desc.columns.len());
+    desc.columns
+        .iter()
+        .enumerate()
+        .take(next_live_physical)
+        .skip(physical_cursor)
+        .rev()
+        .find_map(|(index, column)| column.dropped.then_some(index))
+        .or_else(|| {
+            desc.columns
+                .iter()
+                .enumerate()
+                .skip(physical_cursor)
+                .find_map(|(index, column)| column.dropped.then_some(index))
+        })
 }
 
 fn eval_do_expr(expr: &CompiledExpr, values: &[Value]) -> Result<Value, ExecError> {
@@ -7293,6 +7414,7 @@ fn render_raise_value(value: &Value) -> String {
         }
         Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
         Value::Record(record) => crate::backend::executor::value_io::format_record_text(record),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "<NULL>".to_string(),
     }
 }
 

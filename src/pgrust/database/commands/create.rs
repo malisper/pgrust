@@ -779,6 +779,8 @@ fn collect_expr_rule_dependencies(
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
@@ -6874,13 +6876,16 @@ impl Database {
         let mut desc = create_view_relation_desc_from_query(&stored_query);
         apply_create_view_column_names(&mut desc, &create_stmt.column_names)?;
         let reloptions = create_view_reloptions(&create_stmt.options)?;
-        let mut referenced_relation_oids = std::collections::BTreeSet::new();
-        collect_direct_relation_oids_from_select(
-            &create_stmt.query,
-            &catalog,
-            &mut Vec::new(),
-            &mut referenced_relation_oids,
-        );
+        let mut rule_dependencies = crate::backend::catalog::store::RuleDependencies {
+            constraint_oids,
+            ..Default::default()
+        };
+        collect_rule_dependencies_from_query(&analyzed_query, &catalog, &mut rule_dependencies);
+        let referenced_relation_oids = rule_dependencies
+            .relation_oids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
         let references_temporary_relation = referenced_relation_oids.iter().any(|oid| {
             catalog
                 .relation_by_oid(*oid)
@@ -7039,12 +7044,9 @@ impl Database {
             cid: cid.saturating_add(2),
             ..rule_drop_ctx
         };
-        let mut rule_dependencies = crate::backend::catalog::store::RuleDependencies {
-            relation_oids: referenced_relation_oids.into_iter().collect::<Vec<_>>(),
-            constraint_oids,
-            ..Default::default()
-        };
-        collect_rule_dependencies_from_query(&analyzed_query, &catalog, &mut rule_dependencies);
+        rule_dependencies
+            .relation_oids
+            .extend(referenced_relation_oids.into_iter());
         let rule_result = self.catalog.write().create_rule_mvcc_with_dependencies(
             relation_oid,
             "_RETURN",

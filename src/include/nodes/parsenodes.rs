@@ -674,6 +674,7 @@ pub struct RangeTblEref {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeTblEntry {
     pub alias: Option<String>,
+    pub alias_is_user_defined: bool,
     pub alias_preserves_source_names: bool,
     pub eref: RangeTblEref,
     pub desc: RelationDesc,
@@ -703,6 +704,7 @@ pub enum RangeTblEntryKind {
     },
     Join {
         jointype: JoinType,
+        from_list: bool,
         joinmergedcols: usize,
         joinaliasvars: Vec<Expr>,
         joinleftcols: Vec<usize>,
@@ -2047,6 +2049,7 @@ pub fn function_arg_values(args: &SqlCallArgs) -> impl Iterator<Item = &SqlExpr>
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinKind {
+    Comma,
     Inner,
     Cross,
     Left,
@@ -5355,7 +5358,9 @@ pub enum SqlExpr {
     CurrentCatalog,
     CurrentSchema,
     CurrentUser,
+    User,
     SessionUser,
+    SystemUser,
     CurrentRole,
     CurrentTime {
         precision: Option<i32>,

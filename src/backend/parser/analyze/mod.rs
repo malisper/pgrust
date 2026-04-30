@@ -5688,6 +5688,8 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::CurrentSchema
             | SqlExpr::CurrentUser
             | SqlExpr::SessionUser
+            | SqlExpr::User
+            | SqlExpr::SystemUser
             | SqlExpr::CurrentRole
             | SqlExpr::CurrentTime { .. }
             | SqlExpr::CurrentTimestamp { .. }
@@ -5971,6 +5973,8 @@ fn sql_expr_contains_aggregate_call(expr: &SqlExpr) -> bool {
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -6403,6 +6407,8 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }

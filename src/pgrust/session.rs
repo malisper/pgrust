@@ -20032,6 +20032,7 @@ fn copy_value_to_field(
                 &crate::backend::libpq::pqformat::FloatFormatOptions::default(),
             )
         }
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => options.null_marker.clone(),
         Value::Null => options.null_marker.clone(),
     };
     match options.format {

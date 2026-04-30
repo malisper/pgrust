@@ -2492,12 +2492,14 @@ fn substitute_rule_rte(
                 .map(|sample| substitute_rule_table_sample(sample, old_values, new_values)),
         },
         RangeTblEntryKind::Join {
+            from_list,
             jointype,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => RangeTblEntryKind::Join {
+            from_list,
             jointype,
             joinmergedcols,
             joinaliasvars: joinaliasvars

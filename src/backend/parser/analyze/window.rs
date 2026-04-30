@@ -162,6 +162,8 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -598,6 +600,8 @@ fn expr_contains_current_level_var(expr: &Expr, sublevels_up: usize) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

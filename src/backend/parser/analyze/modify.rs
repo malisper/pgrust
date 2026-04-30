@@ -406,7 +406,9 @@ fn collect_local_selected_columns(expr: &Expr, selected: &mut Vec<usize>) {
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -2137,6 +2139,7 @@ pub(crate) fn plan_merge_with_outer_ctes(
         target_from,
         source_from,
         merge_join_type(&stmt.when_clauses),
+        false,
         join_condition,
         None,
     );
@@ -5199,6 +5202,7 @@ fn bind_update_from(
         target_from,
         source_from,
         JoinType::Cross,
+        false,
         Expr::Const(Value::Bool(true)),
         None,
     );
@@ -5633,6 +5637,7 @@ fn bind_delete_using(
         target_from,
         source_from,
         JoinType::Cross,
+        false,
         Expr::Const(Value::Bool(true)),
         None,
     );

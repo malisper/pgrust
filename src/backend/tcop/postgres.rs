@@ -12,7 +12,9 @@ use crate::backend::commands::copyto::CopyToSink;
 use crate::backend::executor::exec_expr::{
     normalize_composite_result_values_for_catalog, partition_constraint_conditions_for_catalog,
 };
-use crate::backend::executor::{ExecError, QueryColumn, StatementResult};
+use crate::backend::executor::{
+    ExecError, QueryColumn, StatementResult, ensure_no_deferred_column_errors,
+};
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
 };
@@ -6900,6 +6902,10 @@ fn execute_streaming_select_statement(
                                         break;
                                     }
                                 };
+                                if let Err(e) = ensure_no_deferred_column_errors(&values) {
+                                    err = Some(e);
+                                    break;
+                                }
                                 send_typed_data_row(
                                     stream,
                                     &values,
@@ -11723,6 +11729,18 @@ fn handle_execute(
                 let catalog_maps = WireCatalogMaps::for_columns(&catalog, &result.columns);
                 let mut row_buf = Vec::new();
                 for row in &result.rows {
+                    if let Err(e) = ensure_no_deferred_column_errors(row) {
+                        let message = format_exec_error(&e);
+                        let hint = format_exec_error_hint(&e);
+                        send_error_with_hint(
+                            stream,
+                            exec_error_sqlstate(&e),
+                            &message,
+                            hint.as_deref(),
+                            None,
+                        )?;
+                        return Ok(());
+                    }
                     send_typed_data_row(
                         stream,
                         row,
@@ -12355,7 +12373,9 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
         | crate::backend::parser::SqlExpr::CurrentCatalog
         | crate::backend::parser::SqlExpr::CurrentSchema
         | crate::backend::parser::SqlExpr::CurrentUser
+        | crate::backend::parser::SqlExpr::User
         | crate::backend::parser::SqlExpr::SessionUser
+        | crate::backend::parser::SqlExpr::SystemUser
         | crate::backend::parser::SqlExpr::CurrentRole => false,
         crate::backend::parser::SqlExpr::CurrentTime { .. }
         | crate::backend::parser::SqlExpr::CurrentTimestamp { .. }

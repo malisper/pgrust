@@ -313,7 +313,9 @@ fn scalar_expression_rte_column_name(expr: &SqlExpr) -> String {
         SqlExpr::CurrentCatalog => "current_catalog",
         SqlExpr::CurrentSchema => "current_schema",
         SqlExpr::CurrentUser => "current_user",
+        SqlExpr::User => "user",
         SqlExpr::SessionUser => "session_user",
+        SqlExpr::SystemUser => "system_user",
         SqlExpr::CurrentRole => "current_role",
         SqlExpr::CurrentTime { .. } => "current_time",
         SqlExpr::CurrentTimestamp { .. } => "current_timestamp",
@@ -1204,8 +1206,14 @@ pub(super) fn bind_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )?;
-            let plan =
-                AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info);
+            let plan = AnalyzedFrom::join(
+                left_plan,
+                right_plan,
+                plan_join_type(*kind),
+                matches!(kind, JoinKind::Comma),
+                on,
+                alias_info,
+            );
             let scope = scope_with_output_exprs(scope.unwrap_or(raw_scope), &plan.output_exprs);
             Ok((plan, scope))
         }
@@ -2271,6 +2279,8 @@ fn sql_expr_contains_set_returning_call(
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -5533,6 +5543,7 @@ pub(super) fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScop
 
 fn plan_join_type(kind: JoinKind) -> JoinType {
     match kind {
+        JoinKind::Comma => JoinType::Cross,
         JoinKind::Inner => JoinType::Inner,
         JoinKind::Cross => JoinType::Cross,
         JoinKind::Left => JoinType::Left,
@@ -5557,7 +5568,7 @@ fn bind_join_constraint_with_ctes(
 ) -> Result<JoinBinding, ParseError> {
     match constraint {
         JoinConstraint::None => {
-            if !matches!(kind, JoinKind::Cross) {
+            if !matches!(kind, JoinKind::Comma | JoinKind::Cross) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "valid join clause",
                     actual: format!("{kind:?}"),
@@ -5685,21 +5696,39 @@ fn bind_join_using_projection(
         used_left[*left_index] = true;
         used_right[*right_index] = true;
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
+        let right_ty = right_scope.desc.columns[*right_index].sql_type;
+        let output_ty = resolve_common_scalar_type(left_ty, right_ty).ok_or_else(|| {
+            ParseError::UnexpectedToken {
+                expected: "JOIN/USING columns with a common type",
+                actual: format!("{} and {}", sql_type_name(left_ty), sql_type_name(right_ty)),
+            }
+        })?;
         let left_expr = left_scope.output_exprs[*left_index].clone();
         let right_expr = right_scope.output_exprs[*right_index].clone();
+        let left_expr = coerce_bound_expr(left_expr, left_ty, output_ty);
+        let right_expr = coerce_bound_expr(right_expr, right_ty, output_ty);
         alias_exprs.push(match kind {
             JoinKind::Full => Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
             JoinKind::Right => right_expr,
-            _ => left_expr,
+            JoinKind::Inner | JoinKind::Comma | JoinKind::Cross => {
+                if matches!(&left_expr, Expr::Var(_)) {
+                    left_expr
+                } else if matches!(&right_expr, Expr::Var(_)) {
+                    right_expr
+                } else {
+                    left_expr
+                }
+            }
+            JoinKind::Left => left_expr,
         });
         output_columns.push(QueryColumn {
             name: name.clone(),
-            sql_type: left_ty,
+            sql_type: output_ty,
             wire_type_oid: None,
         });
         joinleftcols.push(*left_index + 1);
         joinrightcols.push(*right_index + 1);
-        desc_columns.push(column_desc(name.clone(), left_ty, true));
+        desc_columns.push(column_desc(name.clone(), output_ty, true));
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
             hidden: false,
@@ -5791,6 +5820,7 @@ fn apply_function_rte_alias(plan: &mut AnalyzedFrom, alias: &str, desc: &Relatio
         })
         .collect::<Vec<_>>();
     rte.alias = Some(alias.to_string());
+    rte.alias_is_user_defined = true;
     rte.alias_preserves_source_names = false;
     rte.eref.aliasname = alias.to_string();
     rte.eref.colnames = output_columns
@@ -5836,6 +5866,7 @@ fn apply_join_using_alias(
         && matches!(rte.kind, RangeTblEntryKind::Join { .. })
     {
         rte.alias = Some(alias.to_string());
+        rte.alias_is_user_defined = true;
         rte.alias_preserves_source_names = true;
         rte.eref.aliasname = alias.to_string();
     }
@@ -5905,6 +5936,7 @@ fn apply_relation_alias(
     if let Some(rte) = plan.rtable.last_mut() {
         let preserve_rte_name = rte.alias_preserves_source_names;
         rte.alias = Some(alias.to_string());
+        rte.alias_is_user_defined = true;
         rte.alias_preserves_source_names = preserve_source_names;
         if !preserve_rte_name {
             rte.eref.aliasname = alias.to_string();

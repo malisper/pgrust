@@ -2,10 +2,11 @@ use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, QueryDesc, Statement,
     StatementResult, TransactionId, TupleSlot, Value, bind_delete, bind_insert, bind_update,
     check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
-    clear_subquery_eval_cache, create_query_desc, eval_expr, execute_analyze, execute_create_index,
-    execute_create_table, execute_delete, execute_drop_table, execute_explain, execute_insert,
-    execute_merge, execute_truncate_table, execute_update, execute_vacuum, executor_start,
-    parse_statement, pg_plan_query, pg_plan_values_query,
+    clear_subquery_eval_cache, create_query_desc, ensure_no_deferred_column_errors, eval_expr,
+    execute_analyze, execute_create_index, execute_create_table, execute_delete,
+    execute_drop_table, execute_explain, execute_insert, execute_merge, execute_truncate_table,
+    execute_update, execute_vacuum, executor_start, parse_statement, pg_plan_query,
+    pg_plan_values_query,
 };
 use crate::backend::parser::{
     CatalogLookup, CommonTableExpr, CreateStatisticsStatement, CteBody, FromItem, InsertSource,
@@ -344,6 +345,7 @@ pub fn execute_query_desc(
             let mut rows = Vec::new();
             while let Some(slot) = state.exec_proc_node(ctx)? {
                 let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                ensure_no_deferred_column_errors(&values)?;
                 Value::materialize_all(&mut values);
                 rows.push(values);
             }

@@ -1082,6 +1082,7 @@ fn value_output_text_with_config(
         .as_text()
         .unwrap_or_default()
         .to_string(),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => String::new(),
     })
 }
 

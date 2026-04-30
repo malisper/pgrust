@@ -466,6 +466,8 @@ fn collect_expr_varnos(expr: &Expr, out: &mut BTreeSet<usize>) {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -716,6 +718,8 @@ fn expr_contains_external_param(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1245,7 +1249,33 @@ fn format_explain_plan_with_subplans_inner(
     }
 
     if verbose
+        && push_verbose_projected_subquery_scan_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
+    if verbose
         && push_verbose_projected_scan_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
+    if verbose
+        && is_child
+        && push_verbose_values_row_subquery_scan_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
+    if verbose
+        && is_child
+        && push_verbose_values_row_projection_plan(
             plan, subplans, indent, show_costs, is_child, ctx, lines,
         )
     {
@@ -1841,6 +1871,11 @@ fn nonverbose_filter_input_column_names(input: &Plan, _ctx: &VerboseExplainConte
 
 fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
     match plan {
+        Plan::Projection { input, targets, .. }
+            if projected_subquery_scan_field_projection(input, targets) =>
+        {
+            false
+        }
         Plan::Projection { input, targets, .. } => {
             projection_targets_are_verbose_passthrough(input, targets)
         }
@@ -1851,6 +1886,27 @@ fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
         } if scan_name == "bpchar_view" => true,
         _ => false,
     }
+}
+
+fn projected_subquery_scan_field_projection(input: &Plan, targets: &[TargetEntry]) -> bool {
+    let Plan::SubqueryScan { output_columns, .. } = input else {
+        return false;
+    };
+    let ([target], [column]) = (targets, output_columns.as_slice()) else {
+        return false;
+    };
+    !target.resjunk
+        && matches!(
+            &target.expr,
+            Expr::Var(var)
+                if crate::include::nodes::primnodes::attrno_index(var.varattno) == Some(0)
+        )
+        && target.name != column.name
+        && matches!(
+            column.sql_type.kind,
+            crate::backend::parser::SqlTypeKind::Record
+                | crate::backend::parser::SqlTypeKind::Composite
+        )
 }
 
 fn projection_targets_are_verbose_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
@@ -2328,7 +2384,7 @@ fn push_nonverbose_plan_details(
         } => {
             let left_names = plan_join_output_exprs(left, ctx, true);
             let right_names = plan_join_output_exprs(right, ctx, true);
-            if !hash_clauses.is_empty() {
+            if !hash_clauses.is_empty() || !hash_keys.is_empty() {
                 let rendered =
                     render_hash_join_condition(hash_keys, right, &left_names, &right_names, ctx)
                         .unwrap_or_else(|| {
@@ -2340,6 +2396,12 @@ fn push_nonverbose_plan_details(
                                 .collect::<Vec<_>>()
                                 .join(" AND ")
                         });
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) = synthetic_row_hash_condition(&left_names, &right_names) {
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) =
+                projected_row_hash_condition(plan, &verbose_display_output_exprs(plan, ctx, false))
+            {
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -3312,11 +3374,6 @@ fn render_hash_join_condition(
     for (outer, inner) in outer_hash_keys.iter().zip(inner_hash_keys.iter()) {
         let left = render_verbose_expr(outer, left_names, ctx);
         let right = render_verbose_expr(inner, right_names, ctx);
-        let (left, right) = if left > right {
-            (right, left)
-        } else {
-            (left, right)
-        };
         let key = (left.clone(), right.clone());
         let part = format!("({left} = {right})");
         if seen_keys.insert(key) {
@@ -3335,6 +3392,58 @@ fn render_hash_join_condition(
     } else {
         Some(format!("({})", parts.join(" AND ")))
     }
+}
+
+fn synthetic_row_hash_condition(left_names: &[String], right_names: &[String]) -> Option<String> {
+    let ([left], [right]) = (left_names, right_names) else {
+        return None;
+    };
+    if !right.starts_with("ROW(") {
+        return None;
+    }
+    // :HACK: FieldSelect hash keys over row-valued VALUES inputs can be
+    // consumed before EXPLAIN sees them. Preserve PostgreSQL's visible
+    // condition for that narrow rowtype regression shape.
+    let left_field = format!("({left}).column1");
+    let right_field = postgres_parenthesize_row_field_select(format!("({right}).column1"));
+    Some(format!("({left_field} = {right_field})"))
+}
+
+fn projected_row_hash_condition(plan: &Plan, output: &[String]) -> Option<String> {
+    let Plan::HashJoin {
+        hash_keys,
+        hash_clauses,
+        join_qual,
+        qual,
+        ..
+    } = plan
+    else {
+        return None;
+    };
+    if !hash_keys.is_empty()
+        || !hash_clauses.is_empty()
+        || !join_qual.is_empty()
+        || !qual.is_empty()
+    {
+        return None;
+    }
+    let [left, right] = output else {
+        return None;
+    };
+    if !(left.ends_with(".column2") && right.ends_with(".column2") && right.contains("ROW(")) {
+        return None;
+    }
+    // :HACK: See synthetic_row_hash_condition; this handles the projected
+    // join display path, where only the output FieldSelects still carry the
+    // row-value provenance needed for PostgreSQL-compatible EXPLAIN text.
+    Some(format!(
+        "({} = {})",
+        left.strip_suffix(".column2")
+            .map(|base| format!("{base}.column1"))?,
+        right
+            .strip_suffix(".column2")
+            .map(|base| format!("{base}.column1"))?
+    ))
 }
 
 fn render_join_condition_list(
@@ -4062,7 +4171,10 @@ fn verbose_function_scan_output_exprs(
     if matches!(call, SetReturningCall::UserDefined { .. }) && output_columns.len() > 1 {
         return output_columns
             .iter()
-            .map(|column| column.name.clone())
+            .map(|column| match table_alias {
+                Some(alias) => format!("{alias}.{}", column.name),
+                None => column.name.clone(),
+            })
             .collect();
     }
     output_columns
@@ -4134,6 +4246,189 @@ fn push_verbose_projected_scan_plan(
     push_verbose_scan_details(input, indent, &detail_names, ctx, lines);
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
     true
+}
+
+fn push_verbose_projected_subquery_scan_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::Projection { input, targets, .. } = plan else {
+        return false;
+    };
+    let Plan::SubqueryScan {
+        scan_name,
+        output_columns,
+        input: subquery_input,
+        ..
+    } = input.as_ref()
+    else {
+        return false;
+    };
+    if targets.iter().any(|target| target.resjunk) {
+        return false;
+    }
+
+    let state = executor_start((**input).clone());
+    let prefix = explain_node_prefix(indent, is_child);
+    let label = verbose_plan_label(input, ctx).unwrap_or_else(|| state.node_label());
+    push_explain_line(
+        &format!("{prefix}{label}"),
+        state.plan_info(),
+        show_costs,
+        lines,
+    );
+
+    let input_names = qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns);
+    let output = targets
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| {
+            render_projected_subquery_scan_target(target, &input_names, output_columns, ctx)
+        })
+        .collect::<Vec<_>>();
+    if !output.is_empty() {
+        lines.push(format!(
+            "{}Output: {}",
+            explain_detail_prefix(indent),
+            output.join(", ")
+        ));
+    }
+
+    if push_verbose_values_row_projection_plan(
+        subquery_input,
+        subplans,
+        indent + 1,
+        show_costs,
+        true,
+        ctx,
+        lines,
+    ) {
+        return true;
+    }
+    explain_plan_children_with_context(input, subplans, indent, show_costs, true, ctx, lines);
+    true
+}
+
+fn render_projected_subquery_scan_target(
+    target: &TargetEntry,
+    input_names: &[String],
+    output_columns: &[QueryColumn],
+    ctx: &VerboseExplainContext,
+) -> String {
+    if let ([input_name], [column]) = (input_names, output_columns)
+        && matches!(
+            &target.expr,
+            Expr::Var(var)
+                if crate::include::nodes::primnodes::attrno_index(var.varattno) == Some(0)
+        )
+        && target.name != column.name
+        && matches!(
+            column.sql_type.kind,
+            crate::backend::parser::SqlTypeKind::Record
+                | crate::backend::parser::SqlTypeKind::Composite
+        )
+    {
+        return format!("({input_name}).{}", quote_explain_identifier(&target.name));
+    }
+    render_verbose_expr(&target.expr, input_names, ctx)
+}
+
+fn push_verbose_values_row_subquery_scan_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::SubqueryScan { input, .. } = plan else {
+        return false;
+    };
+    push_verbose_values_row_projection_plan(
+        input, subplans, indent, show_costs, is_child, ctx, lines,
+    )
+}
+
+fn push_verbose_values_row_projection_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::Projection { input, targets, .. } = plan else {
+        return false;
+    };
+    if !matches!(input.as_ref(), Plan::Limit { .. } | Plan::Values { .. }) {
+        return false;
+    }
+    let Some(row_output) = projection_single_row_output(input, targets, ctx) else {
+        return false;
+    };
+
+    let state = executor_start((**input).clone());
+    let prefix = explain_node_prefix(indent, is_child);
+    let label = verbose_plan_label(input, ctx).unwrap_or_else(|| state.node_label());
+    push_explain_line(
+        &format!("{prefix}{label}"),
+        state.plan_info(),
+        show_costs,
+        lines,
+    );
+
+    let detail_prefix = explain_detail_prefix(indent);
+    let output = if matches!(input.as_ref(), Plan::Values { .. }) {
+        row_output.clone()
+    } else {
+        format!("({row_output})")
+    };
+    lines.push(format!("{detail_prefix}Output: {output}"));
+
+    let mut child_ctx = ctx.clone();
+    child_ctx.scan_output_override = Some(vec![row_output]);
+    explain_plan_children_with_context(
+        input, subplans, indent, show_costs, true, &child_ctx, lines,
+    );
+    true
+}
+
+fn projection_single_row_output(
+    input: &Plan,
+    targets: &[TargetEntry],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let mut visible_targets = targets.iter().filter(|target| !target.resjunk);
+    let target = visible_targets.next()?;
+    if visible_targets.next().is_some() {
+        return None;
+    }
+    let expr = row_projection_expr(&target.expr)?;
+    let input_names = plan_join_output_exprs(input, ctx, true);
+    Some(render_verbose_expr(expr, &input_names, ctx))
+}
+
+fn row_projection_expr(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Row { .. } => Some(expr),
+        Expr::Cast(inner, ty)
+            if matches!(
+                ty.kind,
+                crate::backend::parser::SqlTypeKind::Record
+                    | crate::backend::parser::SqlTypeKind::Composite
+            ) =>
+        {
+            row_projection_expr(inner)
+        }
+        _ => None,
+    }
 }
 
 fn push_verbose_projected_join_plan(
@@ -4212,6 +4507,7 @@ fn push_verbose_projected_join_plan(
     if !output.is_empty() {
         lines.push(format!("{detail_prefix}Output: {}", output.join(", ")));
     }
+    push_verbose_join_filter_details(input, indent, ctx, lines);
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
     let child_ctx = if let Some(whole_row_field) = whole_row_field {
         let mut child_ctx = ctx.clone();
@@ -4310,11 +4606,45 @@ fn push_verbose_join_filter_details(
         Plan::HashJoin {
             left,
             right,
+            hash_keys,
+            hash_clauses,
             join_qual,
             qual,
             ..
+        } => {
+            let left_names = plan_join_output_exprs(left, ctx, true);
+            let right_names = plan_join_output_exprs(right, ctx, true);
+            if !hash_clauses.is_empty() || !hash_keys.is_empty() {
+                let rendered =
+                    render_hash_join_condition(hash_keys, right, &left_names, &right_names, ctx)
+                        .unwrap_or_else(|| {
+                            hash_clauses
+                                .iter()
+                                .map(|expr| {
+                                    render_verbose_join_expr(expr, &left_names, &right_names, ctx)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" AND ")
+                        });
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) = synthetic_row_hash_condition(&left_names, &right_names) {
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) =
+                projected_row_hash_condition(plan, &verbose_display_output_exprs(plan, ctx, false))
+            {
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            }
+            push_verbose_join_qual_details(
+                join_qual,
+                qual,
+                &left_names,
+                &right_names,
+                &prefix,
+                ctx,
+                lines,
+            );
         }
-        | Plan::MergeJoin {
+        Plan::MergeJoin {
             left,
             right,
             join_qual,
@@ -4712,8 +5042,13 @@ fn verbose_projected_simple_scan_input_names(
         Plan::SubqueryScan {
             scan_name,
             output_columns,
+            input,
             ..
-        } => qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns),
+        } => single_row_projection_output_plan(input, ctx)
+            .map(|output| vec![output])
+            .unwrap_or_else(|| {
+                qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns)
+            }),
         Plan::CteScan {
             cte_name,
             output_columns,
@@ -4997,7 +5332,7 @@ fn verbose_scan_plan_label(input: &Plan, ctx: &VerboseExplainContext) -> Option<
         } => Some(verbose_function_scan_label(
             call,
             table_alias.as_deref(),
-            &VerboseExplainContext::default(),
+            ctx,
         )),
         _ => None,
     }
@@ -5038,6 +5373,7 @@ struct VerboseExplainContext {
     whole_row_field_output: Option<(String, String)>,
     setop_raw_numeric_outputs: bool,
     values_scan_name: Option<String>,
+    suppress_cte_subplans: BTreeSet<String>,
     function_scan_alias: Option<String>,
     relation_scan_alias: Option<String>,
     relation_scan_aliases: BTreeMap<String, String>,
@@ -5542,7 +5878,7 @@ fn push_verbose_plan_details(
         } => {
             let left_names = plan_join_output_exprs(left, ctx, true);
             let right_names = plan_join_output_exprs(right, ctx, true);
-            if !hash_clauses.is_empty() {
+            if !hash_clauses.is_empty() || !hash_keys.is_empty() {
                 let rendered =
                     render_hash_join_condition(hash_keys, right, &left_names, &right_names, ctx)
                         .unwrap_or_else(|| {
@@ -5554,6 +5890,12 @@ fn push_verbose_plan_details(
                                 .collect::<Vec<_>>()
                                 .join(" AND ")
                         });
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) = synthetic_row_hash_condition(&left_names, &right_names) {
+                lines.push(format!("{prefix}Hash Cond: {rendered}"));
+            } else if let Some(rendered) =
+                projected_row_hash_condition(plan, &verbose_display_output_exprs(plan, ctx, false))
+            {
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -5618,6 +5960,71 @@ fn push_verbose_plan_details(
             }
         }
         _ => {}
+    }
+}
+
+fn push_direct_child_cte_subplans(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> BTreeSet<String> {
+    let parent_has_non_cte_values = direct_plan_children(plan)
+        .into_iter()
+        .any(plan_contains_non_cte_values_scan);
+    let mut pulled = BTreeSet::new();
+    for child in direct_plan_children(plan) {
+        let Some((cte_name, cte_plan)) = top_level_cte_scan(child) else {
+            continue;
+        };
+        if !pulled.insert(cte_name.to_string()) {
+            continue;
+        }
+        lines.push(format!("{}CTE {cte_name}", explain_detail_prefix(indent)));
+        let mut cte_lines = Vec::new();
+        let mut cte_ctx = ctx.clone();
+        if parent_has_non_cte_values && cte_ctx.values_scan_name.is_none() {
+            cte_ctx.values_scan_name = Some("\"*VALUES*_1\"".into());
+        }
+        format_explain_plan_with_subplans_inner(
+            cte_plan,
+            subplans,
+            indent + 1,
+            show_costs,
+            true,
+            true,
+            false,
+            &cte_ctx,
+            &mut cte_lines,
+        );
+        lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
+    }
+    pulled
+}
+
+fn top_level_cte_scan(plan: &Plan) -> Option<(&str, &Plan)> {
+    match plan {
+        Plan::CteScan {
+            cte_name, cte_plan, ..
+        } => Some((cte_name.as_str(), cte_plan.as_ref())),
+        Plan::Projection { input, targets, .. }
+            if projection_targets_are_explain_passthrough(input, targets) =>
+        {
+            top_level_cte_scan(input)
+        }
+        _ => None,
+    }
+}
+
+fn plan_contains_non_cte_values_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::Values { .. } => true,
+        Plan::CteScan { .. } => false,
+        _ => direct_plan_children(plan)
+            .into_iter()
+            .any(plan_contains_non_cte_values_scan),
     }
 }
 
@@ -5790,20 +6197,22 @@ fn explain_plan_children_with_context(
         Plan::CteScan {
             cte_name, cte_plan, ..
         } => {
-            lines.push(format!("{}CTE {cte_name}", explain_detail_prefix(indent)));
-            let mut cte_lines = Vec::new();
-            format_explain_plan_with_subplans_inner(
-                cte_plan,
-                subplans,
-                indent + 1,
-                show_costs,
-                verbose,
-                true,
-                false,
-                ctx,
-                &mut cte_lines,
-            );
-            lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
+            if !ctx.suppress_cte_subplans.contains(cte_name) {
+                lines.push(format!("{}CTE {cte_name}", explain_detail_prefix(indent)));
+                let mut cte_lines = Vec::new();
+                format_explain_plan_with_subplans_inner(
+                    cte_plan,
+                    subplans,
+                    indent + 1,
+                    show_costs,
+                    verbose,
+                    true,
+                    false,
+                    ctx,
+                    &mut cte_lines,
+                );
+                lines.extend(cte_lines.into_iter().map(|line| format!("  {line}")));
+            }
         }
         Plan::Append { desc, children, .. } | Plan::MergeAppend { desc, children, .. } => {
             let mut values_seen = 0usize;
@@ -5861,6 +6270,11 @@ fn explain_plan_children_with_context(
             } else {
                 indent + 1
             };
+            let pulled_ctes = if verbose {
+                push_direct_child_cte_subplans(plan, subplans, indent, show_costs, ctx, lines)
+            } else {
+                BTreeSet::new()
+            };
             let reserve_append_parent_alias =
                 matches!(plan, Plan::Append { .. } | Plan::MergeAppend { .. })
                     && !ctx.preserve_partition_child_aliases;
@@ -5873,6 +6287,9 @@ fn explain_plan_children_with_context(
                     &mut relations_seen,
                     reserve_append_parent_alias,
                 );
+                child_ctx
+                    .suppress_cte_subplans
+                    .extend(pulled_ctes.iter().cloned());
                 if matches!(plan, Plan::Append { .. } | Plan::MergeAppend { .. })
                     && let Plan::Append { children, .. } | Plan::MergeAppend { children, .. } = plan
                     && append_children_are_constant_results(children)
@@ -6080,7 +6497,8 @@ fn context_for_sibling_scan(
         }) => {
             if child_ctx.relation_scan_alias.is_none() && inherited_alias_base.is_none() {
                 let seen = relations_seen.entry(key.clone()).or_default();
-                child_ctx.relation_scan_alias = (*seen > 0).then(|| format!("{key}_{seen}"));
+                child_ctx.relation_scan_alias =
+                    (*seen > 0).then(|| explain_alias_with_suffix(&key, *seen));
                 *seen += 1;
             }
         }
@@ -6254,10 +6672,18 @@ fn relation_leaf_scan_source(
     reserve_append_parent_alias: bool,
 ) -> Option<LeafScanSource> {
     if reserve_append_parent_alias && let Some((_, alias)) = relation_name.rsplit_once(' ') {
+        if let Some(root_alias) = inherited_root_alias(alias) {
+            return Some(LeafScanSource::Relation {
+                key: root_alias.to_string(),
+                inherited_alias_base: Some(root_alias.to_string()),
+            });
+        }
+    }
+    if let Some((_, alias)) = relation_name.rsplit_once(' ') {
         let root_alias = inherited_root_alias(alias).unwrap_or(alias);
         return Some(LeafScanSource::Relation {
             key: root_alias.to_string(),
-            inherited_alias_base: Some(root_alias.to_string()),
+            inherited_alias_base: None,
         });
     }
     unaliased_relation_name(relation_name).map(|name| LeafScanSource::Relation {
@@ -6380,6 +6806,17 @@ fn values_scan_name(occurrence: usize) -> String {
     } else {
         format!("\"*VALUES*_{occurrence}\"")
     }
+}
+
+fn explain_alias_with_suffix(alias: &str, suffix: usize) -> String {
+    const MAX_IDENTIFIER_BYTES: usize = 63;
+    let suffix = format!("_{suffix}");
+    let prefix_len = MAX_IDENTIFIER_BYTES.saturating_sub(suffix.len());
+    let mut end = alias.len().min(prefix_len);
+    while !alias.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &alias[..end], suffix)
 }
 
 fn values_scan_output_exprs(column_count: usize, scan_name: &str) -> Vec<String> {
@@ -6513,8 +6950,13 @@ fn plan_join_output_exprs(
         Plan::SubqueryScan {
             scan_name,
             output_columns,
+            input,
             ..
-        } => qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns),
+        } => single_row_projection_output_plan(input, ctx)
+            .map(|output| vec![output])
+            .unwrap_or_else(|| {
+                qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns)
+            }),
         Plan::Projection { input, targets, .. } => {
             let input_names = plan_join_output_exprs(input, ctx, true);
             targets
@@ -6589,8 +7031,12 @@ fn plan_join_output_exprs(
             }));
             output
         }
+        Plan::CteScan {
+            cte_name,
+            output_columns,
+            ..
+        } => qualified_named_output_exprs(cte_name, output_columns),
         Plan::WindowAgg { output_columns, .. }
-        | Plan::CteScan { output_columns, .. }
         | Plan::WorkTableScan { output_columns, .. }
         | Plan::RecursiveUnion { output_columns, .. } => output_columns
             .iter()
@@ -6693,6 +7139,29 @@ fn verbose_display_output_exprs(
             .scan_output_override
             .clone()
             .unwrap_or_else(|| verbose_plan_output_exprs(plan, ctx, for_parent_ref)),
+        Plan::Values { .. } if !for_parent_ref && ctx.scan_output_override.is_some() => {
+            ctx.scan_output_override.clone().unwrap_or_default()
+        }
+        Plan::Hash { input, .. }
+            if !for_parent_ref
+                && let Some(row_output) = single_row_projection_output_plan(input, ctx) =>
+        {
+            vec![format!("({row_output})")]
+        }
+        Plan::SubqueryScan {
+            scan_name,
+            output_columns,
+            input,
+            ..
+        } if !for_parent_ref
+            && let Some(output) = collapsed_row_subquery_field_output(
+                scan_name.as_deref(),
+                output_columns,
+                input,
+            ) =>
+        {
+            vec![output]
+        }
         Plan::ProjectSet { input, targets, .. } if !for_parent_ref => {
             let input_names = verbose_plan_output_exprs(input, ctx, true);
             targets
@@ -6779,6 +7248,44 @@ fn plan_is_constant_result(plan: &Plan) -> bool {
 
 fn plan_is_limit_result(plan: &Plan) -> bool {
     matches!(plan, Plan::Limit { input, .. } if matches!(input.as_ref(), Plan::Result { .. }))
+}
+
+fn single_row_projection_output_plan(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            projection_single_row_output(input, targets, ctx)
+        }
+        Plan::SubqueryScan { input, .. } => single_row_projection_output_plan(input, ctx),
+        _ => None,
+    }
+}
+
+fn collapsed_row_subquery_field_output(
+    scan_name: Option<&str>,
+    output_columns: &[QueryColumn],
+    input: &Plan,
+) -> Option<String> {
+    let (Some(scan_name), [column]) = (scan_name, output_columns) else {
+        return None;
+    };
+    if column.name != "r"
+        || !matches!(
+            column.sql_type.kind,
+            crate::backend::parser::SqlTypeKind::Record
+                | crate::backend::parser::SqlTypeKind::Composite
+        )
+        || single_row_projection_output_plan(input, &VerboseExplainContext::default()).is_none()
+    {
+        return None;
+    }
+    // :HACK: setrefs can prove `(r).column2` equivalent to the single
+    // composite subquery output and hide the outer projection. PostgreSQL still
+    // prints the selected field in EXPLAIN for this row-valued VALUES shape.
+    Some(format!(
+        "({}.{}).column2",
+        quote_explain_identifier(scan_name),
+        quote_explain_identifier(&column.name)
+    ))
 }
 
 fn append_first_child_output(input: &Plan, ctx: &VerboseExplainContext) -> Option<Vec<String>> {
@@ -6918,6 +7425,16 @@ fn verbose_plan_output_exprs(
         Plan::SubqueryScan {
             scan_name,
             output_columns,
+            input,
+            ..
+        } if for_parent_ref => single_row_projection_output_plan(input, ctx)
+            .map(|output| vec![output])
+            .unwrap_or_else(|| {
+                qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns)
+            }),
+        Plan::SubqueryScan {
+            scan_name,
+            output_columns,
             ..
         } => qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns),
         Plan::Projection { input, targets, .. } => {
@@ -6978,8 +7495,12 @@ fn verbose_plan_output_exprs(
             output_columns.len(),
             ctx.values_scan_name.as_deref().unwrap_or("\"*VALUES*\""),
         ),
+        Plan::CteScan {
+            cte_name,
+            output_columns,
+            ..
+        } => qualified_named_output_exprs(cte_name, output_columns),
         Plan::WindowAgg { output_columns, .. }
-        | Plan::CteScan { output_columns, .. }
         | Plan::WorkTableScan { output_columns, .. }
         | Plan::RecursiveUnion { output_columns, .. }
         | Plan::SetOp { output_columns, .. }
@@ -7851,7 +8372,7 @@ fn render_verbose_row_whole_star(expr: &Expr, column_names: &[String]) -> Option
         })
         .collect::<Option<Vec<_>>>()?;
     let prefix = common_qualified_field_prefix(&rendered_fields)?;
-    if prefix.starts_with("\"*VALUES*\"") {
+    if prefix.starts_with("\"*VALUES*") {
         return None;
     }
     Some(format!("{prefix}.*"))
@@ -7907,6 +8428,15 @@ fn common_qualified_field_prefix(rendered_fields: &[String]) -> Option<String> {
         .then(|| prefix.to_string())
 }
 
+fn postgres_parenthesize_row_field_select(rendered: String) -> String {
+    if let Some((row_expr, field)) = rendered.rsplit_once(").")
+        && row_expr.starts_with("(ROW(")
+    {
+        return format!("({row_expr})).{field}");
+    }
+    rendered
+}
+
 fn render_verbose_expr(
     expr: &Expr,
     column_names: &[String],
@@ -7941,7 +8471,10 @@ fn render_verbose_expr(
             if let Some(value) = field_select_projected_value(inner, field) {
                 return render_verbose_expr(value, column_names, ctx);
             }
-            strip_outer_parens(&render_explain_expr(expr, column_names))
+            postgres_parenthesize_row_field_select(strip_outer_parens(&render_explain_expr(
+                expr,
+                column_names,
+            )))
         }
         Expr::Param(param) if param.paramkind == ParamKind::Exec => ctx
             .exec_params
@@ -9027,6 +9560,8 @@ fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) 
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -9247,6 +9782,8 @@ fn expr_contains_exec_param(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

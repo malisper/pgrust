@@ -6175,6 +6175,16 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }
             _ => Ok(Value::Record(record)),
         },
+        Value::DroppedColumn(attnum) => Ok(Value::DroppedColumn(attnum)),
+        Value::WrongTypeColumn {
+            attnum,
+            table_type,
+            query_type,
+        } => Ok(Value::WrongTypeColumn {
+            attnum,
+            table_type,
+            query_type,
+        }),
     }?;
     let result = apply_time_precision(result, ty.time_precision());
     enforce_domain_check(result, ty, catalog)

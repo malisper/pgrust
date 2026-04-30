@@ -247,6 +247,7 @@ pub(crate) enum FunctionReturnContract {
         columns: Vec<QueryColumn>,
         setof: bool,
         uses_output_vars: bool,
+        composite_typrelid: Option<u32>,
     },
     AnonymousRecord {
         setof: bool,
@@ -1265,6 +1266,7 @@ fn function_return_contract(
                     .collect(),
                 setof: false,
                 uses_output_vars: true,
+                composite_typrelid: None,
             })
         };
     }
@@ -1286,6 +1288,7 @@ fn function_return_contract(
                             .collect(),
                         setof: true,
                         uses_output_vars: true,
+                        composite_typrelid: None,
                     }
                 }
             }
@@ -1307,6 +1310,7 @@ fn function_return_contract(
                         .collect(),
                     setof: true,
                     uses_output_vars: false,
+                    composite_typrelid: Some(result_type.typrelid),
                 }
             }
             _ => FunctionReturnContract::Scalar {
@@ -1328,6 +1332,7 @@ fn function_return_contract(
                 .collect(),
             setof: false,
             uses_output_vars: true,
+            composite_typrelid: None,
         }),
         SqlTypeKind::Record => Ok(FunctionReturnContract::AnonymousRecord { setof: false }),
         SqlTypeKind::Composite => {
@@ -1348,6 +1353,7 @@ fn function_return_contract(
                     .collect(),
                 setof: false,
                 uses_output_vars: false,
+                composite_typrelid: Some(result_type.typrelid),
             })
         }
         _ => Ok(FunctionReturnContract::Scalar {

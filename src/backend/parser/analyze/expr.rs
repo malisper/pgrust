@@ -575,6 +575,8 @@ fn raw_sql_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bo
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -6220,7 +6222,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::CurrentCatalog => Expr::CurrentCatalog,
         SqlExpr::CurrentSchema => Expr::CurrentSchema,
         SqlExpr::CurrentUser => Expr::CurrentUser,
+        SqlExpr::User => Expr::User,
         SqlExpr::SessionUser => Expr::SessionUser,
+        SqlExpr::SystemUser => Expr::SystemUser,
         SqlExpr::CurrentRole => Expr::CurrentRole,
         SqlExpr::CurrentTime { precision } => Expr::CurrentTime {
             precision: *precision,

@@ -3983,6 +3983,8 @@ fn collect_expr_attrs_for_source(expr: &Expr, source_id: usize, attrs: &mut BTre
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -5052,6 +5054,8 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -5369,6 +5373,8 @@ fn expr_uses_outer_relids_at_level(expr: &Expr, relids: &[usize], sublevels_up: 
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -9718,7 +9724,11 @@ fn const_gist_argument_value(expr: &Expr) -> Option<Value> {
 fn runtime_index_argument_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Const(_) | Expr::Param(_) => true,
-        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => true,
+        Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole => true,
         Expr::Var(var) => var.varlevelsup > 0,
         Expr::SubLink(sublink) => sublink
             .testexpr
@@ -9852,7 +9862,11 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
 
 fn expr_contains_runtime_input(expr: &Expr) -> bool {
     match expr {
-        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => true,
+        Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole => true,
         Expr::Var(var) => var.varlevelsup > 0,
         Expr::Param(_) => true,
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {

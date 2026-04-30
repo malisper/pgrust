@@ -504,6 +504,8 @@ fn collect_expr_relation_privileges(
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -774,6 +776,8 @@ fn apply_policy_expr_permission_context(expr: &mut Expr, effective_user_oid: u32
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -860,12 +864,14 @@ fn rewrite_rte(
         },
         RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars: joinaliasvars
                 .into_iter()
@@ -1478,6 +1484,8 @@ fn rewrite_semantic_expr(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

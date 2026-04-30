@@ -2958,7 +2958,9 @@ pub enum Expr {
     },
     Random,
     CurrentUser,
+    User,
     SessionUser,
+    SystemUser,
     CurrentRole,
     CurrentCatalog,
     CurrentSchema,
@@ -3294,9 +3296,11 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::ArrayLiteral { array_type, .. } => Some(*array_type),
         Expr::Row { descriptor, .. } => Some(descriptor.sql_type()),
         Expr::FieldSelect { field_type, .. } => Some(*field_type),
-        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
-            Some(SqlType::new(SqlTypeKind::Name))
-        }
+        Expr::CurrentUser
+        | Expr::User
+        | Expr::SessionUser
+        | Expr::SystemUser
+        | Expr::CurrentRole => Some(SqlType::new(SqlTypeKind::Name)),
         Expr::CurrentCatalog | Expr::CurrentSchema => Some(SqlType::new(SqlTypeKind::Text)),
         Expr::Xml(xml) => Some(match xml.op {
             XmlExprOp::Serialize => xml.target_type.unwrap_or(SqlType::new(SqlTypeKind::Text)),
@@ -3585,7 +3589,9 @@ pub fn expr_contains_set_returning(expr: &Expr) -> bool {
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

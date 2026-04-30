@@ -814,6 +814,12 @@ pub enum Value {
     Array(Vec<Value>),
     PgArray(ArrayValue),
     Record(RecordValue),
+    DroppedColumn(usize),
+    WrongTypeColumn {
+        attnum: usize,
+        table_type: SqlType,
+        query_type: SqlType,
+    },
     Null,
 }
 
@@ -1200,6 +1206,16 @@ impl Value {
                 descriptor: record.descriptor.clone(),
                 fields: record.fields.iter().map(Value::to_owned_value).collect(),
             }),
+            Value::DroppedColumn(attnum) => Value::DroppedColumn(*attnum),
+            Value::WrongTypeColumn {
+                attnum,
+                table_type,
+                query_type,
+            } => Value::WrongTypeColumn {
+                attnum: *attnum,
+                table_type: *table_type,
+                query_type: *query_type,
+            },
             Value::Null => Value::Null,
         }
     }
@@ -1311,6 +1327,7 @@ impl Value {
                 element_type.map(SqlType::array_of)
             }
             Value::Record(record) => Some(record.sql_type()),
+            Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => None,
             Value::Null => None,
         }
     }
@@ -1406,6 +1423,23 @@ impl PartialEq for Value {
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Record(a), Value::Record(b)) => a == b,
+            (Value::DroppedColumn(a), Value::DroppedColumn(b)) => a == b,
+            (
+                Value::WrongTypeColumn {
+                    attnum: left_attnum,
+                    table_type: left_table_type,
+                    query_type: left_query_type,
+                },
+                Value::WrongTypeColumn {
+                    attnum: right_attnum,
+                    table_type: right_table_type,
+                    query_type: right_query_type,
+                },
+            ) => {
+                left_attnum == right_attnum
+                    && left_table_type == right_table_type
+                    && left_query_type == right_query_type
+            }
             (Value::Null, Value::Null) => true,
             (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
                 a.as_text().unwrap() == b.as_text().unwrap()
@@ -1621,6 +1655,20 @@ impl std::hash::Hash for Value {
             Value::Record(v) => {
                 25u8.hash(state);
                 v.hash(state);
+            }
+            Value::DroppedColumn(attnum) => {
+                40u8.hash(state);
+                attnum.hash(state);
+            }
+            Value::WrongTypeColumn {
+                attnum,
+                table_type,
+                query_type,
+            } => {
+                41u8.hash(state);
+                attnum.hash(state);
+                table_type.hash(state);
+                query_type.hash(state);
             }
             Value::Array(_) | Value::PgArray(_) => unreachable!("array values hashed above"),
             Value::Null => {

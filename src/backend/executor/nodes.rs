@@ -25,6 +25,7 @@ use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::libpq::pqformat::format_float8_text;
 use crate::backend::optimizer::partition_prune::partition_may_satisfy_filter_with_runtime_values;
+use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
@@ -4261,8 +4262,10 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_sql_datetime_keyword("LOCALTIMESTAMP", *precision)
         }
         Expr::CurrentUser => "CURRENT_USER".into(),
+        Expr::User => "USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
+        Expr::SystemUser => "SYSTEM_USER".into(),
         Expr::Random => "random()".into(),
         Expr::Like {
             expr,
@@ -8455,6 +8458,8 @@ fn expr_is_plain_aggregate_safe(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -10271,4 +10276,37 @@ impl TupleSlot {
         Value::materialize_all(&mut self.tts_values);
         Ok(self.tts_values)
     }
+}
+
+pub(crate) fn ensure_no_deferred_column_errors(values: &[Value]) -> Result<(), ExecError> {
+    for value in values {
+        match value {
+            Value::DroppedColumn(attnum) => {
+                return Err(ExecError::DetailedError {
+                    message: format!("attribute {attnum} of type record has been dropped"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                });
+            }
+            Value::WrongTypeColumn {
+                attnum,
+                table_type,
+                query_type,
+            } => {
+                return Err(ExecError::DetailedError {
+                    message: format!("attribute {attnum} of type record has wrong type"),
+                    detail: Some(format!(
+                        "Table has type {}, but query expects {}.",
+                        sql_type_name(*table_type),
+                        sql_type_name(*query_type)
+                    )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

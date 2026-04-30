@@ -1397,6 +1397,7 @@ pub(crate) fn jsonb_from_value(
                 .map(|value| jsonb_from_value(value, datetime_config))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => JsonbValue::Null,
     })
 }
 
@@ -1693,6 +1694,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         )
         .to_serde()
         .to_string()),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => Ok("null".into()),
     }
 }
 

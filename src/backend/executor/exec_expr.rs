@@ -7901,6 +7901,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         )
         .unwrap_or_default()
         .len(),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => 0,
         Value::Null => unreachable!("SQL NULL handled above"),
     };
     Ok(Value::Int32(size.min(i32::MAX as usize) as i32))
@@ -9966,6 +9967,8 @@ fn expr_requires_stack_check(expr: &Expr) -> bool {
             | Expr::CurrentSchema
             | Expr::CurrentUser
             | Expr::SessionUser
+            | Expr::User
+            | Expr::SystemUser
             | Expr::CurrentRole
             | Expr::CurrentTime { .. }
             | Expr::CurrentTimestamp { .. }
@@ -10375,8 +10378,10 @@ pub fn eval_expr(
         )),
         Expr::CurrentCatalog => Ok(Value::Text(ctx.current_database_name.clone().into())),
         Expr::CurrentSchema => Ok(current_schema_value(ctx)),
-        Expr::CurrentUser | Expr::CurrentRole => auth_role_name(ctx, ctx.current_user_oid),
-        Expr::SessionUser => auth_role_name(ctx, ctx.session_user_oid),
+        Expr::CurrentUser | Expr::User | Expr::CurrentRole => {
+            auth_role_name(ctx, ctx.current_user_oid)
+        }
+        Expr::SessionUser | Expr::SystemUser => auth_role_name(ctx, ctx.session_user_oid),
         Expr::CurrentTime { precision } => {
             warn_time_precision_overflow(*precision, "TIME", " WITH TIME ZONE");
             Ok(current_time_value_from_timestamp_with_config(
