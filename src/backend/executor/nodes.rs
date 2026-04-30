@@ -6223,7 +6223,7 @@ fn render_explain_infix_operand_with_display_type(
     let expr = if display_type.is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Int8)) {
         strip_bigint_comparison_cast(expr)
     } else if display_type.is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Char)) {
-        strip_bpchar_to_text(expr)
+        strip_bpchar_display_cast(expr)
     } else {
         expr
     };
@@ -6300,6 +6300,10 @@ fn comparison_display_type(
     if expr_has_bpchar_display_type(left) || expr_has_bpchar_display_type(right) {
         Some(SqlType::new(SqlTypeKind::Char))
     } else if expr_has_varchar_display_type(left) || expr_has_varchar_display_type(right) {
+        // :HACK: PostgreSQL's EXPLAIN usually shows varchar comparison
+        // operators through their text operator implementation. The executable
+        // expression still keeps its original types; this only normalizes the
+        // displayed qual while pgrust lacks full operator-family display data.
         Some(SqlType::new(SqlTypeKind::Text))
     } else if collation_oid == Some(POSIX_COLLATION_OID)
         && (expr_sql_type_hint_is(left, SqlTypeKind::Text)
@@ -6365,6 +6369,18 @@ fn strip_bpchar_to_text(expr: &Expr) -> &Expr {
             &func.args[0]
         }
         _ => expr,
+    }
+}
+
+fn strip_bpchar_display_cast(expr: &Expr) -> &Expr {
+    match strip_bpchar_to_text(expr) {
+        Expr::Cast(inner, ty)
+            if matches!(ty.kind, SqlTypeKind::Char)
+                && expr_sql_type_hint_is(inner, SqlTypeKind::Char) =>
+        {
+            inner
+        }
+        stripped => stripped,
     }
 }
 

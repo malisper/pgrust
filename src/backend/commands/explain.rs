@@ -2265,14 +2265,17 @@ fn projection_targets_are_verbose_passthrough(input: &Plan, targets: &[TargetEnt
         let input_columns = input.columns();
         return targets.len() == input_names.len()
             && targets.len() == input_columns.len()
-            && targets
-                .iter()
-                .zip(input_columns.iter())
-                .all(|(target, column)| {
-                    !target.resjunk
-                        && target.name == column.name
-                        && target.sql_type == column.sql_type
-                });
+            && targets.iter().enumerate().all(|(index, target)| {
+                let Some(column) = input_columns.get(index) else {
+                    return false;
+                };
+                // :HACK: PostgreSQL hides the alias-only projection for
+                // partition parents in verbose EXPLAIN while still rendering
+                // child outputs with the parent alias, e.g. part p(x).
+                !target.resjunk
+                    && target.sql_type == column.sql_type
+                    && (target.name == column.name || target.input_resno == Some(index + 1))
+            });
     }
     if matches!(input, Plan::WindowAgg { .. })
         && targets.iter().all(|target| !target.resjunk)

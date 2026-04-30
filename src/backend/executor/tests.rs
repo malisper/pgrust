@@ -4858,6 +4858,60 @@ fn explain_expr_matches_postgres_filter_formatting() {
 }
 
 #[test]
+fn explain_expr_strips_redundant_bpchar_key_casts() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::OpExprKind;
+
+    let bpchar = SqlType::new(SqlTypeKind::Char);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let casted_key = Expr::Cast(
+        Box::new(Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(0),
+            varlevelsup: 0,
+            vartype: bpchar,
+        })),
+        bpchar,
+    );
+    let expr = Expr::binary_op(
+        OpExprKind::Eq,
+        bool_ty,
+        casted_key,
+        Expr::Const(Value::Text("a".into())),
+    );
+
+    assert_eq!(
+        render_explain_expr(&expr, &["a".into()]),
+        "(a = 'a'::bpchar)"
+    );
+}
+
+#[test]
+fn explain_expr_renders_varchar_comparison_as_text_operator() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::OpExprKind;
+
+    let varchar = SqlType::new(SqlTypeKind::Varchar);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let expr = Expr::binary_op(
+        OpExprKind::Eq,
+        bool_ty,
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(1),
+            varlevelsup: 0,
+            vartype: varchar,
+        }),
+        Expr::Const(Value::Text("ab".into())),
+    );
+
+    assert_eq!(
+        render_explain_expr(&expr, &["a".into(), "b".into()]),
+        "((b)::text = 'ab'::text)"
+    );
+}
+
+#[test]
 fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
     use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
     use crate::include::nodes::datum::NumericValue;

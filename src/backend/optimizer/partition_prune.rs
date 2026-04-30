@@ -275,16 +275,24 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
     relation_oid: u32,
     filter: Option<&Expr>,
 ) -> bool {
+    relation_may_satisfy_own_partition_bound_inner(catalog, relation_oid, filter, false)
+}
+
+fn relation_may_satisfy_own_partition_bound_inner(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    filter: Option<&Expr>,
+    inside_or_arm: bool,
+) -> bool {
     let Some(filter) = filter else {
         return true;
     };
     if let Expr::Bool(bool_expr) = filter
         && bool_expr.boolop == BoolExprType::Or
     {
-        return bool_expr
-            .args
-            .iter()
-            .any(|arg| relation_may_satisfy_own_partition_bound(catalog, relation_oid, Some(arg)));
+        return bool_expr.args.iter().any(|arg| {
+            relation_may_satisfy_own_partition_bound_inner(catalog, relation_oid, Some(arg), true)
+        });
     }
     let Some(relation) = catalog.relation_by_oid(relation_oid) else {
         return true;
@@ -322,7 +330,7 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
                         .and_then(|text| deserialize_partition_bound(text.as_str()).ok())
                 })
                 .collect::<Vec<_>>();
-            expr_may_match_bound(
+            expr_may_match_bound_inner(
                 filter,
                 &spec,
                 &bound,
@@ -330,7 +338,13 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
                 None,
                 Some(catalog),
                 None,
-            ) && relation_may_satisfy_own_partition_bound(catalog, row.inhparent, Some(filter))
+                inside_or_arm,
+            ) && relation_may_satisfy_own_partition_bound_inner(
+                catalog,
+                row.inhparent,
+                Some(filter),
+                inside_or_arm,
+            )
         })
 }
 
@@ -472,8 +486,35 @@ fn expr_may_match_bound(
     catalog: Option<&dyn CatalogLookup>,
     relation_oid: Option<u32>,
 ) -> bool {
+    expr_may_match_bound_inner(
+        expr,
+        spec,
+        bound,
+        sibling_bounds,
+        ancestor_bound,
+        catalog,
+        relation_oid,
+        false,
+    )
+}
+
+fn expr_may_match_bound_inner(
+    expr: &Expr,
+    spec: &LoweredPartitionSpec,
+    bound: &PartitionBoundSpec,
+    sibling_bounds: &[PartitionBoundSpec],
+    ancestor_bound: Option<&PartitionBoundSpec>,
+    catalog: Option<&dyn CatalogLookup>,
+    relation_oid: Option<u32>,
+    inside_or_arm: bool,
+) -> bool {
     if let (Some(catalog), Some(relation_oid)) = (catalog, relation_oid)
-        && !relation_may_satisfy_own_partition_bound(catalog, relation_oid, Some(expr))
+        && !relation_may_satisfy_own_partition_bound_inner(
+            catalog,
+            relation_oid,
+            Some(expr),
+            inside_or_arm,
+        )
     {
         return false;
     }
@@ -497,11 +538,32 @@ fn expr_may_match_bound(
         Expr::Const(Value::Bool(value)) => *value,
         Expr::Bool(bool_expr) => match bool_expr.boolop {
             BoolExprType::And => {
-                range_may_satisfy_conjunction(expr, spec, bound, sibling_bounds, ancestor_bound)
-                    .unwrap_or(true)
-                    && hash_may_satisfy_conjunction(expr, spec, bound, catalog).unwrap_or(true)
+                let range_mode = if inside_or_arm {
+                    RangeConstraintMode::PermissiveConflicts
+                } else {
+                    RangeConstraintMode::Strict
+                };
+                let range_result = range_may_satisfy_conjunction(
+                    expr,
+                    spec,
+                    bound,
+                    sibling_bounds,
+                    ancestor_bound,
+                    range_mode,
+                )
+                .unwrap_or(true);
+                let hash_result =
+                    hash_may_satisfy_conjunction(expr, spec, bound, catalog).unwrap_or(true);
+                range_result
+                    && hash_result
                     && bool_expr.args.iter().all(|arg| {
-                        expr_may_match_bound(
+                        if inside_or_arm && range_conjunct_applies_to_spec(arg, spec) {
+                            // :HACK: PostgreSQL's OR-arm pruning relies on the
+                            // combined range clause set and does not reprove
+                            // every individual contradictory range conjunct.
+                            return true;
+                        }
+                        expr_may_match_bound_inner(
                             arg,
                             spec,
                             bound,
@@ -509,11 +571,12 @@ fn expr_may_match_bound(
                             ancestor_bound,
                             catalog,
                             relation_oid,
+                            inside_or_arm,
                         )
                     })
             }
             BoolExprType::Or => bool_expr.args.iter().any(|arg| {
-                expr_may_match_bound(
+                expr_may_match_bound_inner(
                     arg,
                     spec,
                     bound,
@@ -521,6 +584,7 @@ fn expr_may_match_bound(
                     ancestor_bound,
                     catalog,
                     relation_oid,
+                    true,
                 )
             }),
             BoolExprType::Not => true,
@@ -624,6 +688,23 @@ fn expr_may_match_bound(
             }
         }
         _ => true,
+    }
+}
+
+fn range_conjunct_applies_to_spec(expr: &Expr, spec: &LoweredPartitionSpec) -> bool {
+    if !matches!(spec.strategy, PartitionStrategy::Range) {
+        return false;
+    }
+    match expr {
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => partition_key_index(inner, spec).is_some(),
+        Expr::Op(op) => {
+            let [left, right] = op.args.as_slice() else {
+                return false;
+            };
+            let collation_oid = op_pruning_collation(op);
+            partition_key_const_cmp(left, right, spec, collation_oid, None).is_some()
+        }
+        _ => partition_key_bool_equality_predicate(expr, spec).is_some(),
     }
 }
 
@@ -1615,12 +1696,19 @@ enum ConstraintApplyResult {
     Contradiction,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RangeConstraintMode {
+    Strict,
+    PermissiveConflicts,
+}
+
 fn range_may_satisfy_conjunction(
     expr: &Expr,
     spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
     ancestor_bound: Option<&PartitionBoundSpec>,
+    mode: RangeConstraintMode,
 ) -> Option<bool> {
     if !matches!(spec.strategy, PartitionStrategy::Range) {
         return None;
@@ -1628,7 +1716,7 @@ fn range_may_satisfy_conjunction(
     let mut constraints = vec![KeyConstraint::default(); spec.key_exprs.len()];
     let mut saw_constraint = false;
     for conjunct in flatten_and_exprs(expr) {
-        match apply_range_constraint(conjunct, spec, &mut constraints) {
+        match apply_range_constraint(conjunct, spec, &mut constraints, mode) {
             ConstraintApplyResult::Applied => saw_constraint = true,
             ConstraintApplyResult::Ignored => {}
             ConstraintApplyResult::Contradiction => return Some(false),
@@ -1915,15 +2003,17 @@ fn apply_range_constraint(
     expr: &Expr,
     spec: &LoweredPartitionSpec,
     constraints: &mut [KeyConstraint],
+    mode: RangeConstraintMode,
 ) -> ConstraintApplyResult {
     if let Some((key_index, value)) = partition_key_bool_equality_predicate(expr, spec) {
-        return if add_comparison_constraint(
+        return if apply_range_comparison_constraint(
             constraints,
             spec,
             key_index,
             OpExprKind::Eq,
             Value::Bool(value),
             None,
+            mode,
         ) {
             ConstraintApplyResult::Applied
         } else {
@@ -1960,13 +2050,46 @@ fn apply_range_constraint(
             } else {
                 commute_op(op.op)
             };
-            if add_comparison_constraint(constraints, spec, key_index, op, value, collation_oid) {
+            if apply_range_comparison_constraint(
+                constraints,
+                spec,
+                key_index,
+                op,
+                value,
+                collation_oid,
+                mode,
+            ) {
                 ConstraintApplyResult::Applied
             } else {
                 ConstraintApplyResult::Contradiction
             }
         }
         _ => ConstraintApplyResult::Ignored,
+    }
+}
+
+fn apply_range_comparison_constraint(
+    constraints: &mut [KeyConstraint],
+    spec: &LoweredPartitionSpec,
+    key_index: usize,
+    op: OpExprKind,
+    value: Value,
+    collation_oid: Option<u32>,
+    mode: RangeConstraintMode,
+) -> bool {
+    if mode == RangeConstraintMode::Strict || key_index >= constraints.len() {
+        return add_comparison_constraint(constraints, spec, key_index, op, value, collation_oid);
+    }
+    let saved = constraints[key_index].clone();
+    if add_comparison_constraint(constraints, spec, key_index, op, value, collation_oid) {
+        true
+    } else {
+        // :HACK: PostgreSQL's partition pruning does not prove every
+        // contradictory conjunct inside OR arms. Keep the first useful
+        // per-key range constraint for pruning, but let execution enforce the
+        // full filter.
+        constraints[key_index] = saved;
+        true
     }
 }
 
@@ -3302,6 +3425,25 @@ mod tests {
             None,
             None,
         ));
+    }
+
+    #[test]
+    fn range_or_arm_keeps_first_constraint_from_conflicting_and_arm() {
+        let spec = range_spec();
+        let one_to_ten = int_range_bound(int_value(1), int_value(10));
+        let fifteen_to_twenty = int_range_bound(int_value(15), int_value(20));
+        let contradictory_arm = Expr::and(int_cmp(OpExprKind::Eq, 1), int_cmp(OpExprKind::Eq, 3));
+        let exact_arm = Expr::and(int_cmp(OpExprKind::Gt, 1), int_cmp(OpExprKind::Eq, 15));
+        let expr = Expr::or(contradictory_arm.clone(), exact_arm);
+
+        assert!(!expr_may_match_bound(
+            &contradictory_arm,
+            &spec,
+            &one_to_ten,
+            &[]
+        ));
+        assert!(expr_may_match_bound(&expr, &spec, &one_to_ten, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &fifteen_to_twenty, &[]));
     }
 
     #[test]

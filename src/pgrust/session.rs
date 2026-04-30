@@ -3411,9 +3411,11 @@ impl Session {
         // PostgreSQL's parameter selectivity estimates. Keeping index paths out
         // of generic SQL PREPARE plans matches the plancache regression shape
         // until generic/custom planning has a real cost model.
-        config.enable_indexscan = false;
-        config.enable_indexonlyscan = false;
-        config.enable_bitmapscan = false;
+        if config.enable_sort {
+            config.enable_indexscan = false;
+            config.enable_indexonlyscan = false;
+            config.enable_bitmapscan = false;
+        }
         config
     }
 

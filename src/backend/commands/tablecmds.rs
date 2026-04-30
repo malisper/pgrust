@@ -1273,14 +1273,17 @@ fn apply_update_constraint_exclusion(
     catalog: &dyn CatalogLookup,
     planner_config: PlannerConfig,
 ) -> BoundUpdateStatement {
-    let has_multiple_targets = stmt.targets.len() > 1;
+    let inherited_target_count = stmt
+        .targets
+        .iter()
+        .filter(|target| target.partition_update_root_oid.is_none())
+        .count();
     for target in &mut stmt.targets {
         let should_check = if target.partition_update_root_oid.is_some() {
             planner_config.enable_partition_pruning
-        } else if has_multiple_targets
-            && relation_participates_in_regular_inheritance(catalog, target.relation_oid)
-        {
-            planner_config.constraint_exclusion_partition
+        } else if relation_participates_in_regular_inheritance(catalog, target.relation_oid) {
+            planner_config.constraint_exclusion_on
+                || (planner_config.constraint_exclusion_partition && inherited_target_count > 1)
         } else {
             planner_config.constraint_exclusion_on
         };
@@ -1309,14 +1312,17 @@ fn apply_delete_constraint_exclusion(
     catalog: &dyn CatalogLookup,
     planner_config: PlannerConfig,
 ) -> BoundDeleteStatement {
-    let has_multiple_targets = stmt.targets.len() > 1;
+    let inherited_target_count = stmt
+        .targets
+        .iter()
+        .filter(|target| target.partition_delete_root_oid.is_none())
+        .count();
     for target in &mut stmt.targets {
         let should_check = if target.partition_delete_root_oid.is_some() {
             planner_config.enable_partition_pruning
-        } else if has_multiple_targets
-            && relation_participates_in_regular_inheritance(catalog, target.relation_oid)
-        {
-            planner_config.constraint_exclusion_partition
+        } else if relation_participates_in_regular_inheritance(catalog, target.relation_oid) {
+            planner_config.constraint_exclusion_on
+                || (planner_config.constraint_exclusion_partition && inherited_target_count > 1)
         } else {
             planner_config.constraint_exclusion_on
         };

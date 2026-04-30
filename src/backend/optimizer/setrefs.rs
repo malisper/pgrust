@@ -8,6 +8,7 @@ use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
 use crate::backend::parser::{CatalogLookup, SubqueryComparisonOp};
+use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     Query, QueryRowMark, RangeTblEntryKind, TableSampleClause,
@@ -7096,6 +7097,17 @@ fn maybe_wrap_nested_loop_inner_plan(
     if _outer_rows > 5000.0 && plan_contains_values_scan(&right_plan) {
         return right_plan;
     }
+    if root.is_some_and(|root| {
+        matches!(
+            root.parse.command_type,
+            CommandType::Update | CommandType::Delete
+        ) && plan_is_partitioned_append_under_passthrough(&right_plan)
+    }) {
+        // :HACK: PostgreSQL keeps partitioned DML targets visible as target
+        // append paths instead of wrapping the target side in Memoize. The
+        // long-term fix is a target-aware join path role during planning.
+        return right_plan;
+    }
     let mut dependent_paramids = BTreeSet::new();
     collect_plan_exec_paramids(&right_plan, &mut dependent_paramids);
     if dependent_paramids.is_empty() {
@@ -7184,15 +7196,25 @@ fn memoize_inner_plan_is_trivial_or_function(plan: &Plan) -> bool {
 fn plan_is_partitioned_append_under_passthrough(plan: &Plan) -> bool {
     match plan {
         Plan::Append {
-            partition_prune, ..
+            partition_prune,
+            children,
+            ..
         }
         | Plan::MergeAppend {
-            partition_prune, ..
-        } => partition_prune.is_some(),
+            partition_prune,
+            children,
+            ..
+        } => {
+            partition_prune.is_some()
+                || children
+                    .iter()
+                    .any(plan_is_partitioned_append_under_passthrough)
+        }
         Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::Limit { input, .. }
-        | Plan::Materialize { input, .. } => plan_is_partitioned_append_under_passthrough(input),
+        | Plan::Materialize { input, .. }
+        | Plan::SubqueryScan { input, .. } => plan_is_partitioned_append_under_passthrough(input),
         _ => false,
     }
 }
