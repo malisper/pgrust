@@ -69,6 +69,43 @@ fn attrs() -> ConstraintAttributes {
     ConstraintAttributes::default()
 }
 
+fn from_without_table_locations(mut from: Option<FromItem>) -> Option<FromItem> {
+    fn clear_from_item_locations(item: &mut FromItem) {
+        match item {
+            FromItem::Table { location, .. } => *location = None,
+            FromItem::TableSample { source, .. }
+            | FromItem::Lateral(source)
+            | FromItem::Alias { source, .. } => clear_from_item_locations(source),
+            FromItem::Join { left, right, .. } => {
+                clear_from_item_locations(left);
+                clear_from_item_locations(right);
+            }
+            FromItem::DerivedTable(stmt) => {
+                if let Some(from) = stmt.from.as_mut() {
+                    clear_from_item_locations(from);
+                }
+            }
+            FromItem::Values { .. }
+            | FromItem::FunctionCall { .. }
+            | FromItem::RowsFrom { .. }
+            | FromItem::JsonTable(_)
+            | FromItem::XmlTable(_) => {}
+        }
+    }
+
+    if let Some(item) = from.as_mut() {
+        clear_from_item_locations(item);
+    }
+    from
+}
+
+fn select_items_without_locations(mut items: Vec<SelectItem>) -> Vec<SelectItem> {
+    for item in &mut items {
+        item.location = None;
+    }
+    items
+}
+
 #[test]
 fn parse_create_publication_mixed_targets_and_options() {
     let stmt = parse_statement(
@@ -2682,7 +2719,7 @@ fn pest_matches_minimal_select_statement() {
     match stmt {
         Statement::Select(stmt) => {
             assert_eq!(
-                stmt.from,
+                from_without_table_locations(stmt.from),
                 Some(FromItem::Table {
                     name: "people".into(),
                     only: false,
@@ -2701,7 +2738,7 @@ fn parse_select_table_star_as_inherited_table_reference() {
     match stmt {
         Statement::Select(stmt) => {
             assert_eq!(
-                stmt.from,
+                from_without_table_locations(stmt.from),
                 Some(FromItem::Table {
                     name: "people".into(),
                     only: false,
@@ -8515,7 +8552,7 @@ fn parse_multiline_position_convert_from_expression() {
 fn parse_select_with_where() {
     let stmt = parse_select("select name, note from people where id > 1 and note is null").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Table {
             name: "people".into(),
             only: false,
@@ -8549,7 +8586,7 @@ fn parse_join_select() {
     )
     .unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Join {
             left: Box::new(FromItem::Table {
                 name: "people".into(),
@@ -8574,7 +8611,7 @@ fn parse_join_select() {
 fn parse_cross_join_select() {
     let stmt = parse_select("select people.name, pets.name from people, pets").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Join {
             left: Box::new(FromItem::Table {
                 name: "people".into(),
@@ -8597,7 +8634,7 @@ fn parse_table_alias() {
     let stmt = parse_select("select s.name from people s").unwrap();
     assert_eq!(stmt.targets[0].output_name, "name");
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
@@ -8616,7 +8653,7 @@ fn parse_table_alias_with_as() {
     let stmt = parse_select("select s.name from people as s").unwrap();
     assert_eq!(stmt.targets[0].output_name, "name");
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
@@ -8640,7 +8677,7 @@ fn parse_select_with_quoted_output_alias() {
 fn parse_select_star_with_table_alias() {
     let stmt = parse_select("select * from people p").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
@@ -8660,7 +8697,7 @@ fn parse_table_sample_system_repeatable() {
     let stmt =
         parse_select("select * from people p tablesample system (t1.a) repeatable (t1.b)").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::TableSample {
             source: Box::new(FromItem::Alias {
                 source: Box::new(FromItem::Table {
@@ -8686,7 +8723,7 @@ fn parse_table_sample_without_alias() {
     let stmt =
         parse_select("select id from people tablesample bernoulli (50) repeatable (0)").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::TableSample {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
@@ -9528,7 +9565,7 @@ fn parse_numeric_cast_typmods() {
 fn parse_cross_join_with_aliases() {
     let stmt = parse_select("select p.name, q.name from people p, pets q").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Join {
             left: Box::new(FromItem::Alias {
                 source: Box::new(FromItem::Table {
@@ -9567,7 +9604,7 @@ fn parse_select_without_from() {
 fn parse_select_without_targets_but_with_from() {
     let stmt = parse_select("select from people").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Table {
             name: "people".into(),
             only: false,
@@ -9598,7 +9635,7 @@ fn unquoted_identifiers_fold_to_lowercase_for_relation_lookup() {
 fn quoted_identifiers_preserve_case() {
     let stmt = parse_select("select id from \"CHAR_TBL\"").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Table {
             name: "CHAR_TBL".into(),
             only: false,
@@ -17635,12 +17672,15 @@ fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() 
     )
     .unwrap();
     let err = build_plan(&stmt, &catalog()).unwrap_err();
-    assert!(matches!(
-        err.unpositioned(),
-        ParseError::InvalidRecursion(message)
-            if message
-                == "recursive reference to query \"outermost\" must not appear within a subquery"
-    ));
+    assert!(
+        matches!(
+            err.unpositioned(),
+            ParseError::InvalidRecursion(message)
+                if message
+                    == "recursive reference to query \"outermost\" must not appear within its non-recursive term"
+        ),
+        "unexpected recursion error: {err:?}"
+    );
 }
 
 #[test]
@@ -19162,7 +19202,7 @@ fn parse_aliasless_derived_table() {
 fn parse_parenthesized_table_keyword_from_item() {
     let stmt = parse_select("select * from (table people) p").unwrap();
     assert_eq!(
-        stmt.from,
+        from_without_table_locations(stmt.from),
         Some(FromItem::Alias {
             source: Box::new(FromItem::Table {
                 name: "people".into(),
@@ -19872,7 +19912,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && returning == vec![SelectItem {
+            && select_items_without_locations(returning.clone()) == vec![SelectItem {
                 output_name: "*".into(),
                 expr: SqlExpr::Column("*".into()),
                 location: None,
@@ -19887,7 +19927,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && returning == vec![
+            && select_items_without_locations(returning.clone()) == vec![
                 SelectItem {
                     output_name: "id".into(),
                     expr: SqlExpr::Column("id".into()),
@@ -19921,7 +19961,7 @@ fn parse_dml_returning_targets() {
             returning,
             ..
         }) if table_name == "people"
-            && returning == vec![
+            && select_items_without_locations(returning.clone()) == vec![
                 SelectItem {
                     output_name: "id".into(),
                     expr: SqlExpr::Column("id".into()),

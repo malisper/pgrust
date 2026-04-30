@@ -1565,6 +1565,21 @@ fn update_from_projection_targets(
     targets
 }
 
+fn align_relation_outputs_to_projected_slots(mut scope: BoundScope) -> BoundScope {
+    for (index, column) in scope.columns.iter_mut().enumerate() {
+        if column.relation_output_exprs.is_empty() {
+            continue;
+        }
+        let Some(expr) = scope.output_exprs.get(index).cloned() else {
+            continue;
+        };
+        for (_, relation_expr) in &mut column.relation_output_exprs {
+            *relation_expr = expr.clone();
+        }
+    }
+    scope
+}
+
 fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>) -> Query {
     let AnalyzedFrom {
         rtable,
@@ -5212,6 +5227,7 @@ fn bind_update_from(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let eval_scope = align_relation_outputs_to_projected_slots(eval_scope);
     let returning_scope = scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc);
 
     let target_rls = build_target_relation_row_security(
@@ -5646,6 +5662,7 @@ fn bind_delete_using(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let eval_scope = align_relation_outputs_to_projected_slots(eval_scope);
     let returning_scope = scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc);
 
     let target_rls = build_target_relation_row_security(
