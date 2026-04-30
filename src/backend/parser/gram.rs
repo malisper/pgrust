@@ -3545,10 +3545,10 @@ fn try_parse_alter_table_trigger_state_statement(
 ) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
-    if !lowered.starts_with("alter table ") || !lowered.contains(" trigger ") {
+    if !lowered.starts_with("alter table ") || !lowered.contains("trigger") {
         return Ok(None);
     }
-    if !lowered.contains(" enable ") && !lowered.contains(" disable ") {
+    if !lowered.contains("enable") && !lowered.contains("disable") {
         return Ok(None);
     }
     build_alter_table_trigger_state_statement(trimmed)
@@ -7321,6 +7321,35 @@ fn strip_create_foreign_table_column_options(
     Ok((format!("({})", cleaned_items.join(", ")), column_options))
 }
 
+fn strip_create_foreign_table_column_options_from_base_clause(
+    base_clause: &str,
+) -> Result<(String, Vec<(String, Vec<RelOption>)>), ParseError> {
+    let mut cleaned = String::with_capacity(base_clause.len());
+    let mut column_options = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < base_clause.len() {
+        let Some(open_offset) = base_clause[cursor..].find('(') else {
+            cleaned.push_str(&base_clause[cursor..]);
+            break;
+        };
+        let open = cursor + open_offset;
+        cleaned.push_str(&base_clause[cursor..open]);
+        let Some(close_offset) =
+            find_matching_create_foreign_table_columns_end(&base_clause[open..])
+        else {
+            cleaned.push_str(&base_clause[open..]);
+            break;
+        };
+        let close = open + close_offset;
+        let (segment, mut options) =
+            strip_create_foreign_table_column_options(&base_clause[open..=close])?;
+        cleaned.push_str(&segment);
+        column_options.append(&mut options);
+        cursor = close.saturating_add(1);
+    }
+    Ok((cleaned, column_options))
+}
+
 fn build_create_foreign_table_statement(
     sql: &str,
 ) -> Result<CreateForeignTableStatement, ParseError> {
@@ -7333,22 +7362,17 @@ fn build_create_foreign_table_statement(
     };
     let ((schema_name, table_name), next) = parse_qualified_sql_name(rest)?;
     rest = next.trim_start();
-    let columns_end = find_matching_create_foreign_table_columns_end(rest).ok_or(
-        ParseError::UnexpectedToken {
-            expected: "foreign table column definitions",
-            actual: rest.into(),
-        },
-    )?;
-    let columns_sql = &rest[..=columns_end];
-    let (columns_sql, column_options) = strip_create_foreign_table_column_options(columns_sql)?;
-    rest = rest[columns_end + 1..].trim_start();
-    if !keyword_at_start(rest, "server") {
+    let Some(server_idx) = find_top_level_keyword(rest, "server") else {
         return Err(ParseError::UnexpectedToken {
             expected: "SERVER",
-            actual: rest.into(),
-        });
-    }
-    rest = consume_keyword(rest, "server").trim_start();
+            actual: "syntax error at or near \";\"".into(),
+        }
+        .with_position(sql.len()));
+    };
+    let base_clause = rest[..server_idx].trim_end();
+    let (base_clause, column_options) =
+        strip_create_foreign_table_column_options_from_base_clause(base_clause)?;
+    rest = consume_keyword(rest[server_idx..].trim_start(), "server").trim_start();
     let (server_name, tail) = parse_sql_identifier(rest)?;
     let tail = tail.trim_start();
     let options = if tail.is_empty() {
@@ -7367,9 +7391,9 @@ fn build_create_foreign_table_statement(
         .map(|schema| format!("{schema}.{table_name}"))
         .unwrap_or_else(|| table_name.clone());
     let create_table_sql = if if_not_exists {
-        format!("create table if not exists {qualified_name} {columns_sql}")
+        format!("create table if not exists {qualified_name} {base_clause}")
     } else {
-        format!("create table {qualified_name} {columns_sql}")
+        format!("create table {qualified_name} {base_clause}")
     };
     let mut create_table = match parse_statement(&create_table_sql)? {
         Statement::CreateTable(stmt) => stmt,
@@ -9416,6 +9440,10 @@ fn try_parse_sequence_statement(sql: &str) -> Result<Option<Statement>, ParseErr
         return build_alter_sequence_rename_statement(trimmed)
             .map(|stmt| Some(Statement::AlterSequenceRename(stmt)));
     }
+    if lowered.contains(" set schema ") {
+        return build_alter_sequence_set_schema_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterSequenceSetSchema(stmt)));
+    }
     build_alter_sequence_statement(trimmed).map(|stmt| Some(Statement::AlterSequence(stmt)))
 }
 
@@ -10176,6 +10204,42 @@ fn build_alter_sequence_rename_statement(
         only: false,
         table_name,
         new_table_name,
+    })
+}
+
+fn build_alter_sequence_set_schema_statement(
+    sql: &str,
+) -> Result<AlterRelationSetSchemaStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "sequence").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (parts, rest) = parse_qualified_identifier_parts(rest)?;
+    let relation_name = parts.join(".");
+    let mut rest = rest.trim_start();
+    rest = consume_keyword(rest, "set").trim_start();
+    rest = consume_keyword(rest, "schema").trim_start();
+    let (schema_name, rest) = parse_unqualified_identifier(rest, "schema name")?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER SEQUENCE SET SCHEMA statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterRelationSetSchemaStatement {
+        if_exists,
+        relation_name,
+        schema_name,
     })
 }
 
@@ -12470,16 +12534,20 @@ fn parse_aggregate_parallel(input: &str) -> Result<FunctionParallel, ParseError>
 
 fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, ParseError> {
     let lowered = sql.to_ascii_lowercase();
-    if lowered.starts_with("create constraint trigger") {
-        return Err(ParseError::FeatureNotSupported(
-            "CONSTRAINT TRIGGER is not supported".into(),
-        ));
+    let (prefix, replace_existing, is_constraint) =
+        if lowered.starts_with("create constraint trigger") {
+            ("create constraint trigger", false, true)
+        } else if lowered.starts_with("create or replace trigger") {
+            ("create or replace trigger", true, false)
+        } else {
+            ("create trigger", false, false)
+        };
+    if is_constraint && replace_existing {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE CONSTRAINT TRIGGER",
+            actual: sql.into(),
+        });
     }
-    let (prefix, replace_existing) = if lowered.starts_with("create or replace trigger") {
-        ("create or replace trigger", true)
-    } else {
-        ("create trigger", false)
-    };
     let Some(rest) = sql.get(prefix.len()..) else {
         return Err(ParseError::UnexpectedToken {
             expected: "CREATE TRIGGER name ...",
@@ -12593,6 +12661,7 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
 
     Ok(CreateTriggerStatement {
         replace_existing,
+        is_constraint,
         trigger_name,
         schema_name,
         table_name,

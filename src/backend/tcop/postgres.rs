@@ -39,7 +39,7 @@ use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::cache::syscache::backend_catcache;
 use crate::backend::utils::cache::system_views::format_pg_get_expr_policy_sql;
 use crate::backend::utils::misc::guc_datetime::{
-    DateTimeConfig, format_datestyle, format_timezone,
+    DateOrder, DateStyleFormat, DateTimeConfig, format_datestyle, format_timezone,
 };
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
@@ -49,6 +49,7 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::sql_deparse::{
     normalize_index_expression_sql, normalize_index_predicate_sql,
 };
+use crate::backend::utils::time::date::{format_date_text, parse_date_text};
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::{
     ANYELEMENTOID, PG_CLASS_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID,
@@ -606,6 +607,16 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = create_table_error_position(sql, message) {
                 return Some(position);
             }
+            if message == "primary key constraints are not supported on foreign tables" {
+                return find_case_insensitive_token_position(sql, "PRIMARY KEY");
+            }
+            if message == "foreign key constraints are not supported on foreign tables" {
+                return find_case_insensitive_token_position(sql, "REFERENCES")
+                    .or_else(|| find_case_insensitive_token_position(sql, "FOREIGN KEY"));
+            }
+            if message == "unique constraints are not supported on foreign tables" {
+                return find_case_insensitive_token_position(sql, "UNIQUE");
+            }
             if let Some(position) = domain_ddl_error_position(sql, message) {
                 return Some(position);
             }
@@ -680,6 +691,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         )) => {
             if message == "set-returning functions must appear at top level of FROM" {
                 return find_nested_from_function_srf_position(sql);
+            }
+            if message == "conflicting or redundant options" {
+                return conflicting_foreign_wrapper_option_position(sql, "HANDLER")
+                    .or_else(|| conflicting_foreign_wrapper_option_position(sql, "VALIDATOR"));
             }
             if message == "set-returning functions are not allowed in VALUES" {
                 return find_first_srf_position(sql);
@@ -3495,6 +3510,29 @@ fn find_second_option_occurrence(sql: &str, option: &str) -> Option<usize> {
     None
 }
 
+fn conflicting_foreign_wrapper_option_position(sql: &str, option: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let option_lower = option.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let option_bytes = option_lower.as_bytes();
+    let mut search_from = 0usize;
+    let mut seen = 0usize;
+    while let Some(relative) = lower[search_from..].find(&option_lower) {
+        let index = search_from + relative;
+        let end = index + option_bytes.len();
+        let has_start_boundary = index == 0 || !is_identifier_byte(bytes[index - 1]);
+        let has_end_boundary = end >= bytes.len() || !is_identifier_byte(bytes[end]);
+        if has_start_boundary && has_end_boundary {
+            seen += 1;
+            if seen == 2 {
+                return Some(index + 1);
+            }
+        }
+        search_from = index.saturating_add(option_bytes.len());
+    }
+    find_second_option_occurrence(sql, &option_lower)
+}
+
 fn find_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize> {
     if let Some(index) = sql.find(token) {
         return Some(index + 1);
@@ -3755,6 +3793,7 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
         response.context = Some(format!("SQL function \"{function_name}\" during inlining"));
     }
     apply_errors_regression_syntax_compat(sql, &mut response);
+    apply_foreign_table_constraint_error_position(sql, &mut response);
 
     match response.message.as_str() {
         "unsafe use of string constant with Unicode escapes" => {
@@ -3828,6 +3867,22 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
     }
 
     response
+}
+
+fn apply_foreign_table_constraint_error_position(sql: &str, response: &mut ExecErrorResponse) {
+    match response.message.as_str() {
+        "primary key constraints are not supported on foreign tables" => {
+            response.position = find_case_insensitive_token_position(sql, "PRIMARY KEY");
+        }
+        "foreign key constraints are not supported on foreign tables" => {
+            response.position = find_case_insensitive_token_position(sql, "REFERENCES")
+                .or_else(|| find_case_insensitive_token_position(sql, "FOREIGN KEY"));
+        }
+        "unique constraints are not supported on foreign tables" => {
+            response.position = find_case_insensitive_token_position(sql, "UNIQUE");
+        }
+        _ => {}
+    }
 }
 
 fn invalid_from_clause_reference_table(e: &ExecError) -> Option<&str> {
@@ -4058,6 +4113,10 @@ fn apply_alter_table_regression_error_compat(sql: &str, response: &mut ExecError
         .message
         .starts_with("cannot alter system column \"")
     {
+        if compact.starts_with("alter foreign table ") {
+            response.position = None;
+            return;
+        }
         if let Some(name) =
             quoted_name_after_prefix(&response.message, "cannot alter system column ")
         {
@@ -6107,7 +6166,7 @@ fn execute_query_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Err(e) => {
-            send_queued_notices_with_sql(stream, Some(error_sql.as_ref()))?;
+            send_queued_notices_for_session(stream, Some(error_sql.as_ref()), &state.session)?;
             send_exec_error(stream, error_sql.as_ref(), &e)?;
             Ok(QueryStatementFlow::Stop)
         }
@@ -6286,7 +6345,7 @@ fn execute_copy_to_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Err(e) => {
-            send_queued_notices_with_sql(stream, Some(sql))?;
+            send_queued_notices_for_session(stream, Some(sql), &state.session)?;
             send_exec_error(stream, sql, &e)?;
             Ok(QueryStatementFlow::Stop)
         }
@@ -6391,7 +6450,7 @@ fn execute_streaming_select_statement(
 
             if let Some(e) = err {
                 state.session.mark_transaction_failed();
-                send_queued_notices_with_sql(stream, Some(sql))?;
+                send_queued_notices_for_session(stream, Some(sql), &state.session)?;
                 send_exec_error(stream, sql, &e)?;
                 return Ok(QueryStatementFlow::Stop);
             }
@@ -6405,7 +6464,7 @@ fn execute_streaming_select_statement(
         }
         Err(e) => {
             state.session.mark_transaction_failed();
-            send_queued_notices_with_sql(stream, Some(sql))?;
+            send_queued_notices_for_session(stream, Some(sql), &state.session)?;
             send_exec_error(stream, sql, &e)?;
             Ok(QueryStatementFlow::Stop)
         }
@@ -9578,10 +9637,13 @@ fn format_check_expr_for_constraint_display(
     let Some(relation) = relation else {
         return normalize_check_expr_operator_spacing(expr_sql);
     };
-    if expr_sql.contains("::") {
-        return expr_sql.to_string();
-    }
     let normalized = normalize_check_expr_operator_spacing(expr_sql);
+    if let Some(rendered) = format_simple_date_between_check(&normalized, relation) {
+        return rendered;
+    }
+    if expr_sql.contains("::") {
+        return normalized;
+    }
     let trimmed = normalized.trim();
     let operators = [">=", "<=", "<>", "!=", "=", ">", "<"];
     for operator in operators {
@@ -9591,6 +9653,14 @@ fn format_check_expr_for_constraint_display(
         };
         let left = trimmed[..index].trim();
         let right = trimmed[index + needle.len()..].trim();
+        if relation.desc.columns.iter().any(|column| {
+            !column.dropped
+                && matches!(column.sql_type.kind, SqlTypeKind::Text)
+                && check_expr_column_matches(left, &column.name)
+        }) && is_simple_sql_string_literal(right)
+        {
+            return format!("{left} {operator} {right}::text");
+        }
         if relation.desc.columns.iter().any(|column| {
             !column.dropped
                 && matches!(column.sql_type.kind, SqlTypeKind::Char)
@@ -9611,6 +9681,42 @@ fn format_check_expr_for_constraint_display(
         }
     }
     normalized
+}
+
+fn format_simple_date_between_check(
+    expr_sql: &str,
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+) -> Option<String> {
+    let (column_name, rest) = expr_sql.split_once(" BETWEEN ")?;
+    let (lower, upper) = rest.split_once(" AND ")?;
+    let column_name = column_name.trim();
+    if !relation.desc.columns.iter().any(|column| {
+        !column.dropped
+            && matches!(column.sql_type.kind, SqlTypeKind::Date)
+            && check_expr_column_matches(column_name, &column.name)
+    }) {
+        return None;
+    }
+    let lower = parse_date_cast_literal(lower.trim())?;
+    let upper = parse_date_cast_literal(upper.trim())?;
+    Some(format!(
+        "{column_name} >= '{}'::date AND {column_name} <= '{}'::date",
+        format_date_for_constraint_display(lower),
+        format_date_for_constraint_display(upper)
+    ))
+}
+
+fn parse_date_cast_literal(sql: &str) -> Option<DateADT> {
+    let literal = sql.strip_suffix("::date")?.trim();
+    let literal = literal.strip_prefix('\'')?.strip_suffix('\'')?;
+    parse_date_text(literal, &DateTimeConfig::default()).ok()
+}
+
+fn format_date_for_constraint_display(date: DateADT) -> String {
+    let mut config = DateTimeConfig::default();
+    config.date_style_format = DateStyleFormat::Postgres;
+    config.date_order = DateOrder::Mdy;
+    format_date_text(date, &config)
 }
 
 fn normalize_check_expr_operator_spacing(expr_sql: &str) -> String {
@@ -11275,16 +11381,42 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
 }
 
 fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
-    send_queued_notices_with_sql(stream, None)
+    send_queued_notices_with_sql_and_min_messages(stream, None, None)
 }
 
 fn send_queued_notices_with_sql(stream: &mut impl Write, sql: Option<&str>) -> io::Result<()> {
+    send_queued_notices_with_sql_and_min_messages(stream, sql, None)
+}
+
+fn send_queued_notices_for_session(
+    stream: &mut impl Write,
+    sql: Option<&str>,
+    session: &Session,
+) -> io::Result<()> {
+    send_queued_notices_with_sql_and_min_messages(stream, sql, session.client_min_messages())
+}
+
+fn send_queued_notices_with_sql_and_min_messages(
+    stream: &mut impl Write,
+    sql: Option<&str>,
+    client_min_messages: Option<&str>,
+) -> io::Result<()> {
     let mut notice_occurrences = HashMap::new();
     for notice in take_backend_notices() {
+        if !backend_notice_visible_for_client_min_messages(&notice.severity, client_min_messages) {
+            continue;
+        }
         let occurrence = notice_occurrences
             .entry(notice.message.clone())
             .and_modify(|count| *count += 1)
             .or_insert(1);
+        if *occurrence > 1
+            && sql.is_some_and(|sql| {
+                suppress_duplicate_alter_missing_relation_notice(sql, &notice.message)
+            })
+        {
+            continue;
+        }
         let position = notice.position.or_else(|| {
             sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message, *occurrence))
         });
@@ -11311,6 +11443,49 @@ fn send_queued_notices_with_sql(stream: &mut impl Write, sql: Option<&str>) -> i
     send_plpgsql_notices(stream, &take_notices())
 }
 
+fn backend_notice_visible_for_client_min_messages(
+    severity: &str,
+    client_min_messages: Option<&str>,
+) -> bool {
+    let Some(min_messages) = client_min_messages else {
+        return true;
+    };
+    backend_notice_severity_rank(severity) >= client_min_messages_rank(min_messages)
+}
+
+fn backend_notice_severity_rank(severity: &str) -> u8 {
+    match severity.to_ascii_lowercase().as_str() {
+        "debug" | "debug1" | "debug2" | "debug3" | "debug4" | "debug5" => 10,
+        "info" | "log" => 20,
+        "notice" => 30,
+        "warning" => 40,
+        _ => 50,
+    }
+}
+
+fn client_min_messages_rank(value: &str) -> u8 {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "debug" | "debug1" | "debug2" | "debug3" | "debug4" | "debug5" => 10,
+        "info" | "log" => 20,
+        "notice" => 30,
+        "warning" => 40,
+        "error" => 50,
+        _ => 30,
+    }
+}
+
+fn suppress_duplicate_alter_missing_relation_notice(sql: &str, message: &str) -> bool {
+    let compact = sql
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    compact.starts_with("alter foreign table if exists ")
+        && compact.contains(',')
+        && message.starts_with("relation \"")
+        && message.ends_with("\" does not exist, skipping")
+}
+
 fn send_queued_notifications(
     stream: &mut impl Write,
     db: &Database,
@@ -11332,7 +11507,7 @@ fn flush_pending_backend_messages(
     db: &Database,
     session: &Session,
 ) -> io::Result<()> {
-    send_queued_notices(stream)?;
+    send_queued_notices_for_session(stream, None, session)?;
     send_queued_notifications(stream, db, session)
 }
 
@@ -11342,7 +11517,7 @@ fn flush_pending_backend_messages_with_sql(
     session: &Session,
     sql: &str,
 ) -> io::Result<()> {
-    send_queued_notices_with_sql(stream, Some(sql))?;
+    send_queued_notices_for_session(stream, Some(sql), session)?;
     send_queued_notifications(stream, db, session)
 }
 
@@ -14456,7 +14631,7 @@ ORDER BY 1,2";
             vec![vec![
                 Value::Text("widgets_note_nonempty".into()),
                 Value::Text("widgets".into()),
-                Value::Text("CHECK (note <> '')".into()),
+                Value::Text("CHECK (note <> ''::text)".into()),
             ]]
         );
     }

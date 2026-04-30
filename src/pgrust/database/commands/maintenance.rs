@@ -1170,7 +1170,12 @@ impl Database {
                 ));
                 return Ok(StatementResult::AffectedRows(0));
             }
-            return Err(ExecError::Parse(ParseError::TableDoesNotExist(table_name)));
+            return Err(ExecError::DetailedError {
+                message: format!("relation \"{table_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
+            });
         };
         if relation.relkind == 'p' {
             let action = match alter_stmt.persistence {
@@ -1264,7 +1269,12 @@ impl Database {
                 ));
                 return Ok(StatementResult::AffectedRows(0));
             }
-            return Err(ExecError::Parse(ParseError::TableDoesNotExist(table_name)));
+            return Err(ExecError::DetailedError {
+                message: format!("relation \"{table_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
+            });
         };
         let cache = self
             .backend_catcache(client_id, None)

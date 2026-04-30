@@ -1174,7 +1174,7 @@ fn restore_missing_first_class_catalog_rows_scoped(
         let catalog = catalog_from_physical_rows_scoped(base_dir, rows.clone(), db_oid)?;
         rows.constraints = catalog
             .entries()
-            .filter(|(_, entry)| entry.relkind == 'r')
+            .filter(|(_, entry)| matches!(entry.relkind, 'r' | 'f'))
             .flat_map(|(name, entry)| {
                 derived_pg_constraint_rows(
                     entry.relation_oid,

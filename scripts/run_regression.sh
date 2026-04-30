@@ -116,7 +116,6 @@ transform_foreign_data_fixture() {
 
     perl -0pe "
         s/CREATE FUNCTION test_fdw_handler\\(\\)\\n\\s+RETURNS fdw_handler\\n\\s+AS :'regresslib', 'test_fdw_handler'\\n\\s+LANGUAGE C;\\n//s;
-        s/\\btest_fdw_handler\\b/pg_rust_test_fdw_handler/g;
     " "$input_path" > "$output_path"
 }
 

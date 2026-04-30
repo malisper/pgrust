@@ -4057,7 +4057,7 @@ impl CatalogStore {
         let child_relation = self
             .relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if !matches!(child_relation.relkind, 'r' | 'p') {
+        if !matches!(child_relation.relkind, 'r' | 'p' | 'f') {
             let current_inherits = relation_inherits_mvcc(self, ctx, relation_oid)?;
             let removed_inherit = current_inherits
                 .iter()
@@ -6008,6 +6008,62 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn update_check_constraint_exprs_mvcc(
+        &mut self,
+        relation_oid: u32,
+        updates: &[(u32, String)],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        if updates.is_empty() {
+            return Ok(CatalogMutationEffect::default());
+        }
+
+        let update_map = updates
+            .iter()
+            .map(|(oid, expr_sql)| (*oid, expr_sql.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let old_rows = relation_constraints_mvcc(self, ctx, relation_oid)?
+            .into_iter()
+            .filter(|row| update_map.contains_key(&row.oid))
+            .collect::<Vec<_>>();
+        if old_rows.len() != update_map.len() {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let new_rows = old_rows
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                row.conbin = update_map.get(&row.oid).cloned();
+                row
+            })
+            .collect::<Vec<_>>();
+
+        let kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: old_rows,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: new_rows,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn update_foreign_key_constraint_inheritance_mvcc(
         &mut self,
         relation_oid: u32,
@@ -6418,7 +6474,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index =
@@ -6452,7 +6508,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index =
@@ -6502,7 +6558,7 @@ impl CatalogStore {
             relation_oid,
             ctx,
             |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = entry
@@ -6573,7 +6629,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = usize::try_from(attnum.saturating_sub(1))
@@ -8121,6 +8177,7 @@ impl CatalogStore {
         if !old_rows.types.is_empty() || !new_rows.types.is_empty() {
             kinds.insert(1, BootstrapCatalogKind::PgType);
         }
+        preserve_non_derived_relation_rows_mvcc(self, ctx, &entry, &kinds, &mut new_rows)?;
         delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
         insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
@@ -9435,7 +9492,7 @@ fn build_relation_entry(
         0
     };
     let mut next_oid = array_type_oid.saturating_add(1);
-    if matches!(relkind, 'r' | 'p') {
+    if matches!(relkind, 'r' | 'p' | 'f') {
         allocate_relation_object_oids(&mut desc, &mut next_oid);
     }
     let rel_number = if relkind_has_storage(relkind) {
@@ -10199,7 +10256,7 @@ fn preserve_non_derived_relation_rows(
     kinds: &[BootstrapCatalogKind],
     new_rows: &mut PhysicalCatalogRows,
 ) {
-    if !matches!(entry.relkind, 'r' | 'p') {
+    if !matches!(entry.relkind, 'r' | 'p' | 'f') {
         return;
     }
 
@@ -10245,7 +10302,7 @@ fn preserve_non_derived_relation_rows_mvcc(
         }
     }
 
-    if !matches!(entry.relkind, 'r' | 'p') {
+    if !matches!(entry.relkind, 'r' | 'p' | 'f') {
         sort_pg_depend_rows(&mut new_rows.depends);
         new_rows.depends.dedup();
         return Ok(());
@@ -10756,7 +10813,7 @@ fn constraint_rows_for_relation_name(
     relation_name: &str,
     entry: &CatalogEntry,
 ) -> Vec<PgConstraintRow> {
-    if matches!(entry.relkind, 'r' | 'p') {
+    if matches!(entry.relkind, 'r' | 'p' | 'f') {
         return derived_pg_constraint_rows(
             entry.relation_oid,
             relation_object_name(relation_name),
@@ -11936,7 +11993,7 @@ fn catalog_entry_by_oid_mvcc_for_drop(
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
     let attributes = relation_attributes_mvcc(store, ctx, relation_oid)?;
     let attrdefs = relation_attrdefs_mvcc(store, ctx, relation_oid)?;
-    let constraints = if matches!(class_row.relkind, 'r' | 'p') {
+    let constraints = if matches!(class_row.relkind, 'r' | 'p' | 'f') {
         relation_constraints_mvcc(store, ctx, relation_oid)?
     } else {
         Vec::new()
@@ -12023,7 +12080,7 @@ fn rows_for_existing_relation_mvcc(
     };
     let triggers = relation_triggers_mvcc(store, ctx, entry.relation_oid)?;
     let inherits = relation_inherits_mvcc(store, ctx, entry.relation_oid)?;
-    let constraints = if matches!(entry.relkind, 'r' | 'p') {
+    let constraints = if matches!(entry.relkind, 'r' | 'p' | 'f') {
         relation_constraints_mvcc(store, ctx, entry.relation_oid)?
     } else {
         Vec::new()
@@ -12278,7 +12335,7 @@ fn rows_for_existing_relation(
         .into_iter()
         .filter(|row| row.inhrelid == entry.relation_oid)
         .collect::<Vec<_>>();
-    let constraints = if matches!(entry.relkind, 'r' | 'p') {
+    let constraints = if matches!(entry.relkind, 'r' | 'p' | 'f') {
         catcache.constraint_rows_for_relation(entry.relation_oid)
     } else {
         Vec::new()
@@ -12805,7 +12862,7 @@ fn collect_relation_drop_oids_visible(
             continue;
         }
         if let Some(dependent) = relcache.get_by_oid(row.objid) {
-            if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
+            if !matches!(dependent.relkind, 'r' | 'f' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
             collect_relation_drop_oids_visible(
@@ -12838,7 +12895,7 @@ fn collect_relation_drop_oids_mvcc(
             continue;
         }
         if let Some(dependent) = class_row_by_oid_mvcc(store, ctx, row.objid)? {
-            if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
+            if !matches!(dependent.relkind, 'r' | 'f' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
             collect_relation_drop_oids_mvcc(store, ctx, dependent.oid, seen, order)?;
@@ -12891,7 +12948,7 @@ fn collect_relation_drop_oids(
             continue;
         }
         if let Some(dependent) = catalog.get_by_oid(row.objid) {
-            if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
+            if !matches!(dependent.relkind, 'r' | 'f' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
             collect_relation_drop_oids(catalog, depend_rows, dependent.relation_oid, seen, order);

@@ -4061,6 +4061,12 @@ impl Database {
                     rename_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterSequenceSetSchema(ref alter_stmt) => self
+                .execute_alter_sequence_set_schema_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::TruncateTable(ref truncate_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let mut relations = Vec::new();
