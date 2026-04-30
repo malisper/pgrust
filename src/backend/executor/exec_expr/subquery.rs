@@ -490,6 +490,12 @@ pub(super) fn eval_scalar_subquery(
             }
             first_value = Some(value);
         }
+        if subplan.par_param.is_empty() {
+            crate::backend::commands::explain::record_explain_analyze_initplan(
+                subplan.plan_id,
+                state.as_ref(),
+            );
+        }
         Ok(first_value.unwrap_or(Value::Null))
     })?;
     if subplan.par_param.is_empty() {

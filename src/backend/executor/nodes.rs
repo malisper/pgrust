@@ -70,8 +70,8 @@ use crate::include::nodes::plannodes::{
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType,
     OUTER_VAR, OrderByEntry, ParamKind, RelationDesc, SELF_ITEM_POINTER_ATTR_NO,
-    ScalarFunctionImpl, SetReturningCall, SubLinkType, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO,
-    XMIN_ATTR_NO, attrno_index, is_special_varno,
+    ScalarFunctionImpl, SetReturningCall, SubLinkType, SubPlan, TABLE_OID_ATTR_NO, Var,
+    XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -79,6 +79,18 @@ use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 const EMPTY_GROUPING_REFS: [usize; 0] = [];
+
+fn dedup_explain_subplans<'a>(found: Vec<&'a SubPlan>) -> Vec<&'a SubPlan> {
+    let mut seen = BTreeSet::new();
+    found
+        .into_iter()
+        .filter(|subplan| seen.insert(subplan.plan_id))
+        .collect()
+}
+
+fn explain_expr_subplans(expr: &Expr) -> Vec<&SubPlan> {
+    crate::backend::commands::explain::direct_expr_subplans(expr)
+}
 
 fn set_active_grouping_refs(ctx: &mut ExecutorContext, refs: &[usize]) {
     ctx.active_grouping_refs.clear();
@@ -1347,6 +1359,22 @@ impl PlanNode for AppendState {
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
     }
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
+    }
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.current_child = 0;
+        self.active_children = None;
+        self.visible_children = None;
+        self.subplans_removed = 0;
+        self.current_bindings.clear();
+        self.current_grouping_refs.clear();
+        self.slot = TupleSlot::empty(self.column_names.len());
+        for child in &mut self.children {
+            child.rescan(ctx)?;
+        }
+        Ok(())
+    }
     fn column_names(&self) -> &[String] {
         &self.column_names
     }
@@ -1361,6 +1389,16 @@ impl PlanNode for AppendState {
     }
     fn node_label(&self) -> String {
         "Append".into()
+    }
+    fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
+        let visible_children = self.visible_children.as_ref()?;
+        if self.subplans_removed == 0
+            && visible_children.len() == 1
+            && let Some(child) = self.children.get(visible_children[0])
+        {
+            return Some(child.as_ref());
+        }
+        None
     }
     fn explain_one_time_false_input(&self) -> bool {
         self.children.is_empty()
@@ -1379,6 +1417,12 @@ impl PlanNode for AppendState {
                 self.subplans_removed
             ));
         }
+    }
+    fn explain_direct_subplans(&self) -> Vec<&SubPlan> {
+        self.partition_prune
+            .as_ref()
+            .map(|partition_prune| explain_expr_subplans(&partition_prune.filter))
+            .unwrap_or_default()
     }
     fn explain_children(
         &self,
@@ -1487,6 +1531,9 @@ fn renumber_relation_alias(relation_name: &str, ordinal: usize) -> String {
     if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
         return relation_name.to_string();
     }
+    if ordinal == 0 {
+        return format!("{relation} {prefix}");
+    }
     format!("{relation} {prefix}_{ordinal}")
 }
 
@@ -1523,8 +1570,8 @@ fn ensure_append_runtime_pruned(
     let Some(partition_prune) = partition_prune else {
         return Ok(());
     };
-    let (startup_visible, startup_removed) =
-        runtime_pruned_startup_child_indexes(partition_prune, ctx);
+    let (explain_visible, explain_removed) =
+        runtime_pruned_explain_visible_child_indexes(partition_prune, ctx);
     let child_count = partition_prune
         .child_domains
         .len()
@@ -1540,16 +1587,20 @@ fn ensure_append_runtime_pruned(
             active.push(index);
         }
     }
-    let should_renumber_aliases = *subplans_removed > 0 || startup_removed > 0;
-    *subplans_removed += startup_removed;
-    if should_renumber_aliases {
-        for (ordinal, child_index) in startup_visible.iter().enumerate() {
+    let should_renumber_aliases = *subplans_removed > 0 || explain_removed > 0;
+    *subplans_removed += explain_removed;
+    if explain_removed == 0 && explain_visible.len() == 1 {
+        if let Some(child) = children.get_mut(explain_visible[0]) {
+            child.renumber_append_child_aliases(0);
+        }
+    } else if should_renumber_aliases {
+        for (ordinal, child_index) in explain_visible.iter().enumerate() {
             if let Some(child) = children.get_mut(*child_index) {
                 child.renumber_append_child_aliases(ordinal + 1);
             }
         }
     }
-    *visible_children = Some(startup_visible);
+    *visible_children = Some(explain_visible);
     *active_children = Some(active);
     Ok(())
 }
@@ -1576,9 +1627,32 @@ pub(crate) fn runtime_pruned_startup_child_indexes(
     (startup_visible, removed)
 }
 
+pub(crate) fn runtime_pruned_explain_visible_child_indexes(
+    partition_prune: &PartitionPrunePlan,
+    ctx: &mut ExecutorContext,
+) -> (Vec<usize>, usize) {
+    let child_count = partition_prune
+        .child_domains
+        .len()
+        .max(partition_prune.child_bounds.len());
+    let visible = (0..child_count)
+        .filter(|index| {
+            partition_prune_child_may_satisfy(
+                partition_prune,
+                *index,
+                RuntimePruneMode::ExplainVisible,
+                ctx,
+            )
+        })
+        .collect::<Vec<_>>();
+    let removed = child_count.saturating_sub(visible.len());
+    (visible, removed)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimePruneMode {
     Startup,
+    ExplainVisible,
     Execution,
 }
 
@@ -1620,8 +1694,16 @@ fn partition_prune_child_may_satisfy(
             &partition_prune.filter,
             catalog.as_deref(),
             |expr| {
-                if mode == RuntimePruneMode::Startup && !startup_prune_expr_is_evaluable(expr) {
-                    return None;
+                match mode {
+                    RuntimePruneMode::Startup if !startup_prune_expr_is_evaluable(expr) => {
+                        return None;
+                    }
+                    RuntimePruneMode::ExplainVisible
+                        if !explain_visible_prune_expr_is_evaluable(expr) =>
+                    {
+                        return None;
+                    }
+                    _ => {}
                 }
                 eval_expr(expr, &mut eval_slot, ctx).ok()
             },
@@ -1685,6 +1767,75 @@ fn startup_prune_expr_is_evaluable(expr: &Expr) -> bool {
                 && escape
                     .as_ref()
                     .is_none_or(|expr| startup_prune_expr_is_evaluable(expr))
+        }
+        _ => false,
+    }
+}
+
+fn explain_visible_prune_expr_is_evaluable(expr: &Expr) -> bool {
+    match expr {
+        Expr::SubPlan(_) | Expr::SubLink(_) => false,
+        Expr::Const(_) | Expr::Var(_) => true,
+        Expr::Param(param) => param.paramkind == ParamKind::External,
+        Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => op.args.iter().all(explain_visible_prune_expr_is_evaluable),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .all(explain_visible_prune_expr_is_evaluable),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .all(explain_visible_prune_expr_is_evaluable),
+        Expr::Cast(expr, _) => explain_visible_prune_expr_is_evaluable(expr),
+        Expr::Collate { expr, .. } => explain_visible_prune_expr_is_evaluable(expr),
+        Expr::IsNull(expr) | Expr::IsNotNull(expr) => explain_visible_prune_expr_is_evaluable(expr),
+        Expr::ScalarArrayOp(scalar) => {
+            explain_visible_prune_expr_is_evaluable(&scalar.left)
+                && explain_visible_prune_expr_is_evaluable(&scalar.right)
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            explain_visible_prune_expr_is_evaluable(left)
+                && explain_visible_prune_expr_is_evaluable(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().all(explain_visible_prune_expr_is_evaluable)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .all(|(_, expr)| explain_visible_prune_expr_is_evaluable(expr)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_none_or(|expr| explain_visible_prune_expr_is_evaluable(expr))
+                && case_expr.args.iter().all(|when| {
+                    explain_visible_prune_expr_is_evaluable(&when.expr)
+                        && explain_visible_prune_expr_is_evaluable(&when.result)
+                })
+                && explain_visible_prune_expr_is_evaluable(&case_expr.defresult)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            explain_visible_prune_expr_is_evaluable(expr)
+                && explain_visible_prune_expr_is_evaluable(pattern)
+                && escape
+                    .as_ref()
+                    .is_none_or(|expr| explain_visible_prune_expr_is_evaluable(expr))
         }
         _ => false,
     }
@@ -1798,6 +1949,25 @@ impl PlanNode for MergeAppendState {
         &self.current_bindings
     }
 
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
+    }
+
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.active_children = None;
+        self.visible_children = None;
+        self.subplans_removed = 0;
+        self.rows = None;
+        self.next_index = 0;
+        self.current_bindings.clear();
+        self.current_grouping_refs.clear();
+        self.slot = TupleSlot::empty(self.column_names.len());
+        for child in &mut self.children {
+            child.rescan(ctx)?;
+        }
+        Ok(())
+    }
+
     fn column_names(&self) -> &[String] {
         &self.column_names
     }
@@ -1845,6 +2015,20 @@ impl PlanNode for MergeAppendState {
                 self.subplans_removed
             ));
         }
+    }
+
+    fn explain_direct_subplans(&self) -> Vec<&SubPlan> {
+        let mut found = self
+            .partition_prune
+            .as_ref()
+            .map(|partition_prune| explain_expr_subplans(&partition_prune.filter))
+            .unwrap_or_default();
+        found.extend(
+            self.items
+                .iter()
+                .flat_map(|item| explain_expr_subplans(&item.expr)),
+        );
+        dedup_explain_subplans(found)
     }
 
     fn explain_children(
@@ -1926,6 +2110,11 @@ impl PlanNode for UniqueState {
 
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
+    }
+
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.current_bindings.clear();
+        self.input.rescan(ctx)
     }
 
     fn column_names(&self) -> &[String] {
@@ -2786,6 +2975,24 @@ impl PlanNode for IndexOnlyScanState {
         &self.current_bindings
     }
 
+    fn rescan(&mut self, _ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if let Some(scan) = self.scan.take() {
+            indexam::index_endscan(scan, self.am_oid).map_err(|err| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "index access method end scan",
+                    actual: format!("{err:?}"),
+                })
+            })?;
+        }
+        self.pending_array_scan_keys.clear();
+        self.array_scan_seen_tids.clear();
+        self.array_scan_keys_initialized = false;
+        self.scan_exhausted = false;
+        self.current_bindings.clear();
+        self.slot = TupleSlot::empty(self.column_names.len());
+        Ok(())
+    }
+
     fn column_names(&self) -> &[String] {
         &self.column_names
     }
@@ -2855,7 +3062,7 @@ impl PlanNode for IndexOnlyScanState {
         if analyze {
             lines.push(format!("{prefix}Heap Fetches: {}", self.stats.heap_fetches));
         }
-        if analyze && self.stats.index_searches > 0 {
+        if analyze && (self.stats.index_searches > 0 || self.stats.loops == 0) {
             lines.push(format!(
                 "{prefix}Index Searches: {}",
                 self.stats.index_searches
@@ -3319,6 +3526,23 @@ impl PlanNode for IndexScanState {
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
     }
+    fn rescan(&mut self, _ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if let Some(scan) = self.scan.take() {
+            indexam::index_endscan(scan, self.am_oid).map_err(|err| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "index access method end scan",
+                    actual: format!("{err:?}"),
+                })
+            })?;
+        }
+        self.pending_array_scan_keys.clear();
+        self.array_scan_seen_tids.clear();
+        self.array_scan_keys_initialized = false;
+        self.scan_exhausted = false;
+        self.current_bindings.clear();
+        self.slot = TupleSlot::empty(self.column_names.len());
+        Ok(())
+    }
     fn column_names(&self) -> &[String] {
         &self.column_names
     }
@@ -3383,7 +3607,7 @@ impl PlanNode for IndexScanState {
         if analyze && self.index_only {
             lines.push(format!("{prefix}Heap Fetches: {}", self.stats.heap_fetches));
         }
-        if analyze && self.stats.index_searches > 0 {
+        if analyze && (self.stats.index_searches > 0 || self.stats.loops == 0) {
             lines.push(format!(
                 "{prefix}Index Searches: {}",
                 self.stats.index_searches
@@ -6224,6 +6448,8 @@ fn render_explain_infix_operand_with_display_type(
         strip_bigint_comparison_cast(expr)
     } else if display_type.is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Char)) {
         strip_bpchar_display_cast(expr)
+    } else if display_type.is_some_and(|ty| matches!(ty.kind, SqlTypeKind::TimestampTz)) {
+        strip_timestamp_timestamptz_display_cast(expr)
     } else {
         expr
     };
@@ -6312,6 +6538,8 @@ fn comparison_display_type(
         Some(SqlType::new(SqlTypeKind::Text))
     } else if let Some(sql_type) = comparison_cast_literal_display_type(left, right) {
         Some(sql_type)
+    } else if timestamp_timestamptz_comparison_display_type(left, right) {
+        Some(SqlType::new(SqlTypeKind::TimestampTz))
     } else {
         None
     }
@@ -6329,6 +6557,19 @@ fn comparison_cast_literal_display_type(left: &Expr, right: &Expr) -> Option<Sql
         SqlTypeKind::Int2 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
     )
     .then_some(sql_type)
+}
+
+fn timestamp_timestamptz_comparison_display_type(left: &Expr, right: &Expr) -> bool {
+    [left, right].iter().any(|expr| {
+        matches!(
+            expr,
+            Expr::Cast(inner, ty)
+                if matches!(ty.kind, SqlTypeKind::TimestampTz)
+                    && expr_sql_type_hint_is(inner, SqlTypeKind::Timestamp)
+        )
+    }) && [left, right]
+        .iter()
+        .any(|expr| expr_sql_type_hint_is(expr, SqlTypeKind::TimestampTz))
 }
 
 fn expr_has_bpchar_display_type(expr: &Expr) -> bool {
@@ -6387,6 +6628,22 @@ fn strip_bpchar_display_cast(expr: &Expr) -> &Expr {
 fn strip_bigint_comparison_cast(expr: &Expr) -> &Expr {
     match expr {
         Expr::Cast(inner, sql_type) if matches!(sql_type.kind, SqlTypeKind::Int8) => inner,
+        _ => expr,
+    }
+}
+
+fn strip_timestamp_timestamptz_display_cast(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast(inner, sql_type)
+            if matches!(sql_type.kind, SqlTypeKind::TimestampTz)
+                && expr_sql_type_hint_is(inner, SqlTypeKind::Timestamp) =>
+        {
+            // :HACK: PostgreSQL's EXPLAIN prints timestamp-vs-timestamptz
+            // partition quals as `a < const::timestamptz`, even though the
+            // executable expression keeps the stable cast on the timestamp key.
+            // Keep this scoped to rendering; volatility still controls pruning.
+            inner
+        }
         _ => expr,
     }
 }
@@ -6794,6 +7051,14 @@ fn render_explain_const(value: &Value) -> String {
             "'{}'::date",
             format_date_text(*date, &postgres_explain_datetime_config())
         ),
+        Value::Timestamp(timestamp) => format!(
+            "'{}'::timestamp without time zone",
+            format_timestamp_text(*timestamp, &postgres_explain_datetime_config())
+        ),
+        Value::TimestampTz(timestamp) => format!(
+            "'{}'::timestamp with time zone",
+            format_timestamptz_text(*timestamp, &postgres_explain_datetime_config())
+        ),
         Value::Inet(_) | Value::Cidr(_) => match value.sql_type_hint() {
             Some(sql_type) => format!(
                 "{}::{}",
@@ -6810,7 +7075,10 @@ fn render_explain_const(value: &Value) -> String {
             {
                 render_explain_array_items(&array.elements)
             } else {
-                crate::backend::executor::format_array_value_text(array)
+                crate::backend::executor::value_io::format_array_value_text_with_config(
+                    array,
+                    &postgres_explain_datetime_config(),
+                )
             };
             match value.sql_type_hint() {
                 Some(sql_type) => {
@@ -6824,7 +7092,10 @@ fn render_explain_const(value: &Value) -> String {
                 render_explain_array_items(items)
             } else {
                 let array = ArrayValue::from_1d(items.clone());
-                crate::backend::executor::format_array_value_text(&array)
+                crate::backend::executor::value_io::format_array_value_text_with_config(
+                    &array,
+                    &postgres_explain_datetime_config(),
+                )
             };
             let escaped = rendered.replace('\'', "''");
             let array_type = items
@@ -6948,7 +7219,20 @@ fn render_explain_cast(
     {
         return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
     }
+    if let Expr::Cast(inner, inner_ty) = expr
+        && inner_ty.with_typmod(SqlType::NO_TYPEMOD) == ty.with_typmod(SqlType::NO_TYPEMOD)
+    {
+        return render_explain_cast(inner, ty, qualifier, column_names);
+    }
+    if let Expr::ArrayLiteral { array_type, .. } = expr
+        && array_type.with_typmod(SqlType::NO_TYPEMOD) == ty.with_typmod(SqlType::NO_TYPEMOD)
+    {
+        return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    }
     if let Some(rendered) = render_explain_datetime_cast_literal(expr, ty) {
+        return rendered;
+    }
+    if let Some(rendered) = render_explain_array_cast_literal(expr, ty) {
         return rendered;
     }
     if let Expr::Const(value) = expr {
@@ -6987,12 +7271,49 @@ fn explain_cast_is_implicit_integer_widening(from: SqlType, to: SqlType) -> bool
     )
 }
 
+fn render_explain_array_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
+    if !ty.is_array {
+        return None;
+    }
+    let Expr::Const(value) = expr else {
+        return None;
+    };
+    let element_type = ty.element_type();
+    let array = match value {
+        Value::Array(items) => {
+            let elements = items
+                .iter()
+                .map(|item| cast_value(item.clone(), element_type).unwrap_or_else(|_| item.clone()))
+                .collect::<Vec<_>>();
+            ArrayValue::from_1d(elements)
+        }
+        Value::PgArray(array) => {
+            let elements = array
+                .elements
+                .iter()
+                .map(|item| cast_value(item.clone(), element_type).unwrap_or_else(|_| item.clone()))
+                .collect::<Vec<_>>();
+            ArrayValue::from_dimensions(array.dimensions.clone(), elements)
+        }
+        _ => return None,
+    };
+    let rendered = crate::backend::executor::value_io::format_array_value_text_with_config(
+        &array,
+        &postgres_explain_datetime_config(),
+    );
+    Some(format!(
+        "'{}'::{}",
+        rendered.replace('\'', "''"),
+        render_explain_sql_type_name(ty)
+    ))
+}
+
 fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
     let Expr::Const(value) = expr else {
         return None;
     };
     let text = value.as_text()?;
-    let config = postgres_utc_datetime_config();
+    let config = postgres_explain_datetime_config();
     match ty.kind {
         SqlTypeKind::Date => parse_date_text(text, &config).ok().map(|date| {
             format!(
@@ -7003,25 +7324,19 @@ fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<Stri
         SqlTypeKind::Timestamp => parse_timestamp_text(text, &config).ok().map(|timestamp| {
             format!(
                 "'{}'::timestamp without time zone",
-                format_timestamp_text(timestamp, &config).replace('\'', "''")
+                format_timestamp_text(timestamp, &postgres_explain_datetime_config())
+                    .replace('\'', "''")
             )
         }),
         SqlTypeKind::TimestampTz => parse_timestamptz_text(text, &config).ok().map(|timestamp| {
             format!(
                 "'{}'::timestamp with time zone",
-                format_timestamptz_text(timestamp, &config).replace('\'', "''")
+                format_timestamptz_text(timestamp, &postgres_explain_datetime_config())
+                    .replace('\'', "''")
             )
         }),
         _ => None,
     }
-}
-
-fn postgres_utc_datetime_config() -> DateTimeConfig {
-    let mut config = DateTimeConfig::default();
-    config.date_style_format = DateStyleFormat::Postgres;
-    config.date_order = DateOrder::Mdy;
-    config.time_zone = "UTC".into();
-    config
 }
 
 fn render_explain_join_cast(
@@ -7086,7 +7401,18 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
         }
         Value::JsonPath(path) => format!("'{}'", path.replace('\'', "''")),
         Value::PgArray(array) => {
-            let rendered = crate::backend::executor::value_io::format_array_value_text(array);
+            let rendered = crate::backend::executor::value_io::format_array_value_text_with_config(
+                array,
+                &postgres_explain_datetime_config(),
+            );
+            format!("'{}'", rendered.replace('\'', "''"))
+        }
+        Value::Array(items) => {
+            let array = ArrayValue::from_1d(items.clone());
+            let rendered = crate::backend::executor::value_io::format_array_value_text_with_config(
+                &array,
+                &postgres_explain_datetime_config(),
+            );
             format!("'{}'", rendered.replace('\'', "''"))
         }
         Value::Record(record) => {
@@ -7094,7 +7420,22 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
             format!("'{}'", rendered.replace('\'', "''"))
         }
         Value::Date(date) => {
-            format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
+            format!(
+                "'{}'",
+                format_date_text(*date, &postgres_explain_datetime_config())
+            )
+        }
+        Value::Timestamp(timestamp) => {
+            format!(
+                "'{}'",
+                format_timestamp_text(*timestamp, &postgres_explain_datetime_config())
+            )
+        }
+        Value::TimestampTz(timestamp) => {
+            format!(
+                "'{}'",
+                format_timestamptz_text(*timestamp, &postgres_explain_datetime_config())
+            )
         }
         Value::Inet(value) => format!("'{}'", value.render_inet()),
         Value::Cidr(value) => format!("'{}'", value.render_cidr()),
@@ -7120,8 +7461,38 @@ fn render_explain_typed_literal(value: &Value, sql_type: SqlType) -> String {
         SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric => {
             format!("'{}'", render_explain_literal(value).trim_matches('\''))
         }
+        SqlTypeKind::Timestamp => render_explain_timestamp_typed_literal(value, false)
+            .unwrap_or_else(|| render_explain_literal(value)),
+        SqlTypeKind::TimestampTz => render_explain_timestamp_typed_literal(value, true)
+            .unwrap_or_else(|| render_explain_literal(value)),
         _ => render_explain_literal(value),
     }
+}
+
+fn render_explain_timestamp_typed_literal(value: &Value, timestamptz: bool) -> Option<String> {
+    let config = postgres_explain_datetime_config();
+    if timestamptz {
+        let timestamp = match value {
+            Value::TimestampTz(timestamp) => Some(*timestamp),
+            _ => value
+                .as_text()
+                .and_then(|text| parse_timestamptz_text(text, &config).ok()),
+        }?;
+        return Some(format!(
+            "'{}'",
+            format_timestamptz_text(timestamp, &config).replace('\'', "''")
+        ));
+    }
+    let timestamp = match value {
+        Value::Timestamp(timestamp) => Some(*timestamp),
+        _ => value
+            .as_text()
+            .and_then(|text| parse_timestamp_text(text, &config).ok()),
+    }?;
+    Some(format!(
+        "'{}'",
+        format_timestamp_text(timestamp, &config).replace('\'', "''")
+    ))
 }
 
 fn render_explain_array_literal(
@@ -7198,6 +7569,13 @@ fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> S
         }
         Value::Float64(v) => format_float8_text(*v, FloatFormatOptions::default()),
         Value::Numeric(v) => v.render(),
+        Value::Timestamp(timestamp) => render_explain_array_quoted_value(&format_timestamp_text(
+            *timestamp,
+            &postgres_explain_datetime_config(),
+        )),
+        Value::TimestampTz(timestamp) => render_explain_array_quoted_value(
+            &format_timestamptz_text(*timestamp, &postgres_explain_datetime_config()),
+        ),
         Value::Jsonb(bytes) => {
             let rendered = crate::backend::executor::jsonb::render_jsonb_bytes(bytes)
                 .unwrap_or_else(|_| "null".into())
@@ -7215,6 +7593,12 @@ fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> S
         Value::Null => "NULL".into(),
         _ => render_explain_literal(&value),
     }
+}
+
+fn render_explain_array_quoted_value(text: &str) -> String {
+    let mut out = String::new();
+    push_explain_array_quoted_element(&mut out, text);
+    out
 }
 
 fn render_explain_row_comparison_operand(
@@ -7403,6 +7787,9 @@ impl PlanNode for FilterState {
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         self.input.current_system_bindings()
     }
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.input.rescan(ctx)
+    }
     fn column_names(&self) -> &[String] {
         self.input.column_names()
     }
@@ -7416,7 +7803,9 @@ impl PlanNode for FilterState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        if filter_state_is_one_time_false_result(self) {
+        if filter_state_is_one_time_false_result(self)
+            || filter_state_values_one_time_filter(self).is_some()
+        {
             "Result".into()
         } else {
             "Filter".into()
@@ -7433,15 +7822,22 @@ impl PlanNode for FilterState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
+        let renders_as_one_time_result = filter_state_is_one_time_false_result(self)
+            || filter_state_values_one_time_filter(self).is_some();
         if filter_state_is_one_time_false_result(self) {
             lines.push(format!("{prefix}One-Time Filter: false"));
+        } else if let Some(predicate) = filter_state_values_one_time_filter(self) {
+            lines.push(format!(
+                "{prefix}One-Time Filter: {}",
+                render_explain_expr(&predicate, &[])
+            ));
         } else if !matches!(self.predicate, Expr::Const(Value::Bool(true))) {
             lines.push(format!(
                 "{prefix}Filter: {}",
                 render_explain_expr(&self.predicate, self.column_names())
             ));
         }
-        if analyze && self.stats.rows_removed_by_filter > 0 {
+        if analyze && self.stats.rows_removed_by_filter > 0 && !renders_as_one_time_result {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
                 self.stats.rows_removed_by_filter
@@ -7456,7 +7852,9 @@ impl PlanNode for FilterState {
         timing: bool,
         lines: &mut Vec<String>,
     ) {
-        if filter_state_is_one_time_false_result(self) {
+        if filter_state_is_one_time_false_result(self)
+            || filter_state_values_one_time_filter(self).is_some()
+        {
             return;
         }
         format_explain_lines_with_costs(
@@ -7473,6 +7871,113 @@ impl PlanNode for FilterState {
 fn filter_state_is_one_time_false_result(state: &FilterState) -> bool {
     matches!(state.predicate, Expr::Const(Value::Bool(false)))
         && state.input.explain_one_time_false_input()
+}
+
+fn filter_state_values_one_time_filter(state: &FilterState) -> Option<Expr> {
+    let row = state.input.explain_single_values_row()?;
+    // :HACK: PostgreSQL renders a filter over a single VALUES row as a Result
+    // one-time filter after constant substitution.  Keep this as display-only
+    // compatibility until VALUES pull-up produces a Result plan directly.
+    substitute_values_row_vars(&state.predicate, &row)
+}
+
+fn substitute_values_row_vars(expr: &Expr, row: &[Expr]) -> Option<Expr> {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => {
+            let index = attrno_index(var.varattno)?;
+            row.get(index).cloned()
+        }
+        Expr::Op(op) => {
+            let mut op = (**op).clone();
+            op.args = op
+                .args
+                .iter()
+                .map(|arg| substitute_values_row_vars(arg, row))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Op(Box::new(op)))
+        }
+        Expr::Bool(bool_expr) => {
+            let mut bool_expr = (**bool_expr).clone();
+            bool_expr.args = bool_expr
+                .args
+                .iter()
+                .map(|arg| substitute_values_row_vars(arg, row))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Bool(Box::new(bool_expr)))
+        }
+        Expr::Func(func) => {
+            let mut func = (**func).clone();
+            func.args = func
+                .args
+                .iter()
+                .map(|arg| substitute_values_row_vars(arg, row))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Func(Box::new(func)))
+        }
+        Expr::Cast(inner, ty) => Some(Expr::Cast(
+            Box::new(substitute_values_row_vars(inner, row)?),
+            *ty,
+        )),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Some(Expr::Collate {
+            expr: Box::new(substitute_values_row_vars(expr, row)?),
+            collation_oid: *collation_oid,
+        }),
+        Expr::ScalarArrayOp(scalar) => {
+            let mut scalar = (**scalar).clone();
+            scalar.left = Box::new(substitute_values_row_vars(&scalar.left, row)?);
+            scalar.right = Box::new(substitute_values_row_vars(&scalar.right, row)?);
+            Some(Expr::ScalarArrayOp(Box::new(scalar)))
+        }
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Some(Expr::ArrayLiteral {
+            elements: elements
+                .iter()
+                .map(|element| substitute_values_row_vars(element, row))
+                .collect::<Option<Vec<_>>>()?,
+            array_type: *array_type,
+        }),
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Some(Expr::FieldSelect {
+            expr: Box::new(substitute_values_row_vars(expr, row)?),
+            field: field.clone(),
+            field_type: *field_type,
+        }),
+        Expr::Coalesce(left, right) => Some(Expr::Coalesce(
+            Box::new(substitute_values_row_vars(left, row)?),
+            Box::new(substitute_values_row_vars(right, row)?),
+        )),
+        Expr::IsNull(inner) => Some(Expr::IsNull(Box::new(substitute_values_row_vars(
+            inner, row,
+        )?))),
+        Expr::IsNotNull(inner) => Some(Expr::IsNotNull(Box::new(substitute_values_row_vars(
+            inner, row,
+        )?))),
+        Expr::IsDistinctFrom(left, right) => Some(Expr::IsDistinctFrom(
+            Box::new(substitute_values_row_vars(left, row)?),
+            Box::new(substitute_values_row_vars(right, row)?),
+        )),
+        Expr::IsNotDistinctFrom(left, right) => Some(Expr::IsNotDistinctFrom(
+            Box::new(substitute_values_row_vars(left, row)?),
+            Box::new(substitute_values_row_vars(right, row)?),
+        )),
+        Expr::Const(_)
+        | Expr::Param(_)
+        | Expr::SubPlan(_)
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => Some(expr.clone()),
+        _ => Some(expr.clone()),
+    }
 }
 
 impl PlanNode for MaterializeState {
@@ -7501,6 +8006,10 @@ impl PlanNode for MaterializeState {
 
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         self.input.current_system_bindings()
+    }
+
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.input.rescan(ctx)
     }
 
     fn column_names(&self) -> &[String] {
@@ -8271,7 +8780,12 @@ fn exec_lateral_join<'a>(
                         &mut state.current_left.as_mut().unwrap().slot,
                         ctx,
                     )?;
-                    if matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. })) {
+                    if matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. }))
+                        || state
+                            .right_plan
+                            .as_ref()
+                            .is_some_and(plan_can_rescan_with_new_exec_params)
+                    {
                         state.right.rescan(ctx)?;
                     } else {
                         state.right = super::executor_start(
@@ -8432,6 +8946,22 @@ fn exec_lateral_join<'a>(
         state.right_rows = None;
         state.right_matched = None;
         state.current_left = None;
+    }
+}
+
+fn plan_can_rescan_with_new_exec_params(plan: &Plan) -> bool {
+    match plan {
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children.iter().all(plan_can_rescan_with_new_exec_params)
+        }
+        Plan::IndexScan { .. } | Plan::IndexOnlyScan { .. } => true,
+        Plan::Filter { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::Materialize { input, .. } => plan_can_rescan_with_new_exec_params(input),
+        _ => false,
     }
 }
 
@@ -8910,6 +9440,11 @@ impl PlanNode for LimitState {
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         self.input.current_system_bindings()
     }
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.returned = 0;
+        self.skipped = 0;
+        self.input.rescan(ctx)
+    }
     fn column_names(&self) -> &[String] {
         self.input.column_names()
     }
@@ -8973,6 +9508,11 @@ impl PlanNode for LockRowsState {
 
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
+    }
+
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.current_bindings.clear();
+        self.input.rescan(ctx)
     }
 
     fn column_names(&self) -> &[String] {
@@ -9058,6 +9598,12 @@ impl PlanNode for ProjectionState {
     fn current_grouping_refs(&self) -> &[usize] {
         &self.current_grouping_refs
     }
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.current_bindings.clear();
+        self.current_grouping_refs.clear();
+        self.slot = TupleSlot::empty(self.column_names.len());
+        self.input.rescan(ctx)
+    }
     fn column_names(&self) -> &[String] {
         &self.column_names
     }
@@ -9075,6 +9621,14 @@ impl PlanNode for ProjectionState {
     }
     fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
         projection_is_explain_passthrough(self).then_some(self.input.as_ref())
+    }
+    fn explain_single_values_row(&self) -> Option<Vec<Expr>> {
+        let input_row = self.input.explain_single_values_row()?;
+        self.targets
+            .iter()
+            .filter(|target| !target.resjunk)
+            .map(|target| substitute_values_row_vars(&target.expr, &input_row))
+            .collect::<Option<Vec<_>>>()
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
         self.input.renumber_append_child_aliases(ordinal);
@@ -10335,6 +10889,10 @@ impl PlanNode for SubqueryScanState {
         self.input.current_system_bindings()
     }
 
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.input.rescan(ctx)
+    }
+
     fn column_names(&self) -> &[String] {
         &self.output_columns
     }
@@ -10469,6 +11027,13 @@ impl PlanNode for ValuesState {
         _timing: bool,
         _lines: &mut Vec<String>,
     ) {
+    }
+    fn explain_single_values_row(&self) -> Option<Vec<Expr>> {
+        if self.rows.len() == 1 {
+            self.rows.first().cloned()
+        } else {
+            None
+        }
     }
 }
 

@@ -18,6 +18,12 @@ use crate::include::nodes::primnodes::{
     ScalarFunctionImpl, attrno_index, expr_sql_type_hint, user_attrno,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PartitionPruneValueMode {
+    Static,
+    Runtime,
+}
+
 pub(super) fn partition_may_satisfy_filter(
     spec: Option<&LoweredPartitionSpec>,
     bound: Option<&PartitionBoundSpec>,
@@ -60,6 +66,7 @@ pub(super) fn partition_may_satisfy_filter_with_ancestor_bound(
         ancestor_bound,
         catalog,
         None,
+        PartitionPruneValueMode::Static,
     )
 }
 
@@ -89,6 +96,7 @@ pub(super) fn partition_may_satisfy_filter_for_relation(
         ancestor_bound,
         Some(catalog),
         Some(relation_oid),
+        PartitionPruneValueMode::Static,
     )
 }
 
@@ -104,7 +112,16 @@ pub(crate) fn partition_may_satisfy_filter_with_runtime_values(
         return true;
     };
     let filter = substitute_runtime_prune_values(filter, &mut eval_runtime_value);
-    expr_may_match_bound(&filter, spec, bound, sibling_bounds, None, catalog, None)
+    expr_may_match_bound(
+        &filter,
+        spec,
+        bound,
+        sibling_bounds,
+        None,
+        catalog,
+        None,
+        PartitionPruneValueMode::Runtime,
+    )
 }
 
 fn substitute_runtime_prune_values(
@@ -338,6 +355,7 @@ fn relation_may_satisfy_own_partition_bound_inner(
                 None,
                 Some(catalog),
                 None,
+                PartitionPruneValueMode::Static,
                 inside_or_arm,
             ) && relation_may_satisfy_own_partition_bound_inner(
                 catalog,
@@ -485,6 +503,7 @@ fn expr_may_match_bound(
     ancestor_bound: Option<&PartitionBoundSpec>,
     catalog: Option<&dyn CatalogLookup>,
     relation_oid: Option<u32>,
+    value_mode: PartitionPruneValueMode,
 ) -> bool {
     expr_may_match_bound_inner(
         expr,
@@ -494,6 +513,7 @@ fn expr_may_match_bound(
         ancestor_bound,
         catalog,
         relation_oid,
+        value_mode,
         false,
     )
 }
@@ -506,6 +526,7 @@ fn expr_may_match_bound_inner(
     ancestor_bound: Option<&PartitionBoundSpec>,
     catalog: Option<&dyn CatalogLookup>,
     relation_oid: Option<u32>,
+    value_mode: PartitionPruneValueMode,
     inside_or_arm: bool,
 ) -> bool {
     if let (Some(catalog), Some(relation_oid)) = (catalog, relation_oid)
@@ -519,7 +540,7 @@ fn expr_may_match_bound_inner(
         return false;
     }
     if let Some(result) =
-        explicit_list_bound_may_match_expr(expr, spec, bound, catalog, relation_oid)
+        explicit_list_bound_may_match_expr(expr, spec, bound, catalog, relation_oid, value_mode)
     {
         return result;
     }
@@ -571,6 +592,7 @@ fn expr_may_match_bound_inner(
                             ancestor_bound,
                             catalog,
                             relation_oid,
+                            value_mode,
                             inside_or_arm,
                         )
                     })
@@ -584,6 +606,7 @@ fn expr_may_match_bound_inner(
                     ancestor_bound,
                     catalog,
                     relation_oid,
+                    value_mode,
                     true,
                 )
             }),
@@ -611,7 +634,7 @@ fn expr_may_match_bound_inner(
             };
             let collation_oid = op_pruning_collation(op);
             let Some((key_index, key_on_left, value)) =
-                partition_key_const_cmp(left, right, spec, collation_oid, catalog)
+                partition_key_const_cmp(left, right, spec, collation_oid, catalog, value_mode)
             else {
                 return true;
             };
@@ -652,6 +675,8 @@ fn expr_may_match_bound_inner(
                 spec,
                 saop.op,
                 saop.collation_oid,
+                catalog,
+                value_mode,
             ) else {
                 return true;
             };
@@ -702,7 +727,15 @@ fn range_conjunct_applies_to_spec(expr: &Expr, spec: &LoweredPartitionSpec) -> b
                 return false;
             };
             let collation_oid = op_pruning_collation(op);
-            partition_key_const_cmp(left, right, spec, collation_oid, None).is_some()
+            partition_key_const_cmp(
+                left,
+                right,
+                spec,
+                collation_oid,
+                None,
+                PartitionPruneValueMode::Static,
+            )
+            .is_some()
         }
         _ => partition_key_bool_equality_predicate(expr, spec).is_some(),
     }
@@ -714,6 +747,7 @@ fn explicit_list_bound_may_match_expr(
     bound: &PartitionBoundSpec,
     catalog: Option<&dyn CatalogLookup>,
     relation_oid: Option<u32>,
+    value_mode: PartitionPruneValueMode,
 ) -> Option<bool> {
     let (
         PartitionStrategy::List,
@@ -725,11 +759,9 @@ fn explicit_list_bound_may_match_expr(
     else {
         return None;
     };
-    Some(
-        values
-            .iter()
-            .any(|value| list_value_may_match_expr(value, expr, spec, catalog, relation_oid)),
-    )
+    Some(values.iter().any(|value| {
+        list_value_may_match_expr(value, expr, spec, catalog, relation_oid, value_mode)
+    }))
 }
 
 fn list_value_may_match_expr(
@@ -738,6 +770,7 @@ fn list_value_may_match_expr(
     spec: &crate::backend::parser::LoweredPartitionSpec,
     catalog: Option<&dyn CatalogLookup>,
     relation_oid: Option<u32>,
+    value_mode: PartitionPruneValueMode,
 ) -> bool {
     if let (Some(catalog), Some(relation_oid)) = (catalog, relation_oid)
         && !relation_may_satisfy_own_partition_bound(catalog, relation_oid, Some(expr))
@@ -756,14 +789,12 @@ fn list_value_may_match_expr(
     }
     match expr {
         Expr::Bool(bool_expr) => match bool_expr.boolop {
-            BoolExprType::And => bool_expr
-                .args
-                .iter()
-                .all(|arg| list_value_may_match_expr(value, arg, spec, catalog, relation_oid)),
-            BoolExprType::Or => bool_expr
-                .args
-                .iter()
-                .any(|arg| list_value_may_match_expr(value, arg, spec, catalog, relation_oid)),
+            BoolExprType::And => bool_expr.args.iter().all(|arg| {
+                list_value_may_match_expr(value, arg, spec, catalog, relation_oid, value_mode)
+            }),
+            BoolExprType::Or => bool_expr.args.iter().any(|arg| {
+                list_value_may_match_expr(value, arg, spec, catalog, relation_oid, value_mode)
+            }),
             BoolExprType::Not => true,
         },
         Expr::IsNull(inner) => partition_key_index(inner, spec)
@@ -778,7 +809,7 @@ fn list_value_may_match_expr(
             };
             let collation_oid = op_pruning_collation(op);
             let Some((key_index, key_on_left, constant)) =
-                partition_key_const_cmp(left, right, spec, collation_oid, catalog)
+                partition_key_const_cmp(left, right, spec, collation_oid, catalog, value_mode)
             else {
                 return true;
             };
@@ -799,6 +830,8 @@ fn list_value_may_match_expr(
                 spec,
                 saop.op,
                 saop.collation_oid,
+                catalog,
+                value_mode,
             ) else {
                 return true;
             };
@@ -835,6 +868,7 @@ fn partition_key_const_cmp(
     spec: &LoweredPartitionSpec,
     query_collation_oid: Option<u32>,
     catalog: Option<&dyn CatalogLookup>,
+    value_mode: PartitionPruneValueMode,
 ) -> Option<(usize, bool, Value)> {
     for (index, key_expr) in spec.key_exprs.iter().enumerate() {
         let key_collation_oid = spec.partcollation.get(index).copied().unwrap_or(0);
@@ -842,13 +876,13 @@ fn partition_key_const_cmp(
             continue;
         }
         let key_type = spec.key_types.get(index).copied();
-        if partition_key_expr_matches(left, key_expr).is_some()
-            && let Some(value) = const_value_for_partition_key(right, key_type, catalog)
+        if partition_key_expr_matches(left, key_expr, value_mode).is_some()
+            && let Some(value) = const_value_for_partition_key(right, key_type, catalog, value_mode)
         {
             return Some((index, true, value));
         }
-        if partition_key_expr_matches(right, key_expr).is_some()
-            && let Some(value) = const_value_for_partition_key(left, key_type, catalog)
+        if partition_key_expr_matches(right, key_expr, value_mode).is_some()
+            && let Some(value) = const_value_for_partition_key(left, key_type, catalog, value_mode)
         {
             return Some((index, false, value));
         }
@@ -862,12 +896,12 @@ fn partition_key_const_distinct_cmp(
     spec: &LoweredPartitionSpec,
 ) -> Option<(usize, Value)> {
     for (index, key_expr) in spec.key_exprs.iter().enumerate() {
-        if partition_key_expr_matches(left, key_expr).is_some()
+        if partition_key_expr_matches(left, key_expr, PartitionPruneValueMode::Static).is_some()
             && let Some(value) = const_value(right)
         {
             return Some((index, value));
         }
-        if partition_key_expr_matches(right, key_expr).is_some()
+        if partition_key_expr_matches(right, key_expr, PartitionPruneValueMode::Static).is_some()
             && let Some(value) = const_value(left)
         {
             return Some((index, value));
@@ -877,9 +911,9 @@ fn partition_key_const_distinct_cmp(
 }
 
 fn partition_key_index(expr: &Expr, spec: &LoweredPartitionSpec) -> Option<usize> {
-    spec.key_exprs
-        .iter()
-        .position(|key_expr| partition_key_expr_matches(expr, key_expr).is_some())
+    spec.key_exprs.iter().position(|key_expr| {
+        partition_key_expr_matches(expr, key_expr, PartitionPruneValueMode::Static).is_some()
+    })
 }
 
 fn partition_key_bool_equality_predicate(
@@ -951,7 +985,8 @@ fn bool_expr_partition_key_truth_value(
         .enumerate()
         .filter(|(index, _)| partition_key_type_is_bool(spec, *index))
         .find_map(|(index, key_expr)| {
-            if partition_key_expr_matches(expr, key_expr).is_some() {
+            if partition_key_expr_matches(expr, key_expr, PartitionPruneValueMode::Static).is_some()
+            {
                 return Some((index, true));
             }
             if bool_expr_is_negation_of_partition_key(expr, key_expr) {
@@ -962,9 +997,11 @@ fn bool_expr_partition_key_truth_value(
 }
 
 fn bool_expr_is_negation_of_partition_key(expr: &Expr, key_expr: &Expr) -> bool {
-    bool_not_arg(expr).is_some_and(|inner| partition_key_expr_matches(inner, key_expr).is_some())
-        || bool_not_arg(key_expr)
-            .is_some_and(|inner| partition_key_expr_matches(expr, inner).is_some())
+    bool_not_arg(expr).is_some_and(|inner| {
+        partition_key_expr_matches(inner, key_expr, PartitionPruneValueMode::Static).is_some()
+    }) || bool_not_arg(key_expr).is_some_and(|inner| {
+        partition_key_expr_matches(expr, inner, PartitionPruneValueMode::Static).is_some()
+    })
 }
 
 fn bool_not_arg(expr: &Expr) -> Option<&Expr> {
@@ -985,40 +1022,52 @@ fn partition_key_type_is_bool(
         .is_some_and(|ty| !ty.is_array && ty.kind == crate::backend::parser::SqlTypeKind::Bool)
 }
 
-fn partition_key_expr_matches<'a>(expr: &'a Expr, key_expr: &Expr) -> Option<&'a Expr> {
+fn partition_key_expr_matches<'a>(
+    expr: &'a Expr,
+    key_expr: &Expr,
+    value_mode: PartitionPruneValueMode,
+) -> Option<&'a Expr> {
     let normalized = normalize_key_expr(expr);
     let normalized_key = normalize_key_expr(key_expr);
     (normalized == normalized_key
-        || simple_var_matches(normalized, normalized_key)
-        || casted_partition_key_expr_matches(expr, key_expr))
+        || simple_var_matches(normalized, normalized_key, value_mode)
+        || casted_partition_key_expr_matches(expr, key_expr, value_mode))
     .then_some(expr)
 }
 
-fn casted_partition_key_expr_matches(expr: &Expr, key_expr: &Expr) -> bool {
+fn casted_partition_key_expr_matches(
+    expr: &Expr,
+    key_expr: &Expr,
+    value_mode: PartitionPruneValueMode,
+) -> bool {
     let Expr::Cast(inner, cast_ty) = expr else {
         return false;
     };
-    partition_key_expr_matches(inner, key_expr).is_some()
-        && partition_key_cast_is_prune_compatible(key_expr, cast_ty)
+    partition_key_expr_matches(inner, key_expr, value_mode).is_some()
+        && partition_key_cast_is_prune_compatible(key_expr, cast_ty, value_mode)
 }
 
 fn partition_key_cast_is_prune_compatible(
     key_expr: &Expr,
     cast_ty: &crate::backend::parser::SqlType,
+    value_mode: PartitionPruneValueMode,
 ) -> bool {
     let Some(key_ty) = expr_sql_type_hint(normalize_key_expr(key_expr)) else {
         return false;
     };
-    partition_key_cast_types_match(&key_ty, cast_ty)
+    partition_key_cast_types_match(&key_ty, cast_ty, value_mode)
 }
 
 fn partition_key_cast_types_match(
     key_ty: &crate::backend::parser::SqlType,
     cast_ty: &crate::backend::parser::SqlType,
+    value_mode: PartitionPruneValueMode,
 ) -> bool {
     key_ty == cast_ty
         || (integer_partition_cast_type(key_ty) && integer_partition_cast_type(cast_ty))
         || (text_relabel_partition_cast_type(key_ty) && text_relabel_partition_cast_type(cast_ty))
+        || (value_mode == PartitionPruneValueMode::Runtime
+            && stable_datetime_partition_cast_type(key_ty, cast_ty))
 }
 
 fn integer_partition_cast_type(ty: &crate::backend::parser::SqlType) -> bool {
@@ -1042,14 +1091,37 @@ fn text_relabel_partition_cast_type(ty: &crate::backend::parser::SqlType) -> boo
         )
 }
 
-fn simple_var_matches(left: &Expr, right: &Expr) -> bool {
+fn stable_datetime_partition_cast_type(
+    key_ty: &crate::backend::parser::SqlType,
+    cast_ty: &crate::backend::parser::SqlType,
+) -> bool {
+    // :HACK: PostgreSQL treats timestamp/timestamptz partition-key comparisons as
+    // stable because the cast depends on TimeZone. Keep them out of static
+    // pruning while still allowing executor-startup pruning to use the fixed
+    // statement/session timezone. Long term this should be driven by operator
+    // volatility metadata rather than this type-pair check.
+    !key_ty.is_array
+        && !cast_ty.is_array
+        && matches!(
+            (key_ty.kind, cast_ty.kind),
+            (
+                crate::backend::parser::SqlTypeKind::Timestamp,
+                crate::backend::parser::SqlTypeKind::TimestampTz
+            ) | (
+                crate::backend::parser::SqlTypeKind::TimestampTz,
+                crate::backend::parser::SqlTypeKind::Timestamp
+            )
+        )
+}
+
+fn simple_var_matches(left: &Expr, right: &Expr, value_mode: PartitionPruneValueMode) -> bool {
     matches!(
         (left, right),
         (Expr::Var(left), Expr::Var(right))
             if left.varlevelsup == 0
                 && right.varlevelsup == 0
                 && left.varattno == right.varattno
-                && partition_key_cast_types_match(&left.vartype, &right.vartype)
+                && partition_key_cast_types_match(&left.vartype, &right.vartype, value_mode)
     )
 }
 
@@ -1097,15 +1169,23 @@ fn const_value_for_partition_key(
     expr: &Expr,
     key_type: Option<SqlType>,
     catalog: Option<&dyn CatalogLookup>,
+    value_mode: PartitionPruneValueMode,
 ) -> Option<Value> {
     match expr {
-        Expr::Const(value) => coerce_const_for_partition_key(value.clone(), key_type, catalog),
+        Expr::Const(value) => {
+            coerce_const_for_partition_key(value.clone(), key_type, catalog, value_mode)
+        }
         Expr::Collate { expr: inner, .. } => {
-            const_value_for_partition_key(inner, key_type, catalog)
+            const_value_for_partition_key(inner, key_type, catalog, value_mode)
         }
         Expr::Cast(inner, target_type) => {
             let key_type = key_type?;
-            if !partition_key_cast_types_match(&key_type, target_type) {
+            if !partition_key_cast_types_match(&key_type, target_type, value_mode) {
+                return None;
+            }
+            if value_mode == PartitionPruneValueMode::Static
+                && stable_datetime_partition_cast_type(&key_type, target_type)
+            {
                 return None;
             }
             let value = const_value(inner)?;
@@ -1127,12 +1207,18 @@ fn coerce_const_for_partition_key(
     value: Value,
     key_type: Option<SqlType>,
     catalog: Option<&dyn CatalogLookup>,
+    value_mode: PartitionPruneValueMode,
 ) -> Option<Value> {
     let key_type = key_type?;
     if !partition_prune_should_fold_const_cast(key_type) {
         return Some(value);
     }
     let source_type = value.sql_type_hint()?;
+    if value_mode == PartitionPruneValueMode::Static
+        && stable_datetime_partition_cast_type(&key_type, &source_type)
+    {
+        return None;
+    }
     catalog
         .and_then(|catalog| {
             cast_value_with_source_type_catalog_and_config(
@@ -1151,8 +1237,42 @@ fn partition_prune_should_fold_const_cast(target_type: SqlType) -> bool {
     !target_type.is_array
         && matches!(
             target_type.kind,
-            SqlTypeKind::Enum | SqlTypeKind::Composite | SqlTypeKind::Record
+            SqlTypeKind::Date
+                | SqlTypeKind::Time
+                | SqlTypeKind::TimeTz
+                | SqlTypeKind::Timestamp
+                | SqlTypeKind::TimestampTz
+                | SqlTypeKind::Enum
+                | SqlTypeKind::Composite
+                | SqlTypeKind::Record
         )
+}
+
+fn coerce_array_const_for_partition_key(
+    value: Value,
+    key_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+    value_mode: PartitionPruneValueMode,
+) -> Option<Value> {
+    let key_type = key_type?;
+    if !partition_prune_should_fold_const_cast(key_type) {
+        return Some(value);
+    }
+    let source_type = value.sql_type_hint()?;
+    if value_mode == PartitionPruneValueMode::Static
+        && stable_datetime_partition_cast_type(&key_type, &source_type)
+    {
+        return None;
+    }
+    let catalog = catalog?;
+    cast_value_with_source_type_catalog_and_config(
+        value,
+        Some(source_type),
+        key_type,
+        Some(catalog),
+        &DateTimeConfig::default(),
+    )
+    .ok()
 }
 
 fn const_bool_value(expr: &Expr) -> Option<bool> {
@@ -1169,19 +1289,41 @@ fn partition_key_const_array_cmp(
     spec: &crate::backend::parser::LoweredPartitionSpec,
     op: SubqueryComparisonOp,
     query_collation_oid: Option<u32>,
+    catalog: Option<&dyn CatalogLookup>,
+    value_mode: PartitionPruneValueMode,
 ) -> Option<(usize, OpExprKind, Vec<Value>)> {
     let op = subquery_comparison_op_kind(op)?;
-    let values = const_array_values(right)?;
     for (index, key_expr) in spec.key_exprs.iter().enumerate() {
         let key_collation_oid = spec.partcollation.get(index).copied().unwrap_or(0);
         if collation_mismatch(query_collation_oid, key_collation_oid) {
             continue;
         }
-        if partition_key_expr_matches(left, key_expr).is_some() {
+        if partition_key_expr_matches(left, key_expr, value_mode).is_some() {
+            let key_type = spec.key_types.get(index).copied();
+            let values =
+                const_array_values_for_partition_key(right, key_type, catalog, value_mode)?;
             return Some((index, op, values));
         }
     }
     None
+}
+
+fn const_array_values_for_partition_key(
+    expr: &Expr,
+    key_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+    value_mode: PartitionPruneValueMode,
+) -> Option<Vec<Value>> {
+    if value_mode == PartitionPruneValueMode::Static
+        && let (Some(key_type), Some(array_type)) = (key_type, expr_sql_type_hint(expr))
+        && stable_datetime_partition_cast_type(&key_type, &array_type.element_type())
+    {
+        return None;
+    }
+    const_array_values(expr)?
+        .into_iter()
+        .map(|value| coerce_array_const_for_partition_key(value, key_type, catalog, value_mode))
+        .collect()
 }
 
 fn const_array_values(expr: &Expr) -> Option<Vec<Value>> {
@@ -1809,9 +1951,14 @@ fn apply_hash_constraint(
                 return ConstraintApplyResult::Ignored;
             };
             let collation_oid = op_pruning_collation(op);
-            let Some((key_index, _, value)) =
-                partition_key_const_cmp(left, right, spec, collation_oid, None)
-            else {
+            let Some((key_index, _, value)) = partition_key_const_cmp(
+                left,
+                right,
+                spec,
+                collation_oid,
+                None,
+                PartitionPruneValueMode::Static,
+            ) else {
                 return ConstraintApplyResult::Ignored;
             };
             if matches!(value, Value::Null) {
@@ -2040,9 +2187,14 @@ fn apply_range_constraint(
                 return ConstraintApplyResult::Ignored;
             };
             let collation_oid = op_pruning_collation(op);
-            let Some((key_index, key_on_left, value)) =
-                partition_key_const_cmp(left, right, spec, collation_oid, None)
-            else {
+            let Some((key_index, key_on_left, value)) = partition_key_const_cmp(
+                left,
+                right,
+                spec,
+                collation_oid,
+                None,
+                PartitionPruneValueMode::Static,
+            ) else {
                 return ConstraintApplyResult::Ignored;
             };
             let op = if key_on_left {
@@ -2797,6 +2949,7 @@ mod tests {
     use crate::include::catalog::{
         C_COLLATION_OID, POSIX_COLLATION_OID, proc_oid_for_builtin_scalar_function,
     };
+    use crate::include::nodes::datetime::TimestampTzADT;
     use crate::include::nodes::primnodes::RelationDesc;
     use crate::include::nodes::primnodes::{
         BuiltinScalarFunction, FuncExpr, ScalarArrayOpExpr, ScalarFunctionImpl, Var,
@@ -2843,7 +2996,16 @@ mod tests {
         bound: &PartitionBoundSpec,
         sibling_bounds: &[PartitionBoundSpec],
     ) -> bool {
-        super::expr_may_match_bound(expr, spec, bound, sibling_bounds, None, None, None)
+        super::expr_may_match_bound(
+            expr,
+            spec,
+            bound,
+            sibling_bounds,
+            None,
+            None,
+            None,
+            PartitionPruneValueMode::Static,
+        )
     }
 
     fn list_spec() -> LoweredPartitionSpec {
@@ -2865,6 +3027,19 @@ mod tests {
             key_columns: vec!["a".into()],
             key_exprs: vec![int_key_expr(1)],
             key_types: vec![SqlType::new(SqlTypeKind::Int4)],
+            key_sqls: vec!["a".into()],
+            partattrs: vec![1],
+            partclass: vec![0],
+            partcollation: vec![0],
+        }
+    }
+
+    fn timestamp_range_spec() -> LoweredPartitionSpec {
+        LoweredPartitionSpec {
+            strategy: PartitionStrategy::Range,
+            key_columns: vec!["a".into()],
+            key_exprs: vec![timestamp_key_expr()],
+            key_types: vec![SqlType::new(SqlTypeKind::Timestamp)],
             key_sqls: vec!["a".into()],
             partattrs: vec![1],
             partclass: vec![0],
@@ -2925,6 +3100,7 @@ mod tests {
                 varattno: 1,
                 varlevelsup: 0,
                 vartype: SqlType::with_char_len(SqlTypeKind::Char, 1),
+                collation_oid: None,
             })],
             key_types: vec![SqlType::with_char_len(SqlTypeKind::Char, 1)],
             key_sqls: vec!["a".into()],
@@ -2981,6 +3157,16 @@ mod tests {
             varattno,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
+        })
+    }
+
+    fn timestamp_key_expr() -> Expr {
+        Expr::Var(Var {
+            varno: 1,
+            varattno: 1,
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Timestamp),
             collation_oid: None,
         })
     }
@@ -3059,6 +3245,10 @@ mod tests {
 
     fn int_value(value: i32) -> PartitionRangeDatumValue {
         PartitionRangeDatumValue::Value(SerializedPartitionValue::Int32(value))
+    }
+
+    fn timestamp_value(value: i64) -> PartitionRangeDatumValue {
+        PartitionRangeDatumValue::Value(SerializedPartitionValue::Timestamp(value))
     }
 
     fn text_range_value(value: &str) -> PartitionRangeDatumValue {
@@ -3338,6 +3528,7 @@ mod tests {
                 varattno: 1,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Char),
+                collation_oid: None,
             })),
             SqlType::new(SqlTypeKind::Char),
         );
@@ -3424,6 +3615,7 @@ mod tests {
             Some(&ancestor),
             None,
             None,
+            PartitionPruneValueMode::Static,
         ));
     }
 
@@ -3818,6 +4010,87 @@ mod tests {
 
         assert!(!expr_may_match_bound(&expr, &spec, &first, &[]));
         assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+    }
+
+    #[test]
+    fn timestamptz_comparison_is_runtime_only_for_timestamp_partition_key() {
+        let spec = timestamp_range_spec();
+        let first = int_range_bound(timestamp_value(0), timestamp_value(10));
+        let second = int_range_bound(timestamp_value(10), timestamp_value(20));
+        let expr = Expr::op_auto(
+            OpExprKind::Lt,
+            vec![
+                Expr::Cast(
+                    Box::new(timestamp_key_expr()),
+                    SqlType::new(SqlTypeKind::TimestampTz),
+                ),
+                Expr::Const(Value::TimestampTz(TimestampTzADT(10))),
+            ],
+        );
+        let catalog = MockCatalog::default();
+
+        assert!(expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+        assert!(partition_may_satisfy_filter_with_runtime_values(
+            &spec,
+            Some(&first),
+            &[],
+            &expr,
+            Some(&catalog),
+            runtime_test_value
+        ));
+        assert!(!partition_may_satisfy_filter_with_runtime_values(
+            &spec,
+            Some(&second),
+            &[],
+            &expr,
+            Some(&catalog),
+            runtime_test_value
+        ));
+    }
+
+    #[test]
+    fn timestamptz_scalar_array_is_runtime_only_for_timestamp_partition_key() {
+        let spec = timestamp_range_spec();
+        let first = int_range_bound(timestamp_value(0), timestamp_value(10));
+        let second = int_range_bound(timestamp_value(10), timestamp_value(20));
+        let expr = Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            op: SubqueryComparisonOp::Eq,
+            use_or: true,
+            left: Box::new(timestamp_key_expr()),
+            right: Box::new(Expr::ArrayLiteral {
+                elements: vec![Expr::Const(Value::TimestampTz(TimestampTzADT(15)))],
+                array_type: SqlType::array_of(SqlType::new(SqlTypeKind::TimestampTz)),
+            }),
+            collation_oid: None,
+        }));
+        let catalog = MockCatalog::default();
+
+        assert!(expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+        assert!(!partition_may_satisfy_filter_with_runtime_values(
+            &spec,
+            Some(&first),
+            &[],
+            &expr,
+            Some(&catalog),
+            runtime_test_value
+        ));
+        assert!(partition_may_satisfy_filter_with_runtime_values(
+            &spec,
+            Some(&second),
+            &[],
+            &expr,
+            Some(&catalog),
+            runtime_test_value
+        ));
+    }
+
+    fn runtime_test_value(expr: &Expr) -> Option<Value> {
+        match expr {
+            Expr::Const(value) => Some(value.clone()),
+            _ => None,
+        }
     }
 
     #[test]

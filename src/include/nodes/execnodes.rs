@@ -28,7 +28,7 @@ use crate::include::nodes::plannodes::{AggregatePhase, AggregateStrategy};
 pub use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JoinType, JsonTableFunction,
     OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall,
-    TargetEntry, ToastRelationRef, WindowClause,
+    SubPlan, TargetEntry, ToastRelationRef, WindowClause,
 };
 
 pub struct TupleSlot {
@@ -271,6 +271,9 @@ pub trait PlanNode: std::fmt::Debug {
     fn explain_one_time_false_input(&self) -> bool {
         false
     }
+    fn explain_single_values_row(&self) -> Option<Vec<Expr>> {
+        None
+    }
     fn explain_details(
         &self,
         _indent: usize,
@@ -278,6 +281,9 @@ pub trait PlanNode: std::fmt::Debug {
         _show_costs: bool,
         _lines: &mut Vec<String>,
     ) {
+    }
+    fn explain_direct_subplans(&self) -> Vec<&SubPlan> {
+        Vec::new()
     }
     fn renumber_append_child_aliases(&mut self, _ordinal: usize) {}
 

@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
@@ -58,7 +59,77 @@ pub(crate) fn format_explain_lines_with_options(
     show_timing: bool,
     lines: &mut Vec<String>,
 ) {
+    let depth = EXPLAIN_ANALYZE_FORMAT_DEPTH.with(|format_depth| {
+        let value = format_depth.get();
+        format_depth.set(value + 1);
+        value
+    });
+    if depth == 0 && analyze {
+        EXPLAIN_ANALYZE_PRINTED_INITPLANS.with(|printed| printed.borrow_mut().clear());
+    }
     format_explain_lines_with_options_inner(state, indent, analyze, show_costs, show_timing, lines);
+    EXPLAIN_ANALYZE_FORMAT_DEPTH.with(|format_depth| format_depth.set(depth));
+}
+
+thread_local! {
+    static EXPLAIN_ANALYZE_INITPLAN_LINES: RefCell<HashMap<usize, Vec<String>>> =
+        RefCell::new(HashMap::new());
+    static EXPLAIN_ANALYZE_PRINTED_INITPLANS: RefCell<BTreeSet<usize>> =
+        RefCell::new(BTreeSet::new());
+    static EXPLAIN_ANALYZE_CAPTURE_INITPLANS: Cell<bool> = const { Cell::new(false) };
+    static EXPLAIN_ANALYZE_SUBPLAN_COSTS: Cell<bool> = const { Cell::new(false) };
+    static EXPLAIN_ANALYZE_SUBPLAN_TIMING: Cell<bool> = const { Cell::new(false) };
+    static EXPLAIN_ANALYZE_FORMAT_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(crate) fn begin_explain_analyze_initplan_capture(show_costs: bool, show_timing: bool) {
+    EXPLAIN_ANALYZE_INITPLAN_LINES.with(|lines| lines.borrow_mut().clear());
+    EXPLAIN_ANALYZE_SUBPLAN_COSTS.with(|costs| costs.set(show_costs));
+    EXPLAIN_ANALYZE_SUBPLAN_TIMING.with(|timing| timing.set(show_timing));
+    EXPLAIN_ANALYZE_CAPTURE_INITPLANS.with(|capture| capture.set(true));
+}
+
+pub(crate) fn end_explain_analyze_initplan_capture() {
+    EXPLAIN_ANALYZE_CAPTURE_INITPLANS.with(|capture| capture.set(false));
+    EXPLAIN_ANALYZE_INITPLAN_LINES.with(|lines| lines.borrow_mut().clear());
+    EXPLAIN_ANALYZE_PRINTED_INITPLANS.with(|printed| printed.borrow_mut().clear());
+}
+
+pub(crate) fn record_explain_analyze_initplan(plan_id: usize, state: &dyn PlanNode) {
+    let capture = EXPLAIN_ANALYZE_CAPTURE_INITPLANS.with(|capture| capture.get());
+    if !capture {
+        return;
+    }
+    let show_costs = EXPLAIN_ANALYZE_SUBPLAN_COSTS.with(|costs| costs.get());
+    let show_timing = EXPLAIN_ANALYZE_SUBPLAN_TIMING.with(|timing| timing.get());
+    let mut lines = Vec::new();
+    format_explain_lines_with_options(state, 0, true, show_costs, show_timing, &mut lines);
+    normalize_explain_analyze_initplan_lines(&mut lines);
+    EXPLAIN_ANALYZE_INITPLAN_LINES.with(|stored| {
+        stored.borrow_mut().insert(plan_id, lines);
+    });
+}
+
+fn normalize_explain_analyze_initplan_lines(lines: &mut Vec<String>) {
+    if lines.len() < 2 {
+        return;
+    }
+    if !lines[0].trim_start().starts_with("Projection") {
+        return;
+    }
+    if !lines[1].trim_start().starts_with("->  Result") {
+        return;
+    }
+    // :HACK: pgrust represents scalar InitPlan target evaluation as a
+    // Projection over a Result, while PostgreSQL hides that pass-through
+    // projection in EXPLAIN. Keep this as render-only compatibility until
+    // scalar subquery plans carry target expressions on Result nodes.
+    lines.remove(0);
+    for line in lines {
+        if let Some(stripped) = line.strip_prefix("  ") {
+            *line = stripped.to_string();
+        }
+    }
 }
 
 pub(crate) fn format_explain_analyze_json(state: &dyn PlanNode) -> String {
@@ -87,7 +158,42 @@ fn format_explain_lines_with_options_inner(
     }
     push_explain_state_line(state, indent, analyze, show_costs, show_timing, lines);
     state.explain_details(indent, analyze, show_costs, lines);
+    if analyze {
+        push_explain_analyze_direct_subplans(state, indent, lines);
+    }
     state.explain_children(indent, analyze, show_costs, show_timing, lines);
+}
+
+fn push_explain_analyze_direct_subplans(
+    state: &dyn PlanNode,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    for subplan in state.explain_direct_subplans() {
+        if !subplan.par_param.is_empty() {
+            continue;
+        }
+        let Some(subplan_lines) = EXPLAIN_ANALYZE_INITPLAN_LINES
+            .with(|stored| stored.borrow().get(&subplan.plan_id).cloned())
+        else {
+            continue;
+        };
+        let already_printed = EXPLAIN_ANALYZE_PRINTED_INITPLANS
+            .with(|printed| !printed.borrow_mut().insert(subplan.plan_id));
+        if already_printed {
+            continue;
+        }
+        let label_prefix = "  ".repeat(indent + 1);
+        lines.push(format!("{label_prefix}InitPlan {}", subplan.plan_id + 1));
+        let child_prefix = "  ".repeat(indent + 2);
+        lines.extend(subplan_lines.into_iter().enumerate().map(|(index, line)| {
+            if index == 0 && !line.trim_start().starts_with("->") {
+                format!("{child_prefix}->  {}", line.trim_start())
+            } else {
+                format!("{child_prefix}{line}")
+            }
+        }));
+    }
 }
 
 pub(crate) fn push_explain_line(
@@ -298,7 +404,7 @@ fn modify_runtime_var_label(
     ))
 }
 
-fn direct_expr_subplans(expr: &Expr) -> Vec<&SubPlan> {
+pub(crate) fn direct_expr_subplans(expr: &Expr) -> Vec<&SubPlan> {
     let mut out = Vec::new();
     collect_direct_expr_subplans(expr, &mut out);
     out

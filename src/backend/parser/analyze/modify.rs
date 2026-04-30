@@ -6217,15 +6217,22 @@ fn bind_update_from(
         outer_scopes,
         local_ctes,
     )?;
-    let query = query_from_projection_with_target_security_quals(
+    let mut query = query_from_projection_with_target_security_quals(
         projected,
         Vec::new(),
         predicate.clone(),
         catalog,
     )?;
-    let [query] = crate::backend::rewrite::pg_rewrite_query(query, catalog)?
+    // :HACK: The UPDATE executor consumes this as a row-source SELECT, but the
+    // planner needs to know that the first rangetable entry is a fixed DML
+    // target so join planning does not swap it to the inner parameterized side.
+    // The long-term shape is a planner-side modify table path with explicit
+    // target rel metadata.
+    query.command_type = CommandType::Update;
+    let [mut query] = crate::backend::rewrite::pg_rewrite_query(query, catalog)?
         .try_into()
         .expect("UPDATE FROM input rewrite should return a single query");
+    query.command_type = CommandType::Update;
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 

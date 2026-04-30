@@ -4870,6 +4870,7 @@ fn explain_expr_strips_redundant_bpchar_key_casts() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: bpchar,
+            collation_oid: None,
         })),
         bpchar,
     );
@@ -4901,6 +4902,7 @@ fn explain_expr_renders_varchar_comparison_as_text_operator() {
             varattno: user_attrno(1),
             varlevelsup: 0,
             vartype: varchar,
+            collation_oid: None,
         }),
         Expr::Const(Value::Text("ab".into())),
     );
@@ -5245,6 +5247,45 @@ fn explain_const_false_and_scan_filter_uses_one_time_filter() {
     assert_eq!(
         rendered,
         vec!["Result".to_string(), "  One-Time Filter: false".to_string()]
+    );
+}
+
+#[test]
+fn explain_filter_over_single_values_row_uses_one_time_result() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::OpExprKind;
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let plan = Plan::Filter {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![vec![
+                Expr::Const(Value::Int32(10)),
+                Expr::Const(Value::Int32(5)),
+            ]],
+            output_columns: vec![QueryColumn::text("column1"), QueryColumn::text("column2")],
+        }),
+        predicate: Expr::binary_op(
+            OpExprKind::Eq,
+            SqlType::new(SqlTypeKind::Bool),
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(1),
+                varlevelsup: 0,
+                vartype: int4,
+                collation_oid: None,
+            }),
+            Expr::Const(Value::Int32(5)),
+        ),
+    };
+
+    assert_eq!(
+        explain_lines(plan),
+        vec![
+            "Result  (cost=0.00..0.00 rows=0 width=0)".to_string(),
+            "  One-Time Filter: (5 = 5)".to_string()
+        ]
     );
 }
 
