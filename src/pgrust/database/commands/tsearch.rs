@@ -430,6 +430,19 @@ impl Database {
             self.effective_search_path(client_id, configured_search_path),
         ) else {
             if stmt.if_exists {
+                if let Some(schema_name) = stmt.schema_name.as_deref()
+                    && !catcache
+                        .namespace_rows()
+                        .into_iter()
+                        .any(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+                {
+                    push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+                } else {
+                    push_notice(format!(
+                        "text search configuration \"{}\" does not exist, skipping",
+                        stmt.config_name
+                    ));
+                }
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(text_search_not_found("configuration", &stmt.config_name));

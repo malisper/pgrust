@@ -474,6 +474,10 @@ impl Database {
                 .find(|row| row.datname.eq_ignore_ascii_case(&stmt.database_name))
             else {
                 return if stmt.if_exists {
+                    crate::backend::utils::misc::notices::push_notice(format!(
+                        "database \"{}\" does not exist, skipping",
+                        stmt.database_name
+                    ));
                     Ok(StatementResult::AffectedRows(0))
                 } else {
                     Err(ExecError::DetailedError {
@@ -514,6 +518,7 @@ impl Database {
                 .copied()
                 .unwrap_or(0)
                 > 0
+                && !stmt.force
             {
                 return Err(ExecError::DetailedError {
                     message: format!(

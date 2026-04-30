@@ -4614,6 +4614,22 @@ impl Session {
             Statement::DropAggregate(_) => Some("DROP AGGREGATE"),
             Statement::DropIndex(_) => Some("DROP INDEX"),
             Statement::DropTrigger(_) => Some("DROP TRIGGER"),
+            Statement::DropTextSearch(drop) => match drop.kind {
+                crate::backend::parser::TextSearchObjectKind::Dictionary => {
+                    Some("DROP TEXT SEARCH DICTIONARY")
+                }
+                crate::backend::parser::TextSearchObjectKind::Configuration => {
+                    Some("DROP TEXT SEARCH CONFIGURATION")
+                }
+                crate::backend::parser::TextSearchObjectKind::Template => {
+                    Some("DROP TEXT SEARCH TEMPLATE")
+                }
+                crate::backend::parser::TextSearchObjectKind::Parser => {
+                    Some("DROP TEXT SEARCH PARSER")
+                }
+            },
+            Statement::DropExtension(_) => Some("DROP EXTENSION"),
+            Statement::DropAccessMethod(_) => Some("DROP ACCESS METHOD"),
             Statement::DropOwned(_) => Some("DROP OWNED"),
             Statement::DropPolicy(_) => Some("DROP POLICY"),
             Statement::AlterTableCompound(_)
@@ -6914,6 +6930,24 @@ impl Session {
                     )
                 }
             }
+            Statement::DropTextSearch(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_drop_text_search_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::DropTrigger(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_trigger_stmt_with_search_path(
@@ -7997,6 +8031,22 @@ impl Session {
                     result
                 } else {
                     db.execute_drop_database_stmt(self.client_id, drop_stmt)
+                }
+            }
+            Statement::DropExtension(ref drop_stmt) => {
+                db.execute_drop_extension_stmt(self.client_id, drop_stmt)
+            }
+            Statement::DropAccessMethod(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_drop_access_method_stmt(self.client_id, drop_stmt)
                 }
             }
             Statement::GrantObject(ref grant_stmt) => {
@@ -12140,6 +12190,18 @@ impl Session {
                         catalog_effects,
                     )
                 }
+                Statement::DropTextSearch(ref drop_stmt) => {
+                    let search_path = self.configured_search_path();
+                    let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                    db.execute_drop_text_search_stmt_in_transaction_with_search_path(
+                        client_id,
+                        drop_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        catalog_effects,
+                    )
+                }
                 Statement::CreateOperatorClass(ref create_stmt) => {
                     let search_path = self.configured_search_path();
                     let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
@@ -13498,6 +13560,19 @@ impl Session {
                 Statement::DropDatabase(_) => Err(ExecError::Parse(
                     ParseError::ActiveSqlTransaction("DROP DATABASE"),
                 )),
+                Statement::DropExtension(ref drop_stmt) => {
+                    db.execute_drop_extension_stmt(client_id, drop_stmt)
+                }
+                Statement::DropAccessMethod(ref drop_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_drop_access_method_stmt_in_transaction(
+                        client_id,
+                        drop_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
                 Statement::GrantObject(ref grant_stmt) => {
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();

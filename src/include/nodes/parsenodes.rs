@@ -384,6 +384,9 @@ pub enum Statement {
     CreateTextSearchConfiguration(CreateTextSearchConfigurationStatement),
     AlterTextSearchConfiguration(AlterTextSearchConfigurationStatement),
     DropTextSearchConfiguration(DropTextSearchConfigurationStatement),
+    DropTextSearch(DropTextSearchStatement),
+    DropExtension(DropExtensionStatement),
+    DropAccessMethod(DropAccessMethodStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateForeignServer(CreateForeignServerStatement),
     CreateForeignTable(CreateForeignTableStatement),
@@ -1071,6 +1074,14 @@ pub struct DropTextSearchConfigurationStatement {
     pub if_exists: bool,
     pub schema_name: Option<String>,
     pub config_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropTextSearchStatement {
+    pub kind: TextSearchObjectKind,
+    pub if_exists: bool,
+    pub object_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3707,6 +3718,21 @@ pub struct DropCollationStatement {
 pub struct DropDatabaseStatement {
     pub if_exists: bool,
     pub database_name: String,
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropExtensionStatement {
+    pub if_exists: bool,
+    pub extension_names: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropAccessMethodStatement {
+    pub if_exists: bool,
+    pub access_method_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

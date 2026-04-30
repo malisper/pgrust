@@ -417,11 +417,15 @@ impl Database {
             self.table_locks.unlock_table(relation.rel, client_id);
             result
         } else if drop_stmt.if_exists {
+            let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+            push_missing_rule_relation_notice(&catalog, &drop_stmt.relation_name);
             Ok(StatementResult::AffectedRows(0))
         } else {
-            Err(ExecError::Parse(ParseError::UnknownTable(
-                drop_stmt.relation_name.clone(),
-            )))
+            let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+            Err(missing_rule_relation_error(
+                &catalog,
+                &drop_stmt.relation_name,
+            ))
         }
     }
 
@@ -437,11 +441,17 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = match lookup_rule_relation_for_ddl(&catalog, &drop_stmt.relation_name) {
             Ok(relation) => relation,
-            Err(_err) if drop_stmt.if_exists => return Ok(StatementResult::AffectedRows(0)),
-            Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) => {
-                return Err(ExecError::Parse(ParseError::UnknownTable(
-                    drop_stmt.relation_name.clone(),
-                )));
+            Err(_err) if drop_stmt.if_exists => {
+                push_missing_rule_relation_notice(&catalog, &drop_stmt.relation_name);
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            Err(ExecError::Parse(
+                ParseError::TableDoesNotExist(_) | ParseError::UnknownTable(_),
+            )) => {
+                return Err(missing_rule_relation_error(
+                    &catalog,
+                    &drop_stmt.relation_name,
+                ));
             }
             Err(err) => return Err(err),
         };
@@ -449,6 +459,10 @@ impl Database {
         let Some(rewrite) = lookup_rule_row(&catalog, relation.relation_oid, &drop_stmt.rule_name)
         else {
             return if drop_stmt.if_exists {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    "rule \"{}\" for relation \"{}\" does not exist, skipping",
+                    drop_stmt.rule_name, drop_stmt.relation_name
+                ));
                 Ok(StatementResult::AffectedRows(0))
             } else {
                 Err(missing_rule_error(
@@ -662,6 +676,41 @@ fn missing_rule_error(rule_name: &str, relation_name: &str) -> ExecError {
         hint: None,
         sqlstate: "42704",
     }
+}
+
+fn push_missing_rule_relation_notice(catalog: &dyn CatalogLookup, relation_name: &str) {
+    if let Some((schema_name, _)) = relation_name.split_once('.')
+        && !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+    {
+        crate::backend::utils::misc::notices::push_notice(format!(
+            "schema \"{schema_name}\" does not exist, skipping"
+        ));
+        return;
+    }
+    crate::backend::utils::misc::notices::push_notice(format!(
+        "relation \"{}\" does not exist, skipping",
+        relation_name.rsplit('.').next().unwrap_or(relation_name)
+    ));
+}
+
+fn missing_rule_relation_error(catalog: &dyn CatalogLookup, relation_name: &str) -> ExecError {
+    if let Some((schema_name, _)) = relation_name.split_once('.')
+        && !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+    {
+        return ExecError::DetailedError {
+            message: format!("schema \"{schema_name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "3F000",
+        };
+    }
+    ExecError::Parse(ParseError::UnknownTable(relation_name.to_string()))
 }
 
 #[derive(Clone)]

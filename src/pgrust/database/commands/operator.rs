@@ -7,7 +7,7 @@ use crate::backend::parser::{
     resolve_raw_type_name,
 };
 use crate::backend::utils::cache::syscache::backend_catcache;
-use crate::backend::utils::misc::notices::push_warning;
+use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, INT2_TYPE_OID, INT4_TYPE_OID, OID_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PUBLIC_NAMESPACE_OID, PgOperatorRow,
@@ -62,6 +62,74 @@ fn normalize_operator_namespace(
             }
             Err(ParseError::NoSchemaSelectedForCreate)
         }
+    }
+}
+
+fn raw_operator_type_display_name(raw: &RawTypeName) -> String {
+    match raw {
+        RawTypeName::Builtin(sql_type) => {
+            crate::pgrust::database::ddl::format_sql_type_name(*sql_type)
+        }
+        RawTypeName::Serial(kind) => match kind {
+            crate::include::nodes::parsenodes::SerialKind::Small => "smallserial".into(),
+            crate::include::nodes::parsenodes::SerialKind::Regular => "serial".into(),
+            crate::include::nodes::parsenodes::SerialKind::Big => "bigserial".into(),
+        },
+        RawTypeName::Named { name, array_bounds } => {
+            let mut display = name.clone();
+            for _ in 0..*array_bounds {
+                display.push_str("[]");
+            }
+            display
+        }
+        RawTypeName::Record => "record".into(),
+    }
+}
+
+fn missing_schema_for_operator_type(
+    catalog: &dyn CatalogLookup,
+    raw: &RawTypeName,
+) -> Option<String> {
+    let RawTypeName::Named { name, .. } = raw else {
+        return None;
+    };
+    let (schema_name, _) = name.split_once('.')?;
+    let schema_name = schema_name.trim_matches('"').replace("\"\"", "\"");
+    if schema_name.eq_ignore_ascii_case("pg_catalog")
+        || catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
+    {
+        None
+    } else {
+        Some(schema_name)
+    }
+}
+
+fn push_missing_operator_type_notice(catalog: &dyn CatalogLookup, raw: &RawTypeName) {
+    if let Some(schema_name) = missing_schema_for_operator_type(catalog, raw) {
+        push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+    } else {
+        push_notice(format!(
+            "type \"{}\" does not exist, skipping",
+            raw_operator_type_display_name(raw)
+        ));
+    }
+}
+
+fn missing_operator_type_notice_pushed(catalog: &dyn CatalogLookup, raw: &RawTypeName) -> bool {
+    if let Some(schema_name) = missing_schema_for_operator_type(catalog, raw) {
+        push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+        return true;
+    }
+    match resolve_raw_type_name(raw, catalog) {
+        Ok(sql_type) if catalog.type_oid_for_sql_type(sql_type).is_some() => false,
+        Ok(_) | Err(ParseError::UnsupportedType(_)) => {
+            push_missing_operator_type_notice(catalog, raw);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -1310,9 +1378,42 @@ impl Database {
                     configured_search_path,
                 )
             })
-            .transpose()?;
-        let left_type = resolve_operator_type_oid(&catalog, &stmt.left_arg)?;
-        let right_type = resolve_operator_type_oid(&catalog, &stmt.right_arg)?;
+            .transpose();
+        let namespace_oid = match namespace_oid {
+            Ok(namespace_oid) => namespace_oid,
+            Err(err) if stmt.if_exists => {
+                if let Some(schema_name) = stmt.schema_name.as_deref() {
+                    push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                return Err(ExecError::Parse(err));
+            }
+            Err(err) => return Err(ExecError::Parse(err)),
+        };
+        let left_type = match resolve_operator_type_oid(&catalog, &stmt.left_arg) {
+            Ok(type_oid) => type_oid,
+            Err(err) if stmt.if_exists => {
+                if let Some(raw) = stmt.left_arg.as_ref()
+                    && missing_operator_type_notice_pushed(&catalog, raw)
+                {
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+        let right_type = match resolve_operator_type_oid(&catalog, &stmt.right_arg) {
+            Ok(type_oid) => type_oid,
+            Err(err) if stmt.if_exists => {
+                if let Some(raw) = stmt.right_arg.as_ref()
+                    && missing_operator_type_notice_pushed(&catalog, raw)
+                {
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
         if right_type == 0 {
             return Err(unsupported_postfix_operator_error());
         }
@@ -1327,6 +1428,10 @@ impl Database {
         )?
         else {
             if stmt.if_exists {
+                push_notice(format!(
+                    "operator {} does not exist, skipping",
+                    stmt.operator_name
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::Parse(ParseError::DetailedError {

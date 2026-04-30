@@ -454,6 +454,9 @@ impl Database {
             let Some(existing) = find_role_by_name(auth_catalog.roles(), &role_name).cloned()
             else {
                 if stmt.if_exists {
+                    crate::backend::utils::misc::notices::push_notice(format!(
+                        "role \"{role_name}\" does not exist, skipping"
+                    ));
                     continue;
                 }
                 return Err(ExecError::Parse(role_management_error(format!(

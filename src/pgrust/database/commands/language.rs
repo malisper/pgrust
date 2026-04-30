@@ -194,6 +194,10 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let Some(existing) = lookup_language(self, client_id, None, &stmt.language_name)? else {
             if stmt.if_exists {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    "language \"{}\" does not exist, skipping",
+                    stmt.language_name
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::DetailedError {

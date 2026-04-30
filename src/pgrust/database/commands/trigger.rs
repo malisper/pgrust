@@ -375,7 +375,20 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation_name = format_trigger_drop_relation_name(stmt);
-        let relation = lookup_trigger_relation_for_ddl(&catalog, &relation_name)?;
+        let relation = match catalog.lookup_any_relation(&relation_name) {
+            Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => entry,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: relation_name.clone(),
+                    expected: "table or view",
+                }));
+            }
+            None if stmt.if_exists => {
+                push_missing_trigger_relation_notice(&catalog, &relation_name);
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            None => return Err(missing_trigger_relation_error(&catalog, &relation_name)),
+        };
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
 
         let Some(existing) = catalog
@@ -384,11 +397,15 @@ impl Database {
             .find(|row| row.tgname.eq_ignore_ascii_case(&stmt.trigger_name))
         else {
             if stmt.if_exists {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    "trigger \"{}\" for relation \"{}\" does not exist, skipping",
+                    stmt.trigger_name, relation_name
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::DetailedError {
                 message: format!(
-                    "trigger \"{}\" for relation \"{}\" does not exist",
+                    "trigger \"{}\" for table \"{}\" does not exist",
                     stmt.trigger_name, relation_name
                 ),
                 detail: None,
@@ -840,6 +857,49 @@ fn qualified_relation_name(schema_name: Option<&str>, relation_name: &str) -> St
     schema_name
         .map(|schema| format!("{schema}.{relation_name}"))
         .unwrap_or_else(|| relation_name.to_string())
+}
+
+fn push_missing_trigger_relation_notice(catalog: &dyn CatalogLookup, relation_name: &str) {
+    if let Some((schema_name, _)) = relation_name.split_once('.')
+        && !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+    {
+        crate::backend::utils::misc::notices::push_notice(format!(
+            "schema \"{schema_name}\" does not exist, skipping"
+        ));
+        return;
+    }
+    crate::backend::utils::misc::notices::push_notice(format!(
+        "relation \"{}\" does not exist, skipping",
+        relation_name.rsplit('.').next().unwrap_or(relation_name)
+    ));
+}
+
+fn missing_trigger_relation_error(catalog: &dyn CatalogLookup, relation_name: &str) -> ExecError {
+    if let Some((schema_name, _)) = relation_name.split_once('.')
+        && !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+    {
+        return ExecError::DetailedError {
+            message: format!("schema \"{schema_name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "3F000",
+        };
+    }
+    ExecError::DetailedError {
+        message: format!(
+            "relation \"{}\" does not exist",
+            relation_name.rsplit('.').next().unwrap_or(relation_name)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42P01",
+    }
 }
 
 fn lookup_trigger_row(
