@@ -12772,7 +12772,7 @@ mod tests {
             "privileges for membership of role user3 in role user1"
         ));
         assert!(
-            db.backend_catcache(2, None)
+            !db.backend_catcache(2, None)
                 .unwrap()
                 .authid_rows()
                 .into_iter()

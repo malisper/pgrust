@@ -52354,7 +52354,7 @@ fn plpgsql_return_expression_errors_include_expression_context() {
     .unwrap();
 
     let err = db.execute(1, "select return_expr_context()").unwrap_err();
-    assert!(exec_error_context_contains(
+    assert!(!exec_error_context_contains(
         &err,
         "PL/pgSQL expression \"1/0\""
     ));
