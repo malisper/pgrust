@@ -10304,6 +10304,7 @@ impl Session {
     ) -> Result<SelectStatement, ExecError> {
         Ok(SelectStatement {
             with_recursive: select.with_recursive,
+            with_from_recursive_union_outer: select.with_from_recursive_union_outer,
             with: select
                 .with
                 .iter()
@@ -10344,9 +10345,13 @@ impl Session {
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?,
             order_by: Self::substitute_order_by_items(&select.order_by, subst)?,
+            order_by_location: select.order_by_location,
             limit: select.limit,
+            limit_location: select.limit_location,
             offset: select.offset,
+            offset_location: select.offset_location,
             locking_clause: select.locking_clause,
+            locking_location: select.locking_location,
             locking_targets: select.locking_targets.clone(),
             locking_nowait: select.locking_nowait,
             set_operation: select
@@ -10355,6 +10360,7 @@ impl Session {
                 .map(|setop| {
                     Ok::<_, ExecError>(Box::new(crate::backend::parser::SetOperationStatement {
                         op: setop.op,
+                        location: setop.location,
                         inputs: setop
                             .inputs
                             .iter()
@@ -10541,6 +10547,7 @@ impl Session {
     ) -> Result<CommonTableExpr, ExecError> {
         Ok(CommonTableExpr {
             name: cte.name.clone(),
+            location: cte.location,
             column_names: cte.column_names.clone(),
             body: match &cte.body {
                 CteBody::Select(select) => {
@@ -10579,6 +10586,7 @@ impl Session {
                 .as_ref()
                 .map(|cycle| {
                     Ok::<_, ExecError>(CteCycleClause {
+                        location: cycle.location,
                         columns: cycle.columns.clone(),
                         mark_column: cycle.mark_column.clone(),
                         mark_value: cycle
@@ -10697,9 +10705,14 @@ impl Session {
         subst: &mut PreparedParamSubstitution<'_>,
     ) -> Result<FromItem, ExecError> {
         Ok(match from {
-            FromItem::Table { name, only } => FromItem::Table {
+            FromItem::Table {
+                name,
+                only,
+                location,
+            } => FromItem::Table {
                 name: name.clone(),
                 only: *only,
+                location: *location,
             },
             FromItem::Values { rows } => FromItem::Values {
                 rows: rows
@@ -10801,6 +10814,7 @@ impl Session {
         Ok(SelectItem {
             output_name: target.output_name.clone(),
             expr: Self::substitute_sql_expr(&target.expr, subst)?,
+            location: target.location,
         })
     }
 
@@ -10813,6 +10827,7 @@ impl Session {
             .map(|item| {
                 Ok(OrderByItem {
                     expr: Self::substitute_sql_expr(&item.expr, subst)?,
+                    location: item.location,
                     descending: item.descending,
                     nulls_first: item.nulls_first,
                     using_operator: item.using_operator.clone(),

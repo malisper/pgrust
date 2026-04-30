@@ -925,7 +925,7 @@ pub(super) fn bind_from_item_with_ctes(
     expanded_views: &[u32],
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     match stmt {
-        FromItem::Table { name, only } => {
+        FromItem::Table { name, only, .. } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
                 if cte.self_reference {
                     let output_columns = cte

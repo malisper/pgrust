@@ -3940,16 +3940,19 @@ fn materialize_view_rows(
         .map(|column| SelectItem {
             output_name: column.name.clone(),
             expr: crate::backend::parser::SqlExpr::Column(column.name.clone()),
+            location: None,
         })
         .collect();
     let select = SelectStatement {
         with_recursive: false,
         with: Vec::new(),
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: Some(FromItem::Table {
             name: relation_name.to_string(),
             only: false,
+            location: None,
         }),
         targets: visible_columns,
         where_clause: None,
@@ -3958,9 +3961,13 @@ fn materialize_view_rows(
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
+        order_by_location: None,
         limit: None,
+        limit_location: None,
         offset: None,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: None,

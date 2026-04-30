@@ -473,6 +473,7 @@ fn build_distinct_on_clause(
         .cloned()
         .map(|expr| OrderByItem {
             expr,
+            location: None,
             descending: false,
             nulls_first: None,
             using_operator: None,
@@ -4149,6 +4150,7 @@ pub fn normalize_create_view_name(stmt: &CreateViewStatement) -> Result<String, 
 
 fn apply_cte_column_names(
     cte_name: &str,
+    cte_location: Option<usize>,
     mut query: Query,
     desc: RelationDesc,
     column_names: &[String],
@@ -4157,7 +4159,7 @@ fn apply_cte_column_names(
         return Ok((query, desc));
     }
     if column_names.len() != desc.columns.len() {
-        return Err(ParseError::UnexpectedToken {
+        let err = ParseError::UnexpectedToken {
             expected: "CTE column alias count matching query width",
             actual: format!(
                 "WITH query \"{}\" has {} columns available but {} columns specified",
@@ -4165,7 +4167,8 @@ fn apply_cte_column_names(
                 desc.columns.len(),
                 column_names.len()
             ),
-        });
+        };
+        return Err(positioned_if_available(err, cte_location));
     }
     let renamed_desc = RelationDesc {
         columns: desc
@@ -4188,6 +4191,13 @@ fn apply_cte_column_names(
         }
     }
     Ok((query, renamed_desc))
+}
+
+fn positioned_if_available(err: ParseError, position: Option<usize>) -> ParseError {
+    match position {
+        Some(position) => err.with_position(position),
+        None => err,
+    }
 }
 
 fn cte_query_desc(query: &Query) -> RelationDesc {
@@ -4264,6 +4274,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
         CteBody::Values(values) => Ok(SelectStatement {
             with_recursive: values.with_recursive,
             with: values.with.clone(),
+            with_from_recursive_union_outer: false,
             distinct: false,
             distinct_on: Vec::new(),
             from: Some(FromItem::Values {
@@ -4272,6 +4283,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             targets: vec![SelectItem {
                 output_name: "*".into(),
                 expr: SqlExpr::Column("*".into()),
+                location: None,
             }],
             where_clause: None,
             group_by: Vec::new(),
@@ -4279,9 +4291,13 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             having: None,
             window_clauses: Vec::new(),
             order_by: values.order_by.clone(),
+            order_by_location: None,
             limit: values.limit,
+            limit_location: None,
             offset: values.offset,
+            offset_location: None,
             locking_clause: None,
+            locking_location: None,
             locking_targets: Vec::new(),
             locking_nowait: false,
             set_operation: None,
@@ -4299,6 +4315,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
         } => Ok(SelectStatement {
             with_recursive: false,
             with: Vec::new(),
+            with_from_recursive_union_outer: false,
             distinct: false,
             distinct_on: Vec::new(),
             from: None,
@@ -4309,14 +4326,19 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             having: None,
             window_clauses: Vec::new(),
             order_by: Vec::new(),
+            order_by_location: None,
             limit: None,
+            limit_location: None,
             offset: None,
+            offset_location: None,
             locking_clause: None,
+            locking_location: None,
             locking_targets: Vec::new(),
             locking_nowait: false,
             set_operation: Some(Box::new(SetOperationStatement {
                 op: SetOperator::Union { all: *all },
                 inputs: vec![cte_body_as_select(anchor)?, (**recursive).clone()],
+                location: None,
             })),
         }),
     }
@@ -4331,6 +4353,52 @@ fn cte_body_outer_scopes(outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
     cte_outer_scopes.push(empty_scope());
     cte_outer_scopes.extend_from_slice(outer_scopes);
     cte_outer_scopes
+}
+
+fn prevalidate_recursive_select_targets(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    visible_ctes: &[BoundCte],
+    expanded_views: &[u32],
+) -> Result<(), ParseError> {
+    if stmt.set_operation.is_some() {
+        return Ok(());
+    }
+    let local_ctes = bind_ctes(
+        stmt.with_recursive,
+        &stmt.with,
+        catalog,
+        outer_scopes,
+        grouped_outer.cloned(),
+        visible_ctes,
+        expanded_views,
+    )?;
+    let mut precheck_visible_ctes = local_ctes;
+    precheck_visible_ctes.extend_from_slice(visible_ctes);
+    let scope = if let Some(from) = &stmt.from {
+        bind_from_item_with_ctes(
+            from,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            &precheck_visible_ctes,
+            expanded_views,
+        )?
+        .1
+    } else {
+        empty_scope()
+    };
+    let _ = bind_select_targets(
+        &stmt.targets,
+        &scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &precheck_visible_ctes,
+    )?;
+    Ok(())
 }
 
 fn bind_ctes(
@@ -4358,16 +4426,19 @@ fn bind_ctes(
         visible.extend_from_slice(outer_ctes);
         let self_references_cte = cte_body_references_table(&cte.body, &cte.name);
         if with_recursive && self_references_cte && cte_body_is_modifying(&cte.body) {
-            return Err(ParseError::InvalidRecursion(format!(
-                "recursive query \"{}\" must not contain data-modifying statements",
-                cte.name
-            )));
+            return Err(positioned_if_available(
+                ParseError::InvalidRecursion(format!(
+                    "recursive query \"{}\" must not contain data-modifying statements",
+                    cte.name
+                )),
+                cte.location,
+            ));
         }
         if with_recursive
             && self_references_cte
             && !matches!(cte.body, CteBody::RecursiveUnion { .. })
         {
-            return Err(invalid_recursive_cte_shape(&cte.name));
+            return Err(invalid_recursive_cte_shape(cte));
         }
         if !self_references_cte
             && (cte.search.is_some() || cte.cycle.is_some())
@@ -4401,6 +4472,7 @@ fn bind_ctes(
                 validate_recursive_cte_recursive_term(recursive, &cte.name)?;
                 let (base_anchor_query, base_desc) = apply_cte_column_names(
                     &cte.name,
+                    cte.location,
                     base_anchor_query,
                     base_anchor_desc,
                     &cte.column_names,
@@ -4480,6 +4552,14 @@ fn bind_ctes(
                     worktable_id,
                 });
                 let recursive_outer_scopes = cte_body_outer_scopes(outer_scopes);
+                prevalidate_recursive_select_targets(
+                    &recursive_stmt,
+                    catalog,
+                    &recursive_outer_scopes,
+                    grouped_outer.as_ref(),
+                    &recursive_visible,
+                    expanded_views,
+                )?;
                 let (mut recursive_query, _) = analyze_select_query_with_outer(
                     &recursive_stmt,
                     catalog,
@@ -4525,21 +4605,24 @@ fn bind_ctes(
                             let overall_type =
                                 resolve_common_scalar_type(left.sql_type, right.sql_type)
                                     .unwrap_or(right.sql_type);
-                            return Err(ParseError::DetailedError {
-                                message: format!(
-                                    "recursive query \"{}\" column {} has type {} in non-recursive term but type {} overall",
-                                    cte.name,
-                                    index + 1,
-                                    recursive_cte_error_type_name(left.sql_type),
-                                    sql_type_name(overall_type)
-                                ),
-                                detail: None,
-                                hint: Some(
-                                    "Cast the output of the non-recursive term to the correct type."
-                                        .into(),
-                                ),
-                                sqlstate: "42804",
-                            });
+                            return Err(positioned_if_available(
+                                ParseError::DetailedError {
+                                    message: format!(
+                                        "recursive query \"{}\" column {} has type {} in non-recursive term but type {} overall",
+                                        cte.name,
+                                        index + 1,
+                                        recursive_cte_error_type_name(left.sql_type),
+                                        sql_type_name(overall_type)
+                                    ),
+                                    detail: None,
+                                    hint: Some(
+                                        "Cast the output of the non-recursive term to the correct type."
+                                            .into(),
+                                    ),
+                                    sqlstate: "42804",
+                                },
+                                cte_body_target_location(anchor, index),
+                            ));
                         }
                     }
                 }
@@ -4595,7 +4678,7 @@ fn bind_ctes(
                     &visible,
                     expanded_views,
                 )?;
-                apply_cte_column_names(&cte.name, query, desc, &cte.column_names)?
+                apply_cte_column_names(&cte.name, cte.location, query, desc, &cte.column_names)?
             }
         };
         bound_by_index[cte_index] = Some(BoundCte {
@@ -4622,8 +4705,11 @@ fn recursive_cte_binding_order(ctes: &[CommonTableExpr]) -> Result<Vec<usize>, P
     ) -> Result<(), ParseError> {
         match states[index] {
             1 => {
-                return Err(ParseError::InvalidRecursion(
-                    "mutual recursion between WITH items is not implemented".into(),
+                return Err(positioned_if_available(
+                    ParseError::InvalidRecursion(
+                        "mutual recursion between WITH items is not implemented".into(),
+                    ),
+                    ctes[index].location,
                 ));
             }
             2 => return Ok(()),
@@ -4674,10 +4760,23 @@ pub(super) fn cte_body_is_modifying(body: &CteBody) -> bool {
     }
 }
 
-fn invalid_recursive_cte_shape(cte_name: &str) -> ParseError {
-    ParseError::InvalidRecursion(format!(
-        "recursive query \"{cte_name}\" does not have the form non-recursive-term UNION [ALL] recursive-term"
-    ))
+fn invalid_recursive_cte_shape(cte: &CommonTableExpr) -> ParseError {
+    positioned_if_available(
+        ParseError::InvalidRecursion(format!(
+            "recursive query \"{}\" does not have the form non-recursive-term UNION [ALL] recursive-term",
+            cte.name
+        )),
+        cte.location,
+    )
+}
+
+fn cte_body_target_location(body: &CteBody, index: usize) -> Option<usize> {
+    match body {
+        CteBody::Select(select) => select.targets.get(index).and_then(|target| target.location),
+        CteBody::Values(_) => None,
+        CteBody::RecursiveUnion { anchor, .. } => cte_body_target_location(anchor, index),
+        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => None,
+    }
 }
 
 fn recursive_cte_error_type_name(sql_type: SqlType) -> String {
@@ -4709,16 +4808,22 @@ fn validate_cte_search_cycle_clauses(
             .sequence_column
             .eq_ignore_ascii_case(&cycle.mark_column)
         {
-            return Err(ParseError::FeatureNotSupportedMessage(
-                "search sequence column name and cycle mark column name are the same".into(),
+            return Err(positioned_if_available(
+                ParseError::FeatureNotSupportedMessage(
+                    "search sequence column name and cycle mark column name are the same".into(),
+                ),
+                search.location,
             ));
         }
         if search
             .sequence_column
             .eq_ignore_ascii_case(&cycle.path_column)
         {
-            return Err(ParseError::FeatureNotSupportedMessage(
-                "search sequence column name and cycle path column name are the same".into(),
+            return Err(positioned_if_available(
+                ParseError::FeatureNotSupportedMessage(
+                    "search sequence column name and cycle path column name are the same".into(),
+                ),
+                search.location,
             ));
         }
     }
@@ -4847,6 +4952,7 @@ fn select_item(name: &str, expr: SqlExpr) -> SelectItem {
     SelectItem {
         output_name: name.to_string(),
         expr,
+        location: None,
     }
 }
 
@@ -4859,6 +4965,7 @@ fn select_from_derived(
     SelectStatement {
         with_recursive: false,
         with: Vec::new(),
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: Some(FromItem::Alias {
@@ -4874,9 +4981,13 @@ fn select_from_derived(
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
+        order_by_location: None,
         limit: None,
+        limit_location: None,
         offset: None,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: None,
@@ -5134,9 +5245,12 @@ fn validate_cte_search_clause(
 ) -> Result<(), ParseError> {
     for column in &search.columns {
         if !name_in_list(output_names, column) {
-            return Err(ParseError::FeatureNotSupportedMessage(format!(
-                "search column \"{column}\" not in WITH query column list"
-            )));
+            return Err(positioned_if_available(
+                ParseError::FeatureNotSupportedMessage(format!(
+                    "search column \"{column}\" not in WITH query column list"
+                )),
+                search.location,
+            ));
         }
         if search
             .columns
@@ -5145,16 +5259,22 @@ fn validate_cte_search_clause(
             .count()
             > 1
         {
-            return Err(ParseError::FeatureNotSupportedMessage(format!(
-                "search column \"{column}\" specified more than once"
-            )));
+            return Err(positioned_if_available(
+                ParseError::FeatureNotSupportedMessage(format!(
+                    "search column \"{column}\" specified more than once"
+                )),
+                search.location,
+            ));
         }
     }
     if name_in_list(output_names, &search.sequence_column) {
-        return Err(ParseError::FeatureNotSupportedMessage(format!(
-            "search sequence column name \"{}\" already used in WITH query column list",
-            search.sequence_column
-        )));
+        return Err(positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(format!(
+                "search sequence column name \"{}\" already used in WITH query column list",
+                search.sequence_column
+            )),
+            search.location,
+        ));
     }
     Ok(())
 }
@@ -5165,9 +5285,12 @@ fn validate_cte_cycle_clause(
 ) -> Result<(), ParseError> {
     for column in &cycle.columns {
         if !name_in_list(output_names, column) {
-            return Err(ParseError::FeatureNotSupportedMessage(format!(
-                "cycle column \"{column}\" not in WITH query column list"
-            )));
+            return Err(positioned_if_available(
+                ParseError::FeatureNotSupportedMessage(format!(
+                    "cycle column \"{column}\" not in WITH query column list"
+                )),
+                cycle.location,
+            ));
         }
         if cycle
             .columns
@@ -5176,26 +5299,38 @@ fn validate_cte_cycle_clause(
             .count()
             > 1
         {
-            return Err(ParseError::FeatureNotSupportedMessage(format!(
-                "cycle column \"{column}\" specified more than once"
-            )));
+            return Err(positioned_if_available(
+                ParseError::FeatureNotSupportedMessage(format!(
+                    "cycle column \"{column}\" specified more than once"
+                )),
+                cycle.location,
+            ));
         }
     }
     if name_in_list(output_names, &cycle.mark_column) {
-        return Err(ParseError::FeatureNotSupportedMessage(format!(
-            "cycle mark column name \"{}\" already used in WITH query column list",
-            cycle.mark_column
-        )));
+        return Err(positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(format!(
+                "cycle mark column name \"{}\" already used in WITH query column list",
+                cycle.mark_column
+            )),
+            cycle.location,
+        ));
     }
     if name_in_list(output_names, &cycle.path_column) {
-        return Err(ParseError::FeatureNotSupportedMessage(format!(
-            "cycle path column name \"{}\" already used in WITH query column list",
-            cycle.path_column
-        )));
+        return Err(positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(format!(
+                "cycle path column name \"{}\" already used in WITH query column list",
+                cycle.path_column
+            )),
+            cycle.location,
+        ));
     }
     if cycle.mark_column.eq_ignore_ascii_case(&cycle.path_column) {
-        return Err(ParseError::FeatureNotSupportedMessage(
-            "cycle mark column name and cycle path column name are the same".into(),
+        return Err(positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(
+                "cycle mark column name and cycle path column name are the same".into(),
+            ),
+            cycle.location,
         ));
     }
     Ok(())
@@ -5212,11 +5347,14 @@ fn validate_cte_cycle_clause_types(
     let mark_type = infer_sql_expr_type(&mark_value, &scope, catalog, &outer_scopes, None);
     let default_type = infer_sql_expr_type(&default_value, &scope, catalog, &outer_scopes, None);
     let common_type = resolve_common_scalar_type(mark_type, default_type).ok_or_else(|| {
-        ParseError::FeatureNotSupportedMessage(format!(
-            "CYCLE types {} and {} cannot be matched",
-            sql_type_name(mark_type),
-            sql_type_name(default_type)
-        ))
+        positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(format!(
+                "CYCLE types {} and {} cannot be matched",
+                sql_type_name(mark_type),
+                sql_type_name(default_type)
+            )),
+            cycle.location,
+        )
     })?;
     if !cycle_mark_type_has_equality(catalog, common_type) {
         return Err(ParseError::FeatureNotSupportedMessage(format!(
@@ -5272,6 +5410,7 @@ enum RecursiveReferenceContext {
 fn recursive_reference_error(
     context: RecursiveReferenceContext,
     cte_name: &str,
+    position: Option<usize>,
 ) -> Result<(), ParseError> {
     let message = match context {
         RecursiveReferenceContext::Ok => return Ok(()),
@@ -5293,7 +5432,10 @@ fn recursive_reference_error(
             format!("recursive reference to query \"{cte_name}\" must not appear within EXCEPT")
         }
     };
-    Err(ParseError::InvalidRecursion(message))
+    Err(positioned_if_available(
+        ParseError::InvalidRecursion(message),
+        position,
+    ))
 }
 
 #[derive(Debug)]
@@ -5353,7 +5495,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 for cte in &update.with {
                     self.visit_cte_body(&cte.body, RecursiveReferenceContext::Subquery)?;
                 }
-                self.note_reference(&update.table_name, context)?;
+                self.note_reference(&update.table_name, context, None)?;
                 if let Some(from) = &update.from {
                     self.visit_from(from, context)?;
                 }
@@ -5372,7 +5514,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 for cte in &delete.with {
                     self.visit_cte_body(&cte.body, RecursiveReferenceContext::Subquery)?;
                 }
-                self.note_reference(&delete.table_name, context)?;
+                self.note_reference(&delete.table_name, context, None)?;
                 if let Some(using) = &delete.using {
                     self.visit_from(using, context)?;
                 }
@@ -5388,7 +5530,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 for cte in &merge.with {
                     self.visit_cte_body(&cte.body, RecursiveReferenceContext::Subquery)?;
                 }
-                self.note_reference(&merge.target_table, context)?;
+                self.note_reference(&merge.target_table, context, None)?;
                 self.visit_from(&merge.source, context)?;
                 self.visit_expr(&merge.join_condition, context)?;
                 for clause in &merge.when_clauses {
@@ -5439,10 +5581,10 @@ impl<'a> RecursiveReferenceChecker<'a> {
             return Ok(());
         }
 
-        let cte_context = if context == RecursiveReferenceContext::Ok {
-            RecursiveReferenceContext::Ok
-        } else {
+        let cte_context = if stmt.with_from_recursive_union_outer {
             RecursiveReferenceContext::Subquery
+        } else {
+            context
         };
         for cte in &stmt.with {
             self.visit_cte_body(&cte.body, cte_context)?;
@@ -5507,10 +5649,18 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 .count()
                 > 1
         {
-            return Err(ParseError::InvalidRecursion(format!(
-                "recursive reference to query \"{}\" must not appear more than once",
-                self.cte_name
-            )));
+            let position = stmt
+                .inputs
+                .iter()
+                .flat_map(|input| select_statement_table_reference_locations(input, self.cte_name))
+                .nth(1);
+            return Err(positioned_if_available(
+                ParseError::InvalidRecursion(format!(
+                    "recursive reference to query \"{}\" must not appear more than once",
+                    self.cte_name
+                )),
+                position,
+            ));
         }
         let input_context = match stmt.op {
             SetOperator::Union { .. } => context,
@@ -5529,7 +5679,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
         context: RecursiveReferenceContext,
     ) -> Result<(), ParseError> {
         match from {
-            FromItem::Table { name, .. } => self.note_reference(name, context),
+            FromItem::Table { name, location, .. } => self.note_reference(name, context, *location),
             FromItem::Values { rows } => {
                 for row in rows {
                     for expr in row {
@@ -5872,17 +6022,21 @@ impl<'a> RecursiveReferenceChecker<'a> {
         &mut self,
         table_name: &str,
         context: RecursiveReferenceContext,
+        position: Option<usize>,
     ) -> Result<(), ParseError> {
         if !table_name.eq_ignore_ascii_case(self.cte_name) {
             return Ok(());
         }
-        recursive_reference_error(context, self.cte_name)?;
+        recursive_reference_error(context, self.cte_name, position)?;
         self.self_refcount += 1;
         if self.self_refcount > 1 {
-            return Err(ParseError::InvalidRecursion(format!(
-                "recursive reference to query \"{}\" must not appear more than once",
-                self.cte_name
-            )));
+            return Err(positioned_if_available(
+                ParseError::InvalidRecursion(format!(
+                    "recursive reference to query \"{}\" must not appear more than once",
+                    self.cte_name
+                )),
+                position,
+            ));
         }
         Ok(())
     }
@@ -5906,51 +6060,77 @@ fn validate_recursive_cte_non_recursive_term(
 fn validate_recursive_cte_recursive_term_decorations(
     stmt: &SelectStatement,
 ) -> Result<(), ParseError> {
-    if select_statement_contains_recursive_term_aggregate(stmt) {
+    if let Some(position) = select_statement_recursive_term_aggregate_position(stmt) {
         return Err(ParseError::FeatureNotSupportedMessage(
             "aggregate functions are not allowed in a recursive query's recursive term".into(),
-        ));
+        )
+        .with_position(position));
     }
     if !stmt.order_by.is_empty() {
-        return Err(ParseError::FeatureNotSupportedMessage(
-            "ORDER BY in a recursive query is not implemented".into(),
+        let position = stmt
+            .order_by
+            .first()
+            .and_then(|item| item.location)
+            .or(stmt.order_by_location);
+        return Err(positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(
+                "ORDER BY in a recursive query is not implemented".into(),
+            ),
+            position,
         ));
     }
     if stmt.offset.is_some() {
-        return Err(ParseError::FeatureNotSupportedMessage(
-            "OFFSET in a recursive query is not implemented".into(),
+        return Err(positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(
+                "OFFSET in a recursive query is not implemented".into(),
+            ),
+            stmt.offset_location,
         ));
     }
     if stmt.limit.is_some() {
-        return Err(ParseError::FeatureNotSupportedMessage(
-            "LIMIT in a recursive query is not implemented".into(),
+        return Err(positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(
+                "LIMIT in a recursive query is not implemented".into(),
+            ),
+            stmt.limit_location,
         ));
     }
     if stmt.locking_clause.is_some() {
-        return Err(ParseError::FeatureNotSupportedMessage(
-            "FOR UPDATE/SHARE in a recursive query is not implemented".into(),
+        return Err(positioned_if_available(
+            ParseError::FeatureNotSupportedMessage(
+                "FOR UPDATE/SHARE in a recursive query is not implemented".into(),
+            ),
+            stmt.locking_location,
         ));
     }
     Ok(())
 }
 
-fn select_statement_contains_recursive_term_aggregate(stmt: &SelectStatement) -> bool {
+fn select_statement_recursive_term_aggregate_position(stmt: &SelectStatement) -> Option<usize> {
     stmt.targets
         .iter()
-        .any(|target| sql_expr_contains_aggregate_call(&target.expr))
-        || stmt
-            .having
-            .as_ref()
-            .is_some_and(|expr| sql_expr_contains_aggregate_call(expr))
-        || stmt
-            .order_by
-            .iter()
-            .any(|item| sql_expr_contains_aggregate_call(&item.expr))
-        || stmt.set_operation.as_ref().is_some_and(|setop| {
-            setop
-                .inputs
+        .find(|target| sql_expr_contains_aggregate_call(&target.expr))
+        .and_then(|target| target.location)
+        .or_else(|| {
+            stmt.having
+                .as_ref()
+                .filter(|expr| sql_expr_contains_aggregate_call(expr))
+                .map(|_| stmt.targets.first().and_then(|target| target.location))
+                .flatten()
+        })
+        .or_else(|| {
+            stmt.order_by
                 .iter()
-                .any(select_statement_contains_recursive_term_aggregate)
+                .find(|item| sql_expr_contains_aggregate_call(&item.expr))
+                .and_then(|item| item.location)
+        })
+        .or_else(|| {
+            stmt.set_operation.as_ref().and_then(|setop| {
+                setop
+                    .inputs
+                    .iter()
+                    .find_map(select_statement_recursive_term_aggregate_position)
+            })
         })
 }
 
@@ -6195,6 +6375,61 @@ pub(crate) fn select_statement_references_table(stmt: &SelectStatement, table_na
             .order_by
             .iter()
             .any(|item| sql_expr_references_table(&item.expr, table_name))
+}
+
+fn select_statement_table_reference_locations(
+    stmt: &SelectStatement,
+    table_name: &str,
+) -> Vec<usize> {
+    if stmt
+        .with
+        .iter()
+        .any(|cte| cte.name.eq_ignore_ascii_case(table_name))
+    {
+        return Vec::new();
+    }
+    let mut locations = Vec::new();
+    if let Some(from) = &stmt.from {
+        from_item_table_reference_locations(from, table_name, &mut locations);
+    }
+    if let Some(setop) = &stmt.set_operation {
+        for input in &setop.inputs {
+            locations.extend(select_statement_table_reference_locations(
+                input, table_name,
+            ));
+        }
+    }
+    locations
+}
+
+fn from_item_table_reference_locations(
+    from: &FromItem,
+    table_name: &str,
+    locations: &mut Vec<usize>,
+) {
+    match from {
+        FromItem::Table { name, location, .. } if name.eq_ignore_ascii_case(table_name) => {
+            if let Some(location) = location {
+                locations.push(*location);
+            }
+        }
+        FromItem::Table { .. } | FromItem::Values { .. } | FromItem::FunctionCall { .. } => {}
+        FromItem::RowsFrom { .. } | FromItem::JsonTable(_) | FromItem::XmlTable(_) => {}
+        FromItem::TableSample { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::Alias { source, .. } => {
+            from_item_table_reference_locations(source, table_name, locations);
+        }
+        FromItem::DerivedTable(select) => {
+            locations.extend(select_statement_table_reference_locations(
+                select, table_name,
+            ));
+        }
+        FromItem::Join { left, right, .. } => {
+            from_item_table_reference_locations(left, table_name, locations);
+            from_item_table_reference_locations(right, table_name, locations);
+        }
+    }
 }
 
 pub(crate) fn insert_statement_references_table(stmt: &InsertStatement, table_name: &str) -> bool {

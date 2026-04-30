@@ -1637,6 +1637,7 @@ pub struct AnalyzeStatement {
 pub struct SelectStatement {
     pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
+    pub with_from_recursive_union_outer: bool,
     pub distinct: bool,
     pub distinct_on: Vec<SqlExpr>,
     pub from: Option<FromItem>,
@@ -1647,9 +1648,13 @@ pub struct SelectStatement {
     pub having: Option<SqlExpr>,
     pub window_clauses: Vec<RawWindowClause>,
     pub order_by: Vec<OrderByItem>,
+    pub order_by_location: Option<usize>,
     pub limit: Option<usize>,
+    pub limit_location: Option<usize>,
     pub offset: Option<usize>,
+    pub offset_location: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
+    pub locking_location: Option<usize>,
     pub locking_targets: Vec<String>,
     pub locking_nowait: bool,
     pub set_operation: Option<Box<SetOperationStatement>>,
@@ -1722,6 +1727,7 @@ impl SetOperator {
 pub struct SetOperationStatement {
     pub op: SetOperator,
     pub inputs: Vec<SelectStatement>,
+    pub location: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1737,6 +1743,7 @@ pub struct ValuesStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommonTableExpr {
     pub name: String,
+    pub location: Option<usize>,
     pub column_names: Vec<String>,
     pub body: CteBody,
     pub search: Option<CteSearchClause>,
@@ -1745,6 +1752,7 @@ pub struct CommonTableExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CteSearchClause {
+    pub location: Option<usize>,
     pub breadth_first: bool,
     pub columns: Vec<String>,
     pub sequence_column: String,
@@ -1752,6 +1760,7 @@ pub struct CteSearchClause {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CteCycleClause {
+    pub location: Option<usize>,
     pub columns: Vec<String>,
     pub mark_column: String,
     pub mark_value: Option<SqlExpr>,
@@ -1786,6 +1795,7 @@ pub enum FromItem {
     Table {
         name: String,
         only: bool,
+        location: Option<usize>,
     },
     Values {
         rows: Vec<Vec<SqlExpr>>,
@@ -2062,11 +2072,13 @@ pub enum JoinConstraint {
 pub struct SelectItem {
     pub output_name: String,
     pub expr: SqlExpr,
+    pub location: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderByItem {
     pub expr: SqlExpr,
+    pub location: Option<usize>,
     pub descending: bool,
     pub nulls_first: Option<bool>,
     pub using_operator: Option<String>,
