@@ -2763,10 +2763,10 @@ mod tests {
     }
 
     #[test]
-    fn inline_sql_function_rejects_non_select_body() {
+    fn inline_sql_function_rejects_unsupported_body() {
         let catalog = crate::backend::parser::Catalog::default();
         let datetime_config = DateTimeConfig::default();
-        let row = test_proc_row("return 1", None);
+        let row = test_proc_row("delete from sq_target", None);
         let err =
             inline_sql_function_body(&row, &[], None, &catalog, &datetime_config).unwrap_err();
         assert!(matches!(
