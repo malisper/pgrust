@@ -431,7 +431,7 @@ fn resolve_parent_relations(
                 sqlstate: "42809",
             });
         }
-        if !allow_partitioned_parent && parent.relkind != 'r' {
+        if !allow_partitioned_parent && !matches!(parent.relkind, 'r' | 'f') {
             return Err(ParseError::WrongObjectType {
                 name: parent_name.clone(),
                 expected: "table",

@@ -1214,6 +1214,38 @@ fn drop_table_direct_dependencies(
     let mut policy_oids = BTreeSet::new();
     let mut deps = Vec::new();
 
+    if let Some(relation) = ctx
+        .catalog
+        .lookup_relation_by_oid(relation_oid)
+        .or_else(|| ctx.catalog.relation_by_oid(relation_oid))
+    {
+        for sequence_oid in relation.desc.columns.iter().filter_map(|column| {
+            (!column.dropped)
+                .then_some(column.default_sequence_oid)
+                .flatten()
+        }) {
+            if !relation_oids.insert(sequence_oid) {
+                continue;
+            }
+            let Some(class) = ctx.catalog.class_row_by_oid(sequence_oid) else {
+                continue;
+            };
+            if class.relkind != 'S' {
+                continue;
+            }
+            deps.push(DropTableDependency::Relation {
+                relation_oid: sequence_oid,
+                relkind: class.relkind,
+                is_partition: true,
+                display_name: drop_table_display_relation_name(
+                    ctx.catalog,
+                    sequence_oid,
+                    ctx.search_path,
+                ),
+            });
+        }
+    }
+
     for row in ctx.graph.dependents(ObjectAddress::relation(relation_oid)) {
         if row.objsubid != 0 {
             continue;
@@ -1380,7 +1412,7 @@ fn drop_table_direct_dependencies(
         let Some(class) = ctx.catalog.class_row_by_oid(inherit.inhrelid) else {
             continue;
         };
-        if !matches!(class.relkind, 'r' | 'p') {
+        if !matches!(class.relkind, 'r' | 'p' | 'f') {
             continue;
         }
         deps.push(DropTableDependency::Relation {
@@ -2832,6 +2864,14 @@ impl Database {
                     continue;
                 }
                 None => {
+                    if drop_stmt.foreign_table {
+                        return Err(ExecError::DetailedError {
+                            message: format!("foreign table \"{}\" does not exist", relation_name),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P01",
+                        });
+                    }
                     return Err(ExecError::Parse(ParseError::TableDoesNotExist(
                         relation_name.clone(),
                     )));
@@ -2889,9 +2929,14 @@ impl Database {
 
             if !drop_stmt.cascade && !plan.blocker_details.is_empty() {
                 let (_, source_name) = plan.blocker_source.unwrap_or(('r', "table".to_string()));
+                let source_kind = if drop_stmt.foreign_table {
+                    "foreign table"
+                } else {
+                    "table"
+                };
                 return Err(ExecError::DetailedError {
                     message: format!(
-                        "cannot drop table {source_name} because other objects depend on it"
+                        "cannot drop {source_kind} {source_name} because other objects depend on it"
                     ),
                     detail: Some(plan.blocker_details.join("\n")),
                     hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),

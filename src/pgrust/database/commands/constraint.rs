@@ -1698,6 +1698,17 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
+        if relation.relkind == 'f' {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "ALTER action ALTER CONSTRAINT cannot be performed on relation \"{}\"",
+                    relation_basename(&alter_stmt.table_name)
+                ),
+                detail: Some("This operation is not supported for foreign tables.".into()),
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
         let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
         let row = find_constraint_row(&rows, &alter_stmt.constraint_name)
             .cloned()
@@ -2702,6 +2713,21 @@ impl Database {
                 }
             }
             crate::backend::parser::NormalizedAlterTableConstraint::IndexBacked(action) => {
+                if relation.relkind == 'f' {
+                    let constraint_kind = if action.primary {
+                        "primary key"
+                    } else {
+                        "unique"
+                    };
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "{constraint_kind} constraints are not supported on foreign tables"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42809",
+                    });
+                }
                 if relation.relkind == 'p' || relation.relispartition {
                     let _ = self.install_partitioned_index_backed_constraints_in_transaction(
                         client_id,
@@ -4768,11 +4794,6 @@ impl Database {
                 }));
             }
         };
-        if drop_stmt.cascade {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "ALTER TABLE DROP CONSTRAINT CASCADE".into(),
-            )));
-        }
         reject_constraint_with_dependent_views(
             self,
             client_id,
@@ -5390,6 +5411,17 @@ impl Database {
                 })
             })?;
         if existing_not_null.coninhcount > 0 {
+            if relation.relispartition {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" is marked NOT NULL in parent table",
+                        relation.desc.columns[column_index].name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P16",
+                });
+            }
             return Err(ExecError::DetailedError {
                 message: format!(
                     "cannot drop inherited constraint \"{}\" of relation \"{}\"",

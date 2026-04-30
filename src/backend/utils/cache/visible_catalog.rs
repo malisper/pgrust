@@ -1018,6 +1018,7 @@ impl CatalogLookup for VisibleCatalog {
         };
         build_pg_user_mappings_rows(
             catcache.authid_rows(),
+            catcache.auth_members_rows(),
             catcache.foreign_server_rows(),
             catcache.user_mapping_rows(),
             self.current_user_oid(),
