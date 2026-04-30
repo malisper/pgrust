@@ -2760,7 +2760,8 @@ fn nonverbose_sort_items(
     display_items: &[String],
     ctx: &VerboseExplainContext,
 ) -> Vec<String> {
-    if !display_items.is_empty()
+    if !context_has_relation_aliases(ctx)
+        && !display_items.is_empty()
         && !display_items
             .iter()
             .any(|item| explain_display_item_is_debug(item))

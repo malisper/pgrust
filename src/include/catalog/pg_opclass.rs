@@ -1193,7 +1193,9 @@ pub fn index_opclass_is_implicit_for_definition(
     }
     if am_oid == GIST_AM_OID
         && opclass_oid == RANGE_GIST_OPCLASS_OID
-        && (sql_type.is_multirange() || multirange_type_ref_for_sql_type(sql_type).is_some())
+        && (sql_type.is_range()
+            || sql_type.is_multirange()
+            || multirange_type_ref_for_sql_type(sql_type).is_some())
     {
         // :HACK: temporal GiST planning can currently retain the range
         // opclass OID for multirange keys. PostgreSQL treats the compatible

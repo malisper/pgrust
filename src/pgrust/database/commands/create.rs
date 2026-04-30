@@ -1875,7 +1875,7 @@ fn lookup_aggregate_support_proc_row(
         .zip(support.declared_arg_types.iter().copied())
         .zip(support.declared_arg_oids.iter().copied())
     {
-        if is_polymorphic_aggregate_signature_oid(declared_oid) {
+        if is_polymorphic_aggregate_signature_oid(declared_oid) && actual_type == declared_type {
             continue;
         }
         if !is_binary_coercible_type(actual_type, declared_type) {
