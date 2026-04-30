@@ -497,13 +497,18 @@ fn modifying_cte_body_has_nested_modifying_ctes(body: &CteBody) -> bool {
     nested.iter().any(|cte| cte_body_has_writable(&cte.body))
 }
 
-fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> CteBody {
+fn prepend_ctes_to_modifying_body(
+    body: &CteBody,
+    ctes: &[CommonTableExpr],
+    with_recursive: bool,
+) -> CteBody {
     match body {
         CteBody::Insert(insert) => {
             let mut insert = (**insert).clone();
             let mut with = ctes.to_vec();
             with.extend(insert.with);
             insert.with = with;
+            insert.with_recursive = insert.with_recursive || (with_recursive && !ctes.is_empty());
             CteBody::Insert(Box::new(insert))
         }
         CteBody::Update(update) => {
@@ -511,6 +516,7 @@ fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> C
             let mut with = ctes.to_vec();
             with.extend(update.with);
             update.with = with;
+            update.with_recursive = update.with_recursive || (with_recursive && !ctes.is_empty());
             CteBody::Update(Box::new(update))
         }
         CteBody::Delete(delete) => {
@@ -518,6 +524,7 @@ fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> C
             let mut with = ctes.to_vec();
             with.extend(delete.with);
             delete.with = with;
+            delete.with_recursive = delete.with_recursive || (with_recursive && !ctes.is_empty());
             CteBody::Delete(Box::new(delete))
         }
         CteBody::Merge(merge) => {
@@ -525,6 +532,7 @@ fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> C
             let mut with = ctes.to_vec();
             with.extend(merge.with);
             merge.with = with;
+            merge.with_recursive = merge.with_recursive || (with_recursive && !ctes.is_empty());
             CteBody::Merge(Box::new(merge))
         }
         _ => body.clone(),
@@ -893,7 +901,8 @@ impl Database {
                 with_recursive,
                 &remaining_ctes,
             );
-            executable.body = prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes);
+            executable.body =
+                prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes, with_recursive);
             if let Some(bound) = self.execute_modifying_cte_body_autocommit(
                 client_id,
                 interrupts,
@@ -3162,8 +3171,11 @@ impl Database {
                         }
 
                         let mut executable = cte.clone();
-                        executable.body =
-                            prepend_ctes_to_modifying_body(&cte.body, &preceding_select_ctes);
+                        executable.body = prepend_ctes_to_modifying_body(
+                            &cte.body,
+                            &preceding_select_ctes,
+                            insert_stmt.with_recursive,
+                        );
                         let result = match &executable.body {
                             CteBody::Insert(cte_insert) => {
                                 let bound = bind_insert_with_outer_scopes_and_ctes(

@@ -617,83 +617,85 @@ fn analyze_select_usage_with_outer(
         (AnalyzedFrom::result(), empty_scope())
     };
 
-    let mut info = AggregateExprInfo::default();
+    with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
+        let mut info = AggregateExprInfo::default();
 
-    if let Some(setop) = &stmt.set_operation {
-        for input in &setop.inputs {
-            info.merge(analyze_select_usage_with_outer(
-                input,
+        if let Some(setop) = &stmt.set_operation {
+            for input in &setop.inputs {
+                info.merge(analyze_select_usage_with_outer(
+                    input,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.clone(),
+                    &visible_ctes,
+                    expanded_views,
+                )?);
+            }
+        }
+
+        if let Some(predicate) = &stmt.where_clause {
+            info.merge(analyze_expr_internal(
+                predicate,
+                AggregateClauseKind::Where,
+                &scope,
                 catalog,
                 outer_scopes,
-                grouped_outer.clone(),
+                grouped_outer.as_ref(),
                 &visible_ctes,
                 expanded_views,
             )?);
         }
-    }
+        for target in &stmt.targets {
+            info.merge(analyze_expr_internal(
+                &target.expr,
+                AggregateClauseKind::SelectTarget,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+                expanded_views,
+            )?);
+        }
+        for group_item in &stmt.group_by {
+            analyze_group_by_item_aggregates(
+                group_item,
+                &mut info,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+                expanded_views,
+            )?;
+        }
+        if let Some(having) = &stmt.having {
+            info.merge(analyze_expr_internal(
+                having,
+                AggregateClauseKind::Having,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+                expanded_views,
+            )?);
+        }
+        for order_by in &stmt.order_by {
+            info.merge(analyze_expr_internal(
+                resolve_select_order_by_expr(&order_by.expr, &stmt.targets),
+                AggregateClauseKind::OrderBy,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+                expanded_views,
+            )?);
+        }
 
-    if let Some(predicate) = &stmt.where_clause {
-        info.merge(analyze_expr_internal(
-            predicate,
-            AggregateClauseKind::Where,
-            &scope,
-            catalog,
-            outer_scopes,
-            grouped_outer.as_ref(),
-            &visible_ctes,
-            expanded_views,
-        )?);
-    }
-    for target in &stmt.targets {
-        info.merge(analyze_expr_internal(
-            &target.expr,
-            AggregateClauseKind::SelectTarget,
-            &scope,
-            catalog,
-            outer_scopes,
-            grouped_outer.as_ref(),
-            &visible_ctes,
-            expanded_views,
-        )?);
-    }
-    for group_item in &stmt.group_by {
-        analyze_group_by_item_aggregates(
-            group_item,
-            &mut info,
-            &scope,
-            catalog,
-            outer_scopes,
-            grouped_outer.as_ref(),
-            &visible_ctes,
-            expanded_views,
-        )?;
-    }
-    if let Some(having) = &stmt.having {
-        info.merge(analyze_expr_internal(
-            having,
-            AggregateClauseKind::Having,
-            &scope,
-            catalog,
-            outer_scopes,
-            grouped_outer.as_ref(),
-            &visible_ctes,
-            expanded_views,
-        )?);
-    }
-    for order_by in &stmt.order_by {
-        info.merge(analyze_expr_internal(
-            resolve_select_order_by_expr(&order_by.expr, &stmt.targets),
-            AggregateClauseKind::OrderBy,
-            &scope,
-            catalog,
-            outer_scopes,
-            grouped_outer.as_ref(),
-            &visible_ctes,
-            expanded_views,
-        )?);
-    }
-
-    Ok(info)
+        Ok(info)
+    })
 }
 
 pub(super) fn reject_from_subselect_outer_aggregates(
@@ -950,6 +952,22 @@ fn analyze_expr_internal(
                     (None, Some(agg_level)) => agg_level,
                     (None, None) => 0,
                 };
+                if ownership_level > 0 {
+                    for arg in args.args() {
+                        reject_nested_local_ctes_in_raw_agg_expr(&arg.value)?;
+                    }
+                    for item in order_by {
+                        reject_nested_local_ctes_in_raw_agg_expr(&item.expr)?;
+                    }
+                    if let Some(items) = within_group.as_deref() {
+                        for item in items {
+                            reject_nested_local_ctes_in_raw_agg_expr(&item.expr)?;
+                        }
+                    }
+                    if let Some(filter) = filter.as_deref() {
+                        reject_nested_local_ctes_in_raw_agg_expr(filter)?;
+                    }
+                }
                 if min_agglevel.is_some_and(|agg_level| agg_level == ownership_level) {
                     return Err(ParseError::DetailedError {
                         message: "aggregate function calls cannot be nested".into(),

@@ -410,7 +410,7 @@ fn expr_contains_prune_volatile(expr: &Expr, catalog: &dyn CatalogLookup) -> boo
             .into_iter()
             .any(|expr| expr_contains_prune_volatile(expr, catalog)),
         Expr::SetReturning(_) => true,
-        Expr::SubLink(_) | Expr::SubPlan(_) => true,
+        Expr::SubLink(_) | Expr::SubPlan(_) => false,
         Expr::ScalarArrayOp(saop) => {
             expr_contains_prune_volatile(&saop.left, catalog)
                 || expr_contains_prune_volatile(&saop.right, catalog)

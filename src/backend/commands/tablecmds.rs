@@ -405,7 +405,11 @@ fn finalize_bound_delete(
     mut stmt: BoundDeleteStatement,
     catalog: &dyn CatalogLookup,
 ) -> BoundDeleteStatement {
-    let mut subplans = Vec::new();
+    let mut subplans = stmt
+        .input_plan
+        .as_mut()
+        .map(|plan| std::mem::take(&mut plan.subplans))
+        .unwrap_or_default();
     stmt.targets = stmt
         .targets
         .into_iter()

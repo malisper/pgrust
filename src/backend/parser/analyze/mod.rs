@@ -7892,23 +7892,42 @@ fn bind_select_query_with_outer(
                     })
                 });
             } else {
-                let bound_targets = with_window_binding(window_state.clone(), true, || {
-                    bind_select_targets(
-                        &stmt.targets,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer.as_ref(),
-                        &visible_ctes,
-                    )
-                })?;
+                with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
+                    let bound_targets = with_window_binding(window_state.clone(), true, || {
+                        bind_select_targets(
+                            &stmt.targets,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &visible_ctes,
+                        )
+                    })?;
 
-                let BoundSelectTargets::Plain(targets) = bound_targets;
-                let sort_inputs = with_window_binding(window_state.clone(), true, || {
-                    if stmt.order_by.is_empty() {
-                        Ok(Vec::new())
-                    } else {
-                        bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
+                    let BoundSelectTargets::Plain(targets) = bound_targets;
+                    let sort_inputs = with_window_binding(window_state.clone(), true, || {
+                        if stmt.order_by.is_empty() {
+                            Ok(Vec::new())
+                        } else {
+                            bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
+                                bind_expr_with_outer_and_ctes(
+                                    expr,
+                                    &scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer.as_ref(),
+                                    &visible_ctes,
+                                )
+                            })
+                        }
+                    })?;
+                    let sort_clause = build_sort_clause(sort_inputs, &targets);
+                    let distinct_on = build_distinct_on_clause(
+                        &stmt.distinct_on,
+                        &sort_clause,
+                        &targets,
+                        catalog,
+                        |expr| {
                             bind_expr_with_outer_and_ctes(
                                 expr,
                                 &scope,
@@ -7917,82 +7936,66 @@ fn bind_select_query_with_outer(
                                 grouped_outer.as_ref(),
                                 &visible_ctes,
                             )
-                        })
+                        },
+                    )?;
+                    let window_clauses = take_window_clauses(&window_state);
+
+                    let is_identity = targets.len() == base.output_columns.len()
+                        && targets.iter().enumerate().all(|(i, t)| {
+                            t.input_resno == Some(i + 1) && t.name == base.output_columns[i].name
+                        });
+                    let target_list = if is_identity {
+                        normalize_target_list(identity_target_list(
+                            &base.output_columns,
+                            &base.output_exprs,
+                        ))
+                    } else {
+                        normalize_target_list(targets)
+                    };
+
+                    let has_target_srfs =
+                        target_or_sort_clause_contains_srf(&target_list, &sort_clause);
+                    if stmt.distinct
+                        && !stmt.distinct_on.is_empty()
+                        && target_list
+                            .iter()
+                            .any(|target| expr_contains_set_returning(&target.expr))
+                    {
+                        return Err(ParseError::FeatureNotSupportedMessage(
+                            "SELECT DISTINCT ON with set-returning functions is not supported"
+                                .into(),
+                        ));
                     }
-                })?;
-                let sort_clause = build_sort_clause(sort_inputs, &targets);
-                let distinct_on = build_distinct_on_clause(
-                    &stmt.distinct_on,
-                    &sort_clause,
-                    &targets,
-                    catalog,
-                    |expr| {
-                        bind_expr_with_outer_and_ctes(
-                            expr,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &visible_ctes,
-                        )
-                    },
-                )?;
-                let window_clauses = take_window_clauses(&window_state);
-
-                let is_identity = targets.len() == base.output_columns.len()
-                    && targets.iter().enumerate().all(|(i, t)| {
-                        t.input_resno == Some(i + 1) && t.name == base.output_columns[i].name
-                    });
-                let target_list = if is_identity {
-                    normalize_target_list(identity_target_list(
-                        &base.output_columns,
-                        &base.output_exprs,
-                    ))
-                } else {
-                    normalize_target_list(targets)
-                };
-
-                let has_target_srfs =
-                    target_or_sort_clause_contains_srf(&target_list, &sort_clause);
-                if stmt.distinct
-                    && !stmt.distinct_on.is_empty()
-                    && target_list
-                        .iter()
-                        .any(|target| expr_contains_set_returning(&target.expr))
-                {
-                    return Err(ParseError::FeatureNotSupportedMessage(
-                        "SELECT DISTINCT ON with set-returning functions is not supported".into(),
-                    ));
-                }
-                let query = Query {
-                    command_type: crate::include::executor::execdesc::CommandType::Select,
-                    depends_on_row_security: false,
-                    rtable: base.rtable,
-                    jointree: base.jointree,
-                    target_list,
-                    distinct: false,
-                    distinct_on: Vec::new(),
-                    where_qual,
-                    group_by: Vec::new(),
-                    group_by_refs: Vec::new(),
-                    grouping_sets: Vec::new(),
-                    accumulators: Vec::new(),
-                    window_clauses,
-                    having_qual: None,
-                    sort_clause,
-                    constraint_deps: Vec::new(),
-                    limit_count: stmt.limit,
-                    limit_offset: stmt.offset,
-                    locking_clause: stmt.locking_clause,
-                    locking_targets: stmt.locking_targets.clone(),
-                    locking_nowait: stmt.locking_nowait,
-                    row_marks: Vec::new(),
-                    has_target_srfs,
-                    recursive_union: None,
-                    set_operation: None,
-                };
-                let query = apply_select_distinct(query, stmt.distinct, distinct_on);
-                Ok((query, scope))
+                    let query = Query {
+                        command_type: crate::include::executor::execdesc::CommandType::Select,
+                        depends_on_row_security: false,
+                        rtable: base.rtable,
+                        jointree: base.jointree,
+                        target_list,
+                        distinct: false,
+                        distinct_on: Vec::new(),
+                        where_qual,
+                        group_by: Vec::new(),
+                        group_by_refs: Vec::new(),
+                        grouping_sets: Vec::new(),
+                        accumulators: Vec::new(),
+                        window_clauses,
+                        having_qual: None,
+                        sort_clause,
+                        constraint_deps: Vec::new(),
+                        limit_count: stmt.limit,
+                        limit_offset: stmt.offset,
+                        locking_clause: stmt.locking_clause,
+                        locking_targets: stmt.locking_targets.clone(),
+                        locking_nowait: stmt.locking_nowait,
+                        row_marks: Vec::new(),
+                        has_target_srfs,
+                        recursive_union: None,
+                        set_operation: None,
+                    };
+                    let query = apply_select_distinct(query, stmt.distinct, distinct_on);
+                    Ok((query, scope))
+                })
             }
         })
     })

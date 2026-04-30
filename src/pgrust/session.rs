@@ -4215,13 +4215,19 @@ impl Session {
             .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
     }
 
-    fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> CteBody {
+    fn prepend_ctes_to_modifying_body(
+        body: &CteBody,
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+    ) -> CteBody {
         match body {
             CteBody::Insert(insert) => {
                 let mut insert = (**insert).clone();
                 let mut with = ctes.to_vec();
                 with.extend(insert.with);
                 insert.with = with;
+                insert.with_recursive =
+                    insert.with_recursive || (with_recursive && !ctes.is_empty());
                 CteBody::Insert(Box::new(insert))
             }
             CteBody::Update(update) => {
@@ -4229,6 +4235,8 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(update.with);
                 update.with = with;
+                update.with_recursive =
+                    update.with_recursive || (with_recursive && !ctes.is_empty());
                 CteBody::Update(Box::new(update))
             }
             CteBody::Delete(delete) => {
@@ -4236,6 +4244,8 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(delete.with);
                 delete.with = with;
+                delete.with_recursive =
+                    delete.with_recursive || (with_recursive && !ctes.is_empty());
                 CteBody::Delete(Box::new(delete))
             }
             CteBody::Merge(merge) => {
@@ -4243,6 +4253,7 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(merge.with);
                 merge.with = with;
+                merge.with_recursive = merge.with_recursive || (with_recursive && !ctes.is_empty());
                 CteBody::Merge(Box::new(merge))
             }
             _ => body.clone(),
@@ -4560,7 +4571,11 @@ impl Session {
                 with_recursive,
                 &remaining_ctes,
             );
-            executable.body = Self::prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes);
+            executable.body = Self::prepend_ctes_to_modifying_body(
+                &cte.body,
+                &visible_select_ctes,
+                with_recursive,
+            );
             if let Some(bound) = self.execute_modifying_cte_body(
                 db,
                 &executable,
@@ -20591,6 +20606,246 @@ mod tests {
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int32(11), Value::Int32(12)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_runs_to_completion_despite_outer_limit() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_outer_limit");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session
+            .execute(&db, "insert into src select * from generate_series(1, 16)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with upd(id) as (update src set id = id + 100 returning id) \
+                 select id from upd order by id limit 1",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(101)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(id), max(id) from src")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(16), Value::Int32(101), Value::Int32(116)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_recursive_select_cte_feeds_writable_cte() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_recursive");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table dst (id int4)").unwrap();
+        match session
+            .execute(
+                &db,
+                "with recursive t(id) as ( \
+                    select 1 \
+                    union all \
+                    select id + 1 from t where id < 3 \
+                 ), ins as ( \
+                    insert into dst select id from t returning id \
+                 ) \
+                 select id from ins order by id",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(id), max(id) from dst")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(3), Value::Int32(1), Value::Int32(3)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_delete_rule_constant_action_runs_once() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_delete_rule");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table y (a int4)").unwrap();
+        session
+            .execute(&db, "insert into y values (1), (2)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule y_rule as on delete to y \
+                 do instead insert into y values (42) returning *",
+            )
+            .unwrap();
+        match session
+            .execute(&db, "with t as (delete from y returning *) select * from t")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(42)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(
+                &db,
+                "select count(*), count(*) filter (where a = 42) from y",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(3), Value::Int64(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_insert_rule_select_action_returns_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_insert_rule");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (i int4)").unwrap();
+        session.execute(&db, "create table dst (i int4)").unwrap();
+        session
+            .execute(&db, "create table rule_rows (i int4)")
+            .unwrap();
+        session
+            .execute(&db, "insert into src values (11), (12)")
+            .unwrap();
+        session
+            .execute(&db, "insert into rule_rows values (1), (2), (3)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule dst_ins as on insert to dst \
+                 do instead select i from rule_rows",
+            )
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "with t as (delete from src returning *) \
+                 insert into dst select * from t",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sublink_pruning_skips_unused_scalar_sublink_target() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "sublink_prune_target");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session
+            .execute(&db, "insert into src values (1), (2)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "select id from ( \
+                    select id, (select id from src) as unused_scalar_subquery \
+                    from src \
+                 ) s order by id",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sublink_delete_using_cte_keeps_joined_input_subplans() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "sublink_delete_using_cte");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table parent (id int4, payload text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into parent values (1, 'a'), (2, 'b')")
+            .unwrap();
+        assert!(matches!(
+            session
+                .execute(
+                    &db,
+                    "with rcte as (select max(id) as maxid from parent) \
+                     delete from parent using rcte where id = maxid",
+                )
+                .unwrap(),
+            StatementResult::AffectedRows(1)
+        ));
+
+        match session
+            .execute(&db, "select id from parent order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
             }
             other => panic!("expected query result, got {other:?}"),
         }
