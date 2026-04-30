@@ -5457,7 +5457,8 @@ fn outer_join_reduced_to_inner(
     join_restrict_clauses: &[RestrictInfo],
 ) -> bool {
     join_restrict_clauses.iter().any(|restrict| {
-        outer_join_reduction_clause(kind, left_relids, right_relids, &restrict.clause)
+        restrict.is_pushed_down
+            && outer_join_reduction_clause(kind, left_relids, right_relids, &restrict.clause)
     })
 }
 
