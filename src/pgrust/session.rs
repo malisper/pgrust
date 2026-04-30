@@ -2374,6 +2374,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_mergejoin"
         | "enable_memoize"
         | "enable_material"
+        | "enable_partition_pruning"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
@@ -3016,6 +3017,22 @@ impl Session {
                 .gucs
                 .get("enable_material")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_partition_pruning: self
+                .gucs
+                .get("enable_partition_pruning")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            constraint_exclusion_on: self
+                .gucs
+                .get("constraint_exclusion")
+                .is_some_and(|value| value.eq_ignore_ascii_case("on")),
+            constraint_exclusion_partition: self
+                .gucs
+                .get("constraint_exclusion")
+                .map(|value| {
+                    value.eq_ignore_ascii_case("partition") || value.eq_ignore_ascii_case("on")
+                })
                 .unwrap_or(true),
             retain_partial_index_filters: false,
             enable_hashagg: self
@@ -17220,6 +17237,7 @@ fn apply_guc_value_to_state(
         | "enable_mergejoin"
         | "enable_memoize"
         | "enable_material"
+        | "enable_partition_pruning"
         | "enable_hashagg"
         | "enable_sort"
         | "debug_parallel_query" => {

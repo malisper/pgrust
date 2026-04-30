@@ -64,6 +64,13 @@ pub(super) fn append_planned_subquery(
     subselect::append_planned_subquery(planned_stmt, subplans)
 }
 
+pub(super) fn append_uncorrelated_planned_subquery(
+    planned_stmt: PlannedStmt,
+    subplans: &mut Vec<Plan>,
+) -> usize {
+    subselect::append_uncorrelated_planned_subquery(planned_stmt, subplans)
+}
+
 pub(super) fn grouping_planner(
     root: &mut PlannerInfo,
     scanjoin_rel: RelOptInfo,

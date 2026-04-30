@@ -3,7 +3,7 @@ use super::pathnodes::{
     aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_id, rte_slot_varno,
     slot_output_target,
 };
-use super::plan::append_planned_subquery;
+use super::plan::append_uncorrelated_planned_subquery;
 use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base_and_config};
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
@@ -3234,7 +3234,7 @@ fn lower_sublink(
             lower_expr(ctx, expr, mode)
         })
         .collect::<Vec<_>>();
-    let plan_id = append_planned_subquery(planned_stmt, ctx.subplans);
+    let plan_id = append_uncorrelated_planned_subquery(planned_stmt, ctx.subplans);
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type: sublink.sublink_type,
         testexpr: sublink
@@ -5281,6 +5281,7 @@ fn set_append_references(
         .then(|| append_source_alias(ctx, source_id))
         .flatten();
     let child_count = children.len();
+    let partition_prune = lower_partition_prune_plan(ctx, partition_prune);
     let children = children
         .into_iter()
         .enumerate()
@@ -5465,6 +5466,190 @@ fn relation_name_with_alias(relation_name: &str, alias: &str) -> String {
     }
 }
 
+fn lower_partition_prune_plan(
+    ctx: &mut SetRefsContext<'_>,
+    partition_prune: Option<PartitionPrunePlan>,
+) -> Option<PartitionPrunePlan> {
+    partition_prune.map(|mut info| {
+        info.filter = lower_partition_prune_expr(ctx, info.filter);
+        info
+    })
+}
+
+fn lower_partition_prune_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
+    match expr {
+        Expr::SubLink(sublink) => lower_sublink(ctx, *sublink, LowerMode::Scalar),
+        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
+            sublink_type: subplan.sublink_type,
+            testexpr: subplan
+                .testexpr
+                .map(|expr| Box::new(lower_partition_prune_expr(ctx, *expr))),
+            first_col_type: subplan.first_col_type,
+            target_width: subplan.target_width,
+            plan_id: subplan.plan_id,
+            par_param: subplan.par_param,
+            args: subplan
+                .args
+                .into_iter()
+                .map(|expr| lower_partition_prune_expr(ctx, expr))
+                .collect(),
+        })),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| lower_partition_prune_expr(ctx, arg))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| lower_partition_prune_expr(ctx, arg))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| lower_partition_prune_expr(ctx, arg))
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(lower_partition_prune_expr(ctx, *saop.left)),
+            right: Box::new(lower_partition_prune_expr(ctx, *saop.right)),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(lower_partition_prune_expr(ctx, *inner)), ty),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(lower_partition_prune_expr(ctx, *expr)),
+            collation_oid,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(lower_partition_prune_expr(ctx, *inner))),
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(lower_partition_prune_expr(ctx, *inner)))
+        }
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(lower_partition_prune_expr(ctx, *left)),
+            Box::new(lower_partition_prune_expr(ctx, *right)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(lower_partition_prune_expr(ctx, *left)),
+            Box::new(lower_partition_prune_expr(ctx, *right)),
+        ),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(lower_partition_prune_expr(ctx, *left)),
+            Box::new(lower_partition_prune_expr(ctx, *right)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| lower_partition_prune_expr(ctx, element))
+                .collect(),
+            array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, lower_partition_prune_expr(ctx, expr)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(lower_partition_prune_expr(ctx, *expr)),
+            field,
+            field_type,
+        },
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(lower_partition_prune_expr(ctx, *arg))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: lower_partition_prune_expr(ctx, arm.expr),
+                    result: lower_partition_prune_expr(ctx, arm.result),
+                })
+                .collect(),
+            defresult: Box::new(lower_partition_prune_expr(ctx, *case_expr.defresult)),
+            ..*case_expr
+        })),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            collation_oid,
+        } => Expr::Like {
+            expr: Box::new(lower_partition_prune_expr(ctx, *expr)),
+            pattern: Box::new(lower_partition_prune_expr(ctx, *pattern)),
+            escape: escape.map(|expr| Box::new(lower_partition_prune_expr(ctx, *expr))),
+            case_insensitive,
+            negated,
+            collation_oid,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+            collation_oid,
+        } => Expr::Similar {
+            expr: Box::new(lower_partition_prune_expr(ctx, *expr)),
+            pattern: Box::new(lower_partition_prune_expr(ctx, *pattern)),
+            escape: escape.map(|expr| Box::new(lower_partition_prune_expr(ctx, *expr))),
+            negated,
+            collation_oid,
+        },
+        Expr::Xml(xml) => Expr::Xml(Box::new(XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| lower_partition_prune_expr(ctx, arg))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| lower_partition_prune_expr(ctx, arg))
+                .collect(),
+            ..*xml
+        })),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(lower_partition_prune_expr(ctx, *array)),
+            subscripts: subscripts
+                .into_iter()
+                .map(
+                    |subscript| crate::include::nodes::primnodes::ExprArraySubscript {
+                        is_slice: subscript.is_slice,
+                        lower: subscript
+                            .lower
+                            .map(|expr| lower_partition_prune_expr(ctx, expr)),
+                        upper: subscript
+                            .upper
+                            .map(|expr| lower_partition_prune_expr(ctx, expr)),
+                    },
+                )
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 fn set_merge_append_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -5474,6 +5659,7 @@ fn set_merge_append_references(
     partition_prune: Option<PartitionPrunePlan>,
     children: Vec<Path>,
 ) -> Plan {
+    let partition_prune = lower_partition_prune_plan(ctx, partition_prune);
     let lowered_items = if let Some(first_child) = children.first() {
         let input_tlist = build_path_tlist(ctx.root, first_child);
         let mut lowered_items = Vec::with_capacity(items.len());
@@ -6085,12 +6271,19 @@ fn maybe_wrap_nested_loop_inner_plan(
     if dependent_paramids.is_empty() {
         return right_plan;
     }
+    let mut seen_key_paramids = BTreeSet::new();
+    let mut seen_key_exprs = Vec::new();
     let key_paramids = nest_params
         .iter()
         .filter_map(|param| {
-            dependent_paramids
-                .contains(&param.paramid)
-                .then_some(param.paramid)
+            if !dependent_paramids.contains(&param.paramid)
+                || !seen_key_paramids.insert(param.paramid)
+                || seen_key_exprs.iter().any(|expr| expr == &param.expr)
+            {
+                return None;
+            }
+            seen_key_exprs.push(param.expr.clone());
+            Some(param.paramid)
         })
         .collect::<Vec<_>>();
     if key_paramids.is_empty() {

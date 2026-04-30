@@ -19,6 +19,36 @@ use crate::include::nodes::primnodes::{
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+fn append_alias_prefix_from_relation_name(relation_name: &str) -> Option<String> {
+    let alias = relation_name.split_whitespace().last()?;
+    let (prefix, suffix) = alias.rsplit_once('_')?;
+    (!prefix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())).then(|| prefix.to_string())
+}
+
+fn append_sort_key_qualifier_from_plan(plan: &Plan) -> Option<String> {
+    match plan {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => {
+            append_alias_prefix_from_relation_name(relation_name)
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. } => append_sort_key_qualifier_from_plan(input),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::SetOp { children, .. } => children
+            .iter()
+            .find_map(append_sort_key_qualifier_from_plan),
+        _ => None,
+    }
+}
+
 fn expr_uses_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup > 0,
@@ -451,25 +481,33 @@ pub fn executor_start(plan: Plan) -> PlanState {
             items,
             partition_prune,
             children,
-        } => Box::new(MergeAppendState {
-            source_id,
-            children: children.into_iter().map(executor_start).collect(),
-            active_children: None,
-            visible_children: None,
-            subplans_removed: partition_prune
-                .as_ref()
-                .map(|info| info.subplans_removed)
-                .unwrap_or_default(),
-            partition_prune,
-            items,
-            column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
-            rows: None,
-            next_index: 0,
-            slot: TupleSlot::empty(desc.columns.len()),
-            current_bindings: Vec::new(),
-            plan_info,
-            stats: NodeExecStats::default(),
-        }),
+        } => {
+            let sort_key_qualifier = partition_prune.as_ref().and_then(|_| {
+                children
+                    .iter()
+                    .find_map(append_sort_key_qualifier_from_plan)
+            });
+            Box::new(MergeAppendState {
+                source_id,
+                children: children.into_iter().map(executor_start).collect(),
+                active_children: None,
+                visible_children: None,
+                subplans_removed: partition_prune
+                    .as_ref()
+                    .map(|info| info.subplans_removed)
+                    .unwrap_or_default(),
+                partition_prune,
+                items,
+                sort_key_qualifier,
+                column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
+                rows: None,
+                next_index: 0,
+                slot: TupleSlot::empty(desc.columns.len()),
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::Unique {
             plan_info,
             key_indices,

@@ -26,6 +26,170 @@ pub(super) fn append_planned_subquery(
     plan_id
 }
 
+pub(super) fn append_uncorrelated_planned_subquery(
+    planned_stmt: PlannedStmt,
+    subplans: &mut Vec<Plan>,
+) -> usize {
+    if planned_stmt.ext_params.is_empty()
+        && !planned_stmt
+            .subplans
+            .iter()
+            .chain(std::iter::once(&planned_stmt.plan_tree))
+            .any(plan_contains_volatile_expr)
+        && let Some(plan_id) = find_existing_uncorrelated_subquery_bundle(&planned_stmt, subplans)
+    {
+        return plan_id;
+    }
+    append_planned_subquery(planned_stmt, subplans)
+}
+
+fn find_existing_uncorrelated_subquery_bundle(
+    planned_stmt: &PlannedStmt,
+    subplans: &[Plan],
+) -> Option<usize> {
+    let bundle_len = planned_stmt.subplans.len() + 1;
+    if bundle_len > subplans.len() {
+        return None;
+    }
+    for base in 0..=subplans.len().saturating_sub(bundle_len) {
+        let subplan_match = planned_stmt
+            .subplans
+            .iter()
+            .enumerate()
+            .all(|(offset, plan)| {
+                subplans.get(base + offset) == Some(&rebase_plan_subplan_ids(plan.clone(), base))
+            });
+        if !subplan_match {
+            continue;
+        }
+        let plan_id = base + planned_stmt.subplans.len();
+        if subplans.get(plan_id)
+            == Some(&rebase_plan_subplan_ids(
+                planned_stmt.plan_tree.clone(),
+                base,
+            ))
+        {
+            return Some(plan_id);
+        }
+    }
+    None
+}
+
+fn plan_contains_volatile_expr(plan: &Plan) -> bool {
+    match plan {
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::WorkTableScan { .. } => false,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_contains_volatile_expr),
+        Plan::Hash {
+            input, hash_keys, ..
+        } => plan_contains_volatile_expr(input) || hash_keys.iter().any(expr_is_volatile_for_dedup),
+        Plan::Filter {
+            input, predicate, ..
+        } => plan_contains_volatile_expr(input) || expr_is_volatile_for_dedup(predicate),
+        Plan::Projection { input, targets, .. } => {
+            plan_contains_volatile_expr(input)
+                || targets
+                    .iter()
+                    .any(|target| expr_is_volatile_for_dedup(&target.expr))
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            ..
+        } => {
+            plan_contains_volatile_expr(input)
+                || group_by.iter().any(expr_is_volatile_for_dedup)
+                || passthrough_exprs.iter().any(expr_is_volatile_for_dedup)
+                || accumulators
+                    .iter()
+                    .any(agg_accum_contains_volatile_for_dedup)
+                || having.as_ref().is_some_and(expr_is_volatile_for_dedup)
+        }
+        Plan::OrderBy { input, items, .. } | Plan::IncrementalSort { input, items, .. } => {
+            plan_contains_volatile_expr(input)
+                || items
+                    .iter()
+                    .any(|item| expr_is_volatile_for_dedup(&item.expr))
+        }
+        Plan::SubqueryScan { input, filter, .. } => {
+            plan_contains_volatile_expr(input)
+                || filter.as_ref().is_some_and(expr_is_volatile_for_dedup)
+        }
+        Plan::Materialize { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains_volatile_expr(input),
+        _ => true,
+    }
+}
+
+fn agg_accum_contains_volatile_for_dedup(accum: &AggAccum) -> bool {
+    accum.direct_args.iter().any(expr_is_volatile_for_dedup)
+        || accum.args.iter().any(expr_is_volatile_for_dedup)
+        || accum
+            .order_by
+            .iter()
+            .any(|item| expr_is_volatile_for_dedup(&item.expr))
+        || accum
+            .filter
+            .as_ref()
+            .is_some_and(expr_is_volatile_for_dedup)
+}
+
+fn expr_is_volatile_for_dedup(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(_)
+        | Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole => false,
+        Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. }
+        | Expr::Func(_) => true,
+        Expr::Op(op) => op.args.iter().any(expr_is_volatile_for_dedup),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_is_volatile_for_dedup),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_is_volatile_for_dedup(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_is_volatile_for_dedup(left) || expr_is_volatile_for_dedup(right)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_is_volatile_for_dedup(&saop.left) || expr_is_volatile_for_dedup(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_is_volatile_for_dedup),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_is_volatile_for_dedup(expr)),
+        _ => true,
+    }
+}
+
 fn lower_sublink_to_subplan(
     sublink: SubLink,
     catalog: &dyn CatalogLookup,
@@ -52,7 +216,7 @@ fn lower_sublink_to_subplan(
         .iter()
         .map(|param| finalize_expr_subqueries(param.expr.clone(), catalog, subplans))
         .collect::<Vec<_>>();
-    let plan_id = append_planned_subquery(planned_stmt, subplans);
+    let plan_id = append_uncorrelated_planned_subquery(planned_stmt, subplans);
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type: sublink.sublink_type,
         testexpr,

@@ -66,6 +66,7 @@ fn direct_guc_default(name: &str) -> Option<&'static str> {
         | "enable_mergejoin"
         | "enable_memoize"
         | "enable_material"
+        | "enable_partition_pruning"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
@@ -111,6 +112,16 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
         enable_mergejoin: direct_bool_config(gucs, "enable_mergejoin", true),
         enable_memoize: direct_bool_config(gucs, "enable_memoize", true),
         enable_material: direct_bool_config(gucs, "enable_material", true),
+        enable_partition_pruning: direct_bool_config(gucs, "enable_partition_pruning", true),
+        constraint_exclusion_on: gucs
+            .get("constraint_exclusion")
+            .is_some_and(|value| value.eq_ignore_ascii_case("on")),
+        constraint_exclusion_partition: gucs
+            .get("constraint_exclusion")
+            .map(|value| {
+                value.eq_ignore_ascii_case("partition") || value.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(true),
         retain_partial_index_filters: false,
         enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
         enable_sort: direct_bool_config(gucs, "enable_sort", true),

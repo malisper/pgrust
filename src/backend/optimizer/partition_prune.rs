@@ -14,8 +14,8 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
-    BoolExprType, BuiltinScalarFunction, Expr, OpExprKind, RelationDesc, ScalarFunctionImpl,
-    attrno_index, expr_sql_type_hint, user_attrno,
+    BoolExprType, BuiltinScalarFunction, Expr, OpExpr, OpExprKind, RelationDesc,
+    ScalarFunctionImpl, attrno_index, expr_sql_type_hint, user_attrno,
 };
 
 pub(super) fn partition_may_satisfy_filter(
@@ -218,11 +218,54 @@ fn expr_contains_tuple_var(expr: &Expr) -> bool {
             expr_contains_tuple_var(left) || expr_contains_tuple_var(right)
         }
         Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_tuple_var),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_tuple_var(expr)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_tuple_var(expr))
+                || case_expr.args.iter().any(|when| {
+                    expr_contains_tuple_var(&when.expr) || expr_contains_tuple_var(&when.result)
+                })
+                || expr_contains_tuple_var(&case_expr.defresult)
+        }
         Expr::Func(func) => func.args.iter().any(expr_contains_tuple_var),
         Expr::SubPlan(subplan) => subplan
             .testexpr
             .as_deref()
             .is_some_and(expr_contains_tuple_var),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_tuple_var(expr)
+                || expr_contains_tuple_var(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_tuple_var(expr))
+        }
+        Expr::FieldSelect { expr, .. } => expr_contains_tuple_var(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_tuple_var(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_tuple_var)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_tuple_var)
+                })
+        }
         _ => false,
     }
 }
@@ -235,6 +278,14 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
     let Some(filter) = filter else {
         return true;
     };
+    if let Expr::Bool(bool_expr) = filter
+        && bool_expr.boolop == BoolExprType::Or
+    {
+        return bool_expr
+            .args
+            .iter()
+            .any(|arg| relation_may_satisfy_own_partition_bound(catalog, relation_oid, Some(arg)));
+    }
     let Some(relation) = catalog.relation_by_oid(relation_oid) else {
         return true;
     };
@@ -279,6 +330,79 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
                 None,
                 Some(catalog),
                 None,
+            ) && relation_may_satisfy_own_partition_bound(catalog, row.inhparent, Some(filter))
+        })
+}
+
+pub(crate) fn relation_may_satisfy_own_partition_bound_with_runtime_values(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    filter: Option<&Expr>,
+    eval_runtime_value: &mut dyn FnMut(&Expr) -> Option<Value>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    if let Expr::Bool(bool_expr) = filter
+        && bool_expr.boolop == BoolExprType::Or
+    {
+        return bool_expr.args.iter().any(|arg| {
+            relation_may_satisfy_own_partition_bound_with_runtime_values(
+                catalog,
+                relation_oid,
+                Some(arg),
+                eval_runtime_value,
+            )
+        });
+    }
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+        return true;
+    };
+    let Some(bound) = relation
+        .relpartbound
+        .as_deref()
+        .and_then(|text| deserialize_partition_bound(text).ok())
+    else {
+        return true;
+    };
+    catalog
+        .inheritance_parents(relation_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .all(|row| {
+            let Some(parent) = catalog.relation_by_oid(row.inhparent) else {
+                return true;
+            };
+            let Ok(spec) = relation_partition_spec(&parent) else {
+                return true;
+            };
+            let Some(spec) =
+                partition_spec_for_relation_filter(&spec, &parent.desc, &relation.desc)
+            else {
+                return true;
+            };
+            let sibling_bounds = catalog
+                .inheritance_children(row.inhparent)
+                .into_iter()
+                .filter(|row| !row.inhdetachpending)
+                .filter_map(|row| catalog.relation_by_oid(row.inhrelid))
+                .filter_map(|rel| {
+                    rel.relpartbound
+                        .and_then(|text| deserialize_partition_bound(text.as_str()).ok())
+                })
+                .collect::<Vec<_>>();
+            partition_may_satisfy_filter_with_runtime_values(
+                &spec,
+                Some(&bound),
+                &sibling_bounds,
+                filter,
+                Some(catalog),
+                |expr| eval_runtime_value(expr),
+            ) && relation_may_satisfy_own_partition_bound_with_runtime_values(
+                catalog,
+                row.inhparent,
+                Some(filter),
+                eval_runtime_value,
             )
         })
 }
@@ -428,8 +552,9 @@ fn expr_may_match_bound(
             let [left, right] = op.args.as_slice() else {
                 return true;
             };
+            let collation_oid = op_pruning_collation(op);
             let Some((key_index, key_on_left, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid, catalog)
+                partition_key_const_cmp(left, right, spec, collation_oid, catalog)
             else {
                 return true;
             };
@@ -441,7 +566,7 @@ fn expr_may_match_bound(
                 key_on_left,
                 op.op,
                 &value,
-                op.collation_oid,
+                collation_oid,
                 catalog,
                 ancestor_bound,
             )
@@ -605,7 +730,7 @@ fn list_value_may_match_expr(
             let [left, right] = op.args.as_slice() else {
                 return true;
             };
-            let collation_oid = op.collation_oid;
+            let collation_oid = op_pruning_collation(op);
             let Some((key_index, key_on_left, constant)) =
                 partition_key_const_cmp(left, right, spec, collation_oid, catalog)
             else {
@@ -892,6 +1017,19 @@ fn normalize_key_expr(expr: &Expr) -> &Expr {
 
 fn collation_mismatch(query_collation_oid: Option<u32>, key_collation_oid: u32) -> bool {
     query_collation_oid.is_some_and(|oid| key_collation_oid != 0 && oid != key_collation_oid)
+}
+
+fn op_pruning_collation(op: &OpExpr) -> Option<u32> {
+    op.collation_oid
+        .or_else(|| op.args.iter().find_map(top_level_explicit_collation))
+}
+
+fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        Expr::Cast(inner, _) => top_level_explicit_collation(inner),
+        _ => None,
+    }
 }
 
 fn const_value(expr: &Expr) -> Option<Value> {
@@ -1495,6 +1633,7 @@ struct KeyConstraint {
     upper: Option<ScalarBound>,
     equal: Option<Value>,
     requires_null: bool,
+    collation_oid: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -1609,8 +1748,9 @@ fn apply_hash_constraint(
             let [left, right] = op.args.as_slice() else {
                 return ConstraintApplyResult::Ignored;
             };
+            let collation_oid = op_pruning_collation(op);
             let Some((key_index, _, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid, None)
+                partition_key_const_cmp(left, right, spec, collation_oid, None)
             else {
                 return ConstraintApplyResult::Ignored;
             };
@@ -1837,12 +1977,12 @@ fn apply_range_constraint(
             let [left, right] = op.args.as_slice() else {
                 return ConstraintApplyResult::Ignored;
             };
+            let collation_oid = op_pruning_collation(op);
             let Some((key_index, key_on_left, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid, None)
+                partition_key_const_cmp(left, right, spec, collation_oid, None)
             else {
                 return ConstraintApplyResult::Ignored;
             };
-            let collation_oid = op.collation_oid;
             let op = if key_on_left {
                 op.op
             } else {
@@ -1879,6 +2019,14 @@ fn add_comparison_constraint(
     let key_collation_oid = spec.partcollation.get(key_index).copied().unwrap_or(0);
     let collation_oid = collation_oid.or((key_collation_oid != 0).then_some(key_collation_oid));
     let constraint = &mut constraints[key_index];
+    if let Some(existing_collation_oid) = constraint.collation_oid
+        && collation_oid.is_some_and(|oid| oid != existing_collation_oid)
+    {
+        return true;
+    }
+    if constraint.collation_oid.is_none() {
+        constraint.collation_oid = collation_oid;
+    }
     match op {
         OpExprKind::Eq => add_equality_constraint(constraint, value, collation_oid),
         OpExprKind::Lt => {
@@ -2551,8 +2699,13 @@ mod tests {
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, PUBLIC_NAMESPACE_OID, PgInheritsRow,
     };
+    use crate::include::catalog::{
+        C_COLLATION_OID, POSIX_COLLATION_OID, proc_oid_for_builtin_scalar_function,
+    };
     use crate::include::nodes::primnodes::RelationDesc;
-    use crate::include::nodes::primnodes::{ScalarArrayOpExpr, Var};
+    use crate::include::nodes::primnodes::{
+        BuiltinScalarFunction, FuncExpr, ScalarArrayOpExpr, ScalarFunctionImpl, Var,
+    };
 
     #[derive(Default)]
     struct MockCatalog {
@@ -2655,6 +2808,19 @@ mod tests {
         }
     }
 
+    fn list_spec_on_b() -> LoweredPartitionSpec {
+        LoweredPartitionSpec {
+            strategy: PartitionStrategy::List,
+            key_columns: vec!["b".into()],
+            key_exprs: vec![text_key_att_expr(1, 2)],
+            key_types: vec![SqlType::new(SqlTypeKind::Text)],
+            key_sqls: vec!["b".into()],
+            partattrs: vec![2],
+            partclass: vec![0],
+            partcollation: vec![0],
+        }
+    }
+
     fn bool_spec() -> LoweredPartitionSpec {
         LoweredPartitionSpec {
             strategy: PartitionStrategy::List,
@@ -2675,6 +2841,19 @@ mod tests {
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
         })
+    }
+
+    fn substr_key_expr() -> Expr {
+        Expr::Func(Box::new(FuncExpr {
+            funcid: proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Substring)
+                .expect("substring proc oid"),
+            funcname: Some("substr".into()),
+            funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
+            funcvariadic: false,
+            implementation: ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Substring),
+            display_args: None,
+            args: vec![key_expr(), Expr::Const(Value::Int32(1))],
+        }))
     }
 
     fn int_key_expr(varno: usize) -> Expr {
@@ -2744,6 +2923,14 @@ mod tests {
         }
     }
 
+    fn multi_text_range_bound(from: &[&str], to: &[&str]) -> PartitionBoundSpec {
+        PartitionBoundSpec::Range {
+            from: from.iter().map(|value| text_range_value(value)).collect(),
+            to: to.iter().map(|value| text_range_value(value)).collect(),
+            is_default: false,
+        }
+    }
+
     fn int_range_default_bound() -> PartitionBoundSpec {
         PartitionBoundSpec::Range {
             from: Vec::new(),
@@ -2754,6 +2941,10 @@ mod tests {
 
     fn int_value(value: i32) -> PartitionRangeDatumValue {
         PartitionRangeDatumValue::Value(SerializedPartitionValue::Int32(value))
+    }
+
+    fn text_range_value(value: &str) -> PartitionRangeDatumValue {
+        PartitionRangeDatumValue::Value(SerializedPartitionValue::Text(value.into()))
     }
 
     fn int_cmp(op: OpExprKind, value: i32) -> Expr {
@@ -2808,6 +2999,40 @@ mod tests {
                 elements: values.iter().map(|value| text_const(value)).collect(),
                 array_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
             }),
+            collation_oid: None,
+        }))
+    }
+
+    fn collated_text_eq(value: &str, collation_oid: u32) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op: OpExprKind::Eq,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![
+                key_expr(),
+                Expr::Collate {
+                    expr: Box::new(text_const(value)),
+                    collation_oid,
+                },
+            ],
+            collation_oid: None,
+        }))
+    }
+
+    fn collated_substr_eq(value: &str, collation_oid: u32) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op: OpExprKind::Eq,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![
+                substr_key_expr(),
+                Expr::Collate {
+                    expr: Box::new(text_const(value)),
+                    collation_oid,
+                },
+            ],
             collation_oid: None,
         }))
     }
@@ -2901,6 +3126,23 @@ mod tests {
                 .as_ref()
                 .map(|spec| pg_partitioned_table_row(relation_oid, spec, 0)),
             partition_spec,
+        }
+    }
+
+    fn int_text_desc() -> RelationDesc {
+        RelationDesc {
+            columns: vec![
+                crate::backend::catalog::catalog::column_desc(
+                    "a",
+                    SqlType::new(SqlTypeKind::Int4),
+                    true,
+                ),
+                crate::backend::catalog::catalog::column_desc(
+                    "b",
+                    SqlType::new(SqlTypeKind::Text),
+                    true,
+                ),
+            ],
         }
     }
 
@@ -3090,6 +3332,67 @@ mod tests {
     }
 
     #[test]
+    fn multi_key_range_uses_operand_collation_to_match_duplicate_key_exprs() {
+        let spec = LoweredPartitionSpec {
+            strategy: PartitionStrategy::Range,
+            key_columns: vec!["a_posix".into(), "a_c".into()],
+            key_exprs: vec![key_expr(), key_expr()],
+            key_types: vec![SqlType::new(SqlTypeKind::Text); 2],
+            key_sqls: vec!["a".into(), "a".into()],
+            partattrs: vec![0, 0],
+            partclass: vec![0, 0],
+            partcollation: vec![POSIX_COLLATION_OID, C_COLLATION_OID],
+        };
+        let first = multi_text_range_bound(&["a", "a"], &["a", "e"]);
+        let second = multi_text_range_bound(&["a", "e"], &["a", "z"]);
+        let third = multi_text_range_bound(&["b", "a"], &["b", "e"]);
+        let expr = Expr::and(
+            collated_text_eq("e", C_COLLATION_OID),
+            collated_text_eq("a", POSIX_COLLATION_OID),
+        );
+
+        assert!(!expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+        assert!(!expr_may_match_bound(&expr, &spec, &third, &[]));
+    }
+
+    #[test]
+    fn multi_key_range_uses_operand_collation_for_duplicate_substr_keys() {
+        let posix_key = Expr::Collate {
+            expr: Box::new(substr_key_expr()),
+            collation_oid: POSIX_COLLATION_OID,
+        };
+        let c_key = Expr::Collate {
+            expr: Box::new(substr_key_expr()),
+            collation_oid: C_COLLATION_OID,
+        };
+        let spec = LoweredPartitionSpec {
+            strategy: PartitionStrategy::Range,
+            key_columns: vec!["a_posix".into(), "a_c".into()],
+            key_exprs: vec![posix_key, c_key],
+            key_types: vec![SqlType::new(SqlTypeKind::Text); 2],
+            key_sqls: vec![
+                "substr(a, 1) COLLATE \"POSIX\"".into(),
+                "substr(a, 1) COLLATE \"C\"".into(),
+            ],
+            partattrs: vec![0, 0],
+            partclass: vec![0, 0],
+            partcollation: vec![POSIX_COLLATION_OID, C_COLLATION_OID],
+        };
+        let first = multi_text_range_bound(&["a", "a"], &["a", "e"]);
+        let second = multi_text_range_bound(&["a", "e"], &["a", "z"]);
+        let third = multi_text_range_bound(&["b", "a"], &["b", "e"]);
+        let expr = Expr::and(
+            collated_substr_eq("e", C_COLLATION_OID),
+            collated_substr_eq("a", POSIX_COLLATION_OID),
+        );
+
+        assert!(!expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+        assert!(!expr_may_match_bound(&expr, &spec, &third, &[]));
+    }
+
+    #[test]
     fn range_is_not_null_keeps_non_default_partitions() {
         let spec = range_spec();
         let first = int_range_bound(PartitionRangeDatumValue::MinValue, int_value(1));
@@ -3202,6 +3505,50 @@ mod tests {
             &catalog,
             child_oid,
             Some(&child_a_eq_16)
+        ));
+    }
+
+    #[test]
+    fn own_partition_bound_checks_or_arms_against_all_ancestors() {
+        let root_oid = 10;
+        let range_child_oid = 20;
+        let list_leaf_oid = 30;
+        let desc = int_text_desc();
+        let catalog = MockCatalog {
+            relations: vec![
+                relation_with_desc(root_oid, 'p', Some(range_spec()), None, desc.clone()),
+                relation_with_desc(
+                    range_child_oid,
+                    'p',
+                    Some(list_spec_on_b()),
+                    Some(int_range_bound(int_value(10), int_value(20))),
+                    desc.clone(),
+                ),
+                relation_with_desc(list_leaf_oid, 'r', None, Some(text_bound(&["efgh"])), desc),
+            ],
+            inherits: vec![
+                inherit(root_oid, range_child_oid, 1),
+                inherit(range_child_oid, list_leaf_oid, 1),
+            ],
+        };
+        let expr = Expr::or(
+            Expr::op_auto(
+                OpExprKind::Eq,
+                vec![int_key_att_expr(42, 1), Expr::Const(Value::Int32(1))],
+            ),
+            Expr::op_auto(
+                OpExprKind::Eq,
+                vec![
+                    text_key_att_expr(42, 2),
+                    Expr::Const(Value::Text("ab".into())),
+                ],
+            ),
+        );
+
+        assert!(!relation_may_satisfy_own_partition_bound(
+            &catalog,
+            list_leaf_oid,
+            Some(&expr)
         ));
     }
 

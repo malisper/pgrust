@@ -5050,7 +5050,6 @@ impl<'a> RecursiveReferenceChecker<'a> {
                         self.visit_expr(condition, context)?;
                     }
                     match &clause.action {
-                        MergeAction::DoNothing | MergeAction::Delete => {}
                         MergeAction::Update { assignments } => {
                             for assignment in assignments {
                                 self.visit_expr(&assignment.expr, context)?;
@@ -5063,6 +5062,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
                                 }
                             }
                         }
+                        MergeAction::Delete | MergeAction::DoNothing => {}
                     }
                 }
                 for item in &merge.returning {
@@ -5891,6 +5891,7 @@ pub(crate) fn merge_statement_references_table(stmt: &MergeStatement, table_name
     stmt.with
         .iter()
         .any(|cte| cte_body_references_table(&cte.body, table_name))
+        || stmt.target_table.eq_ignore_ascii_case(table_name)
         || from_item_references_table(&stmt.source, table_name)
         || sql_expr_references_table(&stmt.join_condition, table_name)
         || stmt.when_clauses.iter().any(|clause| {
@@ -5899,7 +5900,6 @@ pub(crate) fn merge_statement_references_table(stmt: &MergeStatement, table_name
                 .as_ref()
                 .is_some_and(|expr| sql_expr_references_table(expr, table_name))
                 || match &clause.action {
-                    MergeAction::DoNothing | MergeAction::Delete => false,
                     MergeAction::Update { assignments } => assignments
                         .iter()
                         .any(|assignment| sql_expr_references_table(&assignment.expr, table_name)),
@@ -5909,6 +5909,7 @@ pub(crate) fn merge_statement_references_table(stmt: &MergeStatement, table_name
                             .any(|expr| sql_expr_references_table(expr, table_name)),
                         MergeInsertSource::DefaultValues => false,
                     },
+                    MergeAction::Delete | MergeAction::DoNothing => false,
                 }
         })
         || stmt

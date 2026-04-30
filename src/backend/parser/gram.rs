@@ -18755,6 +18755,30 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
         Rule::update_stmt => Ok(CteBody::Update(Box::new(build_update(pair)?))),
         Rule::delete_stmt => Ok(CteBody::Delete(Box::new(build_delete(pair)?))),
         Rule::merge_stmt => Ok(CteBody::Merge(Box::new(build_merge(pair)?))),
+        Rule::recursive_union_cte_body => {
+            let mut inner = pair.into_inner();
+            let anchor = build_cte_body(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let mut all = false;
+            let mut recursive = None;
+            for part in inner {
+                match part.as_rule() {
+                    Rule::kw_all => all = true,
+                    Rule::select_stmt | Rule::simple_select_stmt | Rule::simple_select_core => {
+                        recursive = Some(build_select(part)?)
+                    }
+                    Rule::parenthesized_set_operation_term => {
+                        recursive = Some(build_set_operation_term(part)?)
+                    }
+                    _ => {}
+                }
+            }
+            Ok(CteBody::RecursiveUnion {
+                all,
+                left_nested: false,
+                anchor: Box::new(anchor),
+                recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
+            })
+        }
         _ => Err(ParseError::UnexpectedToken {
             expected: "SELECT, VALUES, INSERT, UPDATE, DELETE, or MERGE CTE body",
             actual: pair.as_str().into(),

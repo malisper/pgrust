@@ -547,7 +547,12 @@ pub(crate) fn apply_runtime_pruning_for_explain_plan(
                     let existing_children = std::mem::take(children);
                     *children = startup_visible
                         .into_iter()
-                        .filter_map(|index| existing_children.get(index).cloned())
+                        .enumerate()
+                        .filter_map(|(ordinal, index)| {
+                            let mut child = existing_children.get(index).cloned()?;
+                            renumber_append_child_aliases(&mut child, ordinal + 1);
+                            Some(child)
+                        })
                         .collect();
                 }
             }
@@ -613,6 +618,80 @@ fn prune_runtime_explain_box(input: &mut Box<Plan>, ctx: &mut ExecutorContext) {
         }),
     );
     *input = Box::new(apply_runtime_pruning_for_explain_plan(*old, ctx));
+}
+
+fn renumber_append_child_aliases(plan: &mut Plan, ordinal: usize) {
+    match plan {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. } => {
+            *relation_name = renumber_relation_alias(relation_name, ordinal);
+        }
+        Plan::BitmapHeapScan {
+            relation_name,
+            bitmapqual,
+            ..
+        } => {
+            *relation_name = renumber_relation_alias(relation_name, ordinal);
+            renumber_append_child_aliases(bitmapqual, ordinal);
+        }
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::SetOp { children, .. } => {
+            for child in children {
+                renumber_append_child_aliases(child, ordinal);
+            }
+        }
+        Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Filter { input, .. } => renumber_append_child_aliases(input, ordinal),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            renumber_append_child_aliases(left, ordinal);
+            renumber_append_child_aliases(right, ordinal);
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            renumber_append_child_aliases(anchor, ordinal);
+            renumber_append_child_aliases(recursive, ordinal);
+        }
+        Plan::Result { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => {}
+    }
+}
+
+fn renumber_relation_alias(relation_name: &str, ordinal: usize) -> String {
+    let Some((relation, alias)) = relation_name.rsplit_once(' ') else {
+        return relation_name.to_string();
+    };
+    let Some((prefix, suffix)) = alias.rsplit_once('_') else {
+        return relation_name.to_string();
+    };
+    if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        return relation_name.to_string();
+    }
+    format!("{relation} {prefix}_{ordinal}")
 }
 
 fn expr_contains_external_param(expr: &Expr) -> bool {
@@ -7465,7 +7544,6 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
     let mut found = Vec::new();
     match plan {
         Plan::Result { .. }
-        | Plan::Append { .. }
         | Plan::Unique { .. }
         | Plan::SeqScan { .. }
         | Plan::IndexOnlyScan { .. }
@@ -7479,6 +7557,25 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::WorkTableScan { .. }
         | Plan::RecursiveUnion { .. }
         | Plan::SetOp { .. } => {}
+        Plan::Append {
+            partition_prune, ..
+        } => {
+            if let Some(partition_prune) = partition_prune {
+                collect_direct_expr_subplans(&partition_prune.filter, &mut found);
+            }
+        }
+        Plan::MergeAppend {
+            partition_prune,
+            items,
+            ..
+        } => {
+            if let Some(partition_prune) = partition_prune {
+                collect_direct_expr_subplans(&partition_prune.filter, &mut found);
+            }
+            for item in items {
+                collect_direct_expr_subplans(&item.expr, &mut found);
+            }
+        }
         Plan::SubqueryScan { filter, .. } => {
             if let Some(filter) = filter {
                 collect_direct_expr_subplans(filter, &mut found);
@@ -7557,11 +7654,6 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
             }
         }
         Plan::IncrementalSort { items, .. } => {
-            for item in items {
-                collect_direct_expr_subplans(&item.expr, &mut found);
-            }
-        }
-        Plan::MergeAppend { items, .. } => {
             for item in items {
                 collect_direct_expr_subplans(&item.expr, &mut found);
             }
