@@ -686,6 +686,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
             let heap_tid = write_insert_heap_row(
                 &stmt.relation_name,
                 &stmt.relation_name,
+                stmt.relation_oid,
                 stmt.rel,
                 stmt.toast,
                 stmt.toast_index.as_ref(),

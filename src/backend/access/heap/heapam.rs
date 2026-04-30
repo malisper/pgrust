@@ -9,9 +9,9 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::storage::buffer::Page;
 use crate::backend::storage::page::bufpage::{
-    ItemIdFlags, MAX_HEAP_TUPLE_SIZE, PageError, page_clear_all_visible, page_get_item,
-    page_get_item_id, page_get_item_id_unchecked, page_get_item_unchecked,
-    page_get_max_offset_number, page_is_all_visible,
+    ITEM_ID_SIZE, ItemIdFlags, MAX_HEAP_TUPLE_SIZE, PageError, max_align, page_clear_all_visible,
+    page_get_item, page_get_item_id, page_get_item_id_unchecked, page_get_item_unchecked,
+    page_get_max_offset_number, page_header, page_is_all_visible,
 };
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::backend::utils::misc::interrupts::InterruptReason;
@@ -186,6 +186,10 @@ impl VisibleHeapScan {
     /// Return a clone of the current page's shared pin (cheap Rc clone).
     pub fn pinned_buffer_rc(&self) -> Option<Rc<OwnedBufferPin<SmgrStorageBackend>>> {
         self.pinned_buffer.as_ref().map(|(_, pin)| Rc::clone(pin))
+    }
+
+    pub fn nblocks(&self) -> u32 {
+        self.scan.nblocks
     }
 }
 
@@ -433,6 +437,28 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
     }
     // If no pinned buffer, this is the first call — start at current_block (0).
 
+    heap_scan_prepare_current_page(pool, client_id, txns, scan, true)
+}
+
+pub fn heap_scan_prepare_page_at<E: From<HeapError>>(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    txns: &std::sync::Arc<RwLock<TransactionManager>>,
+    scan: &mut VisibleHeapScan,
+    block: u32,
+) -> Result<Option<usize>, E> {
+    drop(scan.pinned_buffer.take());
+    scan.scan.current_block = block;
+    heap_scan_prepare_current_page(pool, client_id, txns, scan, false)
+}
+
+fn heap_scan_prepare_current_page<E: From<HeapError>>(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    txns: &std::sync::Arc<RwLock<TransactionManager>>,
+    scan: &mut VisibleHeapScan,
+    advance_past_empty: bool,
+) -> Result<Option<usize>, E> {
     while scan.scan.current_block < scan.scan.nblocks {
         let block = scan.scan.current_block;
         let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
@@ -497,6 +523,9 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
         // Empty page — drop pin and try next.
         drop(scan.pinned_buffer.take());
         scan.scan.current_block += 1;
+        if !advance_past_empty {
+            return Ok(None);
+        }
     }
 
     Ok(None)
@@ -635,7 +664,7 @@ pub fn heap_insert(
     rel: RelFileLocator,
     tuple: &HeapTuple,
 ) -> Result<ItemPointerData, HeapError> {
-    heap_insert_version(pool, client_id, rel, tuple, 0, 0)
+    heap_insert_version(pool, client_id, rel, tuple, 0, 0, 100)
 }
 
 pub fn heap_insert_mvcc(
@@ -656,7 +685,19 @@ pub fn heap_insert_mvcc_with_cid(
     cid: CommandId,
     tuple: &HeapTuple,
 ) -> Result<ItemPointerData, HeapError> {
-    heap_insert_version(pool, client_id, rel, tuple, xid, cid)
+    heap_insert_version(pool, client_id, rel, tuple, xid, cid, 100)
+}
+
+pub fn heap_insert_mvcc_with_cid_and_fillfactor(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    xid: TransactionId,
+    cid: CommandId,
+    tuple: &HeapTuple,
+    fillfactor: u16,
+) -> Result<ItemPointerData, HeapError> {
+    heap_insert_version(pool, client_id, rel, tuple, xid, cid, fillfactor)
 }
 
 pub fn heap_fetch(
@@ -951,7 +992,7 @@ pub fn heap_update_with_cid(
         }
     }
 
-    let new_tid = heap_insert_version(pool, client_id, rel, replacement, xid, cid)?;
+    let new_tid = heap_insert_version(pool, client_id, rel, replacement, xid, cid, 100)?;
 
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let buffer_id = pin.buffer_id();
@@ -1108,7 +1149,8 @@ pub fn heap_update_with_waiter(
 
         match result {
             ClaimResult::Claimed => {
-                let new_tid = heap_insert_version(pool, client_id, rel, replacement, xid, cid)?;
+                let new_tid =
+                    heap_insert_version(pool, client_id, rel, replacement, xid, cid, 100)?;
 
                 let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
                 let buffer_id = pin.buffer_id();
@@ -1168,6 +1210,7 @@ fn heap_insert_version(
     tuple: &HeapTuple,
     xmin: TransactionId,
     cid: CommandId,
+    fillfactor: u16,
 ) -> Result<ItemPointerData, HeapError> {
     if tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE {
         return Err(HeapError::Tuple(TupleError::Oversized {
@@ -1203,6 +1246,12 @@ fn heap_insert_version(
 
         let serialized_tuple = stored.serialize();
         let page_was_all_visible = page_is_all_visible(&new_page)?;
+        if !heap_page_has_fillfactor_space(&new_page, serialized_tuple.len(), fillfactor)? {
+            drop(guard);
+            drop(pin);
+            extend_heap_relation(pool, rel)?;
+            continue;
+        }
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
                 if page_was_all_visible {
@@ -1231,20 +1280,49 @@ fn heap_insert_version(
             Err(TupleError::Page(PageError::NoSpace)) => {
                 drop(guard);
                 drop(pin);
-                pool.with_storage_mut(|s| -> Result<(), HeapError> {
-                    let current_nblocks = s.smgr.nblocks(rel, ForkNumber::Main)?;
-                    let mut page = [0u8; crate::BLCKSZ];
-                    heap_page_init(&mut page);
-                    s.smgr
-                        .extend(rel, ForkNumber::Main, current_nblocks, &page, true)?;
-                    Ok(())
-                })?;
+                extend_heap_relation(pool, rel)?;
             }
             Err(e) => {
                 return Err(e.into());
             }
         }
     }
+}
+
+fn heap_page_has_fillfactor_space(
+    page: &Page,
+    tuple_len: usize,
+    fillfactor: u16,
+) -> Result<bool, HeapError> {
+    let fillfactor = fillfactor.clamp(10, 100);
+    if fillfactor == 100 {
+        return Ok(true);
+    }
+    let header = page_header(page).map_err(TupleError::from)?;
+    let required = max_align(tuple_len) + ITEM_ID_SIZE;
+    if header.free_space() < required {
+        return Ok(false);
+    }
+    if page_get_max_offset_number(page).map_err(TupleError::from)? == 0 {
+        return Ok(true);
+    }
+    let free_after = header.free_space() - required;
+    let reserved = crate::BLCKSZ * usize::from(100 - fillfactor) / 100;
+    Ok(free_after >= reserved)
+}
+
+fn extend_heap_relation(
+    pool: &BufferPool<SmgrStorageBackend>,
+    rel: RelFileLocator,
+) -> Result<(), HeapError> {
+    pool.with_storage_mut(|s| -> Result<(), HeapError> {
+        let current_nblocks = s.smgr.nblocks(rel, ForkNumber::Main)?;
+        let mut page = [0u8; crate::BLCKSZ];
+        heap_page_init(&mut page);
+        s.smgr
+            .extend(rel, ForkNumber::Main, current_nblocks, &page, true)?;
+        Ok(())
+    })
 }
 
 fn pin_existing_block<'a>(

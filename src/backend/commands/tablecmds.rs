@@ -7,8 +7,9 @@ use parking_lot::RwLock;
 use crate::backend::access::heap::HeapWalPolicy;
 use crate::backend::access::heap::heapam::{
     HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
-    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid, heap_scan_begin_visible,
-    heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_update_with_waiter,
+    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid_and_fillfactor,
+    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+    heap_update_with_waiter,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -5541,6 +5542,7 @@ pub(crate) fn cleanup_toast_attempt(
 pub(crate) fn write_insert_heap_row(
     relation_name: &str,
     rls_relation_name: &str,
+    relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
@@ -5595,7 +5597,34 @@ pub(crate) fn write_insert_heap_row(
         ctx,
     )?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
-    heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple).map_err(Into::into)
+    let fillfactor = heap_fillfactor_for_relation(relation_oid, ctx);
+    heap_insert_mvcc_with_cid_and_fillfactor(
+        &*ctx.pool,
+        ctx.client_id,
+        rel,
+        xid,
+        cid,
+        &tuple,
+        fillfactor,
+    )
+    .map_err(Into::into)
+}
+
+fn heap_fillfactor_for_relation(relation_oid: u32, ctx: &ExecutorContext) -> u16 {
+    ctx.catalog
+        .as_deref()
+        .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
+        .and_then(|row| row.reloptions)
+        .and_then(|options| {
+            options.into_iter().find_map(|option| {
+                let (name, value) = option.split_once('=')?;
+                name.eq_ignore_ascii_case("fillfactor")
+                    .then(|| value.parse::<u16>().ok())
+                    .flatten()
+            })
+        })
+        .filter(|fillfactor| (10..=100).contains(fillfactor))
+        .unwrap_or(100)
 }
 
 pub(crate) fn rollback_inserted_row(
@@ -5873,6 +5902,7 @@ fn move_updated_row_to_partition(
     let inserted_tid = write_insert_heap_row(
         &destination.relation_info.relation_name,
         &destination.relation_info.relation_name,
+        destination.relation_info.relation.relation_oid,
         destination.relation_info.relation.rel,
         destination.relation_info.relation.toast,
         destination.relation_info.toast_index.as_ref(),
@@ -11203,6 +11233,7 @@ fn execute_merge_insert_action(
         let heap_tid = write_insert_heap_row(
             &stmt.relation_name,
             &stmt.relation_name,
+            stmt.relation_oid,
             stmt.rel,
             stmt.toast,
             stmt.toast_index.as_ref(),
@@ -14091,6 +14122,7 @@ pub(crate) fn execute_insert_rows(
             let heap_tid = write_insert_heap_row(
                 relation_name,
                 rls_relation_name,
+                relation_oid,
                 rel,
                 toast,
                 toast_index,
@@ -14362,6 +14394,7 @@ pub fn execute_prepared_insert_row(
     let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
         &prepared.relation_name,
+        prepared.relation_oid,
         prepared.rel,
         prepared.toast,
         prepared.toast_index.as_ref(),

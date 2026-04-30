@@ -17,7 +17,7 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::{IntervalValue, Value};
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref, SelectStatement,
-    SetOperator, ViewCheckOption, WindowFrameExclusion, WindowFrameMode,
+    SetOperator, TableSampleClause, ViewCheckOption, WindowFrameExclusion, WindowFrameMode,
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExprType, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, JoinType, OpExpr,
@@ -1443,12 +1443,48 @@ fn join_operand_requires_outer_parentheses(
         .is_some_and(|rte| !matches!(rte.kind, RangeTblEntryKind::Relation { .. }))
 }
 
+fn render_table_sample_suffix(
+    sample: Option<&TableSampleClause>,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    let Some(sample) = sample else {
+        return String::new();
+    };
+    let args = sample
+        .args
+        .iter()
+        .map(|expr| render_table_sample_expr(expr, ctx))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rendered = format!(" TABLESAMPLE {} ({args})", sample.method);
+    if let Some(repeatable) = &sample.repeatable {
+        rendered.push_str(&format!(
+            " REPEATABLE ({})",
+            render_table_sample_expr(repeatable, ctx)
+        ));
+    }
+    rendered
+}
+
+fn render_table_sample_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    match expr {
+        Expr::Cast(inner, ty) if matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) => {
+            render_wrapped_expr(inner, ctx)
+        }
+        _ => render_expr(expr, ctx),
+    }
+}
+
 fn render_rte(ctx: &ViewDeparseContext<'_>, index: usize) -> String {
     let Some(rte) = ctx.query.rtable.get(index.saturating_sub(1)) else {
         return format!("rte{index}");
     };
     match &rte.kind {
-        RangeTblEntryKind::Relation { relation_oid, .. } => {
+        RangeTblEntryKind::Relation {
+            relation_oid,
+            tablesample,
+            ..
+        } => {
             let base = relation_sql_name(*relation_oid, ctx.catalog)
                 .unwrap_or_else(|| format!("rel{relation_oid}"));
             let relname = ctx
@@ -1459,9 +1495,16 @@ fn render_rte(ctx: &ViewDeparseContext<'_>, index: usize) -> String {
             if let Some(alias) = relation_alias_name(rte)
                 && !alias.eq_ignore_ascii_case(&relname)
             {
-                format!("{base} {}", quote_identifier_if_needed(alias))
+                format!(
+                    "{base} {}{}",
+                    quote_identifier_if_needed(alias),
+                    render_table_sample_suffix(tablesample.as_ref(), ctx)
+                )
             } else {
-                base
+                format!(
+                    "{base}{}",
+                    render_table_sample_suffix(tablesample.as_ref(), ctx)
+                )
             }
         }
         RangeTblEntryKind::Subquery { query } => {
