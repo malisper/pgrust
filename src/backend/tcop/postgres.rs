@@ -8325,8 +8325,14 @@ fn psql_describe_tableinfo_query(
         // default heap AM directly, so suppress that footer here until the
         // catalog can distinguish explicit from implicit table AM selection.
         'r' | 'p' | 'm' | 'f' if amname.as_deref() == Some("heap") => None,
+        'I' => None,
         _ => amname,
     };
+    let reltablespace = db
+        .backend_catcache(session.client_id, txn_ctx)
+        .ok()
+        .and_then(|catcache| catcache.class_by_oid(oid).map(|row| row.reltablespace))
+        .unwrap_or(entry.rel.spc_oid);
     Some((
         vec![
             QueryColumn {
@@ -8404,7 +8410,7 @@ fn psql_describe_tableinfo_query(
             Value::Bool(false),
             Value::Bool(entry.relispartition),
             Value::Text(reloptions.into()),
-            Value::Int32(0),
+            Value::Int32(reltablespace as i32),
             Value::Text(reloftype.into()),
             Value::InternalChar(entry.relpersistence as u8),
             Value::InternalChar(b'd'),
@@ -9762,6 +9768,15 @@ fn psql_describe_indexes_query(
         .index_relations_for_heap(oid)
         .into_iter()
         .map(|index| {
+            let reltablespace = db
+                .backend_catcache(session.client_id, txn_ctx)
+                .ok()
+                .and_then(|catcache| {
+                    catcache
+                        .class_by_oid(index.relation_oid)
+                        .map(|row| row.reltablespace)
+                })
+                .unwrap_or(index.rel.spc_oid);
             let constraint = constraints.iter().find(|row| {
                 row.conindid == index.relation_oid && matches!(row.contype, 'p' | 'u' | 'x')
             });
@@ -9790,7 +9805,7 @@ fn psql_describe_indexes_query(
                 condeferrable,
                 condeferred,
                 Value::Bool(index.index_meta.indisreplident),
-                Value::Int32(0),
+                Value::Int32(reltablespace as i32),
                 constraint
                     .map(|row| Value::Bool(row.conperiod))
                     .unwrap_or(Value::Null),

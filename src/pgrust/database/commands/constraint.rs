@@ -2398,6 +2398,7 @@ impl Database {
         alter_stmt: &crate::backend::parser::AlterTableAddConstraintStatement,
         configured_search_path: Option<&[String]>,
         datetime_config: Option<&crate::backend::utils::misc::guc_datetime::DateTimeConfig>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
@@ -2428,6 +2429,7 @@ impl Database {
             0,
             configured_search_path,
             datetime_config,
+            gucs,
             &mut catalog_effects,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
@@ -2444,6 +2446,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         datetime_config: Option<&crate::backend::utils::misc::guc_datetime::DateTimeConfig>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
@@ -2682,6 +2685,7 @@ impl Database {
                         &[action],
                         !alter_stmt.only,
                         configured_search_path,
+                        None,
                         catalog_effects,
                     )?;
                     return Ok(StatementResult::AffectedRows(0));
@@ -3034,6 +3038,17 @@ impl Database {
                     !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
+                    if relation.relpersistence == 't' {
+                        None
+                    } else {
+                        Some(super::tablespace::resolve_relation_tablespace_oid(
+                            self,
+                            client_id,
+                            Some((xid, index_cid)),
+                            action.tablespace.as_deref(),
+                            gucs,
+                        )?)
+                    },
                     xid,
                     index_cid,
                     access_method_oid,

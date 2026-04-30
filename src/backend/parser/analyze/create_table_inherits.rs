@@ -305,6 +305,7 @@ fn inherited_table_constraints(
                             columns,
                             include_columns: Vec::new(),
                             without_overlaps,
+                            tablespace: None,
                         });
                     } else {
                         constraints.push(TableConstraint::Unique {
@@ -312,6 +313,7 @@ fn inherited_table_constraints(
                             columns,
                             include_columns: Vec::new(),
                             without_overlaps,
+                            tablespace: None,
                         });
                     }
                 }
@@ -1094,6 +1096,7 @@ fn ensure_primary_key_constraint(column: &mut crate::backend::parser::ColumnDef)
     }
     column.constraints.push(ColumnConstraint::PrimaryKey {
         attributes: ConstraintAttributes::default(),
+        tablespace: None,
     });
 }
 
@@ -1103,6 +1106,7 @@ fn ensure_unique_constraint(column: &mut crate::backend::parser::ColumnDef) {
     }
     column.constraints.push(ColumnConstraint::Unique {
         attributes: ConstraintAttributes::default(),
+        tablespace: None,
     });
 }
 

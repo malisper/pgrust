@@ -8024,6 +8024,9 @@ fn eval_pg_tablespace_location(
     {
         return Ok(Value::Text(target.display().to_string().into()));
     }
+    if metadata.is_dir() {
+        return Ok(Value::Text(format!("pg_tblspc/{tablespace_oid}").into()));
+    }
     Ok(Value::Text(source_path.display().to_string().into()))
 }
 

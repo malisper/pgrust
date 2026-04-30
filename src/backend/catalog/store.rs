@@ -615,7 +615,7 @@ mod tests {
 
         let (pool, txns, ctx) = durable_write_context(&base);
         let (_, effect) = store
-            .create_tablespace_mvcc("tblspc", BOOTSTRAP_SUPERUSER_OID, &ctx)
+            .create_tablespace_mvcc("tblspc", BOOTSTRAP_SUPERUSER_OID, None, &ctx)
             .unwrap();
         let _ = (effect, pool);
         commit_catalog_write(&txns, ctx.xid);

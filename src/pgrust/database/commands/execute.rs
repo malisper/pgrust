@@ -72,6 +72,7 @@ fn direct_guc_default(name: &str) -> Option<&'static str> {
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
         "max_parallel_workers_per_gather" => Some("2"),
+        "default_tablespace" => Some(""),
         _ => None,
     }
 }
@@ -1246,12 +1247,15 @@ impl Database {
                     let mut states = self.session_guc_states.write();
                     let gucs = states.entry(client_id).or_default();
                     if let Some(value) = set_stmt.value.as_ref() {
-                        if parse_direct_bool_guc(value).is_none() {
+                        if name == "default_tablespace" {
+                            gucs.insert(name, value.trim().trim_matches('\'').to_string());
+                        } else if parse_direct_bool_guc(value).is_none() {
                             return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
                                 value.clone(),
                             )));
+                        } else {
+                            gucs.insert(name, value.trim().trim_matches('\'').to_ascii_lowercase());
                         }
-                        gucs.insert(name, value.trim().trim_matches('\'').to_ascii_lowercase());
                     } else {
                         gucs.remove(&name);
                     }
@@ -1652,6 +1656,7 @@ impl Database {
                     client_id,
                     create_stmt,
                     configured_search_path,
+                    Some(gucs),
                     65_536,
                 ),
             Statement::ReindexIndex(ref reindex_stmt) => self
@@ -1738,6 +1743,15 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterIndexSetTablespace(ref alter_stmt) => self
+                .execute_alter_table_set_tablespace_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterMoveAllTablespace(ref alter_stmt) => {
+                self.execute_alter_move_all_tablespace_stmt(client_id, alter_stmt)
+            }
             Statement::AlterTableReset(ref alter_stmt) => self
                 .execute_alter_table_reset_stmt_with_search_path(
                     client_id,
@@ -1919,6 +1933,7 @@ impl Database {
                     client_id,
                     alter_stmt,
                     configured_search_path,
+                    None,
                     None,
                 ),
             Statement::AlterTableDropConstraint(ref alter_stmt) => self
@@ -2224,6 +2239,12 @@ impl Database {
                 ),
             Statement::CreateTablespace(ref create_stmt) => {
                 self.execute_create_tablespace_stmt(client_id, create_stmt, false)
+            }
+            Statement::DropTablespace(ref drop_stmt) => {
+                self.execute_drop_tablespace_stmt(client_id, drop_stmt)
+            }
+            Statement::AlterTablespace(ref alter_stmt) => {
+                self.execute_alter_tablespace_stmt(client_id, alter_stmt)
             }
             Statement::AlterSchemaOwner(ref alter_stmt) => self
                 .execute_alter_schema_owner_stmt_with_search_path(
@@ -3690,10 +3711,11 @@ impl Database {
                 result
             }
             Statement::CreateTable(ref create_stmt) => self
-                .execute_create_table_stmt_with_search_path(
+                .execute_create_table_stmt_with_search_path_and_gucs(
                     client_id,
                     create_stmt,
                     configured_search_path,
+                    Some(gucs),
                 ),
             Statement::CreateDomain(ref create_stmt) => self
                 .execute_create_domain_stmt_with_search_path(
@@ -3833,6 +3855,7 @@ impl Database {
                     0,
                     configured_search_path,
                     planner_config,
+                    Some(gucs),
                 ),
             Statement::RefreshMaterializedView(ref refresh_stmt) => self
                 .execute_refresh_materialized_view_stmt_with_search_path(
