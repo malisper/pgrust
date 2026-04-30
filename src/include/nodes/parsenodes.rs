@@ -2461,6 +2461,7 @@ pub enum PreparedStatementQuery {
     Select(SelectStatement),
     Insert(InsertStatement),
     Update(UpdateStatement),
+    Merge(MergeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

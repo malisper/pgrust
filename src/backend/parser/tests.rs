@@ -12189,7 +12189,7 @@ fn plan_merge_rejects_target_reference_in_source_subquery() {
     };
     assert!(matches!(
         plan_merge(&stmt, &catalog),
-        Err(ParseError::UnknownColumn(name)) if name == "p.id"
+        Err(ParseError::InvalidFromClauseReference(name)) if name == "p"
     ));
 }
 

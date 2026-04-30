@@ -1654,6 +1654,10 @@ fn collect_prepared_query_relation_names(query: &PreparedStatementQuery, out: &m
                 collect_from_item_relation_names(from, out);
             }
         }
+        PreparedStatementQuery::Merge(merge) => {
+            out.push(merge.target_table.clone());
+            collect_from_item_relation_names(&merge.source, out);
+        }
     }
 }
 
@@ -1752,6 +1756,7 @@ fn resolve_prepared_from_entry(
         PreparedStatementQuery::Select(select) => Statement::Select(select),
         PreparedStatementQuery::Insert(insert) => Statement::Insert(insert),
         PreparedStatementQuery::Update(update) => Statement::Update(update),
+        PreparedStatementQuery::Merge(merge) => Statement::Merge(merge),
     };
     let params = args
         .iter()
@@ -6371,6 +6376,9 @@ impl Session {
             StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb)
                 .run(|| self.execute_internal(db, sql, statement_lock_scope.scope_id()))
         });
+        if result.is_err() && self.active_txn.is_some() {
+            self.mark_transaction_failed();
+        }
         if matches!(result, Err(ExecError::Interrupted(_))) {
             self.interrupts.reset_statement_state();
         }
@@ -9146,16 +9154,26 @@ impl Session {
             }
             Statement::Merge(ref merge_stmt) => {
                 let _ = merge_stmt;
-                let search_path = self.configured_search_path();
-                db.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
-                    self.client_id,
-                    stmt,
-                    search_path.as_deref(),
-                    &self.datetime_config,
-                    &self.gucs,
-                    self.planner_config(),
-                    Arc::clone(&self.random_state),
-                )
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
+                        self.client_id,
+                        stmt,
+                        search_path.as_deref(),
+                        &self.datetime_config,
+                        &self.gucs,
+                        self.planner_config(),
+                        Arc::clone(&self.random_state),
+                    )
+                }
             }
             Statement::DeclareCursor(ref declare_stmt) => {
                 let options = cursor_options_from_declare(declare_stmt);
@@ -10130,8 +10148,8 @@ impl Session {
         let Statement::Execute(execute_stmt) = explain_stmt.statement.as_ref() else {
             return Ok(Statement::Explain(explain_stmt));
         };
-        let (select, _) = self.prepared_select_for_execute(execute_stmt)?;
-        explain_stmt.statement = Box::new(Statement::Select(select));
+        explain_stmt.statement =
+            Box::new(self.resolve_prepared_statement_to_statement(execute_stmt)?);
         Ok(Statement::Explain(explain_stmt))
     }
 
@@ -10161,6 +10179,7 @@ impl Session {
             PreparedStatementQuery::Select(select) => Statement::Select(select),
             PreparedStatementQuery::Insert(insert) => Statement::Insert(insert),
             PreparedStatementQuery::Update(update) => Statement::Update(update),
+            PreparedStatementQuery::Merge(merge) => Statement::Merge(merge),
         })
     }
 
@@ -10189,6 +10208,7 @@ impl Session {
             PreparedStatementQuery::Select(select) => Statement::Select(select),
             PreparedStatementQuery::Insert(insert) => Statement::Insert(insert),
             PreparedStatementQuery::Update(update) => Statement::Update(update),
+            PreparedStatementQuery::Merge(merge) => Statement::Merge(merge),
         };
         let params = args
             .iter()
@@ -10265,6 +10285,9 @@ impl Session {
             PreparedStatementQuery::Update(update) => PreparedStatementQuery::Update(
                 Self::substitute_update_statement(update, &mut subst)?,
             ),
+            PreparedStatementQuery::Merge(merge) => {
+                PreparedStatementQuery::Merge(Self::substitute_merge_statement(merge, &mut subst)?)
+            }
         };
         if parameter_types.is_empty() && args.len() != subst.max_param {
             return Err(Self::prepared_statement_param_count_error(
@@ -10982,6 +11005,13 @@ impl Session {
                 expr.clone()
             }
             SqlExpr::Parameter(index) => {
+                let name = format!("${index}");
+                if let Some(arg) = Self::substitute_param_ref(&name, subst)? {
+                    return Ok(arg);
+                }
+                expr.clone()
+            }
+            SqlExpr::ParamRef(index) => {
                 let name = format!("${index}");
                 if let Some(arg) = Self::substitute_param_ref(&name, subst)? {
                     return Ok(arg);
@@ -16754,6 +16784,7 @@ impl Session {
             Statement::Insert(insert) => !insert.returning.is_empty(),
             Statement::Update(update) => !update.returning.is_empty(),
             Statement::Delete(delete) => !delete.returning.is_empty(),
+            Statement::Merge(merge) => !merge.returning.is_empty(),
             _ => false,
         })
     }
@@ -17874,7 +17905,10 @@ impl Session {
             (&stmt.destination, &stmt.source)
             && matches!(
                 &**statement,
-                Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_)
+                Statement::Insert(_)
+                    | Statement::Update(_)
+                    | Statement::Delete(_)
+                    | Statement::Merge(_)
             )
         {
             let sink = stdout_sink.ok_or_else(|| {
@@ -18131,6 +18165,14 @@ impl Session {
             Statement::Delete(delete) => {
                 self.validate_copy_to_dml_rules(db, &delete.table_name, '4')?;
                 if delete.returning.is_empty() {
+                    return Err(copy_to_feature_error(
+                        "COPY query must have a RETURNING clause",
+                    ));
+                }
+                Ok(())
+            }
+            Statement::Merge(merge) => {
+                if merge.returning.is_empty() {
                     return Err(copy_to_feature_error(
                         "COPY query must have a RETURNING clause",
                     ));

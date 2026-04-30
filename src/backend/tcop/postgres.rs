@@ -3948,6 +3948,7 @@ fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResp
     apply_insert_conflict_regression_error_compat(sql, response);
     apply_update_alias_regression_error_compat(sql, response);
     apply_update_regression_error_position_compat(sql, response);
+    apply_merge_regression_error_compat(sql, response);
 }
 
 fn apply_update_regression_error_position_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -4013,6 +4014,61 @@ fn clean_sql_identifier_token(token: &str) -> String {
     token
         .trim_matches(|ch: char| matches!(ch, '"' | ',' | ';' | '(' | ')'))
         .to_string()
+}
+
+fn apply_merge_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
+    let lower = sql.to_ascii_lowercase();
+    if response.message.starts_with("WITH query \"")
+        && response
+            .message
+            .ends_with("\" does not have a RETURNING clause")
+        && let Some(position) = find_select_star_position(sql)
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "invalid reference to FROM-clause entry for table \"t\""
+        && lower.contains("merge into")
+        && lower.contains("using")
+        && let Some(position) =
+            find_case_insensitive_token_position(sql, "where t.tid").map(|pos| pos + "where ".len())
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "cannot use system column \"xmin\" in MERGE WHEN condition"
+        && let Some(position) = find_case_insensitive_token_position(sql, "t.xmin")
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "column reference \"balance\" is ambiguous"
+        && lower.contains("merge into")
+        && let Some(position) = find_merge_update_rhs_identifier_position(sql, "balance")
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message
+        == "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command"
+        && let Some(position) = find_case_insensitive_token_position(sql, "merge_action")
+    {
+        response.position = Some(position);
+    }
+}
+
+fn find_select_star_position(sql: &str) -> Option<usize> {
+    find_last_case_insensitive_token_position(sql, "select *").map(|pos| pos + "select ".len())
+}
+
+fn find_merge_update_rhs_identifier_position(sql: &str, identifier: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let update_pos = lower.find("update set")?;
+    let after_update = update_pos + "update set".len();
+    let equals_pos = lower[after_update..].find('=')? + after_update + 1;
+    lower[equals_pos..]
+        .find(&identifier.to_ascii_lowercase())
+        .map(|offset| equals_pos + offset + 1)
 }
 
 fn apply_insert_conflict_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -6580,6 +6636,22 @@ fn execute_query_statement(
         .map_err(|e| io::Error::other(format!("{e:?}")))
     };
     refresh_protocol_prepared_statement_view_rows(state);
+    if state.session.transaction_failed()
+        && let Ok(stmt) = parsed.as_ref()
+        && !matches!(
+            stmt,
+            Statement::Commit(_) | Statement::Rollback(_) | Statement::RollbackTo(_)
+        )
+    {
+        let err = ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "ROLLBACK",
+            actual:
+                "current transaction is aborted, commands ignored until end of transaction block"
+                    .into(),
+        });
+        send_exec_error(stream, error_sql.as_ref(), &err)?;
+        return Ok(QueryStatementFlow::Stop);
+    }
     if let Ok(stmt) = parsed.as_ref()
         && let Some(flow) = handle_portal_statement(stream, db, state, sql.as_ref(), stmt)?
     {

@@ -1,6 +1,7 @@
 use super::domain::enforce_domain_constraints_for_value;
 use super::exec_expr::cast_record_value_for_target;
 use super::value_io::{coerce_assignment_value_with_config, format_array_value_text_with_config};
+use crate::backend::commands::tablecmds::execute_merge;
 use crate::backend::executor::exec_expr::append_array_value;
 use crate::backend::executor::execute_readonly_statement;
 use crate::backend::executor::function_guc::execute_with_sql_function_gucs;
@@ -13,7 +14,7 @@ use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
     CatalogLookup, ParseOptions, SqlType, SqlTypeKind, Statement, bind_insert,
-    parse_statement_with_options,
+    parse_statement_with_options, plan_merge,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::PgProcRow;
@@ -797,6 +798,21 @@ fn execute_sql_function_statement(
                 xid,
                 cid,
             );
+            ctx.next_command_id = ctx.next_command_id.saturating_add(1);
+            result
+        }
+        Statement::Merge(stmt) => {
+            if !ctx.allow_side_effects {
+                return Err(ExecError::DetailedError {
+                    message: "MERGE is not allowed in a read-only execution context".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "25006",
+                });
+            }
+            let xid = ctx.ensure_write_xid()?;
+            let cid = ctx.next_command_id;
+            let result = execute_merge(plan_merge(&stmt, catalog)?, catalog, ctx, xid, cid);
             ctx.next_command_id = ctx.next_command_id.saturating_add(1);
             result
         }
@@ -1716,11 +1732,20 @@ fn inline_sql_function_body(
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
-    let body = row.prosrc.trim().trim_end_matches(';').trim().to_string();
-    if !sql_function_body_is_inline_select_candidate(&body) {
+    let body = normalized_sql_function_body(&row.prosrc);
+    // :HACK: This is a narrow compatibility path for regression setup helpers.
+    // Full PostgreSQL SQL-language functions need dedicated planning/execution
+    // rather than text substitution plus a readonly single-SELECT execution.
+    let lower_body = body.to_ascii_lowercase();
+    if !(starts_with_sql_command(&lower_body, "select")
+        || starts_with_sql_command(&lower_body, "values")
+        || starts_with_sql_command(&lower_body, "with")
+        || starts_with_sql_command(&lower_body, "insert")
+        || starts_with_sql_command(&lower_body, "merge"))
+    {
         return Err(sql_function_runtime_error(
-            "SQL function inlining only supports SELECT bodies",
-            None,
+            "only single SELECT, VALUES, WITH, INSERT, or MERGE LANGUAGE sql function bodies are supported",
+            Some(row.prosrc.clone()),
             "0A000",
         ));
     }
@@ -2171,7 +2196,11 @@ pub(crate) fn substitute_named_arg(input: &str, name: &str, replacement: &str) -
                 }
                 let ident = &input[start..i];
                 if ident.eq_ignore_ascii_case(name) {
-                    if named_arg_occurrence_is_window_unbounded_keyword(input, name, i) {
+                    if named_arg_occurrence_is_window_unbounded_keyword(input, name, i)
+                        || named_arg_occurrence_is_qualified_field(input, start)
+                        || named_arg_occurrence_is_column_alias_list(input, start)
+                        || named_arg_occurrence_is_update_set_target(input, start, i)
+                    {
                         out.push_str(ident);
                     } else {
                         out.push_str(replacement);
@@ -2187,6 +2216,113 @@ pub(crate) fn substitute_named_arg(input: &str, name: &str, replacement: &str) -
         }
     }
     out
+}
+
+fn named_arg_occurrence_is_qualified_field(input: &str, start: usize) -> bool {
+    input[..start]
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_some_and(|ch| ch == '.')
+}
+
+fn named_arg_occurrence_is_column_alias_list(input: &str, start: usize) -> bool {
+    let Some(open) = nearest_open_paren_before(input, start) else {
+        return false;
+    };
+    if !input[open + 1..start]
+        .chars()
+        .all(|ch| ch == '_' || ch == ',' || ch.is_ascii_alphanumeric() || ch.is_whitespace())
+    {
+        return false;
+    }
+    let Some((token, token_start)) = token_before(input, open) else {
+        return false;
+    };
+    if token.eq_ignore_ascii_case("insert") {
+        return true;
+    }
+    let Some((previous, _)) = token_before(input, token_start) else {
+        return false;
+    };
+    previous.eq_ignore_ascii_case("as") || previous.eq_ignore_ascii_case("into")
+}
+
+fn named_arg_occurrence_is_update_set_target(input: &str, start: usize, end: usize) -> bool {
+    let rest = input[end..].trim_start();
+    if !rest.starts_with('=') {
+        return false;
+    }
+
+    let mut best: Option<(&str, usize)> = None;
+    let mut index = 0usize;
+    while index < start {
+        let ch = input.as_bytes()[index] as char;
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let token_start = index;
+            index += 1;
+            while index < start {
+                let ch = input.as_bytes()[index] as char;
+                if ch == '_' || ch.is_ascii_alphanumeric() {
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+            let token = &input[token_start..index];
+            if matches!(
+                token.to_ascii_lowercase().as_str(),
+                "set"
+                    | "where"
+                    | "when"
+                    | "then"
+                    | "returning"
+                    | "values"
+                    | "from"
+                    | "on"
+                    | "insert"
+                    | "update"
+                    | "delete"
+                    | "merge"
+            ) {
+                best = Some((token, token_start));
+            }
+        } else {
+            index += 1;
+        }
+    }
+    best.is_some_and(|(token, _)| token.eq_ignore_ascii_case("set"))
+}
+
+fn nearest_open_paren_before(input: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (idx, ch) in input[..start].char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' if depth == 0 => return Some(idx),
+            '(' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn token_before(input: &str, end: usize) -> Option<(&str, usize)> {
+    let bytes = input.as_bytes();
+    let mut idx = end;
+    while idx > 0 && bytes[idx - 1].is_ascii_whitespace() {
+        idx -= 1;
+    }
+    let token_end = idx;
+    while idx > 0 {
+        let byte = bytes[idx - 1];
+        if byte == b'_' || byte.is_ascii_alphanumeric() {
+            idx -= 1;
+        } else {
+            break;
+        }
+    }
+    (idx < token_end).then_some((&input[idx..token_end], idx))
 }
 
 fn named_arg_occurrence_is_window_unbounded_keyword(input: &str, name: &str, end: usize) -> bool {
@@ -2596,6 +2732,34 @@ mod tests {
             sql,
             "select sum(x) over (rows between unbounded preceding and unbounded following), (2)"
         );
+    }
+
+    #[test]
+    fn inline_sql_function_preserves_merge_column_names() {
+        let catalog = crate::backend::parser::Catalog::default();
+        let datetime_config = DateTimeConfig::default();
+        let row = test_proc_row(
+            "merge into sq_target t\n\
+             using (values ($1, $2, $3)) as v(sid, balance, delta)\n\
+             on tid = v.sid\n\
+             when matched then update set balance = t.balance + v.delta\n\
+             when not matched then insert (balance, tid) values (v.balance + v.delta, v.sid)\n\
+             returning merge_action(), t.*",
+            Some(vec!["sid", "balance", "delta"]),
+        );
+        let sql = inline_sql_function_body(
+            &row,
+            &[Value::Int32(1), Value::Int32(0), Value::Int32(20)],
+            None,
+            &catalog,
+            &datetime_config,
+        )
+        .unwrap();
+
+        assert!(sql.contains("as v(sid, balance, delta)"));
+        assert!(sql.contains("update set balance = t.balance + v.delta"));
+        assert!(sql.contains("insert (balance, tid) values (v.balance + v.delta, v.sid)"));
+        assert!(sql.contains("values ((1), (0), (20))"));
     }
 
     #[test]
