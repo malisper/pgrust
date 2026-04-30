@@ -15,7 +15,7 @@ use crate::include::nodes::primnodes::{
     ScalarFunctionImpl, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
     SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan, SqlJsonTableQuotes,
     SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
-    SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint, user_attrno,
+    SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMIN_ATTR_NO, expr_sql_type_hint, user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -439,6 +439,8 @@ fn resolve_system_column_in_scope(
         (TABLE_OID_ATTR_NO, SqlType::new(SqlTypeKind::Oid))
     } else if column_name.eq_ignore_ascii_case("ctid") {
         (SELF_ITEM_POINTER_ATTR_NO, SqlType::new(SqlTypeKind::Tid))
+    } else if column_name.eq_ignore_ascii_case("xmin") {
+        (XMIN_ATTR_NO, SqlType::new(SqlTypeKind::Xid))
     } else {
         return Ok(None);
     };

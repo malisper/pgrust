@@ -3242,8 +3242,8 @@ impl Database {
             ),
             Statement::SetTransaction(_)
             | Statement::Begin(_)
-            | Statement::Commit
-            | Statement::Rollback
+            | Statement::Commit(_)
+            | Statement::Rollback(_)
             | Statement::Savepoint(_)
             | Statement::ReleaseSavepoint(_)
             | Statement::RollbackTo(_) => Ok(StatementResult::AffectedRows(0)),

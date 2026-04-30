@@ -2573,6 +2573,7 @@ impl WindowFrame {
 pub type AttrNumber = i32;
 
 pub const SELF_ITEM_POINTER_ATTR_NO: AttrNumber = -1;
+pub const XMIN_ATTR_NO: AttrNumber = -2;
 pub const TABLE_OID_ATTR_NO: AttrNumber = -6;
 pub const OUTER_VAR: usize = usize::MAX;
 pub const INNER_VAR: usize = usize::MAX - 1;

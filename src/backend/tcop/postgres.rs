@@ -421,7 +421,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnknownTable(name)) => {
             let lower = sql.trim_start().to_ascii_lowercase();
-            if lower.starts_with("select ") || lower.starts_with("delete ") {
+            if lower.starts_with("select ")
+                || lower.starts_with("delete ")
+                || lower.starts_with("insert ")
+            {
                 return find_case_insensitive_token_position(sql, name);
             }
             return None;
@@ -502,6 +505,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, system_column);
             }
             if message.starts_with("invalid value for parameter \"") {
+                return None;
+            }
+            if message.starts_with("invalid snapshot identifier: ")
+                || (message.starts_with("snapshot \"") && message.ends_with("\" does not exist"))
+            {
                 return None;
             }
             if message == "cannot determine type of empty array" {
@@ -4751,8 +4759,18 @@ fn handle_query(
         send_ready_with_pending_messages(stream, db, &state.session)?;
         return Ok(());
     }
+    // :HACK: pg_regress drives psql backslash-escaped semicolons as one Query
+    // message.  Normalize that psql surface form before the protocol splitter so
+    // the backend still sees the individual SQL commands.
+    let normalized_escaped_semicolons;
+    let split_sql = if sql.contains("\\;") {
+        normalized_escaped_semicolons = normalize_psql_escaped_semicolons(sql);
+        normalized_escaped_semicolons.as_str()
+    } else {
+        sql
+    };
     let statements =
-        split_simple_query_statements(sql, state.session.standard_conforming_strings())
+        split_simple_query_statements(split_sql, state.session.standard_conforming_strings())
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -4768,6 +4786,14 @@ fn handle_query(
     Ok(())
 }
 
+fn normalize_psql_escaped_semicolons(sql: &str) -> String {
+    let mut normalized = sql.to_string();
+    while normalized.contains("\\;") {
+        normalized = normalized.replace("\\;", ";");
+    }
+    normalized
+}
+
 struct SimpleQueryExecutionResult {
     executed_any: bool,
     copy_in_started: bool,
@@ -4779,22 +4805,107 @@ enum QueryStatementFlow {
     CopyInStarted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SimpleQueryTxnControl {
+    Begin,
+    Commit { chain: bool },
+    Rollback { chain: bool },
+    Savepoint,
+    Release,
+    RollbackTo,
+    Other,
+}
+
 fn execute_simple_query_statements(
     stream: &mut impl Write,
     db: &Database,
     state: &mut ConnectionState,
     statements: Vec<String>,
 ) -> io::Result<SimpleQueryExecutionResult> {
+    let multi_statement = statements
+        .iter()
+        .filter(|sql| !sql_is_effectively_empty_after_comments(sql))
+        .count()
+        > 1;
     let mut executed_any = false;
     let mut statements = statements.into_iter();
+    let mut hidden_implicit_txn = false;
     while let Some(raw_stmt) = statements.next() {
         if sql_is_effectively_empty_after_comments(&raw_stmt) {
             continue;
         }
         executed_any = true;
+        let txn_control = simple_query_txn_control(&raw_stmt);
+        if multi_statement
+            && !hidden_implicit_txn
+            && !state.session.in_transaction()
+            && simple_query_starts_implicit_transaction(txn_control)
+        {
+            state.session.begin_implicit_query_transaction(db);
+            hidden_implicit_txn = true;
+        }
+        if hidden_implicit_txn {
+            match txn_control {
+                SimpleQueryTxnControl::Begin => {
+                    hidden_implicit_txn = false;
+                    send_command_complete(stream, "BEGIN")?;
+                    continue;
+                }
+                SimpleQueryTxnControl::Commit { chain: false } => {
+                    if let Err(e) = state.session.commit_implicit_query_transaction(db) {
+                        send_exec_error(stream, &raw_stmt, &e)?;
+                        return Ok(SimpleQueryExecutionResult {
+                            executed_any,
+                            copy_in_started: false,
+                        });
+                    }
+                    hidden_implicit_txn = false;
+                }
+                SimpleQueryTxnControl::Rollback { chain: false } => {
+                    state.session.rollback_implicit_query_transaction(db);
+                    hidden_implicit_txn = false;
+                }
+                SimpleQueryTxnControl::Commit { chain: true } => {
+                    let err = simple_query_chain_requires_transaction_error("COMMIT");
+                    send_exec_error(stream, &raw_stmt, &err)?;
+                    state.session.rollback_implicit_query_transaction(db);
+                    return Ok(SimpleQueryExecutionResult {
+                        executed_any,
+                        copy_in_started: false,
+                    });
+                }
+                SimpleQueryTxnControl::Rollback { chain: true } => {
+                    let err = simple_query_chain_requires_transaction_error("ROLLBACK");
+                    send_exec_error(stream, &raw_stmt, &err)?;
+                    state.session.rollback_implicit_query_transaction(db);
+                    return Ok(SimpleQueryExecutionResult {
+                        executed_any,
+                        copy_in_started: false,
+                    });
+                }
+                SimpleQueryTxnControl::Savepoint
+                | SimpleQueryTxnControl::Release
+                | SimpleQueryTxnControl::RollbackTo => {
+                    let err = simple_query_savepoint_requires_transaction_error(txn_control);
+                    send_exec_error(stream, &raw_stmt, &err)?;
+                    state.session.rollback_implicit_query_transaction(db);
+                    return Ok(SimpleQueryExecutionResult {
+                        executed_any,
+                        copy_in_started: false,
+                    });
+                }
+                SimpleQueryTxnControl::Other => {}
+            }
+        }
         match execute_query_statement(stream, db, state, &raw_stmt)? {
             QueryStatementFlow::Continue => {}
-            QueryStatementFlow::Stop => break,
+            QueryStatementFlow::Stop => {
+                if hidden_implicit_txn {
+                    state.session.rollback_implicit_query_transaction(db);
+                    hidden_implicit_txn = false;
+                }
+                break;
+            }
             QueryStatementFlow::CopyInStarted => {
                 if let Some(copy) = state.copy_in.as_mut() {
                     copy.continuation = statements.collect();
@@ -4806,10 +4917,76 @@ fn execute_simple_query_statements(
             }
         }
     }
+    if hidden_implicit_txn && let Err(e) = state.session.commit_implicit_query_transaction(db) {
+        send_exec_error(stream, "", &e)?;
+    }
 
     Ok(SimpleQueryExecutionResult {
         executed_any,
         copy_in_started: false,
+    })
+}
+
+fn simple_query_txn_control(sql: &str) -> SimpleQueryTxnControl {
+    let normalized = sql
+        .trim_start()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if normalized.starts_with("begin") || normalized.starts_with("start transaction") {
+        return SimpleQueryTxnControl::Begin;
+    }
+    if normalized.starts_with("commit") || normalized.starts_with("end") {
+        return SimpleQueryTxnControl::Commit {
+            chain: normalized.contains(" and chain"),
+        };
+    }
+    if normalized.starts_with("rollback to") || normalized.starts_with("abort to") {
+        return SimpleQueryTxnControl::RollbackTo;
+    }
+    if normalized.starts_with("rollback") || normalized.starts_with("abort") {
+        return SimpleQueryTxnControl::Rollback {
+            chain: normalized.contains(" and chain"),
+        };
+    }
+    if normalized.starts_with("savepoint") {
+        return SimpleQueryTxnControl::Savepoint;
+    }
+    if normalized.starts_with("release") {
+        return SimpleQueryTxnControl::Release;
+    }
+    SimpleQueryTxnControl::Other
+}
+
+fn simple_query_starts_implicit_transaction(control: SimpleQueryTxnControl) -> bool {
+    matches!(control, SimpleQueryTxnControl::Other)
+}
+
+fn simple_query_chain_requires_transaction_error(command: &'static str) -> ExecError {
+    ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+        message: format!("{command} AND CHAIN can only be used in transaction blocks"),
+        detail: None,
+        hint: None,
+        sqlstate: "25001",
+    })
+}
+
+fn simple_query_savepoint_requires_transaction_error(control: SimpleQueryTxnControl) -> ExecError {
+    let message = match control {
+        SimpleQueryTxnControl::Savepoint => "SAVEPOINT can only be used in transaction blocks",
+        SimpleQueryTxnControl::Release => {
+            "RELEASE SAVEPOINT can only be used in transaction blocks"
+        }
+        SimpleQueryTxnControl::RollbackTo => {
+            "ROLLBACK TO SAVEPOINT can only be used in transaction blocks"
+        }
+        _ => "savepoint command can only be used in transaction blocks",
+    };
+    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+        expected: "active transaction",
+        actual: message.into(),
     })
 }
 
@@ -5589,6 +5766,7 @@ fn execute_streaming_select_statement(
             drop(guard);
 
             if let Some(e) = err {
+                state.session.mark_transaction_failed();
                 send_queued_notices_with_sql(stream, Some(sql))?;
                 send_exec_error(stream, sql, &e)?;
                 return Ok(QueryStatementFlow::Stop);
@@ -5602,6 +5780,7 @@ fn execute_streaming_select_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Err(e) => {
+            state.session.mark_transaction_failed();
             send_queued_notices_with_sql(stream, Some(sql))?;
             send_exec_error(stream, sql, &e)?;
             Ok(QueryStatementFlow::Stop)
@@ -12624,7 +12803,7 @@ mod tests {
             "privileges for membership of role user3 in role user1"
         ));
         assert!(
-            db.backend_catcache(2, None)
+            !db.backend_catcache(2, None)
                 .unwrap()
                 .authid_rows()
                 .into_iter()

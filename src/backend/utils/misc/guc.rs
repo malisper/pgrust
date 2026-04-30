@@ -32,6 +32,17 @@ pub fn normalize_function_guc_assignment(
     error_on_invalid: bool,
 ) -> Result<(String, String), ParseError> {
     let normalized = normalize_guc_name(name);
+    if matches!(
+        normalized.as_str(),
+        "transaction_isolation" | "transaction_read_only" | "transaction_deferrable"
+    ) {
+        return Err(ParseError::DetailedError {
+            message: format!("parameter \"{normalized}\" cannot be set locally in functions"),
+            detail: None,
+            hint: None,
+            sqlstate: "25001",
+        });
+    }
     if normalized == "default_text_search_config" && value.eq_ignore_ascii_case("no_such_config") {
         if emit_notice {
             crate::backend::utils::misc::notices::push_notice(

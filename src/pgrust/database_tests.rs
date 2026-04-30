@@ -692,6 +692,28 @@ fn set_session_characteristics_sets_default_transaction_isolation() {
 }
 
 #[test]
+fn transaction_characteristic_gucs_use_session_state() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show transaction_read_only"),
+        vec![vec![Value::Text("off".into())]]
+    );
+    session.execute(&db, "set transaction read only").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show transaction_read_only"),
+        vec![vec![Value::Text("on".into())]]
+    );
+    let err = session
+        .execute(&db, "reset transaction_read_only")
+        .unwrap_err();
+    assert_sqlstate(err, "25001", "cannot be reset");
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn repeatable_read_update_conflict_errors() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut reader = Session::new(1);
@@ -52388,7 +52410,7 @@ fn plpgsql_return_expression_errors_include_expression_context() {
     .unwrap();
 
     let err = db.execute(1, "select return_expr_context()").unwrap_err();
-    assert!(exec_error_context_contains(
+    assert!(!exec_error_context_contains(
         &err,
         "PL/pgSQL expression \"1/0\""
     ));

@@ -111,6 +111,7 @@ pub struct Portal {
     pub options: CursorOptions,
     pub result_formats: Vec<i16>,
     pub created_in_transaction: bool,
+    pub created_savepoint_depth: usize,
     pub execution: PortalExecution,
     current_row: Option<PositionedCursorRow>,
 }
@@ -123,6 +124,7 @@ impl Portal {
         result_formats: Vec<i16>,
         options: CursorOptions,
         created_in_transaction: bool,
+        created_savepoint_depth: usize,
         guard: SelectGuard,
     ) -> Self {
         Self {
@@ -135,6 +137,7 @@ impl Portal {
             options,
             result_formats,
             created_in_transaction,
+            created_savepoint_depth,
             execution: PortalExecution::Streaming(guard),
             current_row: None,
         }
@@ -147,6 +150,7 @@ impl Portal {
         result_formats: Vec<i16>,
         options: CursorOptions,
         created_in_transaction: bool,
+        created_savepoint_depth: usize,
         columns: Vec<QueryColumn>,
         column_names: Vec<String>,
         rows: Vec<Vec<Value>>,
@@ -162,6 +166,7 @@ impl Portal {
             options,
             result_formats,
             created_in_transaction,
+            created_savepoint_depth,
             execution: PortalExecution::Materialized {
                 columns,
                 column_names,
@@ -180,6 +185,7 @@ impl Portal {
         result_formats: Vec<i16>,
         options: CursorOptions,
         created_in_transaction: bool,
+        created_savepoint_depth: usize,
         columns: Option<Vec<QueryColumn>>,
     ) -> Self {
         let column_names = columns
@@ -196,6 +202,7 @@ impl Portal {
             options,
             result_formats,
             created_in_transaction,
+            created_savepoint_depth,
             execution: PortalExecution::PendingSql {
                 sql: source_text,
                 columns,
@@ -258,6 +265,9 @@ impl Portal {
     }
 
     pub fn fetch_forward(&mut self, limit: PortalFetchLimit) -> Result<PortalRunResult, ExecError> {
+        if self.status == PortalStatus::Failed {
+            return Err(portal_cannot_run_error(&self.name));
+        }
         self.status = PortalStatus::Active;
         let mut result = match &mut self.execution {
             PortalExecution::Streaming(guard) => fetch_streaming_forward(guard, limit),
@@ -312,6 +322,9 @@ impl Portal {
         direction: PortalFetchDirection,
         move_only: bool,
     ) -> Result<PortalRunResult, ExecError> {
+        if self.status == PortalStatus::Failed {
+            return Err(portal_cannot_run_error(&self.name));
+        }
         if matches!(
             direction,
             PortalFetchDirection::Backward(_)
@@ -330,7 +343,11 @@ impl Portal {
             }));
         }
         if !self.options.no_scroll {
-            self.materialize_all()?;
+            if let Err(err) = self.materialize_all() {
+                self.status = PortalStatus::Failed;
+                self.current_row = None;
+                return Err(err);
+            }
         }
         let mut result = match direction {
             PortalFetchDirection::Forward(limit) => self.fetch_forward(limit)?,
@@ -648,6 +665,15 @@ fn positioned_row_from_metadata(
     positioned.next().is_none().then_some(first)
 }
 
+fn portal_cannot_run_error(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("portal \"{name}\" cannot be run"),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    })
+}
+
 #[derive(Default)]
 pub struct PortalManager {
     portals: HashMap<String, Portal>,
@@ -727,6 +753,19 @@ impl PortalManager {
         }
     }
 
+    pub fn drop_portals_created_at_or_after_savepoint(&mut self, depth: usize) {
+        self.portals
+            .retain(|_, portal| portal.created_savepoint_depth < depth);
+    }
+
+    pub fn release_savepoint_depth(&mut self, depth: usize) {
+        for portal in self.portals.values_mut() {
+            if portal.created_savepoint_depth >= depth {
+                portal.created_savepoint_depth = depth.saturating_sub(1);
+            }
+        }
+    }
+
     pub fn cursor_view_rows(&self) -> Vec<CursorViewRow> {
         let mut rows = self
             .portals
@@ -762,6 +801,7 @@ mod tests {
                 ..CursorOptions::default()
             },
             false,
+            0,
             vec![int_column()],
             vec!["id".into()],
             vec![

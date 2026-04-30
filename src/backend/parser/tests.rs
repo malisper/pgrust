@@ -28,9 +28,9 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy,
     PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
     RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    SetSessionAuthorizationStatement, SqlCallArgs, SubscriptionOptionValue, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
-    UserMappingUser, ViewCheckOption,
+    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
+    TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -2837,7 +2837,43 @@ fn parse_transaction_alias_statements() {
     );
     assert_eq!(
         parse_statement("commit transaction").unwrap(),
-        Statement::Commit
+        Statement::Commit(TransactionEndOptions { chain: false })
+    );
+    assert_eq!(
+        parse_statement("commit and chain").unwrap(),
+        Statement::Commit(TransactionEndOptions { chain: true })
+    );
+    assert_eq!(
+        parse_statement("rollback and no chain").unwrap(),
+        Statement::Rollback(TransactionEndOptions { chain: false })
+    );
+}
+
+#[test]
+fn parse_transaction_characteristic_gucs() {
+    assert_eq!(
+        parse_statement("reset transaction_read_only").unwrap(),
+        Statement::Reset(ResetStatement {
+            name: Some("transaction_read_only".into())
+        })
+    );
+    assert_eq!(
+        parse_statement("show transaction_read_only").unwrap(),
+        Statement::Show(ShowStatement {
+            name: "transaction_read_only".into()
+        })
+    );
+    assert_eq!(
+        parse_statement("set session characteristics as transaction read only").unwrap(),
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::SessionCharacteristics,
+            options: TransactionOptions {
+                isolation_level: None,
+                read_only: Some(true),
+                deferrable: None,
+            },
+            snapshot_id: None,
+        })
     );
 }
 
@@ -6872,6 +6908,7 @@ fn parse_set_transaction_isolation_level_serializable() {
                 isolation_level: Some(TransactionIsolationLevel::Serializable),
                 ..TransactionOptions::default()
             },
+            snapshot_id: None,
         })
     );
 }
@@ -6889,6 +6926,19 @@ fn parse_set_session_transaction_characteristics() {
                 isolation_level: Some(TransactionIsolationLevel::RepeatableRead),
                 ..TransactionOptions::default()
             },
+            snapshot_id: None,
+        })
+    );
+}
+
+#[test]
+fn parse_set_transaction_snapshot() {
+    assert_eq!(
+        parse_statement("set transaction snapshot 'FFF-FFF-F'").unwrap(),
+        Statement::SetTransaction(SetTransactionStatement {
+            scope: SetTransactionScope::Transaction,
+            options: TransactionOptions::default(),
+            snapshot_id: Some("FFF-FFF-F".into()),
         })
     );
 }
@@ -11583,6 +11633,9 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("vacuum pgbench_branches").unwrap(), Statement::Vacuum(VacuumStatement { analyze: false, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "pgbench_branches".into(), columns: vec![], only: false }])
+    );
+    assert!(
+        matches!(parse_statement("vacuum").unwrap(), Statement::Vacuum(VacuumStatement { analyze: false, targets, .. }) if targets.is_empty())
     );
     assert!(
         matches!(parse_statement("vacuum analyze vactst, vacparted (a)").unwrap(), Statement::Vacuum(VacuumStatement { analyze: true, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }, MaintenanceTarget { table_name: "vacparted".into(), columns: vec!["a".into()], only: false }])
