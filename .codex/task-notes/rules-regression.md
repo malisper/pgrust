@@ -185,3 +185,28 @@ Final validation:
 
 Remaining:
 - No remaining `rules` regression diffs.
+
+Goal:
+Fix CI failures reported on the `rules` parity PR.
+
+Key decisions:
+- Removed synthetic `pg_rules` metadata rows from `pg_indexes`; those rows have
+  four columns and caused `SELECT indexdef FROM pg_indexes ...` to evaluate
+  column 5 against a four-value row.
+- Taught delete-rule EXPLAIN constant substitution to recognize `RULE_OLD_VAR`
+  as well as the older `OUTER_VAR` path.
+
+Files touched:
+- `src/backend/utils/cache/system_views.rs`
+- `src/backend/commands/tablecmds.rs`
+
+Tests run:
+- `scripts/cargo_isolated.sh test --lib --quiet create_hash_index_catalog_and_equality_scan -- --nocapture`
+- `scripts/cargo_isolated.sh test --lib --quiet create_index_on_partitioned_table_builds_index_tree -- --nocapture`
+- `scripts/cargo_isolated.sh test --lib --quiet explain_delete_expands_delete_rule_actions -- --nocapture`
+- `cargo fmt`
+- `scripts/cargo_isolated.sh check`
+- `RUST_BACKTRACE=full scripts/run_regression.sh --test rules --timeout 300 --port 57033`
+
+Remaining:
+- CI should rerun on the PR branch after pushing this fix.

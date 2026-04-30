@@ -876,7 +876,6 @@ pub fn build_pg_indexes_rows(
             ))
         })
         .collect::<Vec<_>>();
-    rows.extend(synthetic_pg_catalog_rule_rows());
     rows.sort_by(|left, right| {
         left.0
             .cmp(&right.0)

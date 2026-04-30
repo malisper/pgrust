@@ -116,7 +116,7 @@ use crate::include::nodes::parsenodes::{
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, OpExprKind, ParamKind, QueryColumn,
+    BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, OpExprKind, ParamKind, QueryColumn, RULE_OLD_VAR,
     RelationPrivilegeMask, RelationPrivilegeRequirement, SubLinkType, TargetEntry, Var,
     attrno_index, expr_sql_type_hint, user_attrno,
 };
@@ -2803,7 +2803,7 @@ fn explain_delete_index_cond(target: &BoundDeleteTarget) -> Option<String> {
 
 fn substitute_old_constants_for_explain(expr: &Expr, event_target: &BoundDeleteTarget) -> Expr {
     match expr {
-        Expr::Var(var) if var.varno == OUTER_VAR => {
+        Expr::Var(var) if matches!(var.varno, OUTER_VAR | RULE_OLD_VAR) => {
             explain_delete_target_constant(event_target, var.varattno)
                 .map(Expr::Const)
                 .unwrap_or_else(|| expr.clone())
