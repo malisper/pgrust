@@ -374,6 +374,8 @@ pub enum Statement {
     CreateView(CreateViewStatement),
     RefreshMaterializedView(RefreshMaterializedViewStatement),
     CreateRule(CreateRuleStatement),
+    AlterRuleRename(AlterRuleRenameStatement),
+    AlterTableRuleState(AlterTableRuleStateStatement),
     CreatePolicy(CreatePolicyStatement),
     CreateStatistics(CreateStatisticsStatement),
     AlterStatistics(AlterStatisticsStatement),
@@ -2160,7 +2162,8 @@ pub enum MergeAction {
         assignments: Vec<Assignment>,
     },
     Insert {
-        columns: Option<Vec<String>>,
+        columns: Option<Vec<AssignmentTarget>>,
+        overriding: Option<OverridingKind>,
         source: MergeInsertSource,
     },
 }
@@ -2492,6 +2495,7 @@ pub enum RuleDoKind {
 pub struct RuleActionStatement {
     pub statement: Statement,
     pub sql: String,
+    pub sql_position: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2504,6 +2508,22 @@ pub struct CreateRuleStatement {
     pub where_clause: Option<SqlExpr>,
     pub where_sql: Option<String>,
     pub actions: Vec<RuleActionStatement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterRuleRenameStatement {
+    pub rule_name: String,
+    pub relation_name: String,
+    pub new_rule_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableRuleStateStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub rule_name: String,
+    pub mode: AlterTableTriggerMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5025,6 +5045,7 @@ pub struct DeleteStatement {
     pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
+    pub target_alias: Option<String>,
     pub only: bool,
     pub using: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,

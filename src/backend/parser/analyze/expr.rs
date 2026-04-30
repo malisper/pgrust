@@ -1734,7 +1734,9 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
     }
     match expr {
         Expr::Var(mut var) => {
-            var.varlevelsup += levels;
+            if !crate::include::nodes::primnodes::is_rule_pseudo_varno(var.varno) {
+                var.varlevelsup += levels;
+            }
             Expr::Var(var)
         }
         Expr::Aggref(mut aggref) => {
@@ -6250,6 +6252,13 @@ fn bind_field_select_expr(
         {
             let resolved = resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, name)
                 .expect("checked above");
+            if let Some((_, expr)) = resolved
+                .fields
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(field))
+            {
+                return Ok(expr.clone());
+            }
             let named_row_type = relation_row_type_identity(catalog, resolved.relation_oid);
             build_whole_row_expr(resolved.fields, named_row_type)
         }

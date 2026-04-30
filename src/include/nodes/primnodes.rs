@@ -818,6 +818,8 @@ pub enum BuiltinScalarFunction {
     PgEventTriggerTableRewriteOid,
     PgEventTriggerTableRewriteReason,
     PgGetFunctionArguments,
+    PgGetFunctionIdentityArguments,
+    PgGetFunctionArgDefault,
     PgGetFunctionDef,
     PgGetFunctionResult,
     PgGetExpr,
@@ -888,6 +890,7 @@ pub enum BuiltinScalarFunction {
     NumericInc,
     Int4Pl,
     Int4Mi,
+    Int4Smaller,
     Int8Inc,
     Int8IncAny,
     Int4AvgAccum,
@@ -2597,13 +2600,19 @@ pub const OUTER_VAR: usize = usize::MAX;
 pub const INNER_VAR: usize = usize::MAX - 1;
 pub const INDEX_VAR: usize = usize::MAX - 2;
 pub const ROWID_VAR: usize = usize::MAX - 3;
+pub const RULE_OLD_VAR: usize = usize::MAX - 4;
+pub const RULE_NEW_VAR: usize = usize::MAX - 5;
 
 pub const fn is_special_varno(varno: usize) -> bool {
-    varno >= ROWID_VAR
+    varno >= RULE_NEW_VAR
 }
 
 pub const fn is_executor_special_varno(varno: usize) -> bool {
     varno >= ROWID_VAR
+}
+
+pub const fn is_rule_pseudo_varno(varno: usize) -> bool {
+    varno == RULE_OLD_VAR || varno == RULE_NEW_VAR
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

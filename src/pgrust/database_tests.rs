@@ -15224,6 +15224,15 @@ fn nested_views_and_pg_views_work() {
 #[test]
 fn pg_views_includes_pg_policies_metadata() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_views where schemaname = 'pg_catalog'",
+        ),
+        vec![vec![Value::Int64(80)]]
+    );
+
     let rows = query_rows(
         &db,
         1,
@@ -15237,7 +15246,7 @@ fn pg_views_includes_pg_policies_metadata() {
     assert_eq!(rows[0][1], Value::Text("pg_policies".into()));
     assert_eq!(rows[0][2], Value::Text("postgres".into()));
     match &rows[0][3] {
-        Value::Text(definition) => assert!(definition.contains("FROM pg_catalog.pg_policy")),
+        Value::Text(definition) => assert!(definition.contains("FROM ((pg_policy pol")),
         other => panic!("expected pg_policies definition text, got {other:?}"),
     }
 }
@@ -20313,6 +20322,137 @@ fn insert_do_also_rule_reevaluates_new_default_expressions() {
 }
 
 #[test]
+fn numeric_add_preserves_display_scale_in_sql() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    let rows = query_rows(&db, 1, "select 4000.00::numeric + 1000.00::numeric");
+    let Value::Numeric(value) = &rows[0][0] else {
+        panic!("expected numeric result, got {:?}", rows[0][0]);
+    };
+    assert_eq!(value.render(), "5000.00");
+}
+
+#[test]
+fn int4smaller_function_returns_smaller_int4() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select int4smaller(4, 7), int4smaller(9, 2), int4smaller(null::int4, 2)"
+        ),
+        vec![vec![Value::Int32(4), Value::Int32(2), Value::Null]]
+    );
+}
+
+#[test]
+fn int4smaller_survives_view_rewrite() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table ready_items (shoe int4, lace int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view ready_view as select int4smaller(shoe, lace) as available from ready_items",
+    )
+    .unwrap();
+    db.execute(1, "insert into ready_items values (2, 5), (8, 3)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select available from ready_view order by available"
+        ),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn insert_select_rule_action_keeps_new_binding_through_nested_update_rule() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table base_items (id int4, qty int4)")
+        .unwrap();
+    db.execute(1, "create view item_view as select id, qty from base_items")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_upd as on update to item_view do instead \
+         update base_items set qty = new.qty where id = old.id",
+    )
+    .unwrap();
+    db.execute(1, "create table arrivals (id int4, delta int4)")
+        .unwrap();
+    db.execute(1, "create table ok_items (id int4, delta int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule ok_items_ins as on insert to ok_items do instead \
+         update item_view set qty = item_view.qty + new.delta where item_view.id = new.id",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into base_items values (1, 5), (2, 10)")
+        .unwrap();
+    db.execute(1, "insert into arrivals values (1, 3), (2, 4)")
+        .unwrap();
+    db.execute(1, "insert into ok_items select * from arrivals")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, qty from base_items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(8)],
+            vec![Value::Int32(2), Value::Int32(14)],
+        ]
+    );
+}
+
+#[test]
+fn update_rule_insert_select_uses_old_new_without_exec_params() {
+    let db = Database::open_ephemeral(16).expect("open ephemeral database");
+
+    db.execute(1, "create table pparent (pid int4, txt text)")
+        .unwrap();
+    db.execute(1, "insert into pparent values (1,'parent1'), (2,'parent2')")
+        .unwrap();
+    db.execute(1, "create table cchild (pid int4, descrip text)")
+        .unwrap();
+    db.execute(1, "insert into cchild values (1,'descrip1')")
+        .unwrap();
+    db.execute(
+        1,
+        "create view vview as \
+         select pparent.pid, txt, descrip from pparent left join cchild using (pid)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule rrule as on update to vview do instead \
+         (insert into cchild (pid, descrip) \
+            select old.pid, new.descrip where old.descrip isnull; \
+          update cchild set descrip = new.descrip where cchild.pid = old.pid;)",
+    )
+    .unwrap();
+
+    db.execute(1, "update vview set descrip='test1' where pid=1")
+        .unwrap();
+    db.execute(1, "update vview set descrip='test2' where pid=2")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select pid, descrip from cchild order by pid"),
+        vec![
+            vec![Value::Int32(1), Value::Text("test1".into())],
+            vec![Value::Int32(2), Value::Text("test2".into())],
+        ]
+    );
+}
+
+#[test]
 fn create_rule_rejects_unqualified_action_reference() {
     let base = temp_dir("rule_unqualified_action");
     let db = Database::open(&base, 16).unwrap();
@@ -20326,7 +20466,22 @@ fn create_rule_rejects_unqualified_action_reference() {
             "create rule rules_foorule as on insert to rules_foo where f1 < 100 do instead insert into rules_foo2 values (f1)",
         )
         .unwrap_err();
-    assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "f1"));
+    match err {
+        ExecError::Parse(ParseError::Positioned { source, .. }) => match source.as_ref() {
+            ParseError::DetailedError {
+                message,
+                detail: Some(detail),
+                hint: Some(hint),
+                sqlstate: "42703",
+            } => {
+                assert_eq!(message, "column \"f1\" does not exist");
+                assert!(detail.contains("cannot be referenced from this part of the query"));
+                assert_eq!(hint, "Try using a table-qualified name.");
+            }
+            other => panic!("expected detailed rule action column error, got {other:?}"),
+        },
+        other => panic!("expected positioned rule action column error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -21544,7 +21699,7 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select definition from pg_rules where tablename = 'item_view' and rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO public.item_view DO INSTEAD  INSERT INTO items (id)\n  VALUES (new.id);"
                 .into(),
         )]]
     );
@@ -21555,7 +21710,7 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD  INSERT INTO items (id)\n  VALUES (new.id);"
                 .into(),
         )]]
     );
@@ -21586,7 +21741,7 @@ fn pg_get_ruledef_formats_insert_rule_actions_with_casts() {
             "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_src_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2)"
+            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2);"
                 .into(),
         )]]
     );
@@ -21615,7 +21770,7 @@ fn pg_get_ruledef_formats_update_rule_actions_with_composite_fields() {
             "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_tab_del'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE rule_tab_del AS\n    ON DELETE TO rule_tab DO INSTEAD  UPDATE rule_tab SET d1.r = (rule_tab.d1).r - 1::double precision, d1.i = (rule_tab.d1).i + 1::double precision\n  WHERE (rule_tab.d1).i > 0::double precision"
+            "CREATE RULE rule_tab_del AS\n    ON DELETE TO rule_tab DO INSTEAD  UPDATE rule_tab SET d1.r = (rule_tab.d1).r - 1::double precision, d1.i = (rule_tab.d1).i + 1::double precision\n  WHERE (rule_tab.d1).i > 0::double precision;"
                 .into(),
         )]]
     );

@@ -25,7 +25,8 @@ use crate::include::nodes::primnodes::{
     INNER_VAR, JoinType, OUTER_VAR, OpExpr, OrderByEntry, Param, ParamKind, QueryColumn,
     RowsFromSource, ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SubPlan, TargetEntry,
     Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
-    is_executor_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
+    is_executor_special_varno, is_rule_pseudo_varno, is_special_varno, is_system_attr,
+    set_returning_call_exprs, user_attrno,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1121,7 +1122,7 @@ fn lower_top_level_input_var(
     match expr {
         Expr::Var(var)
             if var.varlevelsup == 0
-                && !is_executor_special_varno(var.varno)
+                && !is_special_varno(var.varno)
                 && !is_system_attr(var.varattno) =>
         {
             search_input_tlist_entry(root, &Expr::Var(var.clone()), input, tlist)
@@ -1145,10 +1146,7 @@ fn lower_projection_expr_by_input_target(
         return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
     }
     let map_var = |var: Var| {
-        if var.varlevelsup != 0
-            || is_executor_special_varno(var.varno)
-            || is_system_attr(var.varattno)
-        {
+        if var.varlevelsup != 0 || is_special_varno(var.varno) || is_system_attr(var.varattno) {
             return Expr::Var(var);
         }
         let expr = Expr::Var(var.clone());
@@ -1478,7 +1476,7 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => {
             var.varlevelsup == 0
-                && !is_executor_special_varno(var.varno)
+                && !is_special_varno(var.varno)
                 && (attrno_index(var.varattno).is_some() || is_system_attr(var.varattno))
         }
         Expr::Aggref(aggref) => {
@@ -1592,7 +1590,7 @@ fn expr_is_local_system_var(expr: &Expr) -> bool {
         expr,
         Expr::Var(var)
             if var.varlevelsup == 0
-                && !is_executor_special_varno(var.varno)
+                && !is_special_varno(var.varno)
                 && is_system_attr(var.varattno)
     )
 }
@@ -1926,7 +1924,7 @@ fn fix_join_rte_var_for_input(
     let (Some(root), Expr::Var(var)) = (root, expr) else {
         return None;
     };
-    if var.varlevelsup > 0 || is_executor_special_varno(var.varno) || is_system_attr(var.varattno) {
+    if var.varlevelsup > 0 || is_special_varno(var.varno) || is_system_attr(var.varattno) {
         return None;
     }
     let index = attrno_index(var.varattno)?;
@@ -3347,6 +3345,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
     }
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_expr(ctx, Expr::Var(var)),
+        Expr::Var(var) if is_rule_pseudo_varno(var.varno) => Expr::Var(var),
         Expr::Var(var) if is_executor_special_varno(var.varno) => {
             let expr = Expr::Var(var);
             if let LowerMode::Input {

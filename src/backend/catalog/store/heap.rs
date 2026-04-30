@@ -4622,6 +4622,104 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn replace_rule_mvcc_with_dependencies(
+        &mut self,
+        old_rewrite_oid: u32,
+        relation_oid: u32,
+        rule_name: impl Into<String>,
+        ev_type: char,
+        is_instead: bool,
+        ev_qual: String,
+        ev_action: String,
+        dependencies: RuleDependencies,
+        owner_dependency: RuleOwnerDependency,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.RelationIdGetRelation(ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_rewrite = rewrite_row_by_oid_mvcc(self, ctx, old_rewrite_oid)?;
+        let old_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_REWRITE_RELATION_OID, old_rewrite.oid)?;
+        let rewrite_row = PgRewriteRow {
+            oid: old_rewrite.oid,
+            rulename: rule_name.into(),
+            ev_class: relation_oid,
+            ev_type,
+            ev_enabled: old_rewrite.ev_enabled,
+            is_instead,
+            ev_qual,
+            ev_action,
+        };
+
+        let depends = rule_depend_rows_for_dependencies(
+            rewrite_row.oid,
+            relation_oid,
+            dependencies,
+            owner_dependency,
+        );
+        let kinds = [
+            BootstrapCatalogKind::PgDepend,
+            BootstrapCatalogKind::PgRewrite,
+        ];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                rewrites: vec![old_rewrite],
+                depends: old_depends,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                rewrites: vec![rewrite_row.clone()],
+                depends,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    pub fn replace_rule_row_mvcc(
+        &mut self,
+        row: PgRewriteRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_rewrite = rewrite_row_by_oid_mvcc(self, ctx, row.oid)?;
+        let kinds = [BootstrapCatalogKind::PgRewrite];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                rewrites: vec![old_rewrite],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                rewrites: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.ev_class);
+        Ok(effect)
+    }
+
     pub fn create_composite_type_mvcc(
         &mut self,
         name: impl Into<String>,
@@ -10925,6 +11023,85 @@ fn relation_rewrites_mvcc(
             _ => None,
         })
         .collect())
+}
+
+fn rule_depend_rows_for_dependencies(
+    rewrite_oid: u32,
+    relation_oid: u32,
+    dependencies: RuleDependencies,
+    owner_dependency: RuleOwnerDependency,
+) -> Vec<PgDependRow> {
+    let mut referenced = dependencies.relation_oids;
+    referenced.sort_unstable();
+    referenced.dedup();
+    let mut column_refs = dependencies.column_refs;
+    column_refs.sort_unstable();
+    column_refs.dedup();
+    let mut constraint_oids = dependencies.constraint_oids;
+    constraint_oids.sort_unstable();
+    constraint_oids.dedup();
+    let mut proc_oids = dependencies.proc_oids;
+    proc_oids.sort_unstable();
+    proc_oids.dedup();
+    let mut type_oids = dependencies.type_oids;
+    type_oids.sort_unstable();
+    type_oids.dedup();
+
+    let mut depends = match owner_dependency {
+        RuleOwnerDependency::Auto => {
+            relation_rule_depend_rows(rewrite_oid, relation_oid, &referenced)
+        }
+        RuleOwnerDependency::Internal => {
+            view_rewrite_depend_rows(rewrite_oid, relation_oid, &referenced)
+        }
+    };
+    depends.extend(
+        constraint_oids
+            .into_iter()
+            .map(|constraint_oid| PgDependRow {
+                classid: PG_REWRITE_RELATION_OID,
+                objid: rewrite_oid,
+                objsubid: 0,
+                refclassid: PG_CONSTRAINT_RELATION_OID,
+                refobjid: constraint_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            }),
+    );
+    depends.extend(
+        column_refs
+            .into_iter()
+            .map(|(relation_oid, attnum)| PgDependRow {
+                classid: PG_REWRITE_RELATION_OID,
+                objid: rewrite_oid,
+                objsubid: 0,
+                refclassid: PG_CLASS_RELATION_OID,
+                refobjid: relation_oid,
+                refobjsubid: i32::from(attnum),
+                deptype: DEPENDENCY_NORMAL,
+            }),
+    );
+    depends.extend(proc_oids.into_iter().map(|proc_oid| PgDependRow {
+        classid: PG_REWRITE_RELATION_OID,
+        objid: rewrite_oid,
+        objsubid: 0,
+        refclassid: PG_PROC_RELATION_OID,
+        refobjid: proc_oid,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }));
+    depends.extend(type_oids.into_iter().map(|type_oid| PgDependRow {
+        classid: PG_REWRITE_RELATION_OID,
+        objid: rewrite_oid,
+        objsubid: 0,
+        refclassid: PG_TYPE_RELATION_OID,
+        refobjid: type_oid,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }));
+    sort_pg_depend_rows(&mut depends);
+    depends.dedup();
+    depends
 }
 
 fn relation_triggers_mvcc(

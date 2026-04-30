@@ -204,7 +204,11 @@ fn lower_sublink_to_subplan(
         .first()
         .map(|target| target.sql_type);
     let target_width = sublink.subselect.target_list.len();
-    let planned_stmt = planner(*sublink.subselect, catalog)
+    let [subselect] = crate::backend::rewrite::pg_rewrite_query(*sublink.subselect, catalog)
+        .expect("semantic rewrite should complete before subplan lowering")
+        .try_into()
+        .expect("select sublink rewrite should return a single query");
+    let planned_stmt = planner(subselect, catalog)
         .expect("locking validation should complete before subplan lowering");
     let par_param = planned_stmt
         .ext_params

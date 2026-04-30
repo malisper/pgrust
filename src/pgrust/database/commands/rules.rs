@@ -6,18 +6,22 @@ use parking_lot::RwLock;
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::CatalogMutationEffect;
-use crate::backend::catalog::store::CatalogWriteContext;
+use crate::backend::catalog::store::{CatalogWriteContext, RuleDependencies, RuleOwnerDependency};
 use crate::backend::commands::tablecmds::{
     apply_assignment_target, apply_base_delete_row, apply_base_update_row,
+    check_planned_stmt_select_privileges, check_relation_privilege_requirements,
     execute_delete_with_waiter, execute_insert, execute_insert_values, execute_update_with_waiter,
     finalize_bound_delete_stmt, finalize_bound_insert_stmt, finalize_bound_update_stmt,
     materialize_delete_row_events, materialize_insert_rows, materialize_update_row_events,
 };
 use crate::backend::commands::trigger::{RuntimeTriggers, relation_has_instead_row_trigger};
 use crate::backend::executor::{
-    ExecError, ExecutorContext, StatementResult, TupleSlot, Value, eval_expr, execute_planned_stmt,
+    ExecError, ExecutorContext, SessionReplicationRole, StatementResult, TupleSlot, Value,
+    eval_expr, execute_planned_stmt,
 };
+use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::{
+    AlterRuleRenameStatement, AlterTableRuleStateStatement, AlterTableTriggerMode,
     BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement,
     DropRuleStatement, FromItem, ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement,
     Statement, bind_rule_action_statement, bind_rule_qual, rewrite_bound_delete_auto_view_target,
@@ -28,7 +32,18 @@ use crate::backend::rewrite::split_stored_rule_action_sql;
 use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::include::catalog::PgRewriteRow;
-use crate::include::nodes::primnodes::{QueryColumn, RelationDesc, TargetEntry};
+use crate::include::nodes::parsenodes::{
+    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, TableSampleClause,
+};
+use crate::include::nodes::plannodes::{
+    ExecParamSource, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan, Plan, PlannedStmt,
+};
+use crate::include::nodes::primnodes::{
+    AggAccum, Aggref, BoolExpr, CaseExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry,
+    ProjectSetTarget, QueryColumn, RULE_NEW_VAR, RULE_OLD_VAR, RelationDesc, ScalarArrayOpExpr,
+    SetReturningExpr, SubLink, SubPlan, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
+    WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+};
 use crate::pgrust::database::TransactionWaiter;
 use crate::pgrust::database::ddl::map_catalog_error;
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_rule_relation_for_ddl};
@@ -95,6 +110,8 @@ impl Database {
             .join(";\n");
         let ev_qual = create_stmt.where_sql.clone().unwrap_or_default();
 
+        let existing_rule =
+            lookup_rule_row(&catalog, relation.relation_oid, &create_stmt.rule_name);
         let mut catalog_guard = self.catalog.write();
         let ctx = CatalogWriteContext {
             pool: Arc::clone(&self.pool),
@@ -105,26 +122,196 @@ impl Database {
             waiter: None,
             interrupts: Arc::clone(&self.interrupt_state(client_id)),
         };
-        if create_stmt.replace_existing
-            && let Some(existing) =
-                lookup_rule_row(&catalog, relation.relation_oid, &create_stmt.rule_name)
-        {
-            let effect = catalog_guard
-                .drop_rule_mvcc(existing.oid, &ctx)
-                .map_err(map_catalog_error)?;
-            catalog_effects.push(effect);
+        let effect = if let Some(existing_rule) = existing_rule {
+            catalog_guard
+                .replace_rule_mvcc_with_dependencies(
+                    existing_rule.oid,
+                    relation.relation_oid,
+                    create_stmt.rule_name.clone(),
+                    rule_event_code(create_stmt.event),
+                    create_stmt.do_kind == RuleDoKind::Instead,
+                    ev_qual,
+                    ev_action,
+                    RuleDependencies::from_relation_oids(&referenced_relation_oids),
+                    RuleOwnerDependency::Auto,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?
+        } else {
+            catalog_guard
+                .create_rule_mvcc(
+                    relation.relation_oid,
+                    create_stmt.rule_name.clone(),
+                    rule_event_code(create_stmt.event),
+                    create_stmt.do_kind == RuleDoKind::Instead,
+                    ev_qual,
+                    ev_action,
+                    &referenced_relation_oids,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?
+        };
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_alter_rule_rename_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRuleRenameStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_rule_relation_for_ddl(&catalog, &alter_stmt.relation_name)?;
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_rule_rename_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_alter_rule_rename_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRuleRenameStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_rule_relation_for_ddl(&catalog, &alter_stmt.relation_name)?;
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.relation_name)?;
+        let mut rewrite = lookup_rule_row(&catalog, relation.relation_oid, &alter_stmt.rule_name)
+            .ok_or_else(|| {
+            missing_rule_error(&alter_stmt.rule_name, &alter_stmt.relation_name)
+        })?;
+        if rewrite.rulename == "_RETURN" {
+            return Err(ExecError::DetailedError {
+                message: "renaming an ON SELECT rule is not allowed".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
         }
+        if let Some(existing) =
+            lookup_rule_row(&catalog, relation.relation_oid, &alter_stmt.new_rule_name)
+            && existing.oid != rewrite.oid
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "rule \"{}\" for relation \"{}\" already exists",
+                    alter_stmt.new_rule_name, alter_stmt.relation_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42710",
+            });
+        }
+        rewrite.rulename = alter_stmt.new_rule_name.clone();
+
+        let mut catalog_guard = self.catalog.write();
+        let ctx = CatalogWriteContext {
+            pool: Arc::clone(&self.pool),
+            txns: Arc::clone(&self.txns),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&self.interrupt_state(client_id)),
+        };
         let effect = catalog_guard
-            .create_rule_mvcc(
-                relation.relation_oid,
-                create_stmt.rule_name.clone(),
-                rule_event_code(create_stmt.event),
-                create_stmt.do_kind == RuleDoKind::Instead,
-                ev_qual,
-                ev_action,
-                &referenced_relation_oids,
-                &ctx,
-            )
+            .replace_rule_row_mvcc(rewrite, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_alter_table_rule_state_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableRuleStateStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) else {
+            if alter_stmt.if_exists {
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                alter_stmt.table_name.clone(),
+            )));
+        };
+        let interrupts = self.interrupt_state(client_id);
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_table_rule_state_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_alter_table_rule_state_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableRuleStateStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_rule_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        let mut rewrite =
+            lookup_rule_row(&catalog, relation.relation_oid, &alter_stmt.rule_name)
+                .ok_or_else(|| missing_rule_error(&alter_stmt.rule_name, &alter_stmt.table_name))?;
+        rewrite.ev_enabled = rule_enabled_char(alter_stmt.mode);
+
+        let mut catalog_guard = self.catalog.write();
+        let ctx = CatalogWriteContext {
+            pool: Arc::clone(&self.pool),
+            txns: Arc::clone(&self.txns),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&self.interrupt_state(client_id)),
+        };
+        let effect = catalog_guard
+            .replace_rule_row_mvcc(rewrite, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
@@ -273,11 +460,14 @@ impl Database {
         if rewrite.rulename.eq_ignore_ascii_case("_RETURN") {
             return Err(ExecError::DetailedError {
                 message: format!(
-                    "rule \"{}\" for relation \"{}\" cannot be dropped",
-                    drop_stmt.rule_name, drop_stmt.relation_name
+                    "cannot drop rule _RETURN on view {} because view {} requires it",
+                    drop_stmt.relation_name, drop_stmt.relation_name
                 ),
                 detail: None,
-                hint: None,
+                hint: Some(format!(
+                    "You can drop view {} instead.",
+                    drop_stmt.relation_name
+                )),
                 sqlstate: "2BP01",
             });
         }
@@ -306,9 +496,20 @@ fn validate_create_rule_stmt(
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
     if create_stmt.rule_name.eq_ignore_ascii_case("_RETURN") {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "_RETURN rules".into(),
-        )));
+        let detail = match relation.relkind {
+            'p' => "This operation is not supported for partitioned tables.",
+            'r' => "This operation is not supported for tables.",
+            _ => "This operation is not supported for this relation.",
+        };
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "relation \"{}\" cannot have ON SELECT rules",
+                create_stmt.relation_name
+            ),
+            detail: Some(detail.into()),
+            hint: None,
+            sqlstate: "42809",
+        });
     }
     if create_stmt.event == RuleEvent::Select {
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
@@ -442,6 +643,15 @@ fn rule_event_code(event: RuleEvent) -> char {
     }
 }
 
+fn rule_enabled_char(mode: AlterTableTriggerMode) -> char {
+    match mode {
+        AlterTableTriggerMode::Disable => 'D',
+        AlterTableTriggerMode::EnableOrigin => 'O',
+        AlterTableTriggerMode::EnableReplica => 'R',
+        AlterTableTriggerMode::EnableAlways => 'A',
+    }
+}
+
 fn missing_rule_error(rule_name: &str, relation_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!(
@@ -457,7 +667,9 @@ fn missing_rule_error(rule_name: &str, relation_name: &str) -> ExecError {
 #[derive(Clone)]
 struct PreparedRule {
     is_instead: bool,
+    owner_oid: u32,
     qual: Option<crate::backend::executor::Expr>,
+    qual_subplans: Vec<Plan>,
     actions: Vec<crate::backend::parser::BoundRuleAction>,
 }
 
@@ -467,6 +679,9 @@ struct RuleMatchOutcome {
     matched_actions: bool,
     returning_seen: bool,
     returning_rows: Vec<Vec<Value>>,
+    query_columns: Option<Vec<QueryColumn>>,
+    query_column_names: Vec<String>,
+    query_rows: Vec<Vec<Value>>,
 }
 
 pub(crate) struct PreparedBoundStatement<T> {
@@ -578,8 +793,34 @@ pub(crate) fn execute_bound_insert_with_rules(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
-    let has_user_rules =
-        relation_has_user_rules_for_event(stmt.relation_oid, RuleEvent::Insert, catalog);
+    if (stmt.on_conflict.is_some() || stmt.raw_on_conflict.is_some())
+        && (relation_has_active_user_rules_for_event(
+            stmt.relation_oid,
+            RuleEvent::Insert,
+            catalog,
+            ctx.session_replication_role,
+        ) || relation_has_active_user_rules_for_event(
+            stmt.relation_oid,
+            RuleEvent::Update,
+            catalog,
+            ctx.session_replication_role,
+        ))
+    {
+        return Err(ExecError::DetailedError {
+            message:
+                "INSERT with ON CONFLICT clause cannot be used with table that has INSERT or UPDATE rules"
+                    .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    let has_user_rules = relation_has_active_user_rules_for_event(
+        stmt.relation_oid,
+        RuleEvent::Insert,
+        catalog,
+        ctx.session_replication_role,
+    );
     if matches!(stmt.relkind, 'r' | 'p') && !has_user_rules {
         return execute_insert(stmt, catalog, ctx, xid, cid);
     }
@@ -591,10 +832,55 @@ pub(crate) fn execute_bound_insert_with_rules(
     }
 
     let stmt = finalize_bound_insert_stmt(stmt, catalog);
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
-        let rules = load_prepared_rules(stmt.relation_oid, RuleEvent::Insert, &stmt.desc, catalog)?;
+        let rules = load_prepared_rules(
+            stmt.relation_oid,
+            RuleEvent::Insert,
+            &stmt.desc,
+            catalog,
+            ctx.session_replication_role,
+        )?;
         let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        if stmt.relkind == 'v' && rules.iter().all(|rule| !rule.is_instead) {
+            let view_name = stmt.relation_name.clone();
+            let auto_stmt = rewrite_bound_insert_auto_view_target(stmt.clone(), catalog)
+                .map_err(|err| auto_view_prepare_error(&view_name, ViewDmlEvent::Insert, err))?;
+            let auto_result = execute_bound_insert_with_rules(auto_stmt, catalog, ctx, xid, cid)?;
+            let null_old = vec![Value::Null; stmt.desc.columns.len()];
+            let mut query_columns = None;
+            let mut query_column_names = Vec::new();
+            let mut query_rows = Vec::new();
+            ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(cid.saturating_add(1));
+            for row in &rows {
+                let mut outcome = execute_matching_rules(
+                    &rules,
+                    &null_old,
+                    row,
+                    catalog,
+                    ctx,
+                    xid,
+                    cid.saturating_add(1),
+                    None,
+                    false,
+                )?;
+                append_rule_query_output(
+                    &mut query_columns,
+                    &mut query_column_names,
+                    &mut query_rows,
+                    &mut outcome,
+                );
+            }
+            if let Some(columns) = query_columns {
+                return Ok(StatementResult::Query {
+                    columns,
+                    column_names: query_column_names,
+                    rows: query_rows,
+                });
+            }
+            return Ok(auto_result);
+        }
         // :HACK: PostgreSQL's rule rewriter duplicates the original INSERT
         // expressions into DO ALSO rule actions. Until pgrust stores and
         // executes rewritten query trees, re-evaluate the INSERT source for
@@ -608,10 +894,13 @@ pub(crate) fn execute_bound_insert_with_rules(
             };
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
+        let mut query_columns = None;
+        let mut query_column_names = Vec::new();
+        let mut query_rows = Vec::new();
         let null_old = vec![Value::Null; stmt.desc.columns.len()];
 
         for (row, rule_new_row) in rows.into_iter().zip(rule_new_rows.into_iter()) {
-            let outcome = execute_matching_rules(
+            let mut outcome = execute_matching_rules(
                 &rules,
                 &null_old,
                 &rule_new_row,
@@ -622,6 +911,12 @@ pub(crate) fn execute_bound_insert_with_rules(
                 None,
                 !stmt.returning.is_empty(),
             )?;
+            append_rule_query_output(
+                &mut query_columns,
+                &mut query_column_names,
+                &mut query_rows,
+                &mut outcome,
+            );
             if outcome.matched_instead {
                 if !stmt.returning.is_empty() {
                     if !outcome.returning_seen {
@@ -691,6 +986,13 @@ pub(crate) fn execute_bound_insert_with_rules(
             affected_rows += 1;
         }
         if stmt.returning.is_empty() {
+            if let Some(columns) = query_columns {
+                return Ok(StatementResult::Query {
+                    columns,
+                    column_names: query_column_names,
+                    rows: query_rows,
+                });
+            }
             Ok(StatementResult::AffectedRows(affected_rows))
         } else {
             Ok(build_statement_returning_result(
@@ -721,7 +1023,9 @@ pub(crate) fn execute_bound_update_with_rules(
                 .rewrite_rows_for_relation(target.relation_oid)
                 .into_iter()
                 .any(|row| {
-                    row.ev_type == rule_event_code(RuleEvent::Update) && row.rulename != "_RETURN"
+                    row.ev_type == rule_event_code(RuleEvent::Update)
+                        && row.rulename != "_RETURN"
+                        && rule_enabled_for_session(&row, ctx.session_replication_role)
                 })
     });
     if !has_rule_target {
@@ -729,10 +1033,17 @@ pub(crate) fn execute_bound_update_with_rules(
     }
 
     let stmt = finalize_bound_update_stmt(stmt, catalog);
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
+    if let Some(input_plan) = &stmt.input_plan {
+        check_planned_stmt_select_privileges(input_plan, ctx)?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
+        let mut query_columns = None;
+        let mut query_column_names = Vec::new();
+        let mut query_rows = Vec::new();
         let joined_update_events = if stmt.input_plan.is_some()
             && stmt.targets.iter().any(|target| target.relkind != 'v')
         {
@@ -741,8 +1052,12 @@ pub(crate) fn execute_bound_update_with_rules(
             None
         };
         for target in &stmt.targets {
-            let view_has_user_rules =
-                relation_has_user_rules_for_event(target.relation_oid, RuleEvent::Update, catalog);
+            let view_has_user_rules = relation_has_active_user_rules_for_event(
+                target.relation_oid,
+                RuleEvent::Update,
+                catalog,
+                ctx.session_replication_role,
+            );
             if target.relkind == 'v'
                 && !view_has_user_rules
                 && relation_has_instead_row_trigger(
@@ -768,6 +1083,7 @@ pub(crate) fn execute_bound_update_with_rules(
                 RuleEvent::Update,
                 &target.desc,
                 catalog,
+                ctx.session_replication_role,
             )?;
             if target.relkind == 'v' {
                 if !view_has_user_rules {
@@ -776,8 +1092,44 @@ pub(crate) fn execute_bound_update_with_rules(
                         ViewDmlEvent::Update,
                     ));
                 }
+                if rules.iter().all(|rule| !rule.is_instead) {
+                    let events =
+                        materialize_view_update_events_for_stmt(&stmt, target, catalog, ctx)?;
+                    let view_name = target.relation_name.clone();
+                    let auto_stmt = rewrite_bound_update_auto_view_target(stmt.clone(), catalog)
+                        .map_err(|err| {
+                            auto_view_prepare_error(&view_name, ViewDmlEvent::Update, err)
+                        })?;
+                    match execute_bound_update_with_rules(
+                        auto_stmt, catalog, ctx, xid, cid, waiter,
+                    )? {
+                        StatementResult::AffectedRows(rows) => affected_rows += rows,
+                        StatementResult::Query { rows, .. } => returned_rows.extend(rows),
+                    }
+                    ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(cid.saturating_add(1));
+                    for event in events {
+                        let mut outcome = execute_matching_rules(
+                            &rules,
+                            &event.old_values,
+                            &event.new_values,
+                            catalog,
+                            ctx,
+                            xid,
+                            cid.saturating_add(1),
+                            waiter,
+                            false,
+                        )?;
+                        append_rule_query_output(
+                            &mut query_columns,
+                            &mut query_column_names,
+                            &mut query_rows,
+                            &mut outcome,
+                        );
+                    }
+                    continue;
+                }
                 for event in materialize_view_update_events_for_stmt(&stmt, target, catalog, ctx)? {
-                    let outcome = execute_matching_rules(
+                    let mut outcome = execute_matching_rules(
                         &rules,
                         &event.old_values,
                         &event.new_values,
@@ -788,6 +1140,12 @@ pub(crate) fn execute_bound_update_with_rules(
                         waiter,
                         !stmt.returning.is_empty(),
                     )?;
+                    append_rule_query_output(
+                        &mut query_columns,
+                        &mut query_column_names,
+                        &mut query_rows,
+                        &mut outcome,
+                    );
                     if !outcome.matched_instead {
                         return Err(ExecError::Parse(ParseError::WrongObjectType {
                             name: target.relation_name.clone(),
@@ -843,7 +1201,7 @@ pub(crate) fn execute_bound_update_with_rules(
             };
 
             for event in target_events {
-                let outcome = execute_matching_rules(
+                let mut outcome = execute_matching_rules(
                     &rules,
                     &event.old_values,
                     &event.new_values,
@@ -854,6 +1212,12 @@ pub(crate) fn execute_bound_update_with_rules(
                     waiter,
                     !stmt.returning.is_empty(),
                 )?;
+                append_rule_query_output(
+                    &mut query_columns,
+                    &mut query_column_names,
+                    &mut query_rows,
+                    &mut outcome,
+                );
                 if outcome.matched_instead {
                     if !stmt.returning.is_empty() {
                         if !outcome.returning_seen {
@@ -896,6 +1260,13 @@ pub(crate) fn execute_bound_update_with_rules(
             }
         }
         if stmt.returning.is_empty() {
+            if let Some(columns) = query_columns {
+                return Ok(StatementResult::Query {
+                    columns,
+                    column_names: query_column_names,
+                    rows: query_rows,
+                });
+            }
             Ok(StatementResult::AffectedRows(affected_rows))
         } else {
             Ok(build_statement_returning_result(
@@ -925,7 +1296,9 @@ pub(crate) fn execute_bound_delete_with_rules(
                 .rewrite_rows_for_relation(target.relation_oid)
                 .into_iter()
                 .any(|row| {
-                    row.ev_type == rule_event_code(RuleEvent::Delete) && row.rulename != "_RETURN"
+                    row.ev_type == rule_event_code(RuleEvent::Delete)
+                        && row.rulename != "_RETURN"
+                        && rule_enabled_for_session(&row, ctx.session_replication_role)
                 })
     });
     if !has_rule_target {
@@ -933,10 +1306,17 @@ pub(crate) fn execute_bound_delete_with_rules(
     }
 
     let stmt = finalize_bound_delete_stmt(stmt, catalog);
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
+    if let Some(input_plan) = &stmt.input_plan {
+        check_planned_stmt_select_privileges(input_plan, ctx)?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
+        let mut query_columns = None;
+        let mut query_column_names = Vec::new();
+        let mut query_rows = Vec::new();
         if stmt.input_plan.is_some() && stmt.targets.iter().all(|target| target.relkind != 'v') {
             for event in materialize_delete_row_events(&stmt, ctx)? {
                 let target = event.target;
@@ -945,9 +1325,10 @@ pub(crate) fn execute_bound_delete_with_rules(
                     RuleEvent::Delete,
                     &target.desc,
                     catalog,
+                    ctx.session_replication_role,
                 )?;
                 let null_new = vec![Value::Null; target.desc.columns.len()];
-                let outcome = execute_matching_rules(
+                let mut outcome = execute_matching_rules(
                     &rules,
                     &event.old_values,
                     &null_new,
@@ -958,6 +1339,12 @@ pub(crate) fn execute_bound_delete_with_rules(
                     waiter,
                     !stmt.returning.is_empty(),
                 )?;
+                append_rule_query_output(
+                    &mut query_columns,
+                    &mut query_column_names,
+                    &mut query_rows,
+                    &mut outcome,
+                );
                 if outcome.matched_instead {
                     if !stmt.returning.is_empty() {
                         if !outcome.returning_seen {
@@ -989,6 +1376,13 @@ pub(crate) fn execute_bound_delete_with_rules(
                 }
             }
             return if stmt.returning.is_empty() {
+                if let Some(columns) = query_columns {
+                    return Ok(StatementResult::Query {
+                        columns,
+                        column_names: query_column_names,
+                        rows: query_rows,
+                    });
+                }
                 Ok(StatementResult::AffectedRows(affected_rows))
             } else {
                 Ok(build_statement_returning_result(
@@ -998,8 +1392,12 @@ pub(crate) fn execute_bound_delete_with_rules(
             };
         }
         for target in &stmt.targets {
-            let view_has_user_rules =
-                relation_has_user_rules_for_event(target.relation_oid, RuleEvent::Delete, catalog);
+            let view_has_user_rules = relation_has_active_user_rules_for_event(
+                target.relation_oid,
+                RuleEvent::Delete,
+                catalog,
+                ctx.session_replication_role,
+            );
             if target.relkind == 'v'
                 && !view_has_user_rules
                 && relation_has_instead_row_trigger(
@@ -1019,6 +1417,7 @@ pub(crate) fn execute_bound_delete_with_rules(
                 RuleEvent::Delete,
                 &target.desc,
                 catalog,
+                ctx.session_replication_role,
             )?;
             if target.relkind == 'v' {
                 if !view_has_user_rules {
@@ -1028,7 +1427,7 @@ pub(crate) fn execute_bound_delete_with_rules(
                     ));
                 }
                 for old_values in materialize_view_delete_events(target, catalog, ctx)? {
-                    let outcome = execute_matching_rules(
+                    let mut outcome = execute_matching_rules(
                         &rules,
                         &old_values,
                         &vec![Value::Null; target.desc.columns.len()],
@@ -1039,6 +1438,12 @@ pub(crate) fn execute_bound_delete_with_rules(
                         waiter,
                         !stmt.returning.is_empty(),
                     )?;
+                    append_rule_query_output(
+                        &mut query_columns,
+                        &mut query_column_names,
+                        &mut query_rows,
+                        &mut outcome,
+                    );
                     if !outcome.matched_instead {
                         return Err(ExecError::Parse(ParseError::WrongObjectType {
                             name: target.relation_name.clone(),
@@ -1081,7 +1486,7 @@ pub(crate) fn execute_bound_delete_with_rules(
                 ctx,
             )? {
                 let null_new = vec![Value::Null; event.target.desc.columns.len()];
-                let outcome = execute_matching_rules(
+                let mut outcome = execute_matching_rules(
                     &rules,
                     &event.old_values,
                     &null_new,
@@ -1092,6 +1497,12 @@ pub(crate) fn execute_bound_delete_with_rules(
                     waiter,
                     !stmt.returning.is_empty(),
                 )?;
+                append_rule_query_output(
+                    &mut query_columns,
+                    &mut query_column_names,
+                    &mut query_rows,
+                    &mut outcome,
+                );
                 if outcome.matched_instead {
                     if !stmt.returning.is_empty() {
                         if !outcome.returning_seen {
@@ -1132,6 +1543,13 @@ pub(crate) fn execute_bound_delete_with_rules(
             }
         }
         if stmt.returning.is_empty() {
+            if let Some(columns) = query_columns {
+                return Ok(StatementResult::Query {
+                    columns,
+                    column_names: query_column_names,
+                    rows: query_rows,
+                });
+            }
             Ok(StatementResult::AffectedRows(affected_rows))
         } else {
             Ok(build_statement_returning_result(
@@ -1162,7 +1580,7 @@ fn execute_matching_rules(
     let mut outcome = RuleMatchOutcome::default();
     for rule in rules {
         if let Some(qual) = &rule.qual
-            && !evaluate_rule_qual(qual, old_values, new_values, ctx)?
+            && !evaluate_rule_qual(qual, old_values, new_values, rule.owner_oid, catalog, ctx)?
         {
             continue;
         }
@@ -1171,19 +1589,67 @@ fn execute_matching_rules(
             outcome.matched_actions = true;
         }
         for action in &rule.actions {
-            let result = with_rule_bindings(ctx, old_values, new_values, |ctx| {
-                execute_rule_action(action, catalog, ctx, xid, cid, waiter)
+            let action = substitute_rule_action(action.clone(), old_values, new_values);
+            let result = with_rule_owner(ctx, rule.owner_oid, |ctx| {
+                with_rule_bindings(ctx, old_values, new_values, |ctx| {
+                    execute_rule_action(&action, catalog, ctx, xid, cid, waiter)
+                })
             })?;
-            if capture_returning && rule_action_has_returning(action) {
+            if capture_returning && rule_action_has_returning(&action) {
                 if outcome.returning_seen {
                     return Err(multiple_rule_returning_error());
                 }
                 outcome.returning_seen = true;
                 outcome.returning_rows = extract_rule_action_returning_rows(result)?;
+            } else if rule_action_returns_query_output(&action) {
+                capture_rule_action_query_output(result, &mut outcome);
             }
         }
     }
     Ok(outcome)
+}
+
+fn rule_action_returns_query_output(action: &crate::backend::parser::BoundRuleAction) -> bool {
+    matches!(
+        action,
+        crate::backend::parser::BoundRuleAction::Select(_)
+            | crate::backend::parser::BoundRuleAction::Values(_)
+    )
+}
+
+fn capture_rule_action_query_output(result: StatementResult, outcome: &mut RuleMatchOutcome) {
+    let StatementResult::Query {
+        columns,
+        column_names,
+        mut rows,
+    } = result
+    else {
+        return;
+    };
+    if outcome.query_columns.is_none() {
+        outcome.query_columns = Some(columns);
+        outcome.query_column_names = column_names;
+    }
+    outcome.query_rows.append(&mut rows);
+}
+
+fn append_rule_query_output(
+    columns: &mut Option<Vec<QueryColumn>>,
+    column_names: &mut Vec<String>,
+    rows: &mut Vec<Vec<Value>>,
+    outcome: &mut RuleMatchOutcome,
+) {
+    if columns.is_none() {
+        *columns = outcome.query_columns.take();
+        if columns.is_some() {
+            *column_names = std::mem::take(&mut outcome.query_column_names);
+        }
+    }
+    for row in outcome.query_rows.drain(..) {
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+    }
 }
 
 fn execute_view_insert_with_triggers(
@@ -1331,6 +1797,7 @@ fn rule_action_has_returning(action: &crate::backend::parser::BoundRuleAction) -
         crate::backend::parser::BoundRuleAction::Update(stmt) => !stmt.returning.is_empty(),
         crate::backend::parser::BoundRuleAction::Delete(stmt) => !stmt.returning.is_empty(),
         crate::backend::parser::BoundRuleAction::Select(_)
+        | crate::backend::parser::BoundRuleAction::Values(_)
         | crate::backend::parser::BoundRuleAction::Notify(_) => false,
         crate::backend::parser::BoundRuleAction::Sequence(actions) => {
             actions.last().is_some_and(rule_action_has_returning)
@@ -1458,8 +1925,16 @@ fn execute_rule_action(
             let prepared = prepare_bound_delete_for_execution(stmt.clone(), catalog)?;
             execute_bound_delete_with_rules(prepared.stmt, catalog, ctx, xid, waiter)
         }
-        crate::backend::parser::BoundRuleAction::Select(stmt) => {
-            execute_planned_stmt(stmt.clone(), ctx)
+        crate::backend::parser::BoundRuleAction::Sequence(actions) => {
+            let mut result = StatementResult::AffectedRows(0);
+            for action in actions {
+                result = execute_rule_action(action, catalog, ctx, xid, cid, waiter)?;
+            }
+            Ok(result)
+        }
+        crate::backend::parser::BoundRuleAction::Select(planned)
+        | crate::backend::parser::BoundRuleAction::Values(planned) => {
+            execute_planned_stmt(planned.clone(), ctx)
         }
         crate::backend::parser::BoundRuleAction::Notify(stmt) => {
             queue_pending_notification(
@@ -1469,13 +1944,6 @@ fn execute_rule_action(
             )?;
             Ok(StatementResult::AffectedRows(0))
         }
-        crate::backend::parser::BoundRuleAction::Sequence(actions) => {
-            let mut result = StatementResult::AffectedRows(0);
-            for action in actions {
-                result = execute_rule_action(action, catalog, ctx, xid, cid, waiter)?;
-            }
-            Ok(result)
-        }
     }
 }
 
@@ -1483,16 +1951,29 @@ fn evaluate_rule_qual(
     qual: &crate::backend::executor::Expr,
     old_values: &[Value],
     new_values: &[Value],
+    owner_oid: u32,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
-    with_rule_bindings(ctx, old_values, new_values, |ctx| {
-        let mut slot = TupleSlot::virtual_row(Vec::new());
-        match eval_expr(qual, &mut slot, ctx)? {
-            Value::Bool(value) => Ok(value),
-            Value::Null => Ok(false),
-            other => Err(ExecError::NonBoolQual(other)),
-        }
-    })
+    let mut subplans = Vec::new();
+    let qual = finalize_expr_subqueries(
+        substitute_rule_expr(qual.clone(), old_values, new_values),
+        catalog,
+        &mut subplans,
+    );
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, subplans);
+    let result = with_rule_owner(ctx, owner_oid, |ctx| {
+        with_rule_bindings(ctx, old_values, new_values, |ctx| {
+            let mut slot = TupleSlot::virtual_row(Vec::new());
+            match eval_expr(&qual, &mut slot, ctx)? {
+                Value::Bool(value) => Ok(value),
+                Value::Null => Ok(false),
+                other => Err(ExecError::NonBoolQual(other)),
+            }
+        })
+    });
+    ctx.subplans = saved_subplans;
+    result
 }
 
 fn with_rule_bindings<T>(
@@ -1501,14 +1982,1589 @@ fn with_rule_bindings<T>(
     new_values: &[Value],
     f: impl FnOnce(&mut ExecutorContext) -> Result<T, ExecError>,
 ) -> Result<T, ExecError> {
-    let saved_outer = ctx.expr_bindings.outer_tuple.clone();
-    let saved_inner = ctx.expr_bindings.inner_tuple.clone();
-    ctx.expr_bindings.outer_tuple = Some(old_values.to_vec());
-    ctx.expr_bindings.inner_tuple = Some(new_values.to_vec());
+    let saved_old = ctx.expr_bindings.rule_old_tuple.clone();
+    let saved_new = ctx.expr_bindings.rule_new_tuple.clone();
+    ctx.expr_bindings.rule_old_tuple = Some(old_values.to_vec());
+    ctx.expr_bindings.rule_new_tuple = Some(new_values.to_vec());
     let result = f(ctx);
-    ctx.expr_bindings.outer_tuple = saved_outer;
-    ctx.expr_bindings.inner_tuple = saved_inner;
+    ctx.expr_bindings.rule_old_tuple = saved_old;
+    ctx.expr_bindings.rule_new_tuple = saved_new;
     result
+}
+
+fn with_rule_owner<T>(
+    ctx: &mut ExecutorContext,
+    owner_oid: u32,
+    f: impl FnOnce(&mut ExecutorContext) -> Result<T, ExecError>,
+) -> Result<T, ExecError> {
+    let saved_user = ctx.current_user_oid;
+    ctx.current_user_oid = owner_oid;
+    let result = f(ctx);
+    ctx.current_user_oid = saved_user;
+    result
+}
+
+fn substitute_rule_tuple_var(
+    varno: usize,
+    varattno: i32,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> Option<Value> {
+    let index = attrno_index(varattno)?;
+    match varno {
+        RULE_OLD_VAR => Some(old_values.get(index).cloned().unwrap_or(Value::Null)),
+        RULE_NEW_VAR => Some(new_values.get(index).cloned().unwrap_or(Value::Null)),
+        _ => None,
+    }
+}
+
+fn substitute_rule_expr(expr: Expr, old_values: &[Value], new_values: &[Value]) -> Expr {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => {
+            substitute_rule_tuple_var(var.varno, var.varattno, old_values, new_values)
+                .map(Expr::Const)
+                .unwrap_or(Expr::Var(var))
+        }
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(substitute_rule_aggref(
+            *aggref, old_values, new_values,
+        ))),
+        Expr::WindowFunc(func) => Expr::WindowFunc(Box::new(substitute_rule_window_func(
+            *func, old_values, new_values,
+        ))),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| substitute_rule_expr(arg, old_values, new_values))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| substitute_rule_expr(arg, old_values, new_values))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(substitute_rule_expr(*arg, old_values, new_values))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: substitute_rule_expr(arm.expr, old_values, new_values),
+                    result: substitute_rule_expr(arm.result, old_values, new_values),
+                })
+                .collect(),
+            defresult: Box::new(substitute_rule_expr(
+                *case_expr.defresult,
+                old_values,
+                new_values,
+            )),
+            ..*case_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| substitute_rule_expr(arg, old_values, new_values))
+                .collect(),
+            ..*func
+        })),
+        Expr::SqlJsonQueryFunction(func) => Expr::SqlJsonQueryFunction(Box::new(
+            (*func).map_exprs(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        )),
+        Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
+            call: srf
+                .call
+                .map_exprs(|expr| substitute_rule_expr(expr, old_values, new_values)),
+            ..*srf
+        })),
+        Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
+            testexpr: sublink
+                .testexpr
+                .map(|expr| Box::new(substitute_rule_expr(*expr, old_values, new_values))),
+            subselect: Box::new(substitute_rule_query(
+                *sublink.subselect,
+                old_values,
+                new_values,
+            )),
+            ..*sublink
+        })),
+        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
+            testexpr: subplan
+                .testexpr
+                .map(|expr| Box::new(substitute_rule_expr(*expr, old_values, new_values))),
+            args: subplan
+                .args
+                .into_iter()
+                .map(|arg| substitute_rule_expr(arg, old_values, new_values))
+                .collect(),
+            ..*subplan
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(substitute_rule_expr(*saop.left, old_values, new_values)),
+            right: Box::new(substitute_rule_expr(*saop.right, old_values, new_values)),
+            ..*saop
+        })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| substitute_rule_expr(arg, old_values, new_values))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| substitute_rule_expr(arg, old_values, new_values))
+                .collect(),
+            ..*xml
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(substitute_rule_expr(*inner, old_values, new_values)),
+            ty,
+        ),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(substitute_rule_expr(*expr, old_values, new_values)),
+            collation_oid,
+        },
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            collation_oid,
+        } => Expr::Like {
+            expr: Box::new(substitute_rule_expr(*expr, old_values, new_values)),
+            pattern: Box::new(substitute_rule_expr(*pattern, old_values, new_values)),
+            escape: escape
+                .map(|expr| Box::new(substitute_rule_expr(*expr, old_values, new_values))),
+            case_insensitive,
+            negated,
+            collation_oid,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+            collation_oid,
+        } => Expr::Similar {
+            expr: Box::new(substitute_rule_expr(*expr, old_values, new_values)),
+            pattern: Box::new(substitute_rule_expr(*pattern, old_values, new_values)),
+            escape: escape
+                .map(|expr| Box::new(substitute_rule_expr(*expr, old_values, new_values))),
+            negated,
+            collation_oid,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(substitute_rule_expr(
+            *inner, old_values, new_values,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(substitute_rule_expr(
+            *inner, old_values, new_values,
+        ))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(substitute_rule_expr(*left, old_values, new_values)),
+            Box::new(substitute_rule_expr(*right, old_values, new_values)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(substitute_rule_expr(*left, old_values, new_values)),
+            Box::new(substitute_rule_expr(*right, old_values, new_values)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, substitute_rule_expr(expr, old_values, new_values)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(substitute_rule_expr(*expr, old_values, new_values)),
+            field,
+            field_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(substitute_rule_expr(*left, old_values, new_values)),
+            Box::new(substitute_rule_expr(*right, old_values, new_values)),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(substitute_rule_expr(*array, old_values, new_values)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| {
+                    substitute_rule_expr_array_subscript(subscript, old_values, new_values)
+                })
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+fn substitute_rule_expr_array_subscript(
+    subscript: ExprArraySubscript,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> ExprArraySubscript {
+    ExprArraySubscript {
+        lower: subscript
+            .lower
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        upper: subscript
+            .upper
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        is_slice: subscript.is_slice,
+    }
+}
+
+fn substitute_rule_order_by(
+    item: OrderByEntry,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> OrderByEntry {
+    OrderByEntry {
+        expr: substitute_rule_expr(item.expr, old_values, new_values),
+        ..item
+    }
+}
+
+fn substitute_rule_sort_group(
+    item: crate::include::nodes::primnodes::SortGroupClause,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::include::nodes::primnodes::SortGroupClause {
+    crate::include::nodes::primnodes::SortGroupClause {
+        expr: substitute_rule_expr(item.expr, old_values, new_values),
+        ..item
+    }
+}
+
+fn substitute_rule_target(
+    target: TargetEntry,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> TargetEntry {
+    TargetEntry {
+        expr: substitute_rule_expr(target.expr, old_values, new_values),
+        ..target
+    }
+}
+
+fn substitute_rule_agg_accum(
+    accum: AggAccum,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> AggAccum {
+    AggAccum {
+        direct_args: accum
+            .direct_args
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        args: accum
+            .args
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        order_by: accum
+            .order_by
+            .into_iter()
+            .map(|item| substitute_rule_order_by(item, old_values, new_values))
+            .collect(),
+        filter: accum
+            .filter
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        ..accum
+    }
+}
+
+fn substitute_rule_aggref(aggref: Aggref, old_values: &[Value], new_values: &[Value]) -> Aggref {
+    Aggref {
+        direct_args: aggref
+            .direct_args
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        args: aggref
+            .args
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        aggorder: aggref
+            .aggorder
+            .into_iter()
+            .map(|item| substitute_rule_order_by(item, old_values, new_values))
+            .collect(),
+        aggfilter: aggref
+            .aggfilter
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        ..aggref
+    }
+}
+
+fn substitute_rule_window_func(
+    func: WindowFuncExpr,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> WindowFuncExpr {
+    WindowFuncExpr {
+        kind: match func.kind {
+            WindowFuncKind::Aggregate(aggref) => {
+                WindowFuncKind::Aggregate(substitute_rule_aggref(aggref, old_values, new_values))
+            }
+            kind => kind,
+        },
+        args: func
+            .args
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        ..func
+    }
+}
+
+fn substitute_rule_window_frame_bound(
+    bound: WindowFrameBound,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> WindowFrameBound {
+    match bound {
+        WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = substitute_rule_expr(offset.expr.clone(), old_values, new_values);
+            WindowFrameBound::OffsetPreceding(offset.with_expr(expr))
+        }
+        WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = substitute_rule_expr(offset.expr.clone(), old_values, new_values);
+            WindowFrameBound::OffsetFollowing(offset.with_expr(expr))
+        }
+        other => other,
+    }
+}
+
+fn substitute_rule_window_clause(
+    clause: WindowClause,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> WindowClause {
+    WindowClause {
+        spec: crate::include::nodes::primnodes::WindowSpec {
+            partition_by: clause
+                .spec
+                .partition_by
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            order_by: clause
+                .spec
+                .order_by
+                .into_iter()
+                .map(|item| substitute_rule_order_by(item, old_values, new_values))
+                .collect(),
+            frame: WindowFrame {
+                start_bound: substitute_rule_window_frame_bound(
+                    clause.spec.frame.start_bound,
+                    old_values,
+                    new_values,
+                ),
+                end_bound: substitute_rule_window_frame_bound(
+                    clause.spec.frame.end_bound,
+                    old_values,
+                    new_values,
+                ),
+                ..clause.spec.frame
+            },
+        },
+        functions: clause
+            .functions
+            .into_iter()
+            .map(|func| substitute_rule_window_func(func, old_values, new_values))
+            .collect(),
+    }
+}
+
+fn substitute_rule_table_sample(
+    sample: TableSampleClause,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> TableSampleClause {
+    TableSampleClause {
+        args: sample
+            .args
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        repeatable: sample
+            .repeatable
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        ..sample
+    }
+}
+
+fn substitute_rule_rte(
+    rte: RangeTblEntry,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> RangeTblEntry {
+    let kind = match rte.kind {
+        RangeTblEntryKind::Relation {
+            rel,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            tablesample,
+        } => RangeTblEntryKind::Relation {
+            rel,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            tablesample: tablesample
+                .map(|sample| substitute_rule_table_sample(sample, old_values, new_values)),
+        },
+        RangeTblEntryKind::Join {
+            jointype,
+            joinmergedcols,
+            joinaliasvars,
+            joinleftcols,
+            joinrightcols,
+        } => RangeTblEntryKind::Join {
+            jointype,
+            joinmergedcols,
+            joinaliasvars: joinaliasvars
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            joinleftcols,
+            joinrightcols,
+        },
+        RangeTblEntryKind::Values {
+            rows,
+            output_columns,
+        } => RangeTblEntryKind::Values {
+            rows: rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                        .collect()
+                })
+                .collect(),
+            output_columns,
+        },
+        RangeTblEntryKind::Function { call } => RangeTblEntryKind::Function {
+            call: call.map_exprs(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        },
+        RangeTblEntryKind::Cte { cte_id, query } => RangeTblEntryKind::Cte {
+            cte_id,
+            query: Box::new(substitute_rule_query(*query, old_values, new_values)),
+        },
+        RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
+            query: Box::new(substitute_rule_query(*query, old_values, new_values)),
+        },
+        other => other,
+    };
+    RangeTblEntry {
+        security_quals: rte
+            .security_quals
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        kind,
+        ..rte
+    }
+}
+
+fn substitute_rule_jointree(
+    node: JoinTreeNode,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> JoinTreeNode {
+    match node {
+        JoinTreeNode::JoinExpr {
+            left,
+            right,
+            kind,
+            quals,
+            rtindex,
+        } => JoinTreeNode::JoinExpr {
+            left: Box::new(substitute_rule_jointree(*left, old_values, new_values)),
+            right: Box::new(substitute_rule_jointree(*right, old_values, new_values)),
+            kind,
+            quals: substitute_rule_expr(quals, old_values, new_values),
+            rtindex,
+        },
+        other => other,
+    }
+}
+
+fn substitute_rule_query(mut query: Query, old_values: &[Value], new_values: &[Value]) -> Query {
+    query.rtable = query
+        .rtable
+        .into_iter()
+        .map(|rte| substitute_rule_rte(rte, old_values, new_values))
+        .collect();
+    query.jointree = query
+        .jointree
+        .map(|node| substitute_rule_jointree(node, old_values, new_values));
+    query.target_list = query
+        .target_list
+        .into_iter()
+        .map(|target| substitute_rule_target(target, old_values, new_values))
+        .collect();
+    query.where_qual = query
+        .where_qual
+        .map(|expr| substitute_rule_expr(expr, old_values, new_values));
+    query.group_by = query
+        .group_by
+        .into_iter()
+        .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+        .collect();
+    query.accumulators = query
+        .accumulators
+        .into_iter()
+        .map(|accum| substitute_rule_agg_accum(accum, old_values, new_values))
+        .collect();
+    query.window_clauses = query
+        .window_clauses
+        .into_iter()
+        .map(|clause| substitute_rule_window_clause(clause, old_values, new_values))
+        .collect();
+    query.having_qual = query
+        .having_qual
+        .map(|expr| substitute_rule_expr(expr, old_values, new_values));
+    query.sort_clause = query
+        .sort_clause
+        .into_iter()
+        .map(|item| substitute_rule_sort_group(item, old_values, new_values))
+        .collect();
+    query.recursive_union = query.recursive_union.map(|union| {
+        Box::new(crate::include::nodes::parsenodes::RecursiveUnionQuery {
+            anchor: substitute_rule_query(union.anchor, old_values, new_values),
+            recursive: substitute_rule_query(union.recursive, old_values, new_values),
+            ..*union
+        })
+    });
+    query.set_operation = query.set_operation.map(|setop| {
+        Box::new(crate::include::nodes::parsenodes::SetOperationQuery {
+            inputs: setop
+                .inputs
+                .into_iter()
+                .map(|input| substitute_rule_query(input, old_values, new_values))
+                .collect(),
+            ..*setop
+        })
+    });
+    query
+}
+
+fn substitute_rule_exec_param(
+    param: ExecParamSource,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> ExecParamSource {
+    ExecParamSource {
+        expr: substitute_rule_expr(param.expr, old_values, new_values),
+        ..param
+    }
+}
+
+fn substitute_rule_index_key(
+    key: IndexScanKey,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> IndexScanKey {
+    IndexScanKey {
+        argument: match key.argument {
+            IndexScanKeyArgument::Runtime(expr) => {
+                IndexScanKeyArgument::Runtime(substitute_rule_expr(expr, old_values, new_values))
+            }
+            other => other,
+        },
+        display_expr: key
+            .display_expr
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        ..key
+    }
+}
+
+fn substitute_rule_partition_prune(
+    info: PartitionPrunePlan,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> PartitionPrunePlan {
+    PartitionPrunePlan {
+        filter: substitute_rule_expr(info.filter, old_values, new_values),
+        ..info
+    }
+}
+
+fn substitute_rule_project_set_target(
+    target: ProjectSetTarget,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> ProjectSetTarget {
+    match target {
+        ProjectSetTarget::Scalar(target) => {
+            ProjectSetTarget::Scalar(substitute_rule_target(target, old_values, new_values))
+        }
+        ProjectSetTarget::Set {
+            name,
+            source_expr,
+            call,
+            sql_type,
+            column_index,
+            ressortgroupref,
+        } => ProjectSetTarget::Set {
+            name,
+            source_expr: substitute_rule_expr(source_expr, old_values, new_values),
+            call: call.map_exprs(|expr| substitute_rule_expr(expr, old_values, new_values)),
+            sql_type,
+            column_index,
+            ressortgroupref,
+        },
+    }
+}
+
+fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) -> Plan {
+    match plan {
+        Plan::Append {
+            plan_info,
+            source_id,
+            desc,
+            partition_prune,
+            children,
+        } => Plan::Append {
+            plan_info,
+            source_id,
+            desc,
+            partition_prune: partition_prune
+                .map(|info| substitute_rule_partition_prune(info, old_values, new_values)),
+            children: children
+                .into_iter()
+                .map(|child| substitute_rule_plan(child, old_values, new_values))
+                .collect(),
+        },
+        Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            partition_prune,
+            children,
+        } => Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items: items
+                .into_iter()
+                .map(|item| substitute_rule_order_by(item, old_values, new_values))
+                .collect(),
+            partition_prune: partition_prune
+                .map(|info| substitute_rule_partition_prune(info, old_values, new_values)),
+            children: children
+                .into_iter()
+                .map(|child| substitute_rule_plan(child, old_values, new_values))
+                .collect(),
+        },
+        Plan::Unique {
+            plan_info,
+            key_indices,
+            input,
+        } => Plan::Unique {
+            plan_info,
+            key_indices,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+        },
+        Plan::IndexOnlyScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
+        } => Plan::IndexOnlyScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys: keys
+                .into_iter()
+                .map(|key| substitute_rule_index_key(key, old_values, new_values))
+                .collect(),
+            order_by_keys: order_by_keys
+                .into_iter()
+                .map(|key| substitute_rule_index_key(key, old_values, new_values))
+                .collect(),
+            direction,
+        },
+        Plan::IndexScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
+            index_only,
+        } => Plan::IndexScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys: keys
+                .into_iter()
+                .map(|key| substitute_rule_index_key(key, old_values, new_values))
+                .collect(),
+            order_by_keys: order_by_keys
+                .into_iter()
+                .map(|key| substitute_rule_index_key(key, old_values, new_values))
+                .collect(),
+            direction,
+            index_only,
+        },
+        Plan::BitmapIndexScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            index_quals,
+        } => Plan::BitmapIndexScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            desc,
+            index_desc,
+            index_meta,
+            keys: keys
+                .into_iter()
+                .map(|key| substitute_rule_index_key(key, old_values, new_values))
+                .collect(),
+            index_quals: index_quals
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+        },
+        Plan::BitmapOr {
+            plan_info,
+            children,
+        } => Plan::BitmapOr {
+            plan_info,
+            children: children
+                .into_iter()
+                .map(|child| substitute_rule_plan(child, old_values, new_values))
+                .collect(),
+        },
+        Plan::BitmapAnd {
+            plan_info,
+            children,
+        } => Plan::BitmapAnd {
+            plan_info,
+            children: children
+                .into_iter()
+                .map(|child| substitute_rule_plan(child, old_values, new_values))
+                .collect(),
+        },
+        Plan::BitmapHeapScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual,
+            recheck_qual,
+            filter_qual,
+        } => Plan::BitmapHeapScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual: Box::new(substitute_rule_plan(*bitmapqual, old_values, new_values)),
+            recheck_qual: recheck_qual
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            filter_qual: filter_qual
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+        },
+        Plan::Hash {
+            plan_info,
+            input,
+            hash_keys,
+        } => Plan::Hash {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            hash_keys: hash_keys
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+        },
+        Plan::Materialize { plan_info, input } => Plan::Materialize {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+        },
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+            cache_key_labels,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        } => Plan::Memoize {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            cache_keys: cache_keys
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            cache_key_labels,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        },
+        Plan::Gather {
+            plan_info,
+            input,
+            workers_planned,
+            single_copy,
+        } => Plan::Gather {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            workers_planned,
+            single_copy,
+        },
+        Plan::NestedLoopJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            nest_params,
+            join_qual,
+            qual,
+        } => Plan::NestedLoopJoin {
+            plan_info,
+            left: Box::new(substitute_rule_plan(*left, old_values, new_values)),
+            right: Box::new(substitute_rule_plan(*right, old_values, new_values)),
+            kind,
+            nest_params: nest_params
+                .into_iter()
+                .map(|param| substitute_rule_exec_param(param, old_values, new_values))
+                .collect(),
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+        },
+        Plan::HashJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+        } => Plan::HashJoin {
+            plan_info,
+            left: Box::new(substitute_rule_plan(*left, old_values, new_values)),
+            right: Box::new(substitute_rule_plan(*right, old_values, new_values)),
+            kind,
+            hash_clauses: hash_clauses
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            hash_keys: hash_keys
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+        },
+        Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            merge_key_descending,
+            join_qual,
+            qual,
+        } => Plan::MergeJoin {
+            plan_info,
+            left: Box::new(substitute_rule_plan(*left, old_values, new_values)),
+            right: Box::new(substitute_rule_plan(*right, old_values, new_values)),
+            kind,
+            merge_clauses: merge_clauses
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            outer_merge_keys: outer_merge_keys
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            inner_merge_keys: inner_merge_keys
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            merge_key_descending,
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+        },
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate,
+        } => Plan::Filter {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            predicate: substitute_rule_expr(predicate, old_values, new_values),
+        },
+        Plan::OrderBy {
+            plan_info,
+            input,
+            items,
+            display_items,
+        } => Plan::OrderBy {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            items: items
+                .into_iter()
+                .map(|item| substitute_rule_order_by(item, old_values, new_values))
+                .collect(),
+            display_items,
+        },
+        Plan::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        } => Plan::IncrementalSort {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            items: items
+                .into_iter()
+                .map(|item| substitute_rule_order_by(item, old_values, new_values))
+                .collect(),
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        },
+        Plan::Projection {
+            plan_info,
+            input,
+            targets,
+        } => Plan::Projection {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            targets: targets
+                .into_iter()
+                .map(|target| substitute_rule_target(target, old_values, new_values))
+                .collect(),
+        },
+        Plan::Aggregate {
+            plan_info,
+            strategy,
+            phase,
+            disabled,
+            input,
+            group_by,
+            group_by_refs,
+            grouping_sets,
+            passthrough_exprs,
+            accumulators,
+            semantic_accumulators,
+            semantic_output_names,
+            having,
+            output_columns,
+        } => Plan::Aggregate {
+            plan_info,
+            strategy,
+            phase,
+            disabled,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            group_by: group_by
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            group_by_refs,
+            grouping_sets,
+            passthrough_exprs: passthrough_exprs
+                .into_iter()
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                .collect(),
+            accumulators: accumulators
+                .into_iter()
+                .map(|accum| substitute_rule_agg_accum(accum, old_values, new_values))
+                .collect(),
+            semantic_accumulators: semantic_accumulators.map(|accums| {
+                accums
+                    .into_iter()
+                    .map(|accum| substitute_rule_agg_accum(accum, old_values, new_values))
+                    .collect()
+            }),
+            semantic_output_names,
+            having: having.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+            output_columns,
+        },
+        Plan::WindowAgg {
+            plan_info,
+            input,
+            clause,
+            output_columns,
+        } => Plan::WindowAgg {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            clause: substitute_rule_window_clause(clause, old_values, new_values),
+            output_columns,
+        },
+        Plan::FunctionScan {
+            plan_info,
+            call,
+            table_alias,
+        } => Plan::FunctionScan {
+            plan_info,
+            call: call.map_exprs(|expr| substitute_rule_expr(expr, old_values, new_values)),
+            table_alias,
+        },
+        Plan::SubqueryScan {
+            plan_info,
+            input,
+            scan_name,
+            filter,
+            output_columns,
+        } => Plan::SubqueryScan {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            scan_name,
+            filter: filter.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+            output_columns,
+        },
+        Plan::CteScan {
+            plan_info,
+            cte_id,
+            cte_name,
+            cte_plan,
+            output_columns,
+        } => Plan::CteScan {
+            plan_info,
+            cte_id,
+            cte_name,
+            cte_plan: Box::new(substitute_rule_plan(*cte_plan, old_values, new_values)),
+            output_columns,
+        },
+        Plan::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            recursive_references_worktable,
+            output_columns,
+            anchor,
+            recursive,
+        } => Plan::RecursiveUnion {
+            plan_info,
+            worktable_id,
+            distinct,
+            recursive_references_worktable,
+            output_columns,
+            anchor: Box::new(substitute_rule_plan(*anchor, old_values, new_values)),
+            recursive: Box::new(substitute_rule_plan(*recursive, old_values, new_values)),
+        },
+        Plan::SetOp {
+            plan_info,
+            op,
+            strategy,
+            output_columns,
+            children,
+        } => Plan::SetOp {
+            plan_info,
+            op,
+            strategy,
+            output_columns,
+            children: children
+                .into_iter()
+                .map(|child| substitute_rule_plan(child, old_values, new_values))
+                .collect(),
+        },
+        Plan::Values {
+            plan_info,
+            rows,
+            output_columns,
+        } => Plan::Values {
+            plan_info,
+            rows: rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                        .collect()
+                })
+                .collect(),
+            output_columns,
+        },
+        Plan::ProjectSet {
+            plan_info,
+            input,
+            targets,
+        } => Plan::ProjectSet {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            targets: targets
+                .into_iter()
+                .map(|target| substitute_rule_project_set_target(target, old_values, new_values))
+                .collect(),
+        },
+        Plan::Limit {
+            plan_info,
+            input,
+            limit,
+            offset,
+        } => Plan::Limit {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            limit,
+            offset,
+        },
+        Plan::LockRows {
+            plan_info,
+            input,
+            row_marks,
+        } => Plan::LockRows {
+            plan_info,
+            input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
+            row_marks,
+        },
+        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => plan,
+    }
+}
+
+fn substitute_rule_planned_stmt(
+    planned: PlannedStmt,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> PlannedStmt {
+    PlannedStmt {
+        plan_tree: substitute_rule_plan(planned.plan_tree, old_values, new_values),
+        subplans: planned
+            .subplans
+            .into_iter()
+            .map(|plan| substitute_rule_plan(plan, old_values, new_values))
+            .collect(),
+        ext_params: planned
+            .ext_params
+            .into_iter()
+            .map(|param| substitute_rule_exec_param(param, old_values, new_values))
+            .collect(),
+        ..planned
+    }
+}
+
+fn substitute_rule_bound_array_subscript(
+    subscript: crate::backend::parser::BoundArraySubscript,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundArraySubscript {
+    crate::backend::parser::BoundArraySubscript {
+        lower: subscript
+            .lower
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        upper: subscript
+            .upper
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        is_slice: subscript.is_slice,
+    }
+}
+
+fn substitute_rule_assignment(
+    assignment: crate::backend::parser::BoundAssignment,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundAssignment {
+    crate::backend::parser::BoundAssignment {
+        subscripts: assignment
+            .subscripts
+            .into_iter()
+            .map(|subscript| {
+                substitute_rule_bound_array_subscript(subscript, old_values, new_values)
+            })
+            .collect(),
+        expr: substitute_rule_expr(assignment.expr, old_values, new_values),
+        ..assignment
+    }
+}
+
+fn substitute_rule_assignment_target(
+    target: BoundAssignmentTarget,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> BoundAssignmentTarget {
+    BoundAssignmentTarget {
+        subscripts: target
+            .subscripts
+            .into_iter()
+            .map(|subscript| {
+                substitute_rule_bound_array_subscript(subscript, old_values, new_values)
+            })
+            .collect(),
+        ..target
+    }
+}
+
+fn substitute_rule_rls_check(
+    check: crate::backend::rewrite::RlsWriteCheck,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::rewrite::RlsWriteCheck {
+    crate::backend::rewrite::RlsWriteCheck {
+        expr: substitute_rule_expr(check.expr, old_values, new_values),
+        ..check
+    }
+}
+
+fn substitute_rule_on_conflict(
+    clause: crate::backend::parser::BoundOnConflictClause,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundOnConflictClause {
+    crate::backend::parser::BoundOnConflictClause {
+        action: match clause.action {
+            crate::backend::parser::BoundOnConflictAction::Update {
+                assignments,
+                predicate,
+                conflict_visibility_checks,
+                update_write_checks,
+            } => crate::backend::parser::BoundOnConflictAction::Update {
+                assignments: assignments
+                    .into_iter()
+                    .map(|assignment| {
+                        substitute_rule_assignment(assignment, old_values, new_values)
+                    })
+                    .collect(),
+                predicate: predicate.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+                conflict_visibility_checks: conflict_visibility_checks
+                    .into_iter()
+                    .map(|check| substitute_rule_rls_check(check, old_values, new_values))
+                    .collect(),
+                update_write_checks: update_write_checks
+                    .into_iter()
+                    .map(|check| substitute_rule_rls_check(check, old_values, new_values))
+                    .collect(),
+            },
+            other => other,
+        },
+        ..clause
+    }
+}
+
+fn substitute_rule_insert_source(
+    source: crate::backend::parser::BoundInsertSource,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundInsertSource {
+    match source {
+        crate::backend::parser::BoundInsertSource::Values(rows) => {
+            crate::backend::parser::BoundInsertSource::Values(
+                rows.into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                            .collect()
+                    })
+                    .collect(),
+            )
+        }
+        crate::backend::parser::BoundInsertSource::ProjectSetValues(rows) => {
+            crate::backend::parser::BoundInsertSource::ProjectSetValues(
+                rows.into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                            .collect()
+                    })
+                    .collect(),
+            )
+        }
+        crate::backend::parser::BoundInsertSource::DefaultValues(defaults) => {
+            crate::backend::parser::BoundInsertSource::DefaultValues(
+                defaults
+                    .into_iter()
+                    .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+                    .collect(),
+            )
+        }
+        crate::backend::parser::BoundInsertSource::Select(query) => {
+            crate::backend::parser::BoundInsertSource::Select(Box::new(substitute_rule_query(
+                *query, old_values, new_values,
+            )))
+        }
+    }
+}
+
+fn substitute_rule_insert_stmt(
+    stmt: crate::backend::parser::BoundInsertStatement,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundInsertStatement {
+    crate::backend::parser::BoundInsertStatement {
+        column_defaults: stmt
+            .column_defaults
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        target_columns: stmt
+            .target_columns
+            .into_iter()
+            .map(|target| substitute_rule_assignment_target(target, old_values, new_values))
+            .collect(),
+        source: substitute_rule_insert_source(stmt.source, old_values, new_values),
+        on_conflict: stmt
+            .on_conflict
+            .map(|clause| substitute_rule_on_conflict(clause, old_values, new_values)),
+        returning: stmt
+            .returning
+            .into_iter()
+            .map(|target| substitute_rule_target(target, old_values, new_values))
+            .collect(),
+        rls_write_checks: stmt
+            .rls_write_checks
+            .into_iter()
+            .map(|check| substitute_rule_rls_check(check, old_values, new_values))
+            .collect(),
+        subplans: stmt
+            .subplans
+            .into_iter()
+            .map(|plan| substitute_rule_plan(plan, old_values, new_values))
+            .collect(),
+        ..stmt
+    }
+}
+
+fn substitute_rule_update_target(
+    target: crate::backend::parser::BoundUpdateTarget,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundUpdateTarget {
+    crate::backend::parser::BoundUpdateTarget {
+        assignments: target
+            .assignments
+            .into_iter()
+            .map(|assignment| substitute_rule_assignment(assignment, old_values, new_values))
+            .collect(),
+        parent_visible_exprs: target
+            .parent_visible_exprs
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        predicate: target
+            .predicate
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        rls_write_checks: target
+            .rls_write_checks
+            .into_iter()
+            .map(|check| substitute_rule_rls_check(check, old_values, new_values))
+            .collect(),
+        ..target
+    }
+}
+
+fn substitute_rule_update_stmt(
+    stmt: crate::backend::parser::BoundUpdateStatement,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundUpdateStatement {
+    crate::backend::parser::BoundUpdateStatement {
+        targets: stmt
+            .targets
+            .into_iter()
+            .map(|target| substitute_rule_update_target(target, old_values, new_values))
+            .collect(),
+        returning: stmt
+            .returning
+            .into_iter()
+            .map(|target| substitute_rule_target(target, old_values, new_values))
+            .collect(),
+        input_plan: stmt
+            .input_plan
+            .map(|planned| substitute_rule_planned_stmt(planned, old_values, new_values)),
+        subplans: stmt
+            .subplans
+            .into_iter()
+            .map(|plan| substitute_rule_plan(plan, old_values, new_values))
+            .collect(),
+        ..stmt
+    }
+}
+
+fn substitute_rule_delete_target(
+    target: crate::backend::parser::BoundDeleteTarget,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundDeleteTarget {
+    crate::backend::parser::BoundDeleteTarget {
+        parent_visible_exprs: target
+            .parent_visible_exprs
+            .into_iter()
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values))
+            .collect(),
+        predicate: target
+            .predicate
+            .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+        ..target
+    }
+}
+
+fn substitute_rule_delete_stmt(
+    stmt: crate::backend::parser::BoundDeleteStatement,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundDeleteStatement {
+    crate::backend::parser::BoundDeleteStatement {
+        targets: stmt
+            .targets
+            .into_iter()
+            .map(|target| substitute_rule_delete_target(target, old_values, new_values))
+            .collect(),
+        returning: stmt
+            .returning
+            .into_iter()
+            .map(|target| substitute_rule_target(target, old_values, new_values))
+            .collect(),
+        input_plan: stmt
+            .input_plan
+            .map(|planned| substitute_rule_planned_stmt(planned, old_values, new_values)),
+        subplans: stmt
+            .subplans
+            .into_iter()
+            .map(|plan| substitute_rule_plan(plan, old_values, new_values))
+            .collect(),
+        ..stmt
+    }
+}
+
+fn substitute_rule_action(
+    action: crate::backend::parser::BoundRuleAction,
+    old_values: &[Value],
+    new_values: &[Value],
+) -> crate::backend::parser::BoundRuleAction {
+    match action {
+        crate::backend::parser::BoundRuleAction::Insert(stmt) => {
+            crate::backend::parser::BoundRuleAction::Insert(substitute_rule_insert_stmt(
+                stmt, old_values, new_values,
+            ))
+        }
+        crate::backend::parser::BoundRuleAction::Update(stmt) => {
+            crate::backend::parser::BoundRuleAction::Update(stmt)
+        }
+        crate::backend::parser::BoundRuleAction::Delete(stmt) => {
+            crate::backend::parser::BoundRuleAction::Delete(stmt)
+        }
+        crate::backend::parser::BoundRuleAction::Select(planned) => {
+            crate::backend::parser::BoundRuleAction::Select(substitute_rule_planned_stmt(
+                planned, old_values, new_values,
+            ))
+        }
+        crate::backend::parser::BoundRuleAction::Values(planned) => {
+            crate::backend::parser::BoundRuleAction::Values(substitute_rule_planned_stmt(
+                planned, old_values, new_values,
+            ))
+        }
+        other => other,
+    }
 }
 
 fn load_prepared_rules(
@@ -1516,11 +3572,20 @@ fn load_prepared_rules(
     event: RuleEvent,
     relation_desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
+    session_replication_role: SessionReplicationRole,
 ) -> Result<Vec<PreparedRule>, ExecError> {
+    let owner_oid = catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relowner)
+        .unwrap_or_else(|| catalog.current_user_oid());
     catalog
         .rewrite_rows_for_relation(relation_oid)
         .into_iter()
-        .filter(|row| row.rulename != "_RETURN" && row.ev_type == rule_event_code(event))
+        .filter(|row| {
+            row.rulename != "_RETURN"
+                && row.ev_type == rule_event_code(event)
+                && rule_enabled_for_session(&row, session_replication_role)
+        })
         .map(|row| {
             let qual = if row.ev_qual.is_empty() {
                 None
@@ -1539,7 +3604,9 @@ fn load_prepared_rules(
             }
             Ok(PreparedRule {
                 is_instead: row.is_instead,
+                owner_oid,
                 qual,
+                qual_subplans: Vec::new(),
                 actions,
             })
         })
@@ -1727,7 +3794,9 @@ fn materialize_view_rows(
         let mut state = crate::backend::executor::executor_start(planned.plan_tree);
         let mut rows = Vec::new();
         while let Some(slot) = crate::backend::executor::exec_next(&mut state, ctx)? {
-            rows.push(slot.values()?.to_vec());
+            let mut values = slot.values()?.to_vec();
+            Value::materialize_all(&mut values);
+            rows.push(values);
         }
         Ok(rows)
     })();
@@ -1760,6 +3829,35 @@ fn relation_has_user_rules_for_event(
         .rewrite_rows_for_relation(relation_oid)
         .into_iter()
         .any(|row| row.rulename != "_RETURN" && row.ev_type == rule_event_code(event))
+}
+
+fn relation_has_active_user_rules_for_event(
+    relation_oid: u32,
+    event: RuleEvent,
+    catalog: &dyn CatalogLookup,
+    session_replication_role: SessionReplicationRole,
+) -> bool {
+    catalog
+        .rewrite_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| {
+            row.rulename != "_RETURN"
+                && row.ev_type == rule_event_code(event)
+                && rule_enabled_for_session(&row, session_replication_role)
+        })
+}
+
+fn rule_enabled_for_session(
+    row: &PgRewriteRow,
+    session_replication_role: SessionReplicationRole,
+) -> bool {
+    match row.ev_enabled {
+        'D' => false,
+        'A' => true,
+        'R' => session_replication_role == SessionReplicationRole::Replica,
+        'O' => session_replication_role != SessionReplicationRole::Replica,
+        _ => true,
+    }
 }
 
 fn load_view_runtime_triggers(

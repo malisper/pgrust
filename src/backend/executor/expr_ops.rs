@@ -3075,7 +3075,17 @@ mod tests {
     }
 
     #[test]
-    fn numeric_addition_preserves_display_scale() {
+    fn numeric_add_preserves_display_scale() {
+        let left = NumericValue::from("4000.00");
+        let right = NumericValue::from("1000.00");
+
+        assert_eq!(left.add(&right).render(), "5000.00");
+        assert_eq!(
+            NumericValue::from("1.2")
+                .add(&NumericValue::from("3.45"))
+                .render(),
+            "4.65"
+        );
         let left = super::parse_numeric_text("1.0000000000000000").unwrap();
         let right = super::parse_numeric_text("-1").unwrap();
 

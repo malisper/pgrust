@@ -4591,6 +4591,7 @@ impl Session {
             Statement::CreateAggregate(_) => Some("CREATE AGGREGATE"),
             Statement::CreateSchema(_) => Some("CREATE SCHEMA"),
             Statement::CreateView(_) => Some("CREATE VIEW"),
+            Statement::CreateRule(_) => Some("CREATE RULE"),
             Statement::CreateIndex(_) => Some("CREATE INDEX"),
             Statement::CreateOperatorClass(_) => Some("CREATE OPERATOR CLASS"),
             Statement::CreateOperatorFamily(_) => Some("CREATE OPERATOR FAMILY"),
@@ -4646,7 +4647,9 @@ impl Session {
             | Statement::AlterTableNotOf(_)
             | Statement::AlterTableAttachPartition(_)
             | Statement::AlterTableDetachPartition(_)
-            | Statement::AlterTableTriggerState(_) => Some("ALTER TABLE"),
+            | Statement::AlterTableTriggerState(_)
+            | Statement::AlterTableRuleState(_) => Some("ALTER TABLE"),
+            Statement::AlterRuleRename(_) => Some("ALTER RULE"),
             Statement::AlterPolicy(_) => Some("ALTER POLICY"),
             Statement::CommentOnTable(_)
             | Statement::CommentOnColumn(_)
@@ -9401,6 +9404,7 @@ impl Session {
                 .map(|cte| Self::substitute_common_table_expr(cte, subst))
                 .collect::<Result<Vec<_>, _>>()?,
             table_name: delete.table_name.clone(),
+            target_alias: delete.target_alias.clone(),
             only: delete.only,
             using: delete
                 .using
@@ -9474,23 +9478,34 @@ impl Session {
                                         .collect::<Result<Vec<_>, ExecError>>()?,
                                 }
                             }
-                            crate::backend::parser::MergeAction::Insert { columns, source } => {
-                                crate::backend::parser::MergeAction::Insert {
-                                    columns: columns.clone(),
-                                    source: match source {
+                            crate::backend::parser::MergeAction::Insert {
+                                columns,
+                                overriding,
+                                source,
+                            } => crate::backend::parser::MergeAction::Insert {
+                                columns: columns
+                                    .as_ref()
+                                    .map(|columns| {
+                                        columns
+                                            .iter()
+                                            .map(|target| {
+                                                Self::substitute_assignment_target(target, subst)
+                                            })
+                                            .collect::<Result<Vec<_>, _>>()
+                                    })
+                                    .transpose()?,
+                                overriding: *overriding,
+                                source: match source {
+                                    crate::backend::parser::MergeInsertSource::Values(values) => {
                                         crate::backend::parser::MergeInsertSource::Values(
-                                            values,
-                                        ) => {
-                                            crate::backend::parser::MergeInsertSource::Values(
-                                                Self::substitute_exprs(values, subst)?,
-                                            )
-                                        }
-                                        crate::backend::parser::MergeInsertSource::DefaultValues => {
-                                            crate::backend::parser::MergeInsertSource::DefaultValues
-                                        }
-                                    },
-                                }
-                            }
+                                            Self::substitute_exprs(values, subst)?,
+                                        )
+                                    }
+                                    crate::backend::parser::MergeInsertSource::DefaultValues => {
+                                        crate::backend::parser::MergeInsertSource::DefaultValues
+                                    }
+                                },
+                            },
                         },
                     })
                 })
@@ -14488,6 +14503,58 @@ impl Session {
                     db.execute_create_rule_stmt_in_transaction_with_search_path(
                         client_id,
                         create_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterRuleRename(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let relation = match catalog.lookup_any_relation(&alter_stmt.relation_name) {
+                        Some(relation) if matches!(relation.relkind, 'r' | 'v') => relation,
+                        Some(_) => {
+                            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                                name: alter_stmt.relation_name.clone(),
+                                expected: "table or view",
+                            }));
+                        }
+                        None => {
+                            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                                alter_stmt.relation_name.clone(),
+                            )));
+                        }
+                    };
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_rule_rename_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterTableRuleState(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    if let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) {
+                        self.lock_table_if_needed(
+                            db,
+                            crate::pgrust::database::relation_lock_tag(&relation),
+                            TableLockMode::AccessExclusive,
+                        )?;
+                    }
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_rule_state_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
                         xid,
                         cid,
                         search_path.as_deref(),

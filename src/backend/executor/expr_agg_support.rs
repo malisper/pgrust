@@ -346,6 +346,11 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             [left, right] => sub_values(left.clone(), right.clone()),
             _ => malformed_aggregate_support_call("int4mi"),
         },
+        BuiltinScalarFunction::Int4Smaller => match arg_values {
+            [Value::Int32(left), Value::Int32(right)] => Ok(Value::Int32((*left).min(*right))),
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            _ => malformed_aggregate_support_call("int4smaller"),
+        },
         BuiltinScalarFunction::Int8Inc => match arg_values {
             [state] => add_values(state.clone(), Value::Int64(1)),
             _ => malformed_aggregate_support_call("int8inc"),

@@ -6,7 +6,7 @@ use crate::include::nodes::parsenodes::{
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
     RelationPrivilegeMask, RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr,
-    SubLink, SubPlan, attrno_index, is_system_attr, user_attrno,
+    SubLink, SubPlan, attrno_index, is_special_varno, is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -585,7 +585,7 @@ pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             ..*saop
         })),
         Expr::Var(mut var) => {
-            if var.varlevelsup == 0 {
+            if var.varlevelsup == 0 && !is_special_varno(var.varno) {
                 var.varno += offset;
             }
             Expr::Var(var)

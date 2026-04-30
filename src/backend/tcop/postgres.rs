@@ -554,6 +554,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             {
                 return Some(position);
             }
+            if let Some(position) = for_update_missing_relation_position(sql, message) {
+                return Some(position);
+            }
             if let Some(position) = composite_rowtype_error_position(sql, message) {
                 return Some(position);
             }
@@ -2192,6 +2195,25 @@ fn extract_missing_column_name(message: &str) -> Option<&str> {
     message
         .strip_prefix("column \"")?
         .strip_suffix("\" does not exist")
+}
+
+fn for_update_missing_relation_position(sql: &str, message: &str) -> Option<usize> {
+    let target = message
+        .strip_prefix("relation \"")?
+        .strip_suffix("\" in FOR UPDATE clause not found in FROM clause")?;
+    let lower = sql.to_ascii_lowercase();
+    [
+        "for update of",
+        "for no key update of",
+        "for share of",
+        "for key share of",
+    ]
+    .into_iter()
+    .filter_map(|phrase| lower.rfind(phrase).map(|index| index + phrase.len()))
+    .max()
+    .and_then(|start| {
+        find_identifier_in_segment(&sql[start..], target).map(|offset| start + offset + 1)
+    })
 }
 
 fn extract_at_or_near_token(message: &str) -> Option<&str> {
@@ -15795,6 +15817,22 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             });
             assert_eq!(exec_error_position(sql, &err), expected);
         }
+    }
+
+    #[test]
+    fn exec_error_position_points_at_missing_for_update_target() {
+        let sql = "create or replace rule r1 as on update to rules_base do instead\n  select * from rules_base where f1 = 11 for update of old;";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "relation \"old\" in FOR UPDATE clause not found in FROM clause".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P01",
+        });
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("old;").map(|index| index + 1)
+        );
     }
 
     #[test]

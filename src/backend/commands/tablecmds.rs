@@ -118,7 +118,7 @@ use crate::include::nodes::parsenodes::{
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, OpExprKind, ParamKind, QueryColumn,
+    BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, OpExprKind, ParamKind, QueryColumn, RULE_OLD_VAR,
     RelationPrivilegeMask, RelationPrivilegeRequirement, SubLinkType, TargetEntry, Var,
     attrno_index, expr_sql_type_hint, user_attrno,
 };
@@ -1148,12 +1148,17 @@ fn execute_explain_insert(
     for subplan in &bound.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }
-    let base_target_name = explain_insert_target_name(&bound, verbose, catalog);
+    let explain_target =
+        explain_insert_rule_target(&bound, catalog)?.unwrap_or_else(|| bound.clone());
+    let base_target_name = explain_insert_target_name(&explain_target, verbose, catalog);
     let target_name = target_alias
         .as_ref()
+        .filter(|_| explain_target.relation_oid == bound.relation_oid)
         .map(|alias| format!("{base_target_name} {alias}"))
         .unwrap_or(base_target_name);
     let conflict_target_prefix = target_alias.as_deref().unwrap_or(&raw_target_name);
+    let planned = explain_insert_source_plan(&bound.source, catalog, planner_config)?;
+    check_planned_stmt_select_privileges(&planned, ctx)?;
 
     if matches!(format, ExplainFormat::Json) {
         return Ok(StatementResult::Query {
@@ -1172,16 +1177,27 @@ fn execute_explain_insert(
         costs,
         &mut lines,
     );
-    push_explain_insert_on_conflict_lines(&bound, conflict_target_prefix, costs, &mut lines);
-    push_explain_insert_source_lines(
-        &bound,
-        conflict_target_prefix,
-        verbose,
-        costs,
-        catalog,
-        planner_config,
-        &mut lines,
-    )?;
+    push_explain_insert_conflict_lines(&explain_target, &mut lines);
+    let mut child_lines = Vec::new();
+    if verbose {
+        format_verbose_explain_child_plan_with_catalog(
+            &planned.plan_tree,
+            &planned.subplans,
+            1,
+            costs,
+            catalog,
+            &mut child_lines,
+        );
+    } else {
+        format_explain_child_plan_with_subplans(
+            &planned.plan_tree,
+            &planned.subplans,
+            1,
+            costs,
+            &mut child_lines,
+        );
+    }
+    lines.extend(reorder_insert_explain_cte_lines(child_lines));
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
@@ -1957,6 +1973,321 @@ fn plain_explain_prefix(indent: usize) -> String {
     "  ".repeat(indent)
 }
 
+fn reorder_insert_explain_cte_lines(lines: Vec<String>) -> Vec<String> {
+    let mut cte_lines = Vec::new();
+    let mut other_lines = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = &lines[index];
+        if line.trim_start().starts_with("CTE ") {
+            let cte_indent = leading_spaces(line);
+            cte_lines.push(dedent_explain_line(line, 6));
+            index += 1;
+            while index < lines.len() && leading_spaces(&lines[index]) > cte_indent {
+                cte_lines.push(dedent_explain_line(&lines[index], 6));
+                index += 1;
+            }
+        } else {
+            other_lines.push(line.clone());
+            index += 1;
+        }
+    }
+    cte_lines.extend(other_lines);
+    cte_lines
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.bytes().take_while(|byte| *byte == b' ').count()
+}
+
+fn dedent_explain_line(line: &str, spaces: usize) -> String {
+    let remove = leading_spaces(line).min(spaces);
+    line[remove..].to_string()
+}
+
+fn explain_insert_source_plan(
+    source: &BoundInsertSource,
+    catalog: &dyn CatalogLookup,
+    planner_config: PlannerConfig,
+) -> Result<PlannedStmt, ExecError> {
+    match source {
+        BoundInsertSource::Select(query) => {
+            let [query] = pg_rewrite_query((**query).clone(), catalog)
+                .map_err(ExecError::Parse)?
+                .try_into()
+                .expect("insert-select rewrite should return a single query");
+            let query =
+                crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
+            crate::backend::optimizer::planner_with_config(query, catalog, planner_config)
+                .map_err(Into::into)
+        }
+        BoundInsertSource::Values(_)
+        | BoundInsertSource::ProjectSetValues(_)
+        | BoundInsertSource::DefaultValues(_) => Ok(PlannedStmt {
+            command_type: CommandType::Select,
+            depends_on_row_security: false,
+            relation_privileges: Vec::new(),
+            plan_tree: Plan::Result {
+                plan_info: crate::include::nodes::plannodes::PlanEstimate::default(),
+            },
+            subplans: Vec::new(),
+            ext_params: Vec::new(),
+        }),
+    }
+}
+
+fn explain_insert_rule_target(
+    bound: &BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<BoundInsertStatement>, ExecError> {
+    for row in catalog.rewrite_rows_for_relation(bound.relation_oid) {
+        if row.rulename == "_RETURN" || row.ev_type != rule_event_code(RuleEvent::Insert) {
+            continue;
+        }
+        for sql in split_stored_rule_action_sql(&row.ev_action) {
+            let statement = crate::backend::parser::parse_statement(sql)?;
+            let action = bind_rule_action_statement(&statement, &bound.desc, catalog)?;
+            if let BoundRuleAction::Insert(action) = action {
+                return Ok(Some(action));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn push_explain_insert_conflict_lines(bound: &BoundInsertStatement, lines: &mut Vec<String>) {
+    let Some(on_conflict) = bound.on_conflict.as_ref() else {
+        return;
+    };
+    match &on_conflict.action {
+        BoundOnConflictAction::Nothing => lines.push("  Conflict Resolution: NOTHING".into()),
+        BoundOnConflictAction::Update { predicate, .. } => {
+            lines.push("  Conflict Resolution: UPDATE".into());
+            if !on_conflict.arbiter_indexes.is_empty() {
+                lines.push(format!(
+                    "  Conflict Arbiter Indexes: {}",
+                    on_conflict
+                        .arbiter_indexes
+                        .iter()
+                        .map(|index| index.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if let Some(predicate) = predicate {
+                lines.push(format!(
+                    "  Conflict Filter: {}",
+                    render_insert_conflict_filter(bound, predicate)
+                ));
+            }
+        }
+    }
+}
+
+fn render_insert_conflict_filter(bound: &BoundInsertStatement, expr: &Expr) -> String {
+    let target_name = bound
+        .relation_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(&bound.relation_name);
+    let outer_names = bound
+        .desc
+        .columns
+        .iter()
+        .map(|column| format!("{target_name}.{}", column.name))
+        .collect::<Vec<_>>();
+    let inner_names = bound
+        .desc
+        .columns
+        .iter()
+        .map(|column| format!("excluded.{}", column.name))
+        .collect::<Vec<_>>();
+    let rendered = render_insert_conflict_expr(expr, target_name, &outer_names, &inner_names);
+    normalize_insert_conflict_bpchar_literals(&rendered, bound, target_name)
+}
+
+fn render_insert_conflict_expr(
+    expr: &Expr,
+    target_name: &str,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    match expr {
+        Expr::Var(var) if var.varno == OUTER_VAR && var.varattno == 0 => {
+            format!("{target_name}.*")
+        }
+        Expr::Var(var) if var.varno == INNER_VAR && var.varattno == 0 => "excluded.*".into(),
+        other if insert_conflict_expr_is_expanded_whole_row_neq(other) => {
+            format!("({target_name}.* <> excluded.*)")
+        }
+        Expr::Bool(bool_expr) if matches!(bool_expr.boolop, BoolExprType::And) => format!(
+            "({})",
+            bool_expr
+                .args
+                .iter()
+                .map(|arg| render_insert_conflict_expr(arg, target_name, outer_names, inner_names))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        ),
+        Expr::Op(op) if op.args.len() == 2 => {
+            let op_text = match op.op {
+                OpExprKind::Eq => "=",
+                OpExprKind::NotEq => "<>",
+                OpExprKind::Lt => "<",
+                OpExprKind::LtEq => "<=",
+                OpExprKind::Gt => ">",
+                OpExprKind::GtEq => ">=",
+                _ => {
+                    return crate::backend::executor::render_explain_join_expr(
+                        expr,
+                        outer_names,
+                        inner_names,
+                    );
+                }
+            };
+            format!(
+                "({} {op_text} {})",
+                render_insert_conflict_operand(
+                    &op.args[0],
+                    &op.args[1],
+                    target_name,
+                    outer_names,
+                    inner_names
+                ),
+                render_insert_conflict_operand(
+                    &op.args[1],
+                    &op.args[0],
+                    target_name,
+                    outer_names,
+                    inner_names
+                )
+            )
+        }
+        _ => crate::backend::executor::render_explain_join_expr(expr, outer_names, inner_names),
+    }
+}
+
+fn render_insert_conflict_operand(
+    expr: &Expr,
+    other: &Expr,
+    target_name: &str,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    if conflict_expr_type_is_bpchar(other)
+        && let Some(literal) = bpchar_literal_expr(expr)
+    {
+        return format!("{}::bpchar", quote_simple_sql_literal(&literal));
+    }
+    match expr {
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            render_insert_conflict_operand(inner, other, target_name, outer_names, inner_names)
+        }
+        Expr::Var(var) if var.varno == OUTER_VAR && var.varattno != 0 => attrno_index(var.varattno)
+            .and_then(|index| outer_names.get(index).cloned())
+            .unwrap_or_else(|| {
+                render_insert_conflict_expr(expr, target_name, outer_names, inner_names)
+            }),
+        Expr::Var(var) if var.varno == INNER_VAR && var.varattno != 0 => attrno_index(var.varattno)
+            .and_then(|index| inner_names.get(index).cloned())
+            .unwrap_or_else(|| {
+                render_insert_conflict_expr(expr, target_name, outer_names, inner_names)
+            }),
+        _ => render_insert_conflict_expr(expr, target_name, outer_names, inner_names),
+    }
+}
+
+fn bpchar_literal_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Const(value) => value.as_text().map(ToString::to_string),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => bpchar_literal_expr(inner),
+        _ => None,
+    }
+}
+
+fn conflict_expr_type_is_bpchar(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => matches!(var.vartype.kind, SqlTypeKind::Char),
+        Expr::Cast(_, ty) => matches!(ty.kind, SqlTypeKind::Char),
+        Expr::Collate { expr, .. } => conflict_expr_type_is_bpchar(expr),
+        _ => expr_sql_type_hint(expr).is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Char)),
+    }
+}
+
+fn quote_simple_sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn normalize_insert_conflict_bpchar_literals(
+    rendered: &str,
+    bound: &BoundInsertStatement,
+    target_name: &str,
+) -> String {
+    let mut normalized = rendered.to_string();
+    for column in &bound.desc.columns {
+        if !matches!(column.sql_type.kind, SqlTypeKind::Char) {
+            continue;
+        }
+        for qualifier in [target_name, "excluded"] {
+            let qualified = format!("{qualifier}.{}", column.name);
+            for op in ["<>", "="] {
+                normalized = normalize_bpchar_literal_comparison(&normalized, &qualified, op);
+            }
+        }
+    }
+    normalized
+}
+
+fn normalize_bpchar_literal_comparison(rendered: &str, qualified: &str, op: &str) -> String {
+    let prefix = format!("(({qualified}) {op} ('");
+    let suffix = "'::text))";
+    let mut remaining = rendered;
+    let mut out = String::new();
+    while let Some(start) = remaining.find(&prefix) {
+        out.push_str(&remaining[..start]);
+        let literal_start = start + prefix.len();
+        let after_prefix = &remaining[literal_start..];
+        let Some(end) = after_prefix.find(suffix) else {
+            out.push_str(&remaining[start..]);
+            return out;
+        };
+        let literal = &after_prefix[..end];
+        out.push_str(&format!(
+            "({qualified} {op} {}::bpchar)",
+            quote_simple_sql_literal(literal)
+        ));
+        remaining = &after_prefix[end + suffix.len()..];
+    }
+    out.push_str(remaining);
+    out
+}
+
+fn insert_conflict_expr_is_expanded_whole_row_neq(expr: &Expr) -> bool {
+    let Expr::Bool(bool_expr) = expr else {
+        return false;
+    };
+    if !matches!(bool_expr.boolop, BoolExprType::Or) || bool_expr.args.is_empty() {
+        return false;
+    }
+    bool_expr.args.iter().enumerate().all(|(index, arg)| {
+        let Expr::Op(op) = arg else {
+            return false;
+        };
+        if op.op != OpExprKind::NotEq || op.args.len() != 2 {
+            return false;
+        }
+        matches_conflict_column_var(&op.args[0], OUTER_VAR, index)
+            && matches_conflict_column_var(&op.args[1], INNER_VAR, index)
+    })
+}
+
+fn matches_conflict_column_var(expr: &Expr, varno: usize, index: usize) -> bool {
+    let Expr::Var(var) = expr else {
+        return false;
+    };
+    var.varno == varno && attrno_index(var.varattno) == Some(index)
+}
+
 #[derive(Clone)]
 struct ExplainRewriteRule {
     is_instead: bool,
@@ -2520,7 +2851,7 @@ fn explain_delete_index_cond(target: &BoundDeleteTarget) -> Option<String> {
 
 fn substitute_old_constants_for_explain(expr: &Expr, event_target: &BoundDeleteTarget) -> Expr {
     match expr {
-        Expr::Var(var) if var.varno == OUTER_VAR => {
+        Expr::Var(var) if matches!(var.varno, OUTER_VAR | RULE_OLD_VAR) => {
             explain_delete_target_constant(event_target, var.varattno)
                 .map(Expr::Const)
                 .unwrap_or_else(|| expr.clone())
@@ -9879,6 +10210,17 @@ pub(crate) fn execute_merge(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
+    if relation_has_active_user_rules(catalog, stmt.relation_oid, ctx.session_replication_role) {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot execute MERGE on relation \"{}\"",
+                stmt.relation_name
+            ),
+            detail: Some("MERGE is not supported for relations with rules.".into()),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
     let stmt = finalize_bound_merge(stmt, catalog);
     check_merge_privileges(&stmt, &stmt.input_plan, ctx)?;
     enforce_merge_publication_replica_identity(&stmt, catalog)?;
@@ -10068,6 +10410,32 @@ pub(crate) fn execute_merge(
     })();
     ctx.subplans = saved_subplans;
     result
+}
+
+fn relation_has_active_user_rules(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    session_replication_role: crate::backend::executor::SessionReplicationRole,
+) -> bool {
+    catalog
+        .rewrite_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| {
+            row.rulename != "_RETURN"
+                && match row.ev_enabled {
+                    'D' => false,
+                    'A' => true,
+                    'R' => {
+                        session_replication_role
+                            == crate::backend::executor::SessionReplicationRole::Replica
+                    }
+                    'O' => {
+                        session_replication_role
+                            != crate::backend::executor::SessionReplicationRole::Replica
+                    }
+                    _ => true,
+                }
+        })
 }
 
 fn eval_implicit_insert_defaults(
@@ -11959,24 +12327,33 @@ pub(crate) fn execute_insert_rows(
             });
         }
     }
-    for values in &inserted_rows {
-        crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
-            relation_name,
-            rel,
-            &relation_constraints.foreign_keys,
-            values,
-            crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
-            ctx,
-        )?;
-    }
-
-    if let Some(triggers) = &triggers {
-        if let Some(capture) = transition_capture.as_ref() {
-            triggers.after_transition_rows(capture, ctx)?;
-            triggers.after_statement(Some(capture), ctx)?;
-        } else {
-            triggers.after_statement(None, ctx)?;
+    let post_insert_result = (|| -> Result<(), ExecError> {
+        for values in &inserted_rows {
+            crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
+                relation_name,
+                rel,
+                &relation_constraints.foreign_keys,
+                values,
+                crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
+                ctx,
+            )?;
         }
+
+        if let Some(triggers) = &triggers {
+            if let Some(capture) = transition_capture.as_ref() {
+                triggers.after_transition_rows(capture, ctx)?;
+                triggers.after_statement(Some(capture), ctx)?;
+            } else {
+                triggers.after_statement(None, ctx)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(err) = post_insert_result {
+        for heap_tid in inserted_tids.iter().rev().copied() {
+            let _ = rollback_inserted_row(rel, toast, desc, heap_tid, ctx, xid);
+        }
+        return Err(err);
     }
 
     if returning.is_some() {

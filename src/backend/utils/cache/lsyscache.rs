@@ -5,7 +5,10 @@ use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
-use crate::backend::rewrite::{format_view_definition, relation_row_security_is_enabled_for_user};
+use crate::backend::rewrite::{
+    format_stored_rule_definition_with_catalog, format_view_definition,
+    relation_row_security_is_enabled_for_user,
+};
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
@@ -19,12 +22,12 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_archiver_rows,
-    build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows, build_pg_stat_database_rows,
-    build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
-    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows, build_pg_stat_wal_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
-    build_pg_views_rows_with_definition_formatter,
+    build_pg_rules_rows_with_definition_formatter, build_pg_stat_all_tables_rows,
+    build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows,
+    build_pg_stat_database_rows, build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows,
+    build_pg_stat_slru_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_stat_wal_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
+    build_pg_tables_rows, build_pg_views_rows_with_definition_formatter,
 };
 use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
@@ -2477,10 +2480,13 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
-        build_pg_rules_rows(
+        build_pg_rules_rows_with_definition_formatter(
             ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
             ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
             ensure_rewrite_rows(&self.db, self.client_id, self.txn_ctx),
+            |row, relation_name| {
+                format_stored_rule_definition_with_catalog(row, relation_name, self)
+            },
         )
     }
 

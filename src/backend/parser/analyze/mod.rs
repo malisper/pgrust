@@ -32,7 +32,9 @@ use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner_with_config;
-use crate::backend::rewrite::{format_view_definition, pg_rewrite_query};
+use crate::backend::rewrite::{
+    format_stored_rule_definition_with_catalog, format_view_definition, pg_rewrite_query,
+};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
@@ -76,9 +78,10 @@ static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stats_ext_exprs_rows, build_pg_stats_ext_rows,
-    build_pg_stats_rows, build_pg_tables_rows, build_pg_user_mappings_rows,
-    build_pg_views_rows_with_definition_formatter, current_pg_stat_progress_copy_rows,
+    build_pg_rules_rows_with_definition_formatter, build_pg_stats_ext_exprs_rows,
+    build_pg_stats_ext_rows, build_pg_stats_rows, build_pg_tables_rows,
+    build_pg_user_mappings_rows, build_pg_views_rows_with_definition_formatter,
+    current_pg_stat_progress_copy_rows,
 };
 use agg::*;
 use agg_output::*;
@@ -2614,10 +2617,13 @@ impl CatalogLookup for Catalog {
 
     fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
-        build_pg_rules_rows(
+        build_pg_rules_rows_with_definition_formatter(
             catcache.namespace_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
+            |row, relation_name| {
+                format_stored_rule_definition_with_catalog(row, relation_name, self)
+            },
         )
     }
 
@@ -6221,6 +6227,7 @@ pub(crate) fn delete_statement_references_table(stmt: &DeleteStatement, table_na
     stmt.with
         .iter()
         .any(|cte| cte_body_references_table(&cte.body, table_name))
+        || stmt.table_name.eq_ignore_ascii_case(table_name)
         || stmt
             .using
             .as_ref()

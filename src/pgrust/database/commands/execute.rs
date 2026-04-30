@@ -5,14 +5,15 @@ use crate::backend::executor::{
     execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
-    BoundCte, CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement,
-    ParseOptions, PreparedExternalParam, RuleEvent, SelectStatement, UpdateStatement,
-    bind_delete_with_outer_scopes_and_ctes, bind_insert_with_outer_scopes_and_ctes,
-    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes_and_ctes,
-    bound_cte_from_query_rows, cte_body_references_table, delete_statement_references_table,
-    insert_statement_references_table, merge_statement_references_table,
-    pg_plan_values_query_with_outer_scopes_and_ctes, plan_merge_with_outer_ctes,
-    resolve_raw_type_name, update_statement_references_table, with_external_param_types,
+    BoundCte, CatalogLookup, CommonTableExpr, CteBody, DeleteStatement, FromItem, InsertSource,
+    InsertStatement, ParseOptions, PreparedExternalParam, RuleEvent, SelectStatement,
+    UpdateStatement, bind_delete_with_outer_scopes_and_ctes,
+    bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope,
+    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_rows, cte_body_references_table,
+    delete_statement_references_table, insert_statement_references_table,
+    merge_statement_references_table, pg_plan_values_query_with_outer_scopes_and_ctes,
+    plan_merge_with_outer_ctes, resolve_raw_type_name, update_statement_references_table,
+    with_external_param_types,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::push_warning_with_hint;
@@ -369,7 +370,7 @@ fn reject_restricted_views_in_update(
 }
 
 fn reject_restricted_views_in_delete(
-    delete: &crate::backend::parser::DeleteStatement,
+    delete: &DeleteStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
     for cte in &delete.with {
@@ -3798,6 +3799,18 @@ impl Database {
                 .execute_create_rule_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterRuleRename(ref alter_stmt) => self
+                .execute_alter_rule_rename_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableRuleState(ref alter_stmt) => self
+                .execute_alter_table_rule_state_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
                     configured_search_path,
                 ),
             Statement::CreateTableAs(ref create_stmt) => self

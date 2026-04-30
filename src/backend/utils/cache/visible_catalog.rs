@@ -1,18 +1,18 @@
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::analyze::bound_index_relation_from_relcache_entry_with_heap_and_cache;
 use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
-use crate::backend::rewrite::format_view_definition;
+use crate::backend::rewrite::{format_stored_rule_definition_with_catalog, format_view_definition};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stat_activity_rows, build_pg_stat_all_tables_rows,
-    build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows,
-    build_pg_stat_database_rows, build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows,
-    build_pg_stat_slru_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_stat_wal_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
-    build_pg_tables_rows, build_pg_user_mappings_rows,
-    build_pg_views_rows_with_definition_formatter,
+    build_pg_rules_rows_with_definition_formatter, build_pg_stat_activity_rows,
+    build_pg_stat_all_tables_rows, build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows,
+    build_pg_stat_checkpointer_rows, build_pg_stat_database_rows, build_pg_stat_io_rows,
+    build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
+    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows, build_pg_stat_wal_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
+    build_pg_user_mappings_rows, build_pg_views_rows_with_definition_formatter,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PgAggregateRow, PgAmprocRow, PgAuthIdRow,
@@ -978,10 +978,13 @@ impl CatalogLookup for VisibleCatalog {
         let Some(catcache) = &self.catcache else {
             return Vec::new();
         };
-        build_pg_rules_rows(
+        build_pg_rules_rows_with_definition_formatter(
             catcache.namespace_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
+            |row, relation_name| {
+                format_stored_rule_definition_with_catalog(row, relation_name, self)
+            },
         )
     }
 

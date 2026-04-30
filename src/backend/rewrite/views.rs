@@ -74,6 +74,7 @@ struct ViewDeparseContext<'a> {
 struct ViewDeparseOptions {
     parenthesize_var_cast: bool,
     parenthesize_sql_json_passing_exprs: bool,
+    parenthesize_top_level_ops: bool,
 }
 
 impl<'a> ViewDeparseContext<'a> {
@@ -184,6 +185,36 @@ pub(crate) fn format_view_definition(
     relation_desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Result<String, ParseError> {
+    format_view_definition_with_options(
+        relation_oid,
+        relation_desc,
+        catalog,
+        ViewDeparseOptions::default(),
+    )
+}
+
+pub(crate) fn format_view_definition_unpretty(
+    relation_oid: u32,
+    relation_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<String, ParseError> {
+    format_view_definition_with_options(
+        relation_oid,
+        relation_desc,
+        catalog,
+        ViewDeparseOptions {
+            parenthesize_top_level_ops: true,
+            ..ViewDeparseOptions::default()
+        },
+    )
+}
+
+fn format_view_definition_with_options(
+    relation_oid: u32,
+    relation_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    options: ViewDeparseOptions,
+) -> Result<String, ParseError> {
     let display_name = view_display_name(relation_oid, None);
     if let Ok(row) = return_rule_row(catalog, relation_oid, &display_name) {
         if let Some(rendered) = format_rowtypes_composite_view_definition(&row.ev_action) {
@@ -195,7 +226,8 @@ pub(crate) fn format_view_definition(
         }
     }
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, &[])?;
-    Ok(render_view_query(&query, catalog))
+    let ctx = ViewDeparseContext::root_with_options(&query, catalog, options);
+    Ok(render_query(&ctx))
 }
 
 fn format_rowtypes_composite_view_definition(sql: &str) -> Option<String> {
@@ -269,6 +301,7 @@ pub(crate) fn render_relation_expr_sql_for_information_schema(
         ViewDeparseOptions {
             parenthesize_var_cast: true,
             parenthesize_sql_json_passing_exprs: true,
+            parenthesize_top_level_ops: false,
         },
     )
 }
@@ -463,6 +496,7 @@ fn validate_view_shape(
 ) -> Result<(), ParseError> {
     validate_view_function_target_columns(query, catalog)?;
     let actual_columns = query.columns();
+    let values_query = query_is_single_values_rte(query);
     if actual_columns.len() != relation_desc.columns.len() {
         if actual_columns.len() > relation_desc.columns.len()
             && prune_added_view_columns_by_name(query, &actual_columns, relation_desc)
@@ -480,6 +514,7 @@ fn validate_view_shape(
         .enumerate()
     {
         if actual_column.name != stored_column.name
+            && !values_query
             && !query
                 .columns()
                 .iter()
@@ -688,6 +723,14 @@ fn function_outputs_single_composite_column(output_columns: &[QueryColumn]) -> b
         && matches!(
             output_columns[0].sql_type.kind,
             SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+}
+
+fn query_is_single_values_rte(query: &Query) -> bool {
+    query.rtable.len() == 1
+        && matches!(
+            query.rtable.first().map(|rte| &rte.kind),
+            Some(RangeTblEntryKind::Values { .. })
         )
 }
 
@@ -973,7 +1016,58 @@ fn render_query(ctx: &ViewDeparseContext<'_>) -> String {
     if let Some(set_operation) = &ctx.query.set_operation {
         return render_set_operation_query(ctx, set_operation);
     }
+    if let Some(values_sql) = render_top_level_values_query(ctx) {
+        return values_sql;
+    }
     render_plain_query(ctx, None)
+}
+
+fn render_top_level_values_query(ctx: &ViewDeparseContext<'_>) -> Option<String> {
+    if ctx.query.distinct
+        || ctx.query.where_qual.is_some()
+        || !ctx.query.group_by.is_empty()
+        || ctx.query.having_qual.is_some()
+        || !ctx.query.sort_clause.is_empty()
+        || ctx.query.limit_count.is_some()
+        || ctx.query.limit_offset.is_some()
+        || ctx.query.locking_clause.is_some()
+        || ctx.query.rtable.len() != 1
+    {
+        return None;
+    }
+    let jointree = ctx.query.jointree.as_ref()?;
+    if !matches!(jointree, JoinTreeNode::RangeTblRef(1)) {
+        return None;
+    }
+    let rte = ctx.query.rtable.first()?;
+    let RangeTblEntryKind::Values { rows, .. } = &rte.kind else {
+        return None;
+    };
+    let visible_targets = ctx
+        .query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .collect::<Vec<_>>();
+    if visible_targets.len() != rte.desc.columns.len() {
+        return None;
+    }
+    for (index, (target, column)) in visible_targets
+        .iter()
+        .zip(rte.desc.columns.iter())
+        .enumerate()
+    {
+        let Expr::Var(var) = &target.expr else {
+            return None;
+        };
+        if var.varno != 1
+            || attrno_index(var.varattno) != Some(index)
+            || !target.name.eq_ignore_ascii_case(&column.name)
+        {
+            return None;
+        }
+    }
+    Some(format!(" VALUES {};", render_values_rows(rows, ctx)))
 }
 
 fn render_plain_query(ctx: &ViewDeparseContext<'_>, output_names: Option<&[String]>) -> String {
@@ -1006,7 +1100,12 @@ fn render_plain_query(ctx: &ViewDeparseContext<'_>, output_names: Option<&[Strin
         lines.push(format!("   FROM {}", render_from_node(ctx, jointree, 3)));
     }
     if let Some(where_qual) = &ctx.query.where_qual {
-        lines.push(format!("  WHERE {}", render_expr(where_qual, ctx)));
+        let rendered = if ctx.options.parenthesize_top_level_ops {
+            render_wrapped_expr(where_qual, ctx)
+        } else {
+            render_expr(where_qual, ctx)
+        };
+        lines.push(format!("  WHERE {rendered}"));
     }
     if !ctx.query.group_by.is_empty() || !ctx.query.grouping_sets.is_empty() {
         lines.push(format!("  GROUP BY {}", render_group_by_clause(ctx)));
@@ -1129,6 +1228,9 @@ fn render_target_entry(
         && matches!(&target.expr, Expr::Var(_) | Expr::FieldSelect { .. })
         && expr_output_name(&target.expr, ctx)
             .is_some_and(|name| name.eq_ignore_ascii_case(target_name));
+    if ctx.options.parenthesize_top_level_ops && matches!(target.expr, Expr::Op(_)) {
+        rendered = format!("({rendered})");
+    }
     if natural_output_matches && visible_source_count(ctx.query) == 1 && ctx.outers.is_empty() {
         quote_identifier_if_needed(target_name)
     } else if natural_output_matches
@@ -1182,6 +1284,9 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
             if *kind == JoinType::Cross && range_ref_is_sql_xml_table(ctx, right) {
                 let joined = format!("{left_sql},\n{}LATERAL {right_sql}", " ".repeat(indent + 1));
                 return append_join_alias(ctx, *rtindex, joined);
+            }
+            if *kind == JoinType::Cross {
+                return format!("{left_sql},\n{}{}", " ".repeat(indent + 2), right_sql);
             }
             let using_cols = ctx
                 .query
@@ -1382,8 +1487,39 @@ fn render_values_rte(
     rte: &RangeTblEntry,
     ctx: &ViewDeparseContext<'_>,
 ) -> String {
-    let rendered_rows = rows
-        .iter()
+    let rendered_rows = render_values_rows(rows, ctx);
+    let implicit_values_alias = rte.alias.as_deref() == Some("*VALUES*");
+    let mut rendered = if rte.alias.is_none() || implicit_values_alias {
+        format!("(VALUES {rendered_rows})")
+    } else {
+        format!("( VALUES {rendered_rows})")
+    };
+    if let Some(alias) = rte.alias.as_deref() {
+        rendered.push(' ');
+        rendered.push_str(&quote_identifier_if_needed(alias));
+        if let RangeTblEntryKind::Values { output_columns, .. } = &rte.kind {
+            let columns = rte
+                .desc
+                .columns
+                .iter()
+                .zip(output_columns.iter())
+                .filter_map(|(column, source)| {
+                    (!column.name.eq_ignore_ascii_case(&source.name))
+                        .then(|| quote_identifier_if_needed(&column.name))
+                })
+                .collect::<Vec<_>>();
+            if columns.len() == rte.desc.columns.len() && !columns.is_empty() {
+                rendered.push_str(&format!("({})", columns.join(", ")));
+            }
+        }
+    } else {
+        rendered.push_str(" \"*VALUES*\"");
+    }
+    rendered
+}
+
+fn render_values_rows(rows: &[Vec<Expr>], ctx: &ViewDeparseContext<'_>) -> String {
+    rows.iter()
         .map(|row| {
             format!(
                 "({})",
@@ -1394,22 +1530,7 @@ fn render_values_rte(
             )
         })
         .collect::<Vec<_>>()
-        .join(", ");
-    let mut rendered = format!("( VALUES {rendered_rows})");
-    if let Some(alias) = rte.alias.as_deref() {
-        rendered.push(' ');
-        rendered.push_str(&quote_identifier_if_needed(alias));
-        let columns = rte
-            .desc
-            .columns
-            .iter()
-            .map(|column| quote_identifier_if_needed(&column.name))
-            .collect::<Vec<_>>();
-        if !columns.is_empty() {
-            rendered.push_str(&format!("({})", columns.join(", ")));
-        }
-    }
-    rendered
+        .join(", ")
 }
 
 fn render_function_rte(
@@ -3594,7 +3715,12 @@ fn should_qualify_var(var: &Var, ctx: &ViewDeparseContext<'_>) -> bool {
     ctx.query
         .rtable
         .get(var.varno.saturating_sub(1))
-        .is_some_and(|rte| !matches!(rte.kind, RangeTblEntryKind::Relation { .. }))
+        .is_some_and(|rte| {
+            !matches!(
+                rte.kind,
+                RangeTblEntryKind::Relation { .. } | RangeTblEntryKind::Values { .. }
+            )
+        })
 }
 
 fn visible_source_count(query: &Query) -> usize {
@@ -3808,6 +3934,7 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::Substring => "substring",
         BuiltinScalarFunction::Overlay => "overlay",
         BuiltinScalarFunction::Reverse => "reverse",
+        BuiltinScalarFunction::Int4Smaller => "int4smaller",
         _ => "function",
     }
 }

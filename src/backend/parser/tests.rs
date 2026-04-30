@@ -11881,8 +11881,10 @@ fn parse_merge_statement() {
         stmt.when_clauses[1].action,
         MergeAction::Insert {
             columns: Some(ref columns),
+            overriding: None,
             source: MergeInsertSource::Values(ref values),
-        } if columns == &vec!["tid".to_string(), "balance".to_string()] && values.len() == 2
+        } if columns.iter().map(|column| column.column.as_str()).collect::<Vec<_>>() == vec!["tid", "balance"]
+            && values.len() == 2
     ));
     assert_eq!(
         stmt.when_clauses[2].match_kind,
@@ -11890,6 +11892,52 @@ fn parse_merge_statement() {
     );
     assert!(matches!(stmt.when_clauses[2].action, MergeAction::Delete));
     assert!(stmt.returning.is_empty());
+}
+
+#[test]
+fn parse_merge_insert_overriding_clause() {
+    let stmt = parse_statement(
+        "merge into target t using source s on t.tid = s.sid \
+         when not matched then insert (tid, balance) overriding user value values (s.sid, default)",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert!(matches!(
+        stmt.when_clauses[0].action,
+        MergeAction::Insert {
+            columns: Some(ref columns),
+            overriding: Some(OverridingKind::User),
+            source: MergeInsertSource::Values(ref values),
+            ..
+        } if columns.iter().map(|column| column.column.as_str()).collect::<Vec<_>>() == vec!["tid", "balance"]
+            && values.len() == 2
+    ));
+}
+
+#[test]
+fn parse_merge_insert_subscript_target() {
+    let stmt = parse_statement(
+        "merge into target t using source s on t.tid = s.sid \
+         when not matched then insert (filling[1], tid) values (s.sid, s.sid)",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert!(matches!(
+        stmt.when_clauses[0].action,
+        MergeAction::Insert {
+            columns: Some(ref columns),
+            ..
+        } if columns.len() == 2
+            && columns[0].column == "filling"
+            && columns[0].subscripts.len() == 1
+            && columns[1].column == "tid"
+    ));
 }
 
 #[test]
@@ -11904,6 +11952,28 @@ fn parse_merge_returning_clause() {
         other => panic!("expected merge statement, got {other:?}"),
     };
     assert_eq!(stmt.returning.len(), 4);
+}
+
+#[test]
+fn parse_merge_returning_with_old_new_aliases() {
+    let stmt = parse_statement(
+        "merge into target t using source s on t.tid = s.sid \
+         when matched then delete returning with (old as o, new as n) merge_action(), o.*, n.*",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert_eq!(stmt.returning.len(), 3);
+    assert!(matches!(
+        &stmt.returning[1].expr,
+        SqlExpr::Column(name) if name == "old.*"
+    ));
+    assert!(matches!(
+        &stmt.returning[2].expr,
+        SqlExpr::Column(name) if name == "new.*"
+    ));
 }
 
 #[test]
@@ -12057,6 +12127,7 @@ fn parse_create_rule_single_action() {
                     returning: vec![],
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
+                sql_position: Some(67),
             }],
         })
     );

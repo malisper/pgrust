@@ -186,7 +186,7 @@ pub(super) fn lookup_rule_relation_for_ddl(
     name: &str,
 ) -> Result<BoundRelation, ExecError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'v') => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => Ok(entry),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table or view",

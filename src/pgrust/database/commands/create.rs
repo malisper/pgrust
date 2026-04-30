@@ -4,9 +4,9 @@ use super::reloptions::normalize_create_table_reloptions;
 use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::analyze::{
-    ResolvedFunctionCall, bind_scalar_expr_in_scope, is_binary_coercible_type, is_collatable_type,
-    pg_plan_query_with_outer, pg_plan_values_query_with_outer, resolve_function_call,
-    with_external_param_types,
+    ResolvedFunctionCall, bind_delete, bind_insert, bind_scalar_expr_in_scope, bind_update,
+    is_binary_coercible_type, is_collatable_type, pg_plan_query_with_outer,
+    pg_plan_values_query_with_outer, plan_merge, resolve_function_call, with_external_param_types,
 };
 use crate::backend::parser::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
@@ -41,7 +41,8 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Expr, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
-    SqlJsonTableBehavior, SqlJsonTableColumnKind, SqlXmlTableColumnKind, Var, attrno_index,
+    SqlJsonTableBehavior, SqlJsonTableColumnKind, SqlXmlTableColumnKind, TargetEntry, Var,
+    attrno_index,
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::sequences::pg_sequence_row;
@@ -2301,6 +2302,20 @@ fn validate_sql_function_body_on_create(
     if sql_function_arg_type_is_polymorphic(prorettype) {
         return Ok(());
     }
+    if !matches!(create_stmt.body_kind, CreateFunctionBodyKind::As)
+        && sql_function_quoted_body_dml_returns_rows(&stmt)
+        && matches!(
+            create_stmt.return_spec,
+            CreateFunctionReturnSpec::Table(_)
+                | CreateFunctionReturnSpec::DerivedFromOutArgs { .. }
+        )
+    {
+        // :HACK: SQL-standard DML RETURNING bodies need the same broad
+        // acceptance PostgreSQL gives them here.  Full validation should reuse
+        // the statement-local SQL-function binding environment instead of
+        // planning the DML body as a top-level statement.
+        return Ok(());
+    }
     if matches!(create_stmt.body_kind, CreateFunctionBodyKind::As) {
         if sql_function_should_skip_quoted_body_return_validation(create_stmt, catalog, prorettype)
         {
@@ -2314,11 +2329,61 @@ fn validate_sql_function_body_on_create(
         }
     }
     let columns = match with_external_param_types(&external_param_types, || {
-        match &stmt {
-        Statement::Select(select) => pg_plan_query_with_outer(select, catalog, &outer_columns)
+        sql_function_final_statement_columns(&stmt, catalog, &outer_columns, prorettype)
+    }) {
+        Ok(columns) => Some(columns),
+        Err(err)
+            if matches!(create_stmt.body_kind, CreateFunctionBodyKind::As)
+                && sql_function_validation_error_is_undefined_routine(&err) =>
+        {
+            None
+        }
+        Err(err) => return Err(ExecError::Parse(err)),
+    };
+    let Some(columns) = columns else {
+        return Ok(());
+    };
+    if let Some(expected_columns) = sql_function_table_return_columns(create_stmt, catalog)? {
+        return validate_sql_function_table_return_columns(&columns, &expected_columns);
+    }
+    if columns.len() != 1 {
+        return Err(sql_function_return_column_count_error(catalog, prorettype));
+    }
+    let returned_type = columns[0].sql_type;
+    if !sql_function_return_type_compatible(catalog, returned_type, prorettype) {
+        return Err(sql_function_return_type_mismatch_error(
+            catalog,
+            prorettype,
+            returned_type,
+        ));
+    }
+    Ok(())
+}
+
+fn sql_function_final_statement_columns(
+    stmt: &Statement,
+    catalog: &dyn CatalogLookup,
+    outer_columns: &[(String, SqlType)],
+    prorettype: u32,
+) -> Result<Vec<QueryColumn>, ParseError> {
+    match stmt {
+        Statement::Select(select) => {
+            pg_plan_query_with_outer(select, catalog, outer_columns).map(|planned| planned.columns())
+        }
+        Statement::Values(values) => pg_plan_values_query_with_outer(values, catalog, outer_columns)
             .map(|planned| planned.columns()),
-        Statement::Values(values) => pg_plan_values_query_with_outer(&values, catalog, &outer_columns)
-            .map(|planned| planned.columns()),
+        Statement::Insert(insert) if !insert.returning.is_empty() => {
+            bind_insert(insert, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
+        }
+        Statement::Update(update) if !update.returning.is_empty() => {
+            bind_update(update, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
+        }
+        Statement::Delete(delete) if !delete.returning.is_empty() => {
+            bind_delete(delete, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
+        }
+        Statement::Merge(merge) if !merge.returning.is_empty() => {
+            plan_merge(merge, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
+        }
         _ => Err(match sql_function_final_statement_error(catalog, prorettype) {
             ExecError::Parse(err) => err,
             ExecError::DetailedError {
@@ -2346,29 +2411,71 @@ fn validate_sql_function_body_on_create(
             },
         }),
     }
-    }) {
-        Ok(columns) => Some(columns),
-        Err(err)
-            if matches!(create_stmt.body_kind, CreateFunctionBodyKind::As)
-                && sql_function_validation_error_is_undefined_routine(&err) =>
-        {
-            None
-        }
-        Err(err) => return Err(ExecError::Parse(err)),
+}
+
+fn target_entries_to_query_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+    targets
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| QueryColumn {
+            name: target.name.clone(),
+            sql_type: target.sql_type,
+            wire_type_oid: None,
+        })
+        .collect()
+}
+
+fn sql_function_table_return_columns(
+    create_stmt: &CreateFunctionStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Vec<QueryColumn>>, ExecError> {
+    let CreateFunctionReturnSpec::Table(columns) = &create_stmt.return_spec else {
+        return Ok(None);
     };
-    let Some(columns) = columns else {
-        return Ok(());
-    };
-    if columns.len() != 1 {
-        return Err(sql_function_return_column_count_error(catalog, prorettype));
+    let mut expected = Vec::with_capacity(columns.len());
+    for column in columns {
+        let sql_type = resolve_raw_type_name(&column.ty, catalog).map_err(ExecError::Parse)?;
+        expected.push(QueryColumn {
+            name: column.name.clone(),
+            sql_type,
+            wire_type_oid: None,
+        });
     }
-    let returned_type = columns[0].sql_type;
-    if !sql_function_return_type_compatible(catalog, returned_type, prorettype) {
-        return Err(sql_function_return_type_mismatch_error(
-            catalog,
-            prorettype,
-            returned_type,
-        ));
+    Ok(Some(expected))
+}
+
+fn validate_sql_function_table_return_columns(
+    actual: &[QueryColumn],
+    expected: &[QueryColumn],
+) -> Result<(), ExecError> {
+    if actual.len() != expected.len() {
+        return Err(ExecError::DetailedError {
+            message: "return type mismatch in function declared to return record".into(),
+            detail: Some(format!(
+                "Final statement returns {} columns instead of {}.",
+                actual.len(),
+                expected.len()
+            )),
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        if actual.sql_type.kind != expected.sql_type.kind
+            || actual.sql_type.is_array != expected.sql_type.is_array
+        {
+            return Err(ExecError::DetailedError {
+                message: "return type mismatch in function declared to return record".into(),
+                detail: Some(format!(
+                    "Final statement returns {} instead of {} at column {}.",
+                    format_sql_type_name(actual.sql_type),
+                    format_sql_type_name(expected.sql_type),
+                    index + 1
+                )),
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
     }
     Ok(())
 }

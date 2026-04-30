@@ -7,8 +7,8 @@ use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, FuncExpr,
     GroupingFuncExpr, GroupingKeyExpr, JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc,
     ScalarArrayOpExpr, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
-    SubLinkType, Var, WindowFuncExpr, WindowFuncKind, XmlExpr, set_returning_call_exprs,
-    user_attrno,
+    SubLinkType, Var, WindowFuncExpr, WindowFuncKind, XmlExpr, is_special_varno,
+    set_returning_call_exprs, user_attrno,
 };
 
 use super::{and_exprs, expr_relids, flatten_and_conjuncts, joininfo, relids_subset};
@@ -570,7 +570,9 @@ fn adjust_expr_for_pullup(expr: Expr, offset: usize, levels_to_parent: usize) ->
     Some(match expr {
         Expr::Var(mut var) => {
             if var.varlevelsup == 0 {
-                var.varno += offset;
+                if !is_special_varno(var.varno) {
+                    var.varno += offset;
+                }
             } else if var.varlevelsup <= levels_to_parent {
                 return None;
             } else if var.varlevelsup == levels_to_parent + 1 {

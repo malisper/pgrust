@@ -4,7 +4,8 @@ use super::pg_regex::{compile_pg_regex_predicate, pg_regex_is_match};
 use super::{ExecError, ExecutorContext};
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
-    BoolExprType, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExprKind, Var, attrno_index, is_special_varno,
+    BoolExprType, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExprKind, RULE_NEW_VAR, RULE_OLD_VAR, Var,
+    attrno_index, is_special_varno,
 };
 
 pub(crate) type CompiledPredicate =
@@ -272,6 +273,8 @@ enum FastVarSource {
     Outer(usize),
     Inner(usize),
     Index(usize),
+    RuleOld(usize),
+    RuleNew(usize),
 }
 
 fn regex_match_fast_path_parts(args: &[Expr]) -> Option<(FastVarSource, &str)> {
@@ -303,6 +306,8 @@ fn fast_var_source(var: &Var) -> Option<FastVarSource> {
         OUTER_VAR => Some(FastVarSource::Outer(index)),
         INNER_VAR => Some(FastVarSource::Inner(index)),
         INDEX_VAR => Some(FastVarSource::Index(index)),
+        RULE_OLD_VAR => Some(FastVarSource::RuleOld(index)),
+        RULE_NEW_VAR => Some(FastVarSource::RuleNew(index)),
         varno if !is_special_varno(varno) => Some(FastVarSource::Slot(index)),
         _ => None,
     }
@@ -334,6 +339,12 @@ fn fast_var_value<'a>(
         }
         FastVarSource::Index(index) => {
             bound_tuple_value("index", ctx.expr_bindings.index_tuple.as_ref(), index)
+        }
+        FastVarSource::RuleOld(index) => {
+            bound_tuple_value("rule old", ctx.expr_bindings.rule_old_tuple.as_ref(), index)
+        }
+        FastVarSource::RuleNew(index) => {
+            bound_tuple_value("rule new", ctx.expr_bindings.rule_new_tuple.as_ref(), index)
         }
     }
 }
