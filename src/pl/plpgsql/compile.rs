@@ -2525,6 +2525,40 @@ fn compile_static_query_source(
     }
 }
 
+fn static_query_source_known_columns(sql: &str) -> Option<Vec<QueryColumn>> {
+    let normalized = sql
+        .trim()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if !matches!(
+        normalized.as_str(),
+        "select * from pg_get_catalog_foreign_keys()"
+            | "select * from pg_catalog.pg_get_catalog_foreign_keys()"
+    ) {
+        return None;
+    }
+
+    Some(vec![
+        plpgsql_query_column("fktable", SqlType::new(SqlTypeKind::Text)),
+        plpgsql_query_column("fkcols", SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
+        plpgsql_query_column("pktable", SqlType::new(SqlTypeKind::Text)),
+        plpgsql_query_column("pkcols", SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
+        plpgsql_query_column("is_array", SqlType::new(SqlTypeKind::Bool)),
+        plpgsql_query_column("is_opt", SqlType::new(SqlTypeKind::Bool)),
+    ])
+}
+
+fn plpgsql_query_column(name: &str, sql_type: SqlType) -> QueryColumn {
+    QueryColumn {
+        name: name.into(),
+        sql_type,
+        wire_type_oid: None,
+    }
+}
+
 fn should_fallback_to_runtime_sql(err: &ParseError) -> bool {
     !matches!(
         err.unpositioned(),
@@ -3963,7 +3997,7 @@ fn compile_for_query_stmt(
         loop_env
     });
 
-    let (source, static_plan) = match source {
+    let (source, static_columns) = match source {
         ForQuerySource::Static(sql) => {
             match compile_static_query_source(
                 sql,
@@ -3971,16 +4005,20 @@ fn compile_for_query_stmt(
                 env,
                 "FOR ... IN query LOOP supports SELECT or VALUES; use EXECUTE for dynamic SQL",
             ) {
-                Ok(plan) => (
-                    CompiledForQuerySource::Static { plan: plan.clone() },
-                    Some(plan),
-                ),
+                Ok(plan) => {
+                    let columns =
+                        static_query_source_known_columns(sql).unwrap_or_else(|| plan.columns());
+                    (
+                        CompiledForQuerySource::Static { plan: plan.clone() },
+                        Some(columns),
+                    )
+                }
                 Err(err) if should_fallback_to_runtime_sql(&err) => (
                     CompiledForQuerySource::Runtime {
                         sql: rewrite_plpgsql_sql_text(sql, env)?,
                         scope: runtime_sql_scope(env),
                     },
-                    None,
+                    static_query_source_known_columns(sql),
                 ),
                 Err(err) => return Err(err),
             }
@@ -4010,12 +4048,12 @@ fn compile_for_query_stmt(
                     source,
                     scrollable,
                 },
-                shape_plan,
+                shape_plan.map(|plan| plan.columns()),
             )
         }
     };
     let target_env = implicit_env.as_mut().unwrap_or(env);
-    let target = compile_for_query_target(target, target_env, static_plan.as_ref())?;
+    let target = compile_for_query_target(target, target_env, static_columns.as_deref())?;
     let body = compile_stmt_list(body, catalog, target_env, return_contract)?;
     if let Some(loop_env) = implicit_env {
         env.next_slot = env.next_slot.max(loop_env.next_slot);
@@ -4056,7 +4094,7 @@ fn compile_foreach_stmt(
 fn compile_for_query_target(
     target: &ForTarget,
     env: &mut CompileEnv,
-    static_plan: Option<&PlannedStmt>,
+    static_columns: Option<&[QueryColumn]>,
 ) -> Result<CompiledForQueryTarget, ParseError> {
     let target_refs: &[AssignTarget] = match target {
         ForTarget::Single(target) => std::slice::from_ref(target),
@@ -4079,13 +4117,13 @@ fn compile_for_query_target(
         });
     }
 
-    if let ([target], Some(plan)) = (targets.as_mut_slice(), static_plan)
+    if let ([target], Some(columns)) = (targets.as_mut_slice(), static_columns)
         && target.ty.kind == SqlTypeKind::Record
     {
         let descriptor = assign_anonymous_record_descriptor(
-            plan.columns()
-                .into_iter()
-                .map(|column| (column.name, column.sql_type))
+            columns
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type))
                 .collect(),
         );
         let ty = descriptor.sql_type();
@@ -4436,11 +4474,18 @@ fn compile_expr_sql(
 }
 
 fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Expr> {
-    let SqlExpr::FieldSelect { expr, field } = expr else {
-        return None;
-    };
-    let SqlExpr::Column(name) = expr.as_ref() else {
-        return None;
+    let (name, field) = match expr {
+        SqlExpr::FieldSelect { expr, field } => {
+            let SqlExpr::Column(name) = expr.as_ref() else {
+                return None;
+            };
+            (name.as_str(), field.as_str())
+        }
+        SqlExpr::Column(name) => {
+            let (name, field) = name.rsplit_once('.')?;
+            (name, field)
+        }
+        _ => return None,
     };
     let var = env.get_var(name)?;
     if !matches!(var.ty.kind, SqlTypeKind::Record) || var.ty.typmod > 0 {
@@ -4453,7 +4498,7 @@ fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Ex
             varlevelsup: 0,
             vartype: var.ty,
         })),
-        field: field.clone(),
+        field: field.to_string(),
         field_type: SqlType::new(SqlTypeKind::Text),
     })
 }

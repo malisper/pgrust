@@ -1444,6 +1444,10 @@ fn hash_index_gettuple_supported(index: &BoundIndexRelation) -> bool {
         })
 }
 
+fn access_method_supports_full_index_scan(index: &BoundIndexRelation) -> bool {
+    index.index_meta.am_oid != HASH_AM_OID && access_method_supports_index_scan_for_index(index)
+}
+
 fn access_method_supports_bitmap_scan(am_oid: u32) -> bool {
     crate::backend::access::index::amapi::index_am_handler(am_oid)
         .is_some_and(|routine| routine.amgetbitmap.is_some())
@@ -2282,7 +2286,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.is_none()
             && full_index_only_scan
-            && access_method_supports_index_scan_for_index(index)
+            && access_method_supports_full_index_scan(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2306,7 +2310,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.as_ref().is_some_and(expr_contains_subplan)
             && target_index_only
-            && access_method_supports_index_scan_for_index(index)
+            && access_method_supports_full_index_scan(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2332,7 +2336,7 @@ fn collect_relation_access_paths(
             && filter.is_some()
             && !has_index_spec
             && predicate_implies_index_predicate(filter.as_ref(), index.index_predicate.as_ref())
-            && access_method_supports_index_scan_for_index(index)
+            && access_method_supports_full_index_scan(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -5809,7 +5813,7 @@ fn path_tie_breaker_prefers(
         cross_function_join_left_relid(right),
     ) && left_relid != right_relid
     {
-        return left_relid > right_relid;
+        return left_relid < right_relid;
     }
     if let (Some(left_relids), Some(right_relids)) = (
         cross_join_left_relid_count(left),

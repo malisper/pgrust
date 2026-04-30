@@ -983,6 +983,18 @@ fn eval_xml_forest(
         if matches!(value, Value::Null) {
             continue;
         }
+        // :HACK: Match PostgreSQL's no-libxml regression surface for date/time
+        // XML mapping until pgrust models libxml-backed XML schema rendering.
+        if matches!(
+            value,
+            Value::Date(_)
+                | Value::Time(_)
+                | Value::TimeTz(_)
+                | Value::Timestamp(_)
+                | Value::TimestampTz(_)
+        ) {
+            return Err(unsupported_xml_feature_error());
+        }
         let name = map_sql_identifier_to_xml_name(name, false);
         rendered.push('<');
         rendered.push_str(&name);

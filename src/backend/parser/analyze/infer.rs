@@ -1,4 +1,4 @@
-use super::expr::resolve_bound_field_select_type;
+use super::expr::{power_operator_result_type, resolve_bound_field_select_type};
 use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::multiranges::infer_multirange_special_expr_type_with_ctes;
 use super::ranges::infer_range_special_expr_type_with_ctes;
@@ -13,6 +13,15 @@ use crate::backend::utils::record::{
 use crate::include::catalog::{UNKNOWN_TYPE_OID, range_type_ref_for_sql_type};
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
+
+fn explicit_numeric_power_arg(arg: &SqlExpr, catalog: &dyn CatalogLookup) -> bool {
+    matches!(
+        arg,
+        SqlExpr::Cast(_, raw_type)
+            if resolve_raw_type_name(raw_type, catalog)
+                .is_ok_and(|ty| matches!(ty.kind, SqlTypeKind::Numeric))
+    )
+}
 
 fn array_subscript_element_type(array_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
     if let Some(domain_element) = domain_over_array_element_type(array_type, catalog) {
@@ -616,6 +625,12 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 ctes,
             );
             match op.as_str() {
+                "^" => {
+                    let left_type = coerce_unknown_string_literal_type(left, left_type, right_type);
+                    let right_type =
+                        coerce_unknown_string_literal_type(right, right_type, left_type);
+                    power_operator_result_type(left, left_type, right, right_type, catalog)
+                }
                 "@@" => SqlType::new(SqlTypeKind::Bool),
                 "||" if matches!(left_type.element_type().kind, SqlTypeKind::TsVector)
                     && matches!(right_type.element_type().kind, SqlTypeKind::TsVector) =>
@@ -1629,7 +1644,18 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         (Some(left), Some(right))
                             if is_numeric_family(left) && is_numeric_family(right) =>
                         {
-                            SqlType::new(SqlTypeKind::Numeric)
+                            if args
+                                .args()
+                                .first()
+                                .is_some_and(|arg| explicit_numeric_power_arg(&arg.value, catalog))
+                                || args.args().get(1).is_some_and(|arg| {
+                                    explicit_numeric_power_arg(&arg.value, catalog)
+                                })
+                            {
+                                SqlType::new(SqlTypeKind::Numeric)
+                            } else {
+                                SqlType::new(SqlTypeKind::Float8)
+                            }
                         }
                         _ => SqlType::new(SqlTypeKind::Float8),
                     }

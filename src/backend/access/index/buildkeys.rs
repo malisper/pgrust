@@ -158,6 +158,7 @@ impl IndexBuildKeyProjector {
                 stats: expr_ctx.stats.clone(),
                 session_stats: expr_ctx.session_stats.clone(),
                 snapshot: ctx.snapshot.clone(),
+                write_xid_override: None,
                 transaction_state: None,
                 client_id: ctx.client_id,
                 current_database_name: expr_ctx.current_database_name.clone(),

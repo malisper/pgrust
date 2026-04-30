@@ -1903,6 +1903,20 @@ impl PlanNode for UniqueState {
     }
 }
 
+fn display_scan_relation_name(relation_name: &str) -> &str {
+    let relation_name = relation_name
+        .rsplit_once(' ')
+        .map(|(name, _)| name)
+        .unwrap_or(relation_name);
+    if let Some((schema, name)) = relation_name.split_once('.')
+        && (schema.eq_ignore_ascii_case("pg_temp")
+            || schema.to_ascii_lowercase().starts_with("pg_temp_"))
+    {
+        return name;
+    }
+    relation_name
+}
+
 impl PlanNode for SeqScanState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -2211,7 +2225,10 @@ impl PlanNode for SeqScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        format!("Seq Scan on {}", self.relation_name)
+        format!(
+            "Seq Scan on {}",
+            display_scan_relation_name(&self.relation_name)
+        )
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
         self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);

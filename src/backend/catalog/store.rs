@@ -402,6 +402,7 @@ mod tests {
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot,
+            write_xid_override: None,
             transaction_state: None,
             client_id: 0,
             current_database_name: "postgres".to_string(),

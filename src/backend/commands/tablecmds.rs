@@ -4827,7 +4827,7 @@ pub(crate) fn build_index_insert_context(
         txn_waiter: ctx.txn_waiter.clone(),
         client_id: ctx.client_id,
         interrupts: ctx.interrupts.clone(),
-        snapshot: ctx.snapshot.clone(),
+        snapshot: ctx.write_snapshot(),
         heap_relation: heap_rel,
         heap_desc: index.desc.clone(),
         index_relation: index.rel,

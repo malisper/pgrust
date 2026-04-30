@@ -505,7 +505,6 @@ fn validate_view_shape(
     display_name: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {
-    validate_view_function_target_columns(query, catalog)?;
     let actual_columns = query.columns();
     let values_query = query_is_single_values_rte(query);
     if actual_columns.len() != relation_desc.columns.len() {
@@ -519,6 +518,29 @@ fn validate_view_shape(
             actual: format!("stale view definition for {display_name}"),
         });
     }
+    for (index, (actual_column, stored_column)) in actual_columns
+        .into_iter()
+        .zip(relation_desc.columns.iter())
+        .enumerate()
+    {
+        if actual_column.sql_type != stored_column.sql_type {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "attribute {} of type record has wrong type",
+                    index.saturating_add(1)
+                ),
+                detail: Some(format!(
+                    "Table has type {}, but query expects {}.",
+                    sql_type_name(actual_column.sql_type),
+                    sql_type_name(stored_column.sql_type)
+                )),
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+    }
+    validate_view_function_target_columns(query, catalog)?;
+    let actual_columns = query.columns();
     for (index, (actual_column, stored_column)) in actual_columns
         .into_iter()
         .zip(relation_desc.columns.iter())
@@ -547,21 +569,6 @@ fn validate_view_shape(
                 detail: None,
                 hint: None,
                 sqlstate: "42703",
-            });
-        }
-        if actual_column.sql_type != stored_column.sql_type {
-            return Err(ParseError::DetailedError {
-                message: format!(
-                    "attribute {} of type record has wrong type",
-                    index.saturating_add(1)
-                ),
-                detail: Some(format!(
-                    "Table has type {}, but query expects {}.",
-                    sql_type_name(actual_column.sql_type),
-                    sql_type_name(stored_column.sql_type)
-                )),
-                hint: None,
-                sqlstate: "42804",
             });
         }
         if let Some(target) = query.target_list.get_mut(index) {
@@ -660,6 +667,23 @@ fn validate_view_user_function_column(
     else {
         return Ok(());
     };
+    if let Some((attr_index, actual_type, expected_type)) =
+        composite_output_attr_type_mismatch(&relation.desc, output_columns, target_index)
+    {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "attribute {} of type record has wrong type",
+                attr_index.saturating_add(1)
+            ),
+            detail: Some(format!(
+                "Table has type {}, but query expects {}.",
+                sql_type_name(actual_type),
+                sql_type_name(expected_type)
+            )),
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
     let Some(dropped_index) =
         missing_composite_output_attr_index(&relation.desc, output_columns, target_index)
     else {
@@ -674,6 +698,32 @@ fn validate_view_user_function_column(
         hint: None,
         sqlstate: "42703",
     })
+}
+
+fn composite_output_attr_type_mismatch(
+    desc: &RelationDesc,
+    expected_columns: &[QueryColumn],
+    target_index: usize,
+) -> Option<(usize, SqlType, SqlType)> {
+    let mut cursor = 0usize;
+    for (index, expected) in expected_columns.iter().enumerate() {
+        if let Some(found) = find_live_column_at_or_after(desc, expected, cursor) {
+            cursor = found.saturating_add(1);
+            continue;
+        }
+        if index == target_index
+            && let Some(column) = desc
+                .columns
+                .iter()
+                .skip(cursor)
+                .find(|column| !column.dropped && column.name == expected.name)
+            && column.sql_type != expected.sql_type
+        {
+            return Some((index, column.sql_type, expected.sql_type));
+        }
+        return None;
+    }
+    None
 }
 
 fn missing_composite_output_attr_index(

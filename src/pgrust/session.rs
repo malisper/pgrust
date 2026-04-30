@@ -3382,8 +3382,6 @@ impl Session {
         // :HACK: PL/pgSQL DO still binds static SQL before its body can refresh
         // catalog state. Install the current transaction snapshot for compile
         // so anonymous blocks see same-transaction DDL from earlier statements.
-        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
-        let search_path = self.configured_search_path();
         let snapshot = self.snapshot_for_command(db, xid, cid)?;
         if snapshot.current_xid != INVALID_TRANSACTION_ID {
             crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
@@ -3397,9 +3395,7 @@ impl Session {
             .active_txn
             .as_ref()
             .is_none_or(|txn| !txn.isolation_level.uses_transaction_snapshot());
-        let txn_ctx =
-            (snapshot.current_xid != INVALID_TRANSACTION_ID).then_some((snapshot.current_xid, cid));
-        let catalog = db.lazy_catalog_lookup(self.client_id, txn_ctx, search_path.as_deref());
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
         let deferred_foreign_keys = self
             .active_txn
             .as_ref()
@@ -3585,6 +3581,7 @@ impl Session {
             stats: Arc::clone(&db.stats),
             session_stats: Arc::clone(&self.stats_state),
             snapshot,
+            write_xid_override: None,
             transaction_state,
             client_id: self.client_id,
             current_database_name: db.current_database_name(),

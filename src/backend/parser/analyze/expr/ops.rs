@@ -32,8 +32,20 @@ pub(super) fn bind_arithmetic_expr(
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
-    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let mut left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let mut right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if matches!(make, OpExprKind::Eq | OpExprKind::NotEq) {
+        if comparison_string_literal_expr(left)
+            && (right_type.is_range() || right_type.is_multirange())
+        {
+            left_type = right_type;
+        }
+        if comparison_string_literal_expr(right)
+            && (left_type.is_range() || left_type.is_multirange())
+        {
+            right_type = left_type;
+        }
+    }
     let right_is_string_literal = matches!(
         right,
         SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
@@ -821,6 +833,13 @@ pub(super) fn bind_comparison_expr(
         left_explicit_collation,
         right_explicit_collation,
         catalog,
+    )
+}
+
+fn comparison_string_literal_expr(expr: &SqlExpr) -> bool {
+    matches!(
+        expr,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
     )
 }
 

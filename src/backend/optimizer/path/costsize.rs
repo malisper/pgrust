@@ -1298,7 +1298,10 @@ fn try_optimize_access_subtree(
             index,
             config.retain_partial_index_filters,
         ) else {
-            if !config.enable_seqscan && order_items.is_none() {
+            if !config.enable_seqscan
+                && order_items.is_none()
+                && access_method_supports_full_index_scan(index.index_meta.am_oid)
+            {
                 let candidate = estimate_index_candidate(
                     source_id,
                     rel,
@@ -1350,6 +1353,10 @@ fn try_optimize_access_subtree(
 
 fn relation_uses_virtual_scan(relation_oid: u32) -> bool {
     relation_oid == PG_LARGEOBJECT_METADATA_RELATION_OID
+}
+
+fn access_method_supports_full_index_scan(am_oid: u32) -> bool {
+    am_oid != HASH_AM_OID
 }
 
 pub(super) fn relation_stats(
@@ -10628,6 +10635,21 @@ fn build_hash_index_keys(
     parsed_quals: &[IndexableQual],
 ) -> (Vec<IndexScanKey>, Vec<usize>) {
     if index_key_count(index) != 1 {
+        return (Vec::new(), Vec::new());
+    }
+    // :HACK: Hash scans over multirange keys can miss semantically equal
+    // numeric multirange values because the current hash support is not fully
+    // canonicalized with range equality. Prefer the heap scan until the hash
+    // support function matches PostgreSQL's multirange hash semantics.
+    if parsed_quals.iter().any(|qual| {
+        expr_sql_type(&qual.key_expr).is_multirange()
+            || index_argument_sql_type(&qual.argument).is_some_and(SqlType::is_multirange)
+    }) || index
+        .index_meta
+        .indclass
+        .iter()
+        .any(|opclass| *opclass == crate::include::catalog::MULTIRANGE_HASH_OPCLASS_OID)
+    {
         return (Vec::new(), Vec::new());
     }
     let Some((qual_idx, key)) = parsed_quals
