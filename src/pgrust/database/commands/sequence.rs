@@ -1,5 +1,9 @@
 use super::super::*;
+use crate::backend::executor::expr_reg::format_regprocedure_oid_optional;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SequenceOwnedByClause};
+use crate::include::catalog::{
+    DEPENDENCY_NORMAL, INT8_TYPE_OID, PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID,
+};
 use crate::pgrust::database::ddl::{ensure_relation_owner, relation_kind_name};
 use crate::pgrust::database::sequences::{
     apply_sequence_option_patch, initial_sequence_state, pg_sequence_row,
@@ -160,6 +164,28 @@ fn find_sequence_type_relation_refs(
             .or_insert(display_name);
     }
     refs.into_iter().collect()
+}
+
+fn find_sequence_function_dependents(catalog: &dyn CatalogLookup, sequence_oid: u32) -> Vec<u32> {
+    let mut oids = catalog
+        .depend_rows()
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_PROC_RELATION_OID
+                && row.objsubid == 0
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == sequence_oid
+                && row.deptype == DEPENDENCY_NORMAL
+        })
+        .filter_map(|row| {
+            catalog
+                .proc_row_by_oid(row.objid)
+                .map(|proc_row| proc_row.oid)
+        })
+        .collect::<Vec<_>>();
+    oids.sort_unstable();
+    oids.dedup();
+    oids
 }
 
 impl Database {
@@ -571,7 +597,11 @@ impl Database {
 
             let refs = find_sequence_default_refs(&catalog, relation.relation_oid);
             let type_refs = find_sequence_type_relation_refs(&catalog, relation.relation_oid);
-            if (!refs.is_empty() || !type_refs.is_empty()) && !drop_stmt.cascade {
+            let function_dependents =
+                find_sequence_function_dependents(&catalog, relation.relation_oid);
+            if (!refs.is_empty() || !type_refs.is_empty() || !function_dependents.is_empty())
+                && !drop_stmt.cascade
+            {
                 let mut dependents = refs
                     .iter()
                     .map(|(relation_oid, column_name)| {
@@ -585,6 +615,10 @@ impl Database {
                     })
                     .collect::<Vec<_>>();
                 dependents.extend(type_refs.iter().map(|(_, name)| name.clone()));
+                dependents.extend(function_dependents.iter().filter_map(|oid| {
+                    format_regprocedure_oid_optional(*oid, Some(&catalog))
+                        .map(|name| format!("function {name}"))
+                }));
                 result = Err(ExecError::DetailedError {
                     message: format!(
                         "cannot drop sequence {} because other objects depend on it",
@@ -649,6 +683,54 @@ impl Database {
                 }
                 if result.is_err() {
                     break;
+                }
+                match function_dependents.as_slice() {
+                    [] => {}
+                    [oid] => {
+                        if let Some(name) = format_regprocedure_oid_optional(*oid, Some(&catalog)) {
+                            crate::backend::utils::misc::notices::push_notice(format!(
+                                "drop cascades to function {name}"
+                            ));
+                        }
+                    }
+                    oids => {
+                        let detail = oids
+                            .iter()
+                            .filter_map(|oid| {
+                                format_regprocedure_oid_optional(*oid, Some(&catalog))
+                                    .map(|name| format!("drop cascades to function {name}"))
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        crate::backend::utils::misc::notices::push_notice_with_detail(
+                            format!("drop cascades to {} other objects", oids.len()),
+                            detail,
+                        );
+                    }
+                }
+                let mut next_cid = cid;
+                for proc_oid in function_dependents {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: next_cid,
+                        client_id,
+                        waiter: Some(self.txn_waiter.clone()),
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .drop_proc_by_oid_mvcc(proc_oid, &ctx)
+                        .map(|(_, effect)| effect)
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                    self.session_stats_state(client_id)
+                        .write()
+                        .note_function_drop(proc_oid, &self.stats);
+                    next_cid = next_cid.saturating_add(1);
                 }
             }
 

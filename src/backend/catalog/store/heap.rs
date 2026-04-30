@@ -1168,7 +1168,16 @@ impl CatalogStore {
 
     pub fn create_proc_mvcc(
         &mut self,
+        row: PgProcRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        self.create_proc_mvcc_with_extra_depends(row, Vec::new(), ctx)
+    }
+
+    pub fn create_proc_mvcc_with_extra_depends(
+        &mut self,
         mut row: PgProcRow,
+        mut extra_depends: Vec<PgDependRow>,
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         row.oid = self.allocate_next_oid(row.oid)?;
@@ -1176,15 +1185,24 @@ impl CatalogStore {
         if let Some(all_arg_types) = &row.proallargtypes {
             referenced_type_oids.extend(all_arg_types.iter().copied());
         }
+        for depend in &mut extra_depends {
+            depend.classid = PG_PROC_RELATION_OID;
+            depend.objid = row.oid;
+            depend.objsubid = 0;
+        }
+        let mut depends = proc_depend_rows(
+            row.oid,
+            row.pronamespace,
+            row.prorettype,
+            &referenced_type_oids,
+        );
+        depends.extend(extra_depends);
+        sort_pg_depend_rows(&mut depends);
+        depends.dedup();
         let kinds = [BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend];
         let rows = PhysicalCatalogRows {
             procs: vec![row.clone()],
-            depends: proc_depend_rows(
-                row.oid,
-                row.pronamespace,
-                row.prorettype,
-                &referenced_type_oids,
-            ),
+            depends,
             ..PhysicalCatalogRows::default()
         };
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
@@ -1986,21 +2004,22 @@ impl CatalogStore {
     pub fn replace_proc_mvcc(
         &mut self,
         old_row: &PgProcRow,
-        mut row: PgProcRow,
+        row: PgProcRow,
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
-        let mut old_referenced_type_oids = parse_proc_argtype_oids(&old_row.proargtypes);
-        if let Some(all_arg_types) = &old_row.proallargtypes {
-            old_referenced_type_oids.extend(all_arg_types.iter().copied());
-        }
+        self.replace_proc_mvcc_with_extra_depends(old_row, row, Vec::new(), ctx)
+    }
+
+    pub fn replace_proc_mvcc_with_extra_depends(
+        &mut self,
+        old_row: &PgProcRow,
+        mut row: PgProcRow,
+        mut extra_depends: Vec<PgDependRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         let old_rows = PhysicalCatalogRows {
             procs: vec![old_row.clone()],
-            depends: proc_depend_rows(
-                old_row.oid,
-                old_row.pronamespace,
-                old_row.prorettype,
-                &old_referenced_type_oids,
-            ),
+            depends: depend_rows_for_object_mvcc(self, ctx, PG_PROC_RELATION_OID, old_row.oid)?,
             ..PhysicalCatalogRows::default()
         };
         let kinds = [BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend];
@@ -2011,14 +2030,23 @@ impl CatalogStore {
         if let Some(all_arg_types) = &row.proallargtypes {
             referenced_type_oids.extend(all_arg_types.iter().copied());
         }
+        for depend in &mut extra_depends {
+            depend.classid = PG_PROC_RELATION_OID;
+            depend.objid = row.oid;
+            depend.objsubid = 0;
+        }
+        let mut depends = proc_depend_rows(
+            row.oid,
+            row.pronamespace,
+            row.prorettype,
+            &referenced_type_oids,
+        );
+        depends.extend(extra_depends);
+        sort_pg_depend_rows(&mut depends);
+        depends.dedup();
         let new_rows = PhysicalCatalogRows {
             procs: vec![row.clone()],
-            depends: proc_depend_rows(
-                row.oid,
-                row.pronamespace,
-                row.prorettype,
-                &referenced_type_oids,
-            ),
+            depends,
             ..PhysicalCatalogRows::default()
         };
         insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
@@ -2212,10 +2240,6 @@ impl CatalogStore {
     ) -> Result<(PgProcRow, CatalogMutationEffect), CatalogError> {
         let proc_row = proc_row_by_oid_mvcc(self, ctx, proc_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(proc_oid.to_string()))?;
-        let mut referenced_type_oids = parse_proc_argtype_oids(&proc_row.proargtypes);
-        if let Some(all_arg_types) = &proc_row.proallargtypes {
-            referenced_type_oids.extend(all_arg_types.iter().copied());
-        }
         let aggregate_row = aggregate_row_by_fnoid_mvcc(self, ctx, proc_oid)?;
         let mut kinds = vec![BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend];
         if aggregate_row.is_some() {
@@ -2231,25 +2255,12 @@ impl CatalogStore {
             &PhysicalCatalogRows {
                 procs: vec![proc_row.clone()],
                 aggregates: aggregate_row.clone().into_iter().collect(),
-                depends: aggregate_row
-                    .as_ref()
-                    .map(|agg| {
-                        aggregate_depend_rows(
-                            proc_row.oid,
-                            proc_row.pronamespace,
-                            proc_row.prorettype,
-                            &referenced_type_oids,
-                            agg,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        proc_depend_rows(
-                            proc_row.oid,
-                            proc_row.pronamespace,
-                            proc_row.prorettype,
-                            &referenced_type_oids,
-                        )
-                    }),
+                depends: depend_rows_for_object_mvcc(
+                    self,
+                    ctx,
+                    PG_PROC_RELATION_OID,
+                    proc_row.oid,
+                )?,
                 descriptions: description_rows,
                 ..PhysicalCatalogRows::default()
             },

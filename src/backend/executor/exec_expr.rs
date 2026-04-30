@@ -133,6 +133,7 @@ use super::{
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_next_visible,
 };
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::object_address::{
     ObjectAddress, ObjectAddressError, get_object_address, identify_object,
@@ -143,7 +144,10 @@ use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
     jsonb_from_value, parse_json_text_input,
 };
-use crate::backend::parser::analyze::is_binary_coercible_type;
+use crate::backend::parser::analyze::{
+    analyze_select_query_with_outer, is_binary_coercible_type, scope_for_relation,
+    with_external_param_types,
+};
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec,
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind,
@@ -1231,8 +1235,18 @@ fn function_definition_text(
     {
         return format!("{signature}\n {body}\n");
     }
-    if let Some(body) = sql_standard_function_body(&proc_row.prosrc) {
-        return format!("{signature}\n{body}\n");
+    if proc_row.prokind == 'f'
+        && proc_row
+            .prosrc
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("begin atomic")
+        && let Some(body) = format_sql_standard_procedure_body(proc_row, catalog)
+    {
+        return format!("{signature}\n {body}\n");
+    }
+    if let Some(body) = format_sql_standard_return_body(proc_row, catalog) {
+        return format!("{signature}\n {body}\n");
     }
     let tag = if proc_row.prokind == 'p' {
         "$procedure$"
@@ -1240,6 +1254,9 @@ fn function_definition_text(
         "$function$"
     };
     let body = proc_row.prosrc.trim().replace(tag, &format!("{tag} "));
+    if !body.contains('\n') {
+        return format!("{signature}\nAS {tag}{body}{tag}\n");
+    }
     format!("{signature}\nAS {tag}\n{body}\n{tag}\n")
 }
 
@@ -1293,6 +1310,21 @@ fn sql_standard_function_body(body: &str) -> Option<String> {
         .then(|| trimmed.trim_end_matches(';').trim_end().to_string())
 }
 
+fn format_sql_standard_return_body(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let body = sql_standard_function_body(&proc_row.prosrc)?;
+    let lower = body.to_ascii_lowercase();
+    if !lower.starts_with("return ") {
+        return Some(body);
+    }
+    let expr_sql = replace_sql_standard_body_params(body["return".len()..].trim(), proc_row);
+    let rendered =
+        render_sql_standard_select_expr(&format!("SELECT {expr_sql}"), proc_row, catalog)?;
+    Some(format!("RETURN {rendered}"))
+}
+
 fn sql_standard_procedure_body(body: &str) -> Option<&str> {
     body.trim_start()
         .to_ascii_lowercase()
@@ -1319,8 +1351,13 @@ fn format_sql_standard_procedure_body(
     let inner = sql_standard_procedure_body_inner(&proc_row.prosrc)?;
     let mut lines = vec!["BEGIN ATOMIC".to_string()];
     for statement in split_sql_standard_body_statements_for_display(inner) {
+        let statement = replace_sql_standard_body_params(&statement, proc_row);
         if let Some(insert) = format_sql_standard_insert_statement(&statement, proc_row, catalog) {
             lines.extend(insert.lines().map(str::to_string));
+        } else if let Some(select) =
+            format_sql_standard_select_statement(&statement, proc_row, catalog)
+        {
+            lines.extend(select.lines().map(str::to_string));
         } else {
             lines.push(format!("  {};", statement.trim().trim_end_matches(';')));
         }
@@ -1343,6 +1380,10 @@ fn format_sql_standard_insert_statement(
     catalog: &dyn CatalogLookup,
 ) -> Option<String> {
     let trimmed = statement.trim().trim_end_matches(';').trim();
+    if let Some(rendered) = format_sql_standard_insert_select_statement(trimmed, proc_row, catalog)
+    {
+        return Some(rendered);
+    }
     let lower = trimmed.to_ascii_lowercase();
     let rest = lower
         .starts_with("insert into ")
@@ -1368,6 +1409,218 @@ fn format_sql_standard_insert_statement(
     Some(format!(
         "  INSERT INTO {target} ({})\n    VALUES {qualified_values};",
         column_names.join(", ")
+    ))
+}
+
+fn format_sql_standard_insert_select_statement(
+    statement: &str,
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let crate::backend::parser::Statement::Insert(insert) = parse_statement(statement).ok()? else {
+        return None;
+    };
+    let relation = catalog.lookup_any_relation(&insert.table_name)?;
+    let column_names = insert
+        .columns
+        .as_ref()
+        .map(|columns| {
+            columns
+                .iter()
+                .map(|column| quote_identifier(&column.column))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            relation
+                .desc
+                .columns
+                .iter()
+                .filter(|column| !column.dropped)
+                .map(|column| quote_identifier(&column.name))
+                .collect::<Vec<_>>()
+        });
+    let crate::backend::parser::InsertSource::Select(select) = &insert.source else {
+        return None;
+    };
+    let rendered_expr = insert_select_expr_sql(statement)
+        .map(|expr| {
+            let qualified = qualify_sql_standard_body_args(expr, proc_row);
+            if qualified.starts_with('(') {
+                qualified
+            } else {
+                format!("({qualified})")
+            }
+        })
+        .or_else(|| render_sql_standard_select_expr_from_select(select, proc_row, catalog, None))?;
+    Some(format!(
+        "  INSERT INTO {} ({})  SELECT {};",
+        insert.table_name,
+        column_names.join(", "),
+        rendered_expr
+    ))
+}
+
+fn insert_select_expr_sql(statement: &str) -> Option<&str> {
+    let lower = statement.to_ascii_lowercase();
+    let select_pos = lower.find(" select ")?;
+    let expr = statement[select_pos + " select ".len()..]
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    (!expr.is_empty()).then_some(expr)
+}
+
+fn format_sql_standard_select_statement(
+    statement: &str,
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let crate::backend::parser::Statement::Select(select) = parse_statement(statement).ok()? else {
+        return None;
+    };
+    let (query, desc) = analyze_sql_standard_select(&select, proc_row, catalog)?;
+    let target = query.target_list.iter().find(|target| !target.resjunk)?;
+    if let crate::backend::executor::Expr::Case(case_expr) = &target.expr {
+        let mut lines = vec!["  SELECT".to_string(), "          CASE".to_string()];
+        for arm in &case_expr.args {
+            lines.push(format!(
+                "              WHEN {} THEN {}",
+                render_wrapped_sql_function_expr(&arm.expr, None, &desc, catalog),
+                render_relation_expr_sql(&arm.result, None, &desc, catalog)
+            ));
+        }
+        lines.push(format!(
+            "              ELSE {}",
+            render_relation_expr_sql(&case_expr.defresult, None, &desc, catalog)
+        ));
+        lines.push(format!(
+            "          END AS {};",
+            quote_sql_function_output_name(&target.name)
+        ));
+        return Some(lines.join("\n"));
+    }
+    let rendered = render_sql_standard_query_target(target, None, &desc, catalog);
+    Some(format!("  SELECT {rendered};"))
+}
+
+fn quote_sql_function_output_name(name: &str) -> String {
+    if name.eq_ignore_ascii_case("case") {
+        "\"case\"".to_string()
+    } else {
+        quote_identifier(name)
+    }
+}
+
+fn render_sql_standard_select_expr(
+    statement: &str,
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let crate::backend::parser::Statement::Select(select) = parse_statement(statement).ok()? else {
+        return None;
+    };
+    render_sql_standard_select_expr_from_select(&select, proc_row, catalog, None)
+}
+
+fn render_sql_standard_select_expr_from_select(
+    select: &crate::backend::parser::SelectStatement,
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+    relation_name: Option<&str>,
+) -> Option<String> {
+    let (query, desc) = analyze_sql_standard_select(select, proc_row, catalog)?;
+    let target = query.target_list.iter().find(|target| !target.resjunk)?;
+    Some(render_sql_standard_query_target(
+        target,
+        relation_name,
+        &desc,
+        catalog,
+    ))
+}
+
+fn render_sql_standard_query_target(
+    target: &crate::include::nodes::primnodes::TargetEntry,
+    relation_name: Option<&str>,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    render_wrapped_sql_function_expr(&target.expr, relation_name, desc, catalog)
+}
+
+fn render_wrapped_sql_function_expr(
+    expr: &crate::backend::executor::Expr,
+    relation_name: Option<&str>,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let rendered = render_relation_expr_sql(expr, relation_name, desc, catalog);
+    if matches!(
+        expr,
+        crate::backend::executor::Expr::Bool(_) | crate::backend::executor::Expr::Op(_)
+    ) {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
+fn analyze_sql_standard_select(
+    select: &crate::backend::parser::SelectStatement,
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<(
+    crate::include::nodes::parsenodes::Query,
+    crate::include::nodes::primnodes::RelationDesc,
+)> {
+    let (external_param_types, desc) = sql_function_display_arg_context(proc_row, catalog)?;
+    let outer_scope = scope_for_relation(None, &desc);
+    let analyzed = with_external_param_types(&external_param_types, || {
+        analyze_select_query_with_outer(select, catalog, &[outer_scope], None, None, &[], &[])
+    })
+    .ok()?;
+    Some((analyzed.0, desc))
+}
+
+fn sql_function_display_arg_context(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<(
+    Vec<(usize, SqlType)>,
+    crate::include::nodes::primnodes::RelationDesc,
+)> {
+    let all_types = proc_row.proallargtypes.clone().unwrap_or_else(|| {
+        proc_row
+            .proargtypes
+            .split_whitespace()
+            .filter_map(|oid| oid.parse::<u32>().ok())
+            .collect()
+    });
+    let modes = proc_row.proargmodes.as_deref();
+    let names = proc_row.proargnames.as_deref().unwrap_or(&[]);
+    let mut input_index = 0usize;
+    let mut external_param_types = Vec::new();
+    let mut columns = Vec::new();
+    for (index, oid) in all_types.iter().copied().enumerate() {
+        let mode = modes
+            .and_then(|modes| modes.get(index))
+            .copied()
+            .unwrap_or(b'i');
+        if !matches!(mode, b'i' | b'b' | b'v') {
+            continue;
+        }
+        input_index += 1;
+        let sql_type = catalog.type_by_oid(oid)?.sql_type;
+        external_param_types.push((input_index, sql_type));
+        let name = names
+            .get(index)
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("${input_index}"));
+        columns.push(column_desc(name, sql_type, true));
+    }
+    Some((
+        external_param_types,
+        crate::include::nodes::primnodes::RelationDesc { columns },
     ))
 }
 
@@ -1437,6 +1690,78 @@ fn qualify_sql_standard_body_args(
         index += 1;
     }
     out
+}
+
+fn replace_sql_standard_body_params(
+    sql: &str,
+    proc_row: &crate::include::catalog::PgProcRow,
+) -> String {
+    let names = sql_function_input_arg_names(proc_row);
+    if names.iter().all(Option::is_none) {
+        return sql.to_string();
+    }
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            let start = index;
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\'' {
+                    index += 1;
+                    if bytes.get(index) == Some(&b'\'') {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                index += 1;
+            }
+            out.push_str(&sql[start..index]);
+            continue;
+        }
+        if bytes[index] == b'$' {
+            let start = index;
+            index += 1;
+            let digit_start = index;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+            if digit_start != index
+                && let Ok(position) = sql[digit_start..index].parse::<usize>()
+                && let Some(Some(name)) = names.get(position.saturating_sub(1))
+            {
+                out.push_str(&quote_identifier(name));
+                continue;
+            }
+            out.push_str(&sql[start..index]);
+            continue;
+        }
+        out.push(bytes[index] as char);
+        index += 1;
+    }
+    out
+}
+
+fn sql_function_input_arg_names(
+    proc_row: &crate::include::catalog::PgProcRow,
+) -> Vec<Option<String>> {
+    let names = proc_row.proargnames.as_deref().unwrap_or(&[]);
+    let Some(modes) = proc_row.proargmodes.as_ref() else {
+        return (0..proc_row.pronargs.max(0) as usize)
+            .map(|index| names.get(index).filter(|name| !name.is_empty()).cloned())
+            .collect();
+    };
+    modes
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(index, mode)| {
+            matches!(mode, b'i' | b'b' | b'v')
+                .then(|| names.get(index).filter(|name| !name.is_empty()).cloned())
+        })
+        .collect()
 }
 
 fn is_sql_identifier_start(byte: u8) -> bool {

@@ -6668,7 +6668,10 @@ fn parse_create_function_statement_with_returns_table() {
             window: false,
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
+            body_kind: CreateFunctionBodyKind::As,
+            body_position: None,
             link_symbol: None,
+            window: false,
             config: Vec::new(),
         })
     );
@@ -6714,7 +6717,10 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             window: false,
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
+            body_kind: CreateFunctionBodyKind::As,
+            body_position: None,
             link_symbol: None,
+            window: false,
             config: Vec::new(),
         })
     );
@@ -7093,7 +7099,10 @@ fn parse_create_function_statement_with_unnamed_args() {
             window: false,
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
+            body_kind: CreateFunctionBodyKind::As,
+            body_position: None,
             link_symbol: None,
+            window: false,
             config: Vec::new(),
         })
     );
@@ -7139,7 +7148,10 @@ fn parse_create_function_statement_with_variadic_arg() {
             window: false,
             language: "sql".into(),
             body: " select $1[1] ".into(),
+            body_kind: CreateFunctionBodyKind::As,
+            body_position: Some(91),
             link_symbol: None,
+            window: false,
             config: Vec::new(),
         })
     );
@@ -7208,7 +7220,10 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             window: false,
             language: "c".into(),
             body: "regress".into(),
+            body_kind: CreateFunctionBodyKind::As,
+            body_position: None,
             link_symbol: Some("binary_coercible".into()),
+            window: false,
             config: Vec::new(),
         })
     );
@@ -7276,8 +7291,11 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             parallel: FunctionParallel::Safe,
             window: false,
             language: "sql".into(),
-            body: "select substr(encode(sha256($1), 'hex'), 1, 32)".into(),
+            body: "RETURN substr(encode(sha256($1), 'hex'), 1, 32)".into(),
+            body_kind: CreateFunctionBodyKind::SqlReturn,
+            body_position: None,
             link_symbol: None,
+            window: false,
             config: Vec::new(),
         })
     );
@@ -7344,7 +7362,10 @@ fn parse_create_function_statement_with_cost_clause() {
             window: false,
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
+            body_kind: CreateFunctionBodyKind::As,
+            body_position: None,
             link_symbol: None,
+            window: false,
             config: Vec::new(),
         })
     );

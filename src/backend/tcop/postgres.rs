@@ -6107,7 +6107,8 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
         }
         if bytes[i] == b';' && paren_depth == 0 {
             if sql_function_atomic_body
-                && !simple_query_prefix_ends_with_keyword(&sql[start..i], "end")
+                && (!simple_query_prefix_ends_with_keyword(&sql[start..i], "end")
+                    || simple_query_next_token_is_keyword(sql, i + 1, "end"))
             {
                 i += 1;
                 continue;
@@ -6167,6 +6168,11 @@ fn simple_query_prefix_ends_with_keyword(prefix: &str, keyword: &str) -> bool {
         return false;
     }
     start == 0 || !simple_query_ident_byte(trimmed.as_bytes()[start - 1])
+}
+
+fn simple_query_next_token_is_keyword(sql: &str, pos: usize, keyword: &str) -> bool {
+    let pos = simple_query_skip_whitespace(sql, pos);
+    simple_query_keyword_at(sql, pos, keyword).is_some()
 }
 
 fn simple_query_ident_byte(byte: u8) -> bool {

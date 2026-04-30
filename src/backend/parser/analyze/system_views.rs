@@ -10,6 +10,7 @@ use crate::backend::utils::cache::system_view_registry::{
 use crate::backend::utils::trigger::format_trigger_definition;
 use crate::include::catalog::{
     CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+    PG_PROC_RELATION_OID, TEXT_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
@@ -365,6 +366,22 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::InformationSchemaColumns => {
             information_schema_column_rows(catalog)
         }
+        SyntheticSystemViewKind::InformationSchemaRoutines => information_schema_routine_rows(catalog),
+        SyntheticSystemViewKind::InformationSchemaParameters => {
+            information_schema_parameter_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaRoutineRoutineUsage => {
+            information_schema_routine_routine_usage_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaRoutineSequenceUsage => {
+            information_schema_routine_sequence_usage_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaRoutineColumnUsage => {
+            information_schema_routine_column_usage_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaRoutineTableUsage => {
+            information_schema_routine_table_usage_rows(catalog)
+        }
         SyntheticSystemViewKind::InformationSchemaColumnColumnUsage => {
             information_schema_column_column_usage_rows(catalog)
         }
@@ -649,6 +666,252 @@ fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>
             .then_with(|| value_int32(left.get(4)).cmp(&value_int32(right.get(4))))
     });
     rows
+}
+
+fn information_schema_routine_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    catalog
+        .proc_rows()
+        .into_iter()
+        .filter(|row| row.prokind == 'f')
+        .filter_map(|row| {
+            let schema = routine_schema_name(catalog, row.pronamespace)?;
+            Some(vec![
+                Value::Text(schema.clone().into()),
+                Value::Text(row.proname.clone().into()),
+                Value::Text(schema.into()),
+                Value::Text(row.proname.into()),
+            ])
+        })
+        .collect()
+}
+
+fn information_schema_parameter_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for proc_row in catalog
+        .proc_rows()
+        .into_iter()
+        .filter(|row| row.prokind == 'f')
+    {
+        let Some(schema) = routine_schema_name(catalog, proc_row.pronamespace) else {
+            continue;
+        };
+        let defaults = decode_information_schema_proc_arg_defaults(&proc_row);
+        let names = proc_row.proargnames.clone().unwrap_or_default();
+        if let (Some(all_argtypes), Some(modes)) = (
+            proc_row.proallargtypes.as_ref(),
+            proc_row.proargmodes.as_ref(),
+        ) {
+            let mut input_index = 0usize;
+            for (index, (type_oid, mode)) in all_argtypes.iter().zip(modes.iter()).enumerate() {
+                let is_input = matches!(*mode, b'i' | b'b' | b'v');
+                let default = if is_input {
+                    let value = defaults.get(input_index).cloned().flatten();
+                    input_index += 1;
+                    value
+                } else {
+                    None
+                };
+                rows.push(information_schema_parameter_row(
+                    &schema,
+                    &proc_row.proname,
+                    index,
+                    names.get(index).cloned().unwrap_or_default(),
+                    default,
+                    *type_oid,
+                ));
+            }
+            continue;
+        }
+        let arg_oids = parse_information_schema_proc_argtype_oids(&proc_row.proargtypes);
+        for (index, type_oid) in arg_oids.iter().copied().enumerate() {
+            rows.push(information_schema_parameter_row(
+                &schema,
+                &proc_row.proname,
+                index,
+                names.get(index).cloned().unwrap_or_default(),
+                defaults.get(index).cloned().flatten(),
+                type_oid,
+            ));
+        }
+    }
+    rows
+}
+
+fn information_schema_parameter_row(
+    schema: &str,
+    routine_name: &str,
+    index: usize,
+    parameter_name: String,
+    default: Option<String>,
+    type_oid: u32,
+) -> Vec<Value> {
+    vec![
+        Value::Text(schema.into()),
+        Value::Text(routine_name.into()),
+        Value::Int32((index + 1) as i32),
+        if parameter_name.is_empty() {
+            Value::Null
+        } else {
+            Value::Text(parameter_name.into())
+        },
+        default
+            .map(|value| Value::Text(format_parameter_default(value, type_oid).into()))
+            .unwrap_or(Value::Null),
+    ]
+}
+
+fn information_schema_routine_routine_usage_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    routine_depend_rows(catalog, PG_PROC_RELATION_OID)
+        .into_iter()
+        .filter_map(|(routine, depend)| {
+            let referenced = catalog.proc_row_by_oid(depend.refobjid)?;
+            routine_schema_name(catalog, referenced.pronamespace)?;
+            Some(vec![
+                Value::Text(routine.proname.into()),
+                Value::Text(referenced.proname.into()),
+            ])
+        })
+        .collect()
+}
+
+fn information_schema_routine_sequence_usage_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    routine_depend_rows(catalog, PG_CLASS_RELATION_OID)
+        .into_iter()
+        .filter_map(|(routine, depend)| {
+            let class = catalog.class_row_by_oid(depend.refobjid)?;
+            (class.relkind == 'S').then_some(())?;
+            let schema = routine_schema_name(catalog, routine.pronamespace)?;
+            Some(vec![
+                Value::Text(schema.into()),
+                Value::Text(routine.proname.into()),
+                Value::Text(class.relname.into()),
+            ])
+        })
+        .collect()
+}
+
+fn information_schema_routine_column_usage_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    routine_depend_rows(catalog, PG_CLASS_RELATION_OID)
+        .into_iter()
+        .filter(|(_, depend)| depend.refobjsubid > 0)
+        .filter_map(|(routine, depend)| {
+            let schema = routine_schema_name(catalog, routine.pronamespace)?;
+            let relation = catalog.lookup_relation_by_oid(depend.refobjid)?;
+            let class = catalog.class_row_by_oid(depend.refobjid)?;
+            (!matches!(class.relkind, 'S')).then_some(())?;
+            let column = depend
+                .refobjsubid
+                .checked_sub(1)
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| relation.desc.columns.get(index))?;
+            (!column.dropped).then_some(())?;
+            Some(vec![
+                Value::Text(schema.into()),
+                Value::Text(routine.proname.into()),
+                Value::Text(class.relname.into()),
+                Value::Text(column.name.clone().into()),
+            ])
+        })
+        .collect()
+}
+
+fn information_schema_routine_table_usage_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let mut seen = std::collections::BTreeSet::new();
+    routine_depend_rows(catalog, PG_CLASS_RELATION_OID)
+        .into_iter()
+        .filter_map(|(routine, depend)| {
+            let schema = routine_schema_name(catalog, routine.pronamespace)?;
+            let class = catalog.class_row_by_oid(depend.refobjid)?;
+            matches!(class.relkind, 'r' | 'p' | 'v').then_some(())?;
+            seen.insert((routine.oid, class.oid)).then_some(vec![
+                Value::Text(schema.into()),
+                Value::Text(routine.proname.into()),
+                Value::Text(class.relname.into()),
+            ])
+        })
+        .collect()
+}
+
+fn routine_depend_rows(
+    catalog: &dyn CatalogLookup,
+    refclassid: u32,
+) -> Vec<(
+    crate::include::catalog::PgProcRow,
+    crate::include::catalog::PgDependRow,
+)> {
+    let visible_routine_oids = user_visible_routines(catalog)
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    catalog
+        .depend_rows()
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_PROC_RELATION_OID
+                && row.objsubid == 0
+                && row.refclassid == refclassid
+                && visible_routine_oids.contains_key(&row.objid)
+        })
+        .filter_map(|row| {
+            visible_routine_oids
+                .get(&row.objid)
+                .cloned()
+                .map(|routine| (routine, row))
+        })
+        .collect()
+}
+
+fn user_visible_routines(catalog: &dyn CatalogLookup) -> Vec<crate::include::catalog::PgProcRow> {
+    catalog
+        .proc_rows()
+        .into_iter()
+        .filter(|row| row.prokind == 'f')
+        .filter(|row| routine_schema_name(catalog, row.pronamespace).is_some())
+        .collect()
+}
+
+fn routine_schema_name(catalog: &dyn CatalogLookup, namespace_oid: u32) -> Option<String> {
+    let namespace = catalog.namespace_row_by_oid(namespace_oid)?;
+    (!namespace.nspname.eq_ignore_ascii_case("pg_catalog")
+        && !namespace.nspname.eq_ignore_ascii_case(INFO_SCHEMA_NAME))
+    .then_some(namespace.nspname)
+}
+
+fn parse_information_schema_proc_argtype_oids(argtypes: &str) -> Vec<u32> {
+    argtypes
+        .split_whitespace()
+        .filter_map(|item| item.parse::<u32>().ok())
+        .collect()
+}
+
+fn decode_information_schema_proc_arg_defaults(
+    row: &crate::include::catalog::PgProcRow,
+) -> Vec<Option<String>> {
+    let input_count = row.pronargs.max(0) as usize;
+    let Some(defaults) = row.proargdefaults.as_deref() else {
+        return vec![None; input_count];
+    };
+    if let Ok(parsed) = serde_json::from_str::<Vec<Option<String>>>(defaults)
+        && parsed.len() == input_count
+    {
+        return parsed;
+    }
+    let legacy = defaults
+        .split_whitespace()
+        .map(|default| Some(default.to_string()))
+        .collect::<Vec<_>>();
+    let mut aligned = vec![None; input_count.saturating_sub(legacy.len())];
+    aligned.extend(legacy);
+    aligned.resize(input_count, None);
+    aligned
+}
+
+fn format_parameter_default(default: String, type_oid: u32) -> String {
+    if type_oid == TEXT_TYPE_OID && default.starts_with('\'') && !default.contains("::") {
+        format!("{default}::text")
+    } else {
+        default
+    }
 }
 
 fn information_schema_column_column_usage_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {

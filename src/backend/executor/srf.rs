@@ -27,7 +27,7 @@ use crate::backend::utils::time::datetime::{
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::include::catalog::{
     BOOL_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, REGTYPE_TYPE_OID, TEXT_TYPE_OID,
-    builtin_scalar_function_for_proc_row,
+    VOID_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_scalar_function_for_proc_row,
 };
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
@@ -132,7 +132,20 @@ pub(crate) fn eval_set_returning_call(
             with_ordinality,
             ..
         } => {
+            if ctx
+                .catalog
+                .as_deref()
+                .and_then(|catalog| catalog.proc_row_by_oid(*proc_oid))
+                .is_some_and(|row| row.proretset && row.prorettype == VOID_TYPE_OID)
+            {
+                return Ok(Vec::new());
+            }
             let output_columns = function_output_columns(output_columns, *with_ordinality);
+            if output_columns.len() == 1
+                && matches!(output_columns[0].sql_type.kind, SqlTypeKind::Void)
+            {
+                return Ok(Vec::new());
+            }
             if let Some(inlined_expr) = inlined_expr {
                 eval_inlined_user_defined_function_scan(inlined_expr, output_columns, slot, ctx)
             } else {

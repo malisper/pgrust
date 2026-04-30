@@ -45,6 +45,7 @@ fn resolve_operator_object_namespace(
             for schema in db.effective_search_path(client_id, configured_search_path) {
                 match schema.as_str() {
                     "" | "$user" | "pg_temp" | "pg_catalog" => continue,
+                    schema if schema.starts_with("pg_temp_") => continue,
                     _ => {
                         if let Some(oid) =
                             db.visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
