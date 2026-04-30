@@ -13,8 +13,8 @@ use crate::backend::parser::{
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp,
     deserialize_partition_bound, is_binary_coercible_type, partition_value_to_value,
 };
-use crate::include::catalog::BTREE_AM_OID;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
+use crate::include::catalog::{BTREE_AM_OID, HASH_AM_OID};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind, TableSampleClause,
@@ -66,6 +66,10 @@ use super::{
 };
 
 type PlannerIndexExprCache = RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>;
+
+fn spec_prefers_plain_index_scan(spec: &IndexPathSpec) -> bool {
+    spec_prefers_plain_network_btree_scan(spec) || hash_index_gettuple_supported(&spec.index)
+}
 
 fn spec_prefers_plain_network_btree_scan(spec: &IndexPathSpec) -> bool {
     spec.index.index_meta.am_oid == BTREE_AM_OID
@@ -1213,7 +1217,9 @@ fn relation_display_name(
             catalog
                 .namespace_row_by_oid(row.relnamespace)
                 .map(|namespace| {
-                    if matches!(namespace.nspname.as_str(), "public" | "pg_catalog") {
+                    if matches!(namespace.nspname.as_str(), "public" | "pg_catalog")
+                        || namespace.nspname.starts_with("pg_temp_")
+                    {
                         row.relname.clone()
                     } else {
                         format!("{}.{}", namespace.nspname, row.relname)
@@ -1238,11 +1244,28 @@ fn relation_display_name(
 }
 
 fn access_method_supports_index_scan(am_oid: u32) -> bool {
-    if am_oid == crate::include::catalog::HASH_AM_OID {
+    if am_oid == HASH_AM_OID {
         return false;
     }
     crate::backend::access::index::amapi::index_am_handler(am_oid)
         .is_some_and(|routine| routine.amgettuple.is_some())
+}
+
+fn access_method_supports_index_scan_for_index(index: &BoundIndexRelation) -> bool {
+    if index.index_meta.am_oid == HASH_AM_OID {
+        return hash_index_gettuple_supported(index);
+    }
+    access_method_supports_index_scan(index.index_meta.am_oid)
+}
+
+fn hash_index_gettuple_supported(index: &BoundIndexRelation) -> bool {
+    index.index_meta.indpred.is_some()
+        && index.desc.columns.first().is_some_and(|column| {
+            matches!(
+                column.sql_type.kind,
+                SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Oid
+            )
+        })
 }
 
 fn access_method_supports_bitmap_scan(am_oid: u32) -> bool {
@@ -2011,7 +2034,7 @@ fn collect_relation_access_paths(
                 && filter.is_none()
                 && index_supports_index_only_attrs(index, &visible_user_attr_indexes(&desc)));
         let order_removing_index_scan_available = config.enable_indexscan
-            && access_method_supports_index_scan(index.index_meta.am_oid)
+            && access_method_supports_index_scan_for_index(index)
             && query_order_items.as_ref().is_some_and(|order_items| {
                 build_index_path_spec(
                     filter.as_ref(),
@@ -2029,9 +2052,8 @@ fn collect_relation_access_paths(
         );
         let has_index_spec = index_spec.is_some();
         if let Some(spec) = index_spec {
-            let prefer_plain_index_scan = spec_prefers_plain_network_btree_scan(&spec);
-            if config.enable_indexscan && access_method_supports_index_scan(index.index_meta.am_oid)
-            {
+            let prefer_plain_index_scan = spec_prefers_plain_index_scan(&spec);
+            if config.enable_indexscan && access_method_supports_index_scan_for_index(index) {
                 paths.push(
                     estimate_index_candidate(
                         rtindex,
@@ -2078,7 +2100,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.is_none()
             && full_index_only_scan
-            && access_method_supports_index_scan(index.index_meta.am_oid)
+            && access_method_supports_index_scan_for_index(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2102,7 +2124,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.as_ref().is_some_and(expr_contains_subplan)
             && target_index_only
-            && access_method_supports_index_scan(index.index_meta.am_oid)
+            && access_method_supports_index_scan_for_index(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2127,7 +2149,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.is_some()
             && !has_index_spec
-            && access_method_supports_index_scan(index.index_meta.am_oid)
+            && access_method_supports_index_scan_for_index(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2155,7 +2177,7 @@ fn collect_relation_access_paths(
                 index,
                 config.retain_partial_index_filters,
             )
-            && access_method_supports_index_scan(index.index_meta.am_oid)
+            && access_method_supports_index_scan_for_index(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2249,7 +2271,7 @@ fn collect_relation_ordered_index_paths(
                 && !index.index_meta.indkey.is_empty()
         })
     {
-        if !access_method_supports_index_scan(index.index_meta.am_oid) {
+        if !access_method_supports_index_scan_for_index(index) {
             continue;
         }
         if let Some(spec) = build_index_path_spec(
