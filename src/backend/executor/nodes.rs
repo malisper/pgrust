@@ -238,7 +238,12 @@ fn aggregate_key_values_equal(left: &[Value], right: &[Value]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::pg_sql_sort_by;
+    use super::{pg_sql_sort_by, render_explain_const, render_explain_datetime_cast_literal};
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::backend::utils::time::datetime::days_from_ymd;
+    use crate::include::nodes::datetime::DateADT;
+    use crate::include::nodes::datum::Value;
+    use crate::include::nodes::primnodes::Expr;
 
     #[test]
     fn pg_sql_sort_by_matches_postgres_empsalary_peer_order() {
@@ -296,6 +301,21 @@ mod tests {
                 (3, 3),
                 (7, 3),
             ]
+        );
+    }
+
+    #[test]
+    fn explain_renders_date_constants_in_postgres_mdy_style() {
+        let date = DateADT(days_from_ymd(1997, 1, 1).unwrap());
+        assert_eq!(
+            render_explain_const(&Value::Date(date)),
+            "'01-01-1997'::date"
+        );
+
+        let expr = Expr::Const(Value::Text("1997-01-01".into()));
+        assert_eq!(
+            render_explain_datetime_cast_literal(&expr, SqlType::new(SqlTypeKind::Date)),
+            Some("'01-01-1997'::date".into())
         );
     }
 }
@@ -6235,6 +6255,12 @@ fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<Stri
     let text = value.as_text()?;
     let config = postgres_utc_datetime_config();
     match ty.kind {
+        SqlTypeKind::Date => parse_date_text(text, &config).ok().map(|date| {
+            format!(
+                "'{}'::date",
+                format_date_text(date, &postgres_explain_datetime_config()).replace('\'', "''")
+            )
+        }),
         SqlTypeKind::Timestamp => parse_timestamp_text(text, &config).ok().map(|timestamp| {
             format!(
                 "'{}'::timestamp without time zone",

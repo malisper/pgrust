@@ -61,8 +61,8 @@ use crate::backend::utils::misc::guc::{
 };
 use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_datetime_config, default_intervalstyle,
-    default_timezone, format_datestyle, format_intervalstyle, parse_datestyle_with_fallback,
-    parse_intervalstyle, parse_timezone,
+    default_timezone, format_datestyle, format_intervalstyle, format_timezone,
+    parse_datestyle_with_fallback, parse_intervalstyle, parse_timezone_with_display,
 };
 use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
@@ -15585,7 +15585,7 @@ impl Session {
             ),
             "timezone" => (
                 "TimeZone".to_string(),
-                self.datetime_config.time_zone.clone(),
+                format_timezone(&self.datetime_config).to_string(),
             ),
             "xmlbinary" => (
                 "xmlbinary".to_string(),
@@ -15776,6 +15776,8 @@ impl Session {
 
     fn guc_reset_timezone(&mut self) {
         self.datetime_config.time_zone = self.reset_datetime_config.time_zone.clone();
+        self.datetime_config.time_zone_display =
+            self.reset_datetime_config.time_zone_display.clone();
     }
 
     fn guc_reset_max_stack_depth(&mut self) {
@@ -17642,12 +17644,13 @@ fn apply_guc_value_to_state(
             stored_value = format_intervalstyle(interval_style).to_string();
         }
         "timezone" => {
-            let Some(time_zone) = parse_timezone(value) else {
+            let Some((time_zone, time_zone_display)) = parse_timezone_with_display(value) else {
                 return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
                     value.to_string(),
                 )));
             };
             state.datetime_config.time_zone = time_zone;
+            state.datetime_config.time_zone_display = time_zone_display;
         }
         "statement_timeout" => {
             parse_statement_timeout(value)?;
@@ -17945,6 +17948,8 @@ fn reset_guc_in_state(
         }
         "timezone" => {
             state.datetime_config.time_zone = reset_datetime_config.time_zone.clone();
+            state.datetime_config.time_zone_display =
+                reset_datetime_config.time_zone_display.clone();
         }
         "max_stack_depth" => {
             state.datetime_config.max_stack_depth_kb = reset_datetime_config.max_stack_depth_kb;
@@ -17965,6 +17970,7 @@ fn reset_all_gucs_in_state(state: &mut GucState, reset_datetime_config: &DateTim
     state.datetime_config.interval_style =
         parse_intervalstyle(default_intervalstyle()).expect("default IntervalStyle must parse");
     state.datetime_config.time_zone = reset_datetime_config.time_zone.clone();
+    state.datetime_config.time_zone_display = reset_datetime_config.time_zone_display.clone();
     state.datetime_config.max_stack_depth_kb = reset_datetime_config.max_stack_depth_kb;
     state.datetime_config.xml = Default::default();
     state.stats_fetch_consistency = StatsFetchConsistency::Cache;

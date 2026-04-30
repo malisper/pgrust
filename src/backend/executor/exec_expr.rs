@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
+use crate::backend::utils::misc::guc_datetime::format_timezone;
 use crate::backend::utils::sql_deparse::{
     normalize_check_expr_sql, normalize_index_expression_sql, normalize_index_predicate_sql,
 };
@@ -2953,7 +2954,7 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         return Ok(Value::Text("none".into()));
     }
     if name == "timezone" {
-        return Ok(Value::Text(ctx.datetime_config.time_zone.clone().into()));
+        return Ok(Value::Text(format_timezone(&ctx.datetime_config).into()));
     }
     if name == "server_encoding" {
         return Ok(Value::Text("UTF8".into()));
