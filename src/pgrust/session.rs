@@ -3846,6 +3846,20 @@ impl Session {
         }
     }
 
+    fn refresh_executor_snapshot_after_lock_wait(
+        &mut self,
+        db: &Database,
+        xid: TransactionId,
+        cid: CommandId,
+        ctx: &mut ExecutorContext,
+        waited_for_lock: bool,
+    ) -> Result<(), ExecError> {
+        if waited_for_lock {
+            ctx.snapshot = self.snapshot_for_command(db, xid, cid)?;
+        }
+        Ok(())
+    }
+
     fn active_txn_ctx_for_command(&self, cid: CommandId) -> Option<(TransactionId, CommandId)> {
         self.active_txn.as_ref().and_then(|txn| {
             txn.xid.map(|xid| (xid, cid)).or_else(|| {
@@ -4118,7 +4132,8 @@ impl Session {
                     &insert_foreign_key_lock_requests(&prepared.stmt),
                     &prepared.extra_lock_requests,
                 );
-                self.lock_table_requests_if_needed(db, &lock_requests)?;
+                let waited_for_lock = self.lock_table_requests_if_needed(db, &lock_requests)?;
+                self.refresh_executor_snapshot_after_lock_wait(db, xid, cid, ctx, waited_for_lock)?;
                 crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
                     prepared.stmt,
                     catalog,
@@ -4149,7 +4164,8 @@ impl Session {
                     &update_foreign_key_lock_requests(&prepared.stmt),
                     &prepared.extra_lock_requests,
                 );
-                self.lock_table_requests_if_needed(db, &lock_requests)?;
+                let waited_for_lock = self.lock_table_requests_if_needed(db, &lock_requests)?;
+                self.refresh_executor_snapshot_after_lock_wait(db, xid, cid, ctx, waited_for_lock)?;
                 let interrupts = self.interrupts();
                 ctx.interrupts = Arc::clone(&interrupts);
                 crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
@@ -4183,7 +4199,8 @@ impl Session {
                     &delete_foreign_key_lock_requests(&prepared.stmt),
                     &prepared.extra_lock_requests,
                 );
-                self.lock_table_requests_if_needed(db, &lock_requests)?;
+                let waited_for_lock = self.lock_table_requests_if_needed(db, &lock_requests)?;
+                self.refresh_executor_snapshot_after_lock_wait(db, xid, cid, ctx, waited_for_lock)?;
                 let interrupts = self.interrupts();
                 ctx.interrupts = Arc::clone(&interrupts);
                 crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
@@ -10370,24 +10387,21 @@ impl Session {
         db: &Database,
         rel: RelFileLocator,
         mode: TableLockMode,
-    ) -> Result<(), ExecError> {
+    ) -> Result<bool, ExecError> {
         let Some(txn) = self.active_txn.as_mut() else {
-            db.table_locks.lock_table_interruptible(
-                rel,
-                mode,
-                self.client_id,
-                self.interrupts.as_ref(),
-            )?;
-            return Ok(());
+            return db
+                .table_locks
+                .lock_table_interruptible(rel, mode, self.client_id, self.interrupts.as_ref())
+                .map_err(ExecError::from);
         };
         if txn
             .held_table_locks
             .get(&rel)
             .is_some_and(|existing| existing.strongest(mode) == *existing)
         {
-            return Ok(());
+            return Ok(false);
         }
-        db.table_locks.lock_table_interruptible(
+        let waited = db.table_locks.lock_table_interruptible(
             rel,
             mode,
             self.client_id,
@@ -10397,18 +10411,19 @@ impl Session {
             .entry(rel)
             .and_modify(|existing| *existing = existing.strongest(mode))
             .or_insert(mode);
-        Ok(())
+        Ok(waited)
     }
 
     fn lock_table_requests_if_needed(
         &mut self,
         db: &Database,
         requests: &[(RelFileLocator, TableLockMode)],
-    ) -> Result<(), ExecError> {
+    ) -> Result<bool, ExecError> {
+        let mut waited = false;
         for (rel, mode) in requests {
-            self.lock_table_if_needed(db, *rel, *mode)?;
+            waited |= self.lock_table_if_needed(db, *rel, *mode)?;
         }
-        Ok(())
+        Ok(waited)
     }
 
     pub fn execute_streaming(
@@ -13591,7 +13606,15 @@ impl Session {
                                 &insert_foreign_key_lock_requests(&prepared.stmt),
                                 &prepared.extra_lock_requests,
                             );
-                            self.lock_table_requests_if_needed(db, &lock_requests)?;
+                            let waited_for_lock =
+                                self.lock_table_requests_if_needed(db, &lock_requests)?;
+                            self.refresh_executor_snapshot_after_lock_wait(
+                                db,
+                                xid,
+                                cid,
+                                &mut ctx,
+                                waited_for_lock,
+                            )?;
                             return crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -13635,7 +13658,15 @@ impl Session {
                             &insert_foreign_key_lock_requests(&prepared.stmt),
                             &prepared.extra_lock_requests,
                         );
-                        self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        let waited_for_lock =
+                            self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        self.refresh_executor_snapshot_after_lock_wait(
+                            db,
+                            xid,
+                            cid,
+                            &mut ctx,
+                            waited_for_lock,
+                        )?;
                         crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -13713,7 +13744,15 @@ impl Session {
                             &update_foreign_key_lock_requests(&prepared.stmt),
                             &prepared.extra_lock_requests,
                         );
-                        self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        let waited_for_lock =
+                            self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        self.refresh_executor_snapshot_after_lock_wait(
+                            db,
+                            xid,
+                            cid,
+                            &mut ctx,
+                            waited_for_lock,
+                        )?;
                         crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -13792,7 +13831,15 @@ impl Session {
                             &delete_foreign_key_lock_requests(&prepared.stmt),
                             &prepared.extra_lock_requests,
                         );
-                        self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        let waited_for_lock =
+                            self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        self.refresh_executor_snapshot_after_lock_wait(
+                            db,
+                            xid,
+                            cid,
+                            &mut ctx,
+                            waited_for_lock,
+                        )?;
                         crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
                             prepared.stmt,
                             &catalog,

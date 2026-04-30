@@ -188,7 +188,7 @@ impl TableLockManager {
         mode: TableLockMode,
         client_id: ClientId,
         interrupts: &InterruptState,
-    ) -> Result<(), TableLockError> {
+    ) -> Result<bool, TableLockError> {
         let mut state = self.state.lock();
         let mut waiting = false;
         loop {
@@ -201,7 +201,7 @@ impl TableLockManager {
                 }
                 let entries = state.locks.entry(rel).or_default();
                 grant_table_lock(entries, client_id, mode);
-                return Ok(());
+                return Ok(waiting);
             }
             if !waiting {
                 state.waiters.entry(rel).or_default().push(TableLockWaiter {
@@ -341,6 +341,7 @@ pub(crate) fn lock_relations_interruptible(
         TableLockMode::AccessShare,
         interrupts,
     )
+    .map(|_| ())
 }
 
 pub(crate) fn lock_tables_interruptible(
@@ -349,16 +350,20 @@ pub(crate) fn lock_tables_interruptible(
     rels: &[RelFileLocator],
     mode: TableLockMode,
     interrupts: &InterruptState,
-) -> Result<(), TableLockError> {
+) -> Result<bool, TableLockError> {
     let mut locked = Vec::new();
+    let mut waited = false;
     for rel in rels {
-        if let Err(err) = table_locks.lock_table_interruptible(*rel, mode, client_id, interrupts) {
-            unlock_relations(table_locks, client_id, &locked);
-            return Err(err);
-        }
+        waited |= match table_locks.lock_table_interruptible(*rel, mode, client_id, interrupts) {
+            Ok(waited) => waited,
+            Err(err) => {
+                unlock_relations(table_locks, client_id, &locked);
+                return Err(err);
+            }
+        };
         locked.push(*rel);
     }
-    Ok(())
+    Ok(waited)
 }
 
 pub(crate) fn lock_table_requests_interruptible(
@@ -366,16 +371,20 @@ pub(crate) fn lock_table_requests_interruptible(
     client_id: ClientId,
     requests: &[(RelFileLocator, TableLockMode)],
     interrupts: &InterruptState,
-) -> Result<(), TableLockError> {
+) -> Result<bool, TableLockError> {
     let mut locked = Vec::new();
+    let mut waited = false;
     for (rel, mode) in requests {
-        if let Err(err) = table_locks.lock_table_interruptible(*rel, *mode, client_id, interrupts) {
-            unlock_relations(table_locks, client_id, &locked);
-            return Err(err);
-        }
+        waited |= match table_locks.lock_table_interruptible(*rel, *mode, client_id, interrupts) {
+            Ok(waited) => waited,
+            Err(err) => {
+                unlock_relations(table_locks, client_id, &locked);
+                return Err(err);
+            }
+        };
         locked.push(*rel);
     }
-    Ok(())
+    Ok(waited)
 }
 
 fn grant_table_lock(entries: &mut Vec<TableLockEntry>, client_id: ClientId, mode: TableLockMode) {

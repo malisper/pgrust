@@ -123,6 +123,19 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
     }
 }
 
+fn refresh_autocommit_snapshot_after_lock_wait(
+    db: &Database,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waited_for_lock: bool,
+) -> Result<(), ExecError> {
+    if waited_for_lock {
+        ctx.snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct PreparedExternalBinding {
     paramid: usize,
@@ -714,13 +727,15 @@ impl Database {
                     &insert_foreign_key_lock_requests(&prepared.stmt),
                     &prepared.extra_lock_requests,
                 );
-                crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                    &self.table_locks,
-                    client_id,
-                    &lock_requests,
-                    interrupts.as_ref(),
-                )?;
+                let waited_for_lock =
+                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                        &self.table_locks,
+                        client_id,
+                        &lock_requests,
+                        interrupts.as_ref(),
+                    )?;
                 locked_rels.extend(table_lock_relations(&lock_requests));
+                refresh_autocommit_snapshot_after_lock_wait(self, ctx, xid, cid, waited_for_lock)?;
                 super::rules::execute_bound_insert_with_rules(
                     prepared.stmt,
                     catalog,
@@ -748,13 +763,15 @@ impl Database {
                     &update_foreign_key_lock_requests(&prepared.stmt),
                     &prepared.extra_lock_requests,
                 );
-                crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                    &self.table_locks,
-                    client_id,
-                    &lock_requests,
-                    interrupts.as_ref(),
-                )?;
+                let waited_for_lock =
+                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                        &self.table_locks,
+                        client_id,
+                        &lock_requests,
+                        interrupts.as_ref(),
+                    )?;
                 locked_rels.extend(table_lock_relations(&lock_requests));
+                refresh_autocommit_snapshot_after_lock_wait(self, ctx, xid, cid, waited_for_lock)?;
                 super::rules::execute_bound_update_with_rules(
                     prepared.stmt,
                     catalog,
@@ -783,13 +800,15 @@ impl Database {
                     &delete_foreign_key_lock_requests(&prepared.stmt),
                     &prepared.extra_lock_requests,
                 );
-                crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                    &self.table_locks,
-                    client_id,
-                    &lock_requests,
-                    interrupts.as_ref(),
-                )?;
+                let waited_for_lock =
+                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                        &self.table_locks,
+                        client_id,
+                        &lock_requests,
+                        interrupts.as_ref(),
+                    )?;
                 locked_rels.extend(table_lock_relations(&lock_requests));
+                refresh_autocommit_snapshot_after_lock_wait(self, ctx, xid, cid, waited_for_lock)?;
                 super::rules::execute_bound_delete_with_rules(
                     prepared.stmt,
                     catalog,
@@ -2967,13 +2986,21 @@ impl Database {
                             &insert_foreign_key_lock_requests(&prepared.stmt),
                             &prepared.extra_lock_requests,
                         );
-                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                            &self.table_locks,
-                            client_id,
-                            &lock_requests,
-                            interrupts.as_ref(),
-                        )?;
+                        let waited_for_lock =
+                            crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                &self.table_locks,
+                                client_id,
+                                &lock_requests,
+                                interrupts.as_ref(),
+                            )?;
                         locked_rels.extend(table_lock_relations(&lock_requests));
+                        refresh_autocommit_snapshot_after_lock_wait(
+                            self,
+                            &mut ctx,
+                            xid,
+                            0,
+                            waited_for_lock,
+                        )?;
                         return super::rules::execute_bound_insert_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -3036,13 +3063,21 @@ impl Database {
                                     &insert_foreign_key_lock_requests(&prepared.stmt),
                                     &prepared.extra_lock_requests,
                                 );
-                                crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                let waited_for_lock =
+                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
                                     &self.table_locks,
                                     client_id,
                                     &lock_requests,
                                     interrupts.as_ref(),
                                 )?;
                                 locked_rels.extend(table_lock_relations(&lock_requests));
+                                refresh_autocommit_snapshot_after_lock_wait(
+                                    self,
+                                    &mut ctx,
+                                    xid,
+                                    0,
+                                    waited_for_lock,
+                                )?;
                                 super::rules::execute_bound_insert_with_rules(
                                     prepared.stmt,
                                     &catalog,
@@ -3072,13 +3107,21 @@ impl Database {
                                     &update_foreign_key_lock_requests(&prepared.stmt),
                                     &prepared.extra_lock_requests,
                                 );
-                                crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                let waited_for_lock =
+                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
                                     &self.table_locks,
                                     client_id,
                                     &lock_requests,
                                     interrupts.as_ref(),
                                 )?;
                                 locked_rels.extend(table_lock_relations(&lock_requests));
+                                refresh_autocommit_snapshot_after_lock_wait(
+                                    self,
+                                    &mut ctx,
+                                    xid,
+                                    0,
+                                    waited_for_lock,
+                                )?;
                                 super::rules::execute_bound_update_with_rules(
                                     prepared.stmt,
                                     &catalog,
@@ -3109,13 +3152,21 @@ impl Database {
                                     &delete_foreign_key_lock_requests(&prepared.stmt),
                                     &prepared.extra_lock_requests,
                                 );
-                                crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                let waited_for_lock =
+                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
                                     &self.table_locks,
                                     client_id,
                                     &lock_requests,
                                     interrupts.as_ref(),
                                 )?;
                                 locked_rels.extend(table_lock_relations(&lock_requests));
+                                refresh_autocommit_snapshot_after_lock_wait(
+                                    self,
+                                    &mut ctx,
+                                    xid,
+                                    0,
+                                    waited_for_lock,
+                                )?;
                                 super::rules::execute_bound_delete_with_rules(
                                     prepared.stmt,
                                     &catalog,
@@ -3159,13 +3210,21 @@ impl Database {
                         &insert_foreign_key_lock_requests(&prepared.stmt),
                         &prepared.extra_lock_requests,
                     );
-                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                        &self.table_locks,
-                        client_id,
-                        &lock_requests,
-                        interrupts.as_ref(),
-                    )?;
+                    let waited_for_lock =
+                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                            &self.table_locks,
+                            client_id,
+                            &lock_requests,
+                            interrupts.as_ref(),
+                        )?;
                     locked_rels.extend(table_lock_relations(&lock_requests));
+                    refresh_autocommit_snapshot_after_lock_wait(
+                        self,
+                        &mut ctx,
+                        xid,
+                        0,
+                        waited_for_lock,
+                    )?;
                     super::rules::execute_bound_insert_with_rules(
                         prepared.stmt,
                         &catalog,
@@ -3287,13 +3346,21 @@ impl Database {
                             &update_foreign_key_lock_requests(&prepared.stmt),
                             &prepared.extra_lock_requests,
                         );
-                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                            &self.table_locks,
-                            client_id,
-                            &lock_requests,
-                            interrupts.as_ref(),
-                        )?;
+                        let waited_for_lock =
+                            crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                &self.table_locks,
+                                client_id,
+                                &lock_requests,
+                                interrupts.as_ref(),
+                            )?;
                         locked_rels.extend(table_lock_relations(&lock_requests));
+                        refresh_autocommit_snapshot_after_lock_wait(
+                            self,
+                            &mut ctx,
+                            xid,
+                            0,
+                            waited_for_lock,
+                        )?;
                         return super::rules::execute_bound_update_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -3340,13 +3407,21 @@ impl Database {
                         &update_foreign_key_lock_requests(&prepared.stmt),
                         &prepared.extra_lock_requests,
                     );
-                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                        &self.table_locks,
-                        client_id,
-                        &lock_requests,
-                        interrupts.as_ref(),
-                    )?;
+                    let waited_for_lock =
+                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                            &self.table_locks,
+                            client_id,
+                            &lock_requests,
+                            interrupts.as_ref(),
+                        )?;
                     locked_rels.extend(table_lock_relations(&lock_requests));
+                    refresh_autocommit_snapshot_after_lock_wait(
+                        self,
+                        &mut ctx,
+                        xid,
+                        0,
+                        waited_for_lock,
+                    )?;
                     super::rules::execute_bound_update_with_rules(
                         prepared.stmt,
                         &catalog,
@@ -3466,13 +3541,21 @@ impl Database {
                             &delete_foreign_key_lock_requests(&prepared.stmt),
                             &prepared.extra_lock_requests,
                         );
-                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                            &self.table_locks,
-                            client_id,
-                            &lock_requests,
-                            interrupts.as_ref(),
-                        )?;
+                        let waited_for_lock =
+                            crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                &self.table_locks,
+                                client_id,
+                                &lock_requests,
+                                interrupts.as_ref(),
+                            )?;
                         locked_rels.extend(table_lock_relations(&lock_requests));
+                        refresh_autocommit_snapshot_after_lock_wait(
+                            self,
+                            &mut ctx,
+                            xid,
+                            0,
+                            waited_for_lock,
+                        )?;
                         return super::rules::execute_bound_delete_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -3518,13 +3601,21 @@ impl Database {
                         &delete_foreign_key_lock_requests(&prepared.stmt),
                         &prepared.extra_lock_requests,
                     );
-                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                        &self.table_locks,
-                        client_id,
-                        &lock_requests,
-                        interrupts.as_ref(),
-                    )?;
+                    let waited_for_lock =
+                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                            &self.table_locks,
+                            client_id,
+                            &lock_requests,
+                            interrupts.as_ref(),
+                        )?;
                     locked_rels.extend(table_lock_relations(&lock_requests));
+                    refresh_autocommit_snapshot_after_lock_wait(
+                        self,
+                        &mut ctx,
+                        xid,
+                        0,
+                        waited_for_lock,
+                    )?;
                     super::rules::execute_bound_delete_with_rules(
                         prepared.stmt,
                         &catalog,
