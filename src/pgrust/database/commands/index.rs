@@ -22,9 +22,8 @@ use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
-    GIST_RANGE_FAMILY_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, RANGE_GIST_OPCLASS_OID,
-    SPGIST_AM_OID, builtin_range_rows, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
+    builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::RelOption;
@@ -692,6 +691,34 @@ fn btree_opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
         ) && matches!(type_oid, TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID))
 }
 
+fn index_opclass_accepts_type(
+    access_method_oid: u32,
+    opcintype: u32,
+    opcfamily: u32,
+    type_oid: u32,
+    sql_type: crate::backend::parser::SqlType,
+) -> bool {
+    use crate::include::catalog::{
+        ANYARRAYOID, ANYMULTIRANGEOID, ANYRANGEOID, BPCHAR_TYPE_OID, BTREE_AM_OID, CIDR_TYPE_OID,
+        GIST_RANGE_FAMILY_OID, INET_TYPE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    };
+
+    let is_range_type = builtin_range_rows()
+        .iter()
+        .any(|row| row.rngtypid == type_oid);
+    opcintype == type_oid
+        || (opcintype == INET_TYPE_OID && type_oid == CIDR_TYPE_OID)
+        || (matches!(
+            opcintype,
+            TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
+        ) && matches!(type_oid, TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID))
+        || (opcintype == ANYARRAYOID && sql_type.is_array)
+        || (opcintype == ANYRANGEOID && (is_range_type || sql_type.is_range()))
+        || (opcintype == ANYMULTIRANGEOID && sql_type.is_multirange())
+        || (is_range_type && opcfamily == GIST_RANGE_FAMILY_OID)
+        || (access_method_oid == BTREE_AM_OID && btree_opclass_accepts_type(opcintype, type_oid))
+}
+
 fn catalog_type_oid(
     catalog: &dyn crate::backend::parser::CatalogLookup,
     sql_type: crate::backend::parser::SqlType,
@@ -1226,9 +1253,6 @@ impl Database {
                 })?;
             let type_name = index_type_name_for_oid(self, client_id, txn_ctx, type_oid);
             let opclass = if let Some(opclass_name) = column.opclass.as_deref() {
-                let is_range_type = builtin_range_rows()
-                    .iter()
-                    .any(|row| row.rngtypid == type_oid);
                 let opclass_lookup_name = opclass_name
                     .rsplit_once('.')
                     .map(|(_, name)| name)
@@ -1238,12 +1262,13 @@ impl Database {
                     .find(|row| {
                         row.opcmethod == access_method.oid
                             && row.opcname.eq_ignore_ascii_case(opclass_lookup_name)
-                            && (row.opcintype == type_oid
-                                || (row.opcintype == crate::include::catalog::INET_TYPE_OID
-                                    && type_oid == crate::include::catalog::CIDR_TYPE_OID)
-                                || (is_range_type && row.opcfamily == GIST_RANGE_FAMILY_OID)
-                                || (access_method.oid == BTREE_AM_OID
-                                    && btree_opclass_accepts_type(row.opcintype, type_oid)))
+                            && index_opclass_accepts_type(
+                                access_method.oid,
+                                row.opcintype,
+                                row.opcfamily,
+                                type_oid,
+                                sql_type,
+                            )
                     })
                     .cloned()
             } else {
@@ -1859,6 +1884,7 @@ impl Database {
             snapshot,
             heap_relation: relation.rel,
             heap_desc: relation.desc.clone(),
+            heap_toast: relation.toast,
             index_relation: index_entry.rel,
             index_name: index_name.to_string(),
             index_desc: index_entry.desc.clone(),
@@ -2428,16 +2454,6 @@ impl Database {
         if access_method_name.eq_ignore_ascii_case("rtree") {
             push_notice("substituting access method \"gist\" for obsolete method \"rtree\"");
             access_method_name = "gist".into();
-        }
-        if access_method_name.eq_ignore_ascii_case("brin")
-            && create_stmt
-                .columns
-                .iter()
-                .any(|column| column.expr_sql.is_some())
-        {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "BRIN expression indexes".into(),
-            )));
         }
         let mut key_columns = create_stmt.columns.clone();
         reject_system_columns_in_index(&key_columns, create_stmt.predicate_sql.as_deref())?;

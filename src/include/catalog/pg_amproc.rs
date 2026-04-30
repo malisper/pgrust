@@ -568,6 +568,7 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         (BRIN_PG_LSN_MINMAX_FAMILY_OID, PG_LSN_TYPE_OID),
         (BRIN_MACADDR_MINMAX_FAMILY_OID, MACADDR_TYPE_OID),
         (BRIN_MACADDR8_MINMAX_FAMILY_OID, MACADDR8_TYPE_OID),
+        (BRIN_NAME_MINMAX_FAMILY_OID, NAME_TYPE_OID),
         // :HACK: Generic BRIN minmax-multi and bloom runtime support is not
         // implemented yet; these rows expose PostgreSQL-compatible catalogs.
         (BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID, MACADDR_TYPE_OID),
@@ -585,6 +586,31 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
             (12, operator_proc_oid(&operators, "<=", type_oid, type_oid)),
             (13, operator_proc_oid(&operators, ">=", type_oid, type_oid)),
             (14, operator_proc_oid(&operators, ">", type_oid, type_oid)),
+        ] {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: type_oid,
+                amprocrighttype: type_oid,
+                amprocnum: procnum,
+                amproc: proc_oid,
+            });
+            oid = oid.saturating_add(1);
+        }
+    }
+    // :HACK: Native BRIN inclusion summaries are not implemented yet. These
+    // rows let explicit inclusion opclasses build, while the BRIN scan path
+    // treats them as lossy and relies on heap recheck for correctness.
+    for (family, type_oid) in [
+        (BRIN_NETWORK_INCLUSION_FAMILY_OID, INET_TYPE_OID),
+        (BRIN_RANGE_INCLUSION_FAMILY_OID, ANYRANGEOID),
+        (BRIN_BOX_INCLUSION_FAMILY_OID, BOX_TYPE_OID),
+    ] {
+        for (procnum, proc_oid) in [
+            (1_i16, BRIN_MINMAX_OPCINFO_PROC_OID),
+            (2, BRIN_MINMAX_ADD_VALUE_PROC_OID),
+            (3, BRIN_MINMAX_CONSISTENT_PROC_OID),
+            (4, BRIN_MINMAX_UNION_PROC_OID),
         ] {
             rows.push(PgAmprocRow {
                 oid,

@@ -5489,7 +5489,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::Inet(value) => match ty.kind {
             SqlTypeKind::Inet => Ok(Value::Inet(value)),
-            SqlTypeKind::Cidr => parse_cidr_text(&value.render_cidr()).map(Value::Cidr),
+            SqlTypeKind::Cidr => Ok(Value::Cidr(crate::backend::executor::network_prefix(
+                &value,
+            ))),
             SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
                 Ok(Value::Text(CompactString::from_owned(value.render_cidr())))
             }

@@ -78,6 +78,7 @@ pub const BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID: u32 = 76116;
 pub const BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID: u32 = 76117;
 pub const BRIN_MACADDR_BLOOM_FAMILY_OID: u32 = 76118;
 pub const BRIN_MACADDR8_BLOOM_FAMILY_OID: u32 = 76119;
+pub const BRIN_NAME_MINMAX_FAMILY_OID: u32 = 76143;
 pub const BRIN_TEXT_BLOOM_FAMILY_OID: u32 = 4573;
 pub const BRIN_NETWORK_MINMAX_FAMILY_OID: u32 = 4075;
 pub const BRIN_NETWORK_INCLUSION_FAMILY_OID: u32 = 4102;
@@ -433,6 +434,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         brin_row(BRIN_PG_LSN_MINMAX_FAMILY_OID, "pg_lsn_minmax_ops"),
         brin_row(BRIN_MACADDR_MINMAX_FAMILY_OID, "macaddr_minmax_ops"),
         brin_row(BRIN_MACADDR8_MINMAX_FAMILY_OID, "macaddr8_minmax_ops"),
+        brin_row(BRIN_NAME_MINMAX_FAMILY_OID, "name_minmax_ops"),
         // :HACK: pgrust's BRIN runtime is still generic minmax-only; expose
         // PostgreSQL-compatible minmax-multi and bloom catalog families now.
         brin_row(

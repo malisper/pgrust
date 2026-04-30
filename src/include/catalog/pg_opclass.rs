@@ -97,6 +97,7 @@ pub const MACADDR_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76139;
 pub const MACADDR8_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76140;
 pub const MACADDR_BRIN_BLOOM_OPCLASS_OID: u32 = 76141;
 pub const MACADDR8_BRIN_BLOOM_OPCLASS_OID: u32 = 76142;
+pub const NAME_BRIN_MINMAX_OPCLASS_OID: u32 = 76150;
 pub const BOOL_HASH_OPCLASS_OID: u32 = 76200;
 pub const INT2_HASH_OPCLASS_OID: u32 = 76201;
 pub const INT4_HASH_OPCLASS_OID: u32 = 76202;
@@ -760,6 +761,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_MACADDR8_MINMAX_FAMILY_OID,
             MACADDR8_TYPE_OID,
         ),
+        brin_row(
+            NAME_BRIN_MINMAX_OPCLASS_OID,
+            "name_minmax_ops",
+            BRIN_NAME_MINMAX_FAMILY_OID,
+            NAME_TYPE_OID,
+        ),
         // :HACK: Generic BRIN minmax-multi and bloom runtime support is not
         // implemented yet; these rows expose PostgreSQL-compatible catalogs.
         brin_non_default_row(
@@ -1163,7 +1170,7 @@ fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
         SqlTypeKind::Uuid => opcintype == UUID_TYPE_OID,
         SqlTypeKind::Bit => opcintype == BIT_TYPE_OID,
         SqlTypeKind::VarBit => opcintype == VARBIT_TYPE_OID,
-        SqlTypeKind::Cidr => opcintype == CIDR_TYPE_OID,
+        SqlTypeKind::Cidr => matches!(opcintype, CIDR_TYPE_OID | INET_TYPE_OID),
         SqlTypeKind::Inet => opcintype == INET_TYPE_OID,
         SqlTypeKind::PgLsn => opcintype == PG_LSN_TYPE_OID,
         SqlTypeKind::Composite | SqlTypeKind::Record => opcintype == RECORD_TYPE_OID,

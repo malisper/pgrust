@@ -1879,6 +1879,12 @@ fn estimate_brin_bitmap_candidate(
         + heap_pages * RANDOM_PAGE_COST
         + rows * CPU_TUPLE_COST
         + recheck_cost;
+    if index_correlation < 0.1 {
+        // BRIN only pays off when the indexed values are clustered enough to
+        // avoid reading most heap ranges. If ANALYZE reports effectively no
+        // heap correlation, prefer the sequential scan unless it is disabled.
+        total_cost += stats.relpages * RANDOM_PAGE_COST + stats.reltuples * CPU_TUPLE_COST;
+    }
     let mut plan = Path::BitmapHeapScan {
         plan_info: PlanEstimate::new(
             bitmap_index.plan_info().startup_cost.as_f64(),
@@ -9263,6 +9269,36 @@ fn builtin_btree_strategy_type_compatible(
             SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char
         )
     );
+    let same_name_family = index.index_meta.am_oid == BRIN_AM_OID
+        && matches!(
+            (column.sql_type.kind, argument_type.kind),
+            (
+                SqlTypeKind::Name,
+                SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char | SqlTypeKind::Name
+            ) | (
+                SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char,
+                SqlTypeKind::Name
+            )
+        );
+    let same_oid_integer_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Oid
+                | SqlTypeKind::RegProc
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegCollation
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
+                | SqlTypeKind::Xid,
+            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Oid
+        )
+    );
     let same_numeric_family = matches!(
         (column.sql_type.kind, argument_type.kind),
         (
@@ -9280,7 +9316,34 @@ fn builtin_btree_strategy_type_compatible(
                 | SqlTypeKind::Numeric
         )
     );
-    same_string_family || same_numeric_family
+    let same_network_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Inet | SqlTypeKind::Cidr,
+            SqlTypeKind::Inet | SqlTypeKind::Cidr
+        )
+    );
+    let same_datetime_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz,
+            SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        )
+    );
+    let same_bit_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Bit | SqlTypeKind::VarBit,
+            SqlTypeKind::Bit | SqlTypeKind::VarBit
+        )
+    );
+    same_string_family
+        || same_name_family
+        || same_numeric_family
+        || same_oid_integer_family
+        || same_network_family
+        || same_datetime_family
+        || same_bit_family
 }
 
 fn index_key_argument(expr: &Expr) -> Option<IndexScanKeyArgument> {
