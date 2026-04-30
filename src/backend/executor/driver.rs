@@ -758,8 +758,8 @@ fn execute_statement_with_source(
             )))
         }
         Statement::Begin(_)
-        | Statement::Commit
-        | Statement::Rollback
+        | Statement::Commit(_)
+        | Statement::Rollback(_)
         | Statement::Savepoint(_)
         | Statement::ReleaseSavepoint(_)
         | Statement::RollbackTo(_) => {

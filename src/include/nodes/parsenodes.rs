@@ -551,8 +551,8 @@ pub enum Statement {
     Delete(DeleteStatement),
     Unsupported(UnsupportedStatement),
     Begin(TransactionOptions),
-    Commit,
-    Rollback,
+    Commit(TransactionEndOptions),
+    Rollback(TransactionEndOptions),
     Savepoint(String),
     RollbackTo(String),
     ReleaseSavepoint(String),
@@ -1316,6 +1316,11 @@ pub struct TransactionOptions {
     pub deferrable: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransactionEndOptions {
+    pub chain: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetTransactionScope {
     Transaction,
@@ -1326,6 +1331,7 @@ pub enum SetTransactionScope {
 pub struct SetTransactionStatement {
     pub scope: SetTransactionScope,
     pub options: TransactionOptions,
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

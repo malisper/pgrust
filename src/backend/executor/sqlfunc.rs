@@ -598,7 +598,17 @@ fn execute_sql_function_query(
     )?;
     let saved_expr_bindings = std::mem::take(&mut ctx.expr_bindings);
     let restore_row_security = apply_sql_function_row_security_set_config_effect(&sql, ctx);
+    let saved_snapshot_cid = if row.provolatile == 'v' {
+        let saved = ctx.snapshot.current_cid;
+        ctx.snapshot.current_cid = crate::backend::access::transam::xact::CommandId::MAX;
+        Some(saved)
+    } else {
+        None
+    };
     let result = execute_sql_function_statement(stmt, catalog, ctx);
+    if let Some(saved) = saved_snapshot_cid {
+        ctx.snapshot.current_cid = saved;
+    }
     restore_sql_function_row_security_set_config_effect(restore_row_security, ctx);
     ctx.expr_bindings = saved_expr_bindings;
     result

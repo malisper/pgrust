@@ -1597,8 +1597,8 @@ fn run_statement(
         | Statement::ClosePortal(_)
         | Statement::SetTransaction(_)
         | Statement::Begin(_)
-        | Statement::Commit
-        | Statement::Rollback
+        | Statement::Commit(_)
+        | Statement::Rollback(_)
         | Statement::Savepoint(_)
         | Statement::ReleaseSavepoint(_)
         | Statement::RollbackTo(_) => {

@@ -243,6 +243,10 @@ impl TransactionManager {
             xmin,
             xmax,
             in_progress,
+            own_xids: (current_xid != INVALID_TRANSACTION_ID)
+                .then_some(current_xid)
+                .into_iter()
+                .collect(),
         })
     }
 

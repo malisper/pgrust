@@ -178,7 +178,7 @@ use crate::include::nodes::datum::{
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
     OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
-    attrno_index, is_executor_special_varno, is_system_attr,
+    XMIN_ATTR_NO, attrno_index, is_executor_special_varno, is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pl::plpgsql::current_event_trigger_table_rewrite;
@@ -2343,6 +2343,17 @@ fn lookup_ctid_binding(
         .find(|binding| binding.varno == varno)
         .and_then(|binding| binding.tid)
         .map(ctid_value)
+}
+
+fn lookup_xmin_binding(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Option<Value> {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.xmin)
+        .map(|xmin| Value::Xid8(u64::from(xmin)))
 }
 
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
@@ -8187,6 +8198,7 @@ fn eval_bound_system_var(
     match var.varattno {
         TABLE_OID_ATTR_NO => lookup_system_binding(bindings, var.varno),
         SELF_ITEM_POINTER_ATTR_NO => lookup_ctid_binding(bindings, var.varno),
+        XMIN_ATTR_NO => lookup_xmin_binding(bindings, var.varno),
         _ => None,
     }
 }
@@ -8335,6 +8347,12 @@ pub fn eval_expr(
                     .tid()
                     .map(ctid_value)
                     .or_else(|| lookup_ctid_binding(&ctx.system_bindings, var.varno))
+                    .unwrap_or(Value::Null))
+            } else if var.varattno == XMIN_ATTR_NO {
+                Ok(slot
+                    .xmin()
+                    .map(|xmin| Value::Xid8(u64::from(xmin)))
+                    .or_else(|| lookup_xmin_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {
