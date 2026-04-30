@@ -52991,7 +52991,8 @@ fn pg_get_viewdef_renders_values_rows_and_set_operation_inputs() {
     };
     assert!(union_sql.contains("UNION"), "{union_sql}");
     assert!(union_sql.contains("src_setop.x AS a"), "{union_sql}");
-    assert!(union_sql.contains("42 AS a"), "{union_sql}");
+    assert!(union_sql.contains("SELECT 42"), "{union_sql}");
+    assert!(!union_sql.contains("42 AS a"), "{union_sql}");
     assert!(!union_sql.contains("var1"), "{union_sql}");
 }
 
