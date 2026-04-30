@@ -110,7 +110,6 @@ pub(super) fn used_parent_attrs_for_rte(
             }
             RangeTblEntryKind::Subquery { query }
                 if query_contains_outer_ref_to_rte(query, rtindex, 1)
-                    || query_contains_outer_ref_to_rte(query, rtindex, 0)
                     || query_contains_outer_join_alias_ref_to_rte(&root.parse, query, rtindex) =>
             {
                 // :HACK: PostgreSQL tracks these with PlaceHolderVars and
