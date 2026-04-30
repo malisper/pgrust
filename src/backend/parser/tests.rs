@@ -2934,6 +2934,7 @@ fn parse_create_unique_index_statement() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3443,6 +3444,7 @@ fn parse_create_index_with_method_and_ordering() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3488,6 +3490,7 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3569,6 +3572,7 @@ fn parse_create_index_without_name() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3870,6 +3874,7 @@ fn parse_create_index_with_expression_item() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3903,6 +3908,7 @@ fn parse_create_index_with_function_expression_item() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3938,6 +3944,7 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
             predicate: Some(parse_expr("unique1 < 20 or unique1 > 980").unwrap()),
             predicate_sql: Some("unique1 < 20 or unique1 > 980".into()),
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -6189,7 +6196,9 @@ fn parse_create_tablespace_statement() {
         stmt,
         Statement::CreateTablespace(CreateTablespaceStatement {
             tablespace_name: "regress_tblspace".into(),
+            owner: None,
             location: "".into(),
+            options: Vec::new(),
         })
     );
 }
