@@ -3434,6 +3434,29 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         }
         return;
     }
+    let filter = root
+        .simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .and_then(base_filter_expr);
+    if root.config.constraint_exclusion_on
+        && let RangeTblEntryKind::Relation { relation_oid, .. } = rte.kind.clone()
+        && !relation_may_satisfy_own_partition_bound(catalog, relation_oid, filter.as_ref())
+    {
+        if let Some(rel) = root
+            .simple_rel_array
+            .get_mut(rtindex)
+            .and_then(Option::as_mut)
+        {
+            rel.add_path(optimize_path_with_config(
+                const_false_relation_path(rtindex, &rte.desc),
+                catalog,
+                root.config,
+            ));
+            bestpath::set_cheapest(rel);
+        }
+        return;
+    }
     if let RangeTblEntryKind::Relation {
         rel: heap_rel,
         relation_oid,
@@ -3461,11 +3484,6 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         }
         let query_order_items = query_order_items_for_base_rel(root, rtindex);
         let query_pathkeys = root.query_pathkeys.clone();
-        let filter = root
-            .simple_rel_array
-            .get(rtindex)
-            .and_then(Option::as_ref)
-            .and_then(base_filter_expr);
         let has_null_scalar_array_filter = if relkind == 'p' {
             filter
                 .as_ref()

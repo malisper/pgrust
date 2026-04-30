@@ -14,8 +14,8 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
-    BoolExprType, BuiltinScalarFunction, Expr, OpExprKind, RelationDesc, ScalarFunctionImpl,
-    attrno_index, expr_sql_type_hint, user_attrno,
+    BoolExprType, BuiltinScalarFunction, Expr, OpExpr, OpExprKind, RelationDesc,
+    ScalarFunctionImpl, attrno_index, expr_sql_type_hint, user_attrno,
 };
 
 pub(super) fn partition_may_satisfy_filter(
@@ -552,8 +552,9 @@ fn expr_may_match_bound(
             let [left, right] = op.args.as_slice() else {
                 return true;
             };
+            let collation_oid = op_pruning_collation(op);
             let Some((key_index, key_on_left, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid, catalog)
+                partition_key_const_cmp(left, right, spec, collation_oid, catalog)
             else {
                 return true;
             };
@@ -565,7 +566,7 @@ fn expr_may_match_bound(
                 key_on_left,
                 op.op,
                 &value,
-                op.collation_oid,
+                collation_oid,
                 catalog,
                 ancestor_bound,
             )
@@ -729,7 +730,7 @@ fn list_value_may_match_expr(
             let [left, right] = op.args.as_slice() else {
                 return true;
             };
-            let collation_oid = op.collation_oid;
+            let collation_oid = op_pruning_collation(op);
             let Some((key_index, key_on_left, constant)) =
                 partition_key_const_cmp(left, right, spec, collation_oid, catalog)
             else {
@@ -1016,6 +1017,19 @@ fn normalize_key_expr(expr: &Expr) -> &Expr {
 
 fn collation_mismatch(query_collation_oid: Option<u32>, key_collation_oid: u32) -> bool {
     query_collation_oid.is_some_and(|oid| key_collation_oid != 0 && oid != key_collation_oid)
+}
+
+fn op_pruning_collation(op: &OpExpr) -> Option<u32> {
+    op.collation_oid
+        .or_else(|| op.args.iter().find_map(top_level_explicit_collation))
+}
+
+fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        Expr::Cast(inner, _) => top_level_explicit_collation(inner),
+        _ => None,
+    }
 }
 
 fn const_value(expr: &Expr) -> Option<Value> {
@@ -1619,6 +1633,7 @@ struct KeyConstraint {
     upper: Option<ScalarBound>,
     equal: Option<Value>,
     requires_null: bool,
+    collation_oid: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -1733,8 +1748,9 @@ fn apply_hash_constraint(
             let [left, right] = op.args.as_slice() else {
                 return ConstraintApplyResult::Ignored;
             };
+            let collation_oid = op_pruning_collation(op);
             let Some((key_index, _, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid, None)
+                partition_key_const_cmp(left, right, spec, collation_oid, None)
             else {
                 return ConstraintApplyResult::Ignored;
             };
@@ -1961,12 +1977,12 @@ fn apply_range_constraint(
             let [left, right] = op.args.as_slice() else {
                 return ConstraintApplyResult::Ignored;
             };
+            let collation_oid = op_pruning_collation(op);
             let Some((key_index, key_on_left, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid, None)
+                partition_key_const_cmp(left, right, spec, collation_oid, None)
             else {
                 return ConstraintApplyResult::Ignored;
             };
-            let collation_oid = op.collation_oid;
             let op = if key_on_left {
                 op.op
             } else {
@@ -2003,6 +2019,14 @@ fn add_comparison_constraint(
     let key_collation_oid = spec.partcollation.get(key_index).copied().unwrap_or(0);
     let collation_oid = collation_oid.or((key_collation_oid != 0).then_some(key_collation_oid));
     let constraint = &mut constraints[key_index];
+    if let Some(existing_collation_oid) = constraint.collation_oid
+        && collation_oid.is_some_and(|oid| oid != existing_collation_oid)
+    {
+        return true;
+    }
+    if constraint.collation_oid.is_none() {
+        constraint.collation_oid = collation_oid;
+    }
     match op {
         OpExprKind::Eq => add_equality_constraint(constraint, value, collation_oid),
         OpExprKind::Lt => {
@@ -2675,6 +2699,7 @@ mod tests {
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, PUBLIC_NAMESPACE_OID, PgInheritsRow,
     };
+    use crate::include::catalog::{C_COLLATION_OID, POSIX_COLLATION_OID};
     use crate::include::nodes::primnodes::RelationDesc;
     use crate::include::nodes::primnodes::{ScalarArrayOpExpr, Var};
 
@@ -2881,6 +2906,14 @@ mod tests {
         }
     }
 
+    fn multi_text_range_bound(from: &[&str], to: &[&str]) -> PartitionBoundSpec {
+        PartitionBoundSpec::Range {
+            from: from.iter().map(|value| text_range_value(value)).collect(),
+            to: to.iter().map(|value| text_range_value(value)).collect(),
+            is_default: false,
+        }
+    }
+
     fn int_range_default_bound() -> PartitionBoundSpec {
         PartitionBoundSpec::Range {
             from: Vec::new(),
@@ -2891,6 +2924,10 @@ mod tests {
 
     fn int_value(value: i32) -> PartitionRangeDatumValue {
         PartitionRangeDatumValue::Value(SerializedPartitionValue::Int32(value))
+    }
+
+    fn text_range_value(value: &str) -> PartitionRangeDatumValue {
+        PartitionRangeDatumValue::Value(SerializedPartitionValue::Text(value.into()))
     }
 
     fn int_cmp(op: OpExprKind, value: i32) -> Expr {
@@ -2945,6 +2982,23 @@ mod tests {
                 elements: values.iter().map(|value| text_const(value)).collect(),
                 array_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
             }),
+            collation_oid: None,
+        }))
+    }
+
+    fn collated_text_eq(value: &str, collation_oid: u32) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op: OpExprKind::Eq,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![
+                key_expr(),
+                Expr::Collate {
+                    expr: Box::new(text_const(value)),
+                    collation_oid,
+                },
+            ],
             collation_oid: None,
         }))
     }
@@ -3241,6 +3295,31 @@ mod tests {
             &default_bound,
             &siblings
         ));
+    }
+
+    #[test]
+    fn multi_key_range_uses_operand_collation_to_match_duplicate_key_exprs() {
+        let spec = LoweredPartitionSpec {
+            strategy: PartitionStrategy::Range,
+            key_columns: vec!["a_posix".into(), "a_c".into()],
+            key_exprs: vec![key_expr(), key_expr()],
+            key_types: vec![SqlType::new(SqlTypeKind::Text); 2],
+            key_sqls: vec!["a".into(), "a".into()],
+            partattrs: vec![0, 0],
+            partclass: vec![0, 0],
+            partcollation: vec![POSIX_COLLATION_OID, C_COLLATION_OID],
+        };
+        let first = multi_text_range_bound(&["a", "a"], &["a", "e"]);
+        let second = multi_text_range_bound(&["a", "e"], &["a", "z"]);
+        let third = multi_text_range_bound(&["b", "a"], &["b", "e"]);
+        let expr = Expr::and(
+            collated_text_eq("e", C_COLLATION_OID),
+            collated_text_eq("a", POSIX_COLLATION_OID),
+        );
+
+        assert!(!expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+        assert!(!expr_may_match_bound(&expr, &spec, &third, &[]));
     }
 
     #[test]

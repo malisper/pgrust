@@ -326,6 +326,7 @@ pub struct MergeAppendState {
     pub(crate) partition_prune: Option<PartitionPrunePlan>,
     pub(crate) subplans_removed: usize,
     pub(crate) items: Vec<OrderByEntry>,
+    pub(crate) sort_key_qualifier: Option<String>,
     pub(crate) column_names: Vec<String>,
     pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,

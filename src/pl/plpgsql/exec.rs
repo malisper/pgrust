@@ -4215,6 +4215,9 @@ fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerC
         enable_memoize: bool_executor_guc(gucs, "enable_memoize", true),
         enable_material: bool_executor_guc(gucs, "enable_material", true),
         enable_partition_pruning: bool_executor_guc(gucs, "enable_partition_pruning", true),
+        constraint_exclusion_on: gucs
+            .get("constraint_exclusion")
+            .is_some_and(|value| value.eq_ignore_ascii_case("on")),
         retain_partial_index_filters: false,
         enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
         enable_sort: bool_executor_guc(gucs, "enable_sort", true),

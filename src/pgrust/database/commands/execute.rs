@@ -108,6 +108,9 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
         enable_memoize: direct_bool_config(gucs, "enable_memoize", true),
         enable_material: direct_bool_config(gucs, "enable_material", true),
         enable_partition_pruning: direct_bool_config(gucs, "enable_partition_pruning", true),
+        constraint_exclusion_on: gucs
+            .get("constraint_exclusion")
+            .is_some_and(|value| value.eq_ignore_ascii_case("on")),
         retain_partial_index_filters: false,
         enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
         enable_sort: direct_bool_config(gucs, "enable_sort", true),

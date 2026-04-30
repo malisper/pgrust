@@ -768,14 +768,10 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
             collation_oid,
         } => {
             let expr = simplify_expr(*expr, case_test_value)?;
-            if matches!(expr, Expr::Const(_)) {
-                Ok(expr)
-            } else {
-                Ok(Expr::Collate {
-                    expr: Box::new(expr),
-                    collation_oid,
-                })
-            }
+            Ok(Expr::Collate {
+                expr: Box::new(expr),
+                collation_oid,
+            })
         }
         Expr::Like {
             expr,
@@ -1319,34 +1315,53 @@ fn simplify_bool_expr(
 }
 
 fn and_args_have_contradictory_equalities(args: &[Expr]) -> bool {
-    let mut equalities: Vec<(&Expr, &Value)> = Vec::new();
+    let mut equalities: Vec<(&Expr, &Value, Option<u32>)> = Vec::new();
     for arg in args {
-        let Some((expr, value)) = equality_to_const(arg) else {
+        let Some((expr, value, collation_oid)) = equality_to_const(arg) else {
             continue;
         };
         if matches!(value, Value::Null) {
             continue;
         }
-        if equalities.iter().any(|(existing_expr, existing_value)| {
-            *existing_expr == expr && *existing_value != value
-        }) {
+        if equalities
+            .iter()
+            .any(|(existing_expr, existing_value, existing_collation_oid)| {
+                *existing_expr == expr
+                    && *existing_collation_oid == collation_oid
+                    && *existing_value != value
+            })
+        {
             return true;
         }
-        equalities.push((expr, value));
+        equalities.push((expr, value, collation_oid));
     }
     false
 }
 
-fn equality_to_const(expr: &Expr) -> Option<(&Expr, &Value)> {
+fn equality_to_const(expr: &Expr) -> Option<(&Expr, &Value, Option<u32>)> {
     let Expr::Op(op) = expr else {
         return None;
     };
     if op.op != OpExprKind::Eq || op.args.len() != 2 {
         return None;
     }
+    let collation_oid = op_equality_collation(op);
     match (&op.args[0], &op.args[1]) {
-        (left, Expr::Const(value)) => Some((left, value)),
-        (Expr::Const(value), right) => Some((right, value)),
+        (left, Expr::Const(value)) => Some((left, value, collation_oid)),
+        (Expr::Const(value), right) => Some((right, value, collation_oid)),
+        _ => None,
+    }
+}
+
+fn op_equality_collation(op: &OpExpr) -> Option<u32> {
+    op.collation_oid
+        .or_else(|| op.args.iter().find_map(top_level_explicit_collation))
+}
+
+fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        Expr::Cast(inner, _) => top_level_explicit_collation(inner),
         _ => None,
     }
 }

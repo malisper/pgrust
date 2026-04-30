@@ -17,7 +17,10 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::value_io::format_failing_row_detail;
-use crate::backend::optimizer::partition_prune::relation_may_satisfy_own_partition_bound_with_runtime_values;
+use crate::backend::optimizer::partition_prune::{
+    relation_may_satisfy_own_partition_bound,
+    relation_may_satisfy_own_partition_bound_with_runtime_values,
+};
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
@@ -525,7 +528,15 @@ pub(crate) fn execute_explain(
     } = stmt;
     let statement = *statement;
     if let Statement::Update(update) = statement {
-        return execute_explain_update(update, analyze, costs, verbose, catalog, ctx);
+        return execute_explain_update(
+            update,
+            analyze,
+            costs,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        );
     }
     if let Statement::Delete(delete) = statement {
         return execute_explain_delete(delete, analyze, costs, verbose, catalog, planner_config);
@@ -828,11 +839,13 @@ fn execute_explain_update(
     verbose: bool,
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
 ) -> Result<StatementResult, ExecError> {
     let bound = bind_update(&stmt, catalog)?;
     let bound = rewrite_bound_update_auto_view_target(bound, catalog)
         .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
     let bound = finalize_bound_update_stmt(bound, catalog);
+    let bound = apply_update_constraint_exclusion(bound, catalog, planner_config);
     if analyze {
         let xid = ctx.ensure_write_xid()?;
         let cid = ctx.next_command_id;
@@ -855,7 +868,7 @@ fn execute_explain_delete(
     costs: bool,
     verbose: bool,
     catalog: &dyn CatalogLookup,
-    _planner_config: PlannerConfig,
+    planner_config: PlannerConfig,
 ) -> Result<StatementResult, ExecError> {
     if analyze {
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
@@ -867,6 +880,7 @@ fn execute_explain_delete(
     let bound = rewrite_bound_delete_auto_view_target(bound, catalog)
         .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
     let bound = finalize_bound_delete_stmt(bound, catalog);
+    let bound = apply_delete_constraint_exclusion(bound, catalog, planner_config);
     let lines = explain_delete_lines(&stmt, &bound, catalog, costs, verbose)?;
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
@@ -876,6 +890,48 @@ fn execute_explain_delete(
             .map(|line| vec![Value::Text(line.into())])
             .collect(),
     })
+}
+
+fn apply_update_constraint_exclusion(
+    mut stmt: BoundUpdateStatement,
+    catalog: &dyn CatalogLookup,
+    planner_config: PlannerConfig,
+) -> BoundUpdateStatement {
+    if !planner_config.constraint_exclusion_on {
+        return stmt;
+    }
+    for target in &mut stmt.targets {
+        if !relation_may_satisfy_own_partition_bound(
+            catalog,
+            target.relation_oid,
+            target.predicate.as_ref(),
+        ) {
+            target.predicate = Some(Expr::Const(Value::Bool(false)));
+            target.row_source = BoundModifyRowSource::Heap;
+        }
+    }
+    stmt
+}
+
+fn apply_delete_constraint_exclusion(
+    mut stmt: BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
+    planner_config: PlannerConfig,
+) -> BoundDeleteStatement {
+    if !planner_config.constraint_exclusion_on {
+        return stmt;
+    }
+    for target in &mut stmt.targets {
+        if !relation_may_satisfy_own_partition_bound(
+            catalog,
+            target.relation_oid,
+            target.predicate.as_ref(),
+        ) {
+            target.predicate = Some(Expr::Const(Value::Bool(false)));
+            target.row_source = BoundModifyRowSource::Heap;
+        }
+    }
+    stmt
 }
 
 fn execute_explain_insert(

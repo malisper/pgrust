@@ -627,6 +627,14 @@ fn renumber_append_child_aliases(plan: &mut Plan, ordinal: usize) {
         | Plan::IndexScan { relation_name, .. } => {
             *relation_name = renumber_relation_alias(relation_name, ordinal);
         }
+        Plan::BitmapHeapScan {
+            relation_name,
+            bitmapqual,
+            ..
+        } => {
+            *relation_name = renumber_relation_alias(relation_name, ordinal);
+            renumber_append_child_aliases(bitmapqual, ordinal);
+        }
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::BitmapOr { children, .. }
@@ -664,9 +672,6 @@ fn renumber_append_child_aliases(plan: &mut Plan, ordinal: usize) {
         } => {
             renumber_append_child_aliases(anchor, ordinal);
             renumber_append_child_aliases(recursive, ordinal);
-        }
-        Plan::BitmapHeapScan { bitmapqual, .. } => {
-            renumber_append_child_aliases(bitmapqual, ordinal);
         }
         Plan::Result { .. }
         | Plan::BitmapIndexScan { .. }
@@ -7534,7 +7539,6 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
     let mut found = Vec::new();
     match plan {
         Plan::Result { .. }
-        | Plan::Append { .. }
         | Plan::Unique { .. }
         | Plan::SeqScan { .. }
         | Plan::IndexOnlyScan { .. }
@@ -7548,6 +7552,25 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::WorkTableScan { .. }
         | Plan::RecursiveUnion { .. }
         | Plan::SetOp { .. } => {}
+        Plan::Append {
+            partition_prune, ..
+        } => {
+            if let Some(partition_prune) = partition_prune {
+                collect_direct_expr_subplans(&partition_prune.filter, &mut found);
+            }
+        }
+        Plan::MergeAppend {
+            partition_prune,
+            items,
+            ..
+        } => {
+            if let Some(partition_prune) = partition_prune {
+                collect_direct_expr_subplans(&partition_prune.filter, &mut found);
+            }
+            for item in items {
+                collect_direct_expr_subplans(&item.expr, &mut found);
+            }
+        }
         Plan::SubqueryScan { filter, .. } => {
             if let Some(filter) = filter {
                 collect_direct_expr_subplans(filter, &mut found);
@@ -7626,11 +7649,6 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
             }
         }
         Plan::IncrementalSort { items, .. } => {
-            for item in items {
-                collect_direct_expr_subplans(&item.expr, &mut found);
-            }
-        }
-        Plan::MergeAppend { items, .. } => {
             for item in items {
                 collect_direct_expr_subplans(&item.expr, &mut found);
             }

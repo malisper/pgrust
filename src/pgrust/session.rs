@@ -2855,6 +2855,10 @@ impl Session {
                 .get("enable_partition_pruning")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            constraint_exclusion_on: self
+                .gucs
+                .get("constraint_exclusion")
+                .is_some_and(|value| value.eq_ignore_ascii_case("on")),
             retain_partial_index_filters: false,
             enable_hashagg: self
                 .gucs
