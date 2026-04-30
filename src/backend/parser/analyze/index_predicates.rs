@@ -1,5 +1,5 @@
 use super::{is_text_like_type, query::shift_expr_rtindexes};
-use crate::backend::executor::compare_order_values;
+use crate::backend::executor::{cast_value, compare_order_values};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
     BoolExprType, Expr, OpExprKind, SELF_ITEM_POINTER_ATTR_NO, expr_sql_type_hint,
@@ -86,14 +86,12 @@ fn simple_comparison_implies(filter: &Expr, predicate: &Expr) -> bool {
     let Some(predicate) = extract_simple_comparison(predicate) else {
         return false;
     };
-    if filter.key != predicate.key {
+    if !predicate_keys_match(&filter.key, &predicate.key) {
         return false;
     }
-    if !text_like_range_implication(&filter) || !text_like_range_implication(&predicate) {
-        return false;
-    }
-    let Some(ordering) =
-        compare_order_values(&filter.value, &predicate.value, None, None, false).ok()
+    let Some(ordering) = compare_order_values(&filter.value, &predicate.value, None, None, false)
+        .ok()
+        .or_else(|| compare_predicate_integer_values(&filter.value, &predicate.value))
     else {
         return false;
     };
@@ -130,9 +128,59 @@ fn simple_comparison_implies(filter: &Expr, predicate: &Expr) -> bool {
     }
 }
 
-fn text_like_range_implication(comparison: &SimpleComparison) -> bool {
-    comparison.value.as_text().is_some()
-        && expr_sql_type_hint(&comparison.key).is_some_and(is_text_like_type)
+fn predicate_keys_match(left: &Expr, right: &Expr) -> bool {
+    left == right || normalize_predicate_key(left) == normalize_predicate_key(right)
+}
+
+fn normalize_predicate_key(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Const(Value::Int16(value)) => Expr::Const(Value::Int64(i64::from(*value))),
+        Expr::Const(Value::Int32(value)) => Expr::Const(Value::Int64(i64::from(*value))),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(normalize_predicate_key(left)),
+            Box::new(normalize_predicate_key(right)),
+        ),
+        Expr::Cast(inner, ty) => match inner.as_ref() {
+            Expr::Const(value) => cast_value(value.clone(), *ty)
+                .map(Expr::Const)
+                .unwrap_or_else(|_| Expr::Cast(Box::new(normalize_predicate_key(inner)), *ty)),
+            inner if expr_sql_type_hint(inner).is_some_and(|source| source == *ty) => {
+                normalize_predicate_key(inner)
+            }
+            _ => Expr::Cast(Box::new(normalize_predicate_key(inner)), *ty),
+        },
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(normalize_predicate_key(expr)),
+            collation_oid: *collation_oid,
+        },
+        Expr::Func(func) => {
+            let mut func = (**func).clone();
+            func.args = func.args.iter().map(normalize_predicate_key).collect();
+            Expr::Func(Box::new(func))
+        }
+        Expr::Op(op) => {
+            let mut op = (**op).clone();
+            op.args = op.args.iter().map(normalize_predicate_key).collect();
+            Expr::Op(Box::new(op))
+        }
+        other => other.clone(),
+    }
+}
+
+fn compare_predicate_integer_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    Some(predicate_integer_value(left)?.cmp(&predicate_integer_value(right)?))
+}
+
+fn predicate_integer_value(value: &Value) -> Option<i128> {
+    match value {
+        Value::Int16(value) => Some(i128::from(*value)),
+        Value::Int32(value) => Some(i128::from(*value)),
+        Value::Int64(value) => Some(i128::from(*value)),
+        _ => None,
+    }
 }
 
 fn extract_simple_comparison(expr: &Expr) -> Option<SimpleComparison> {
@@ -175,12 +223,18 @@ fn commute_comparison_op(op: OpExprKind) -> Option<OpExprKind> {
 
 fn predicate_key_expr(expr: &Expr) -> Option<Expr> {
     let stripped = strip_text_like_casts(expr);
-    matches!(stripped, Expr::Var(_)).then(|| stripped.clone())
+    if matches!(stripped, Expr::Const(_)) {
+        return None;
+    }
+    Some(stripped.clone())
 }
 
 fn predicate_const_value(expr: &Expr) -> Option<Value> {
     match strip_text_like_casts(expr) {
         Expr::Const(value) => Some(value.clone()),
+        Expr::Cast(inner, target) => {
+            predicate_const_value(inner).and_then(|value| cast_value(value, *target).ok())
+        }
         _ => None,
     }
 }
@@ -462,6 +516,15 @@ mod tests {
         })
     }
 
+    fn int8_var() -> Expr {
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(0),
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Int8),
+        })
+    }
+
     fn int_cmp(op: OpExprKind, value: i32) -> Expr {
         Expr::Op(Box::new(OpExpr {
             opno: 0,
@@ -473,11 +536,75 @@ mod tests {
         }))
     }
 
+    fn coalesce_int_cmp(op: OpExprKind, value: i32, fallback: Value) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![
+                Expr::Coalesce(Box::new(int_var()), Box::new(Expr::Const(fallback))),
+                Expr::Const(Value::Int32(value)),
+            ],
+            collation_oid: None,
+        }))
+    }
+
+    fn coalesce_int8_cmp(op: OpExprKind, value: i64, fallback: Value) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![
+                Expr::Coalesce(Box::new(int8_var()), Box::new(Expr::Const(fallback))),
+                Expr::Const(Value::Int64(value)),
+            ],
+            collation_oid: None,
+        }))
+    }
+
+    fn coalesce_casted_int_cmp(op: OpExprKind, value: i64) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![
+                Expr::Coalesce(
+                    Box::new(int8_var()),
+                    Box::new(Expr::Cast(
+                        Box::new(Expr::Const(Value::Int32(1))),
+                        SqlType::new(SqlTypeKind::Int8),
+                    )),
+                ),
+                Expr::Const(Value::Int64(value)),
+            ],
+            collation_oid: None,
+        }))
+    }
+
     #[test]
-    fn numeric_filter_does_not_imply_range_partial_predicate() {
-        assert!(!predicate_implies_index_predicate(
-            Some(&int_cmp(OpExprKind::Eq, 1)),
+    fn numeric_filter_implies_range_partial_predicate() {
+        assert!(predicate_implies_index_predicate(
+            Some(&int_cmp(OpExprKind::Gt, 1)),
             Some(&int_cmp(OpExprKind::Gt, 0)),
+        ));
+    }
+
+    #[test]
+    fn coalesce_filter_implies_range_partial_predicate() {
+        assert!(predicate_implies_index_predicate(
+            Some(&coalesce_int_cmp(OpExprKind::Gt, 1, Value::Int32(1))),
+            Some(&coalesce_int_cmp(OpExprKind::Gt, 0, Value::Int64(1))),
+        ));
+    }
+
+    #[test]
+    fn coalesce_filter_matches_casted_index_predicate_literals() {
+        assert!(predicate_implies_index_predicate(
+            Some(&coalesce_int8_cmp(OpExprKind::Gt, 1, Value::Int64(1))),
+            Some(&coalesce_casted_int_cmp(OpExprKind::Gt, 0)),
         ));
     }
 }

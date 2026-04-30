@@ -23625,7 +23625,7 @@ fn build_row_assignment(pair: Pair<'_, Rule>) -> Result<Vec<Assignment>, ParseEr
         }
     }
     let targets = targets.ok_or(ParseError::UnexpectedEof)?;
-    let exprs = split_row_assignment_expr(expr.ok_or(ParseError::UnexpectedEof)?, targets.len())?;
+    let exprs = split_row_assignment_expr(expr.ok_or(ParseError::UnexpectedEof)?, &targets)?;
     Ok(targets
         .into_iter()
         .zip(exprs)
@@ -23633,9 +23633,30 @@ fn build_row_assignment(pair: Pair<'_, Rule>) -> Result<Vec<Assignment>, ParseEr
         .collect())
 }
 
-fn split_row_assignment_expr(expr: SqlExpr, arity: usize) -> Result<Vec<SqlExpr>, ParseError> {
+fn split_row_assignment_expr(
+    expr: SqlExpr,
+    targets: &[AssignmentTarget],
+) -> Result<Vec<SqlExpr>, ParseError> {
+    let arity = targets.len();
     match expr {
         SqlExpr::Row(items) if items.len() == arity => Ok(items),
+        SqlExpr::Row(items) if items.len() == 1 && arity > 1 => {
+            if let SqlExpr::Column(name) = &items[0]
+                && let Some(relation) = name.strip_suffix(".*")
+            {
+                return Ok(targets
+                    .iter()
+                    .map(|target| SqlExpr::FieldSelect {
+                        expr: Box::new(SqlExpr::Column(relation.to_string())),
+                        field: target.column.clone(),
+                    })
+                    .collect());
+            }
+            Err(ParseError::UnexpectedToken {
+                expected: "matching row assignment values",
+                actual: "1 values".into(),
+            })
+        }
         SqlExpr::Row(items) => Err(ParseError::UnexpectedToken {
             expected: "matching row assignment values",
             actual: format!("{} values", items.len()),

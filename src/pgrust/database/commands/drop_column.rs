@@ -693,6 +693,10 @@ impl Database {
                 waiter: None,
                 interrupts: interrupts.clone(),
             };
+            let drop_partition_child_column = !drop_stmt.only
+                && relation.relkind == 'p'
+                && item.relation.relispartition
+                && column.attinhcount <= expected_parents;
             let effect = if drop_stmt.only {
                 let new_attinhcount = column.attinhcount.saturating_sub(expected_parents);
                 let not_null_inhcount = column.not_null_constraint_oid.map(|_| {
@@ -712,7 +716,9 @@ impl Database {
                         &ctx,
                     )
                     .map_err(map_catalog_error)?
-            } else if column.attinhcount <= expected_parents && !column.attislocal {
+            } else if drop_partition_child_column
+                || (column.attinhcount <= expected_parents && !column.attislocal)
+            {
                 self.catalog
                     .write()
                     .alter_table_drop_column_mvcc(
@@ -745,7 +751,10 @@ impl Database {
                     )
                     .map_err(map_catalog_error)?
             };
-            if !drop_stmt.only && column.attinhcount <= expected_parents && !column.attislocal {
+            if !drop_stmt.only
+                && (drop_partition_child_column
+                    || (column.attinhcount <= expected_parents && !column.attislocal))
+            {
                 dropped_inheritance_oids.insert(item.relation.relation_oid);
             }
             self.apply_catalog_mutation_effect_immediate(&effect)?;

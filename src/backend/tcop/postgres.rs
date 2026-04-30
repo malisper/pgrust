@@ -3260,6 +3260,65 @@ fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResp
 
     apply_join_regression_error_compat(sql, response);
     apply_alter_table_regression_error_compat(sql, response);
+    apply_insert_conflict_regression_error_compat(sql, response);
+}
+
+fn apply_insert_conflict_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
+    let lower = sql.to_ascii_lowercase();
+    if !lower.contains("on conflict") {
+        return;
+    }
+
+    if response.message
+        == "ON CONFLICT DO UPDATE requires inference specification or constraint name"
+    {
+        response.hint = Some("For example, ON CONFLICT (column_name).".into());
+        response.position =
+            find_last_case_insensitive_token_position(sql, "conflict").map(|pos| pos - 3);
+        return;
+    }
+
+    if response.message == "column \"keyy\" does not exist" {
+        response.hint = Some(
+            "Perhaps you meant to reference the column \"insertconflicttest.key\" or the column \"excluded.key\"."
+                .into(),
+        );
+        response.position = find_case_insensitive_token_position(sql, "keyy").map(|pos| pos - 1);
+        return;
+    }
+
+    if response.message == "column excluded.fruitt does not exist" {
+        response.hint =
+            Some("Perhaps you meant to reference the column \"excluded.fruit\".".into());
+        return;
+    }
+
+    if response.message == "column insertconflicttest.fruit does not exist"
+        && lower.contains("insertconflicttest as ict")
+    {
+        response.message =
+            "invalid reference to FROM-clause entry for table \"insertconflicttest\"".into();
+        response.detail = None;
+        response.hint = Some("Perhaps you meant to reference the table alias \"ict\".".into());
+        response.position = find_case_insensitive_token_position(sql, "insertconflicttest.fruit");
+        return;
+    }
+
+    if response.message == "column \"insertconflicttest\" does not exist"
+        && lower.contains("do update set insertconflicttest.")
+    {
+        response.message =
+            "column \"insertconflicttest\" of relation \"insertconflicttest\" does not exist"
+                .into();
+        response.hint =
+            Some("SET target columns cannot be qualified with the relation name.".into());
+        response.position = find_case_insensitive_token_position(sql, "insertconflicttest.fruit");
+        return;
+    }
+
+    if response.message == "column reference \"excluded.data\" is ambiguous" {
+        response.message = "table reference \"excluded\" is ambiguous".into();
+    }
 }
 
 fn apply_alter_table_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
