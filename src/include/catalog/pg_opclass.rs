@@ -50,6 +50,7 @@ pub const TSQUERY_GIST_OPCLASS_OID: u32 = 10065;
 pub const RANGE_SPGIST_OPCLASS_OID: u32 = 10045;
 pub const TEXT_SPGIST_OPCLASS_OID: u32 = 10046;
 pub const INET_BRIN_INCLUSION_OPCLASS_OID: u32 = 10047;
+pub const INET_BRIN_MINMAX_OPCLASS_OID: u32 = 76144;
 pub const RANGE_BRIN_INCLUSION_OPCLASS_OID: u32 = 10048;
 pub const BOX_BRIN_INCLUSION_OPCLASS_OID: u32 = 10049;
 pub const ARRAY_GIN_OPCLASS_OID: u32 = 10051;
@@ -73,7 +74,9 @@ pub const CHAR_BRIN_MINMAX_OPCLASS_OID: u32 = 76121;
 pub const INT2_BRIN_MINMAX_OPCLASS_OID: u32 = 76122;
 pub const INT4_BRIN_MINMAX_OPCLASS_OID: u32 = 76123;
 pub const INT8_BRIN_MINMAX_OPCLASS_OID: u32 = 76124;
+pub const NUMERIC_BRIN_MINMAX_OPCLASS_OID: u32 = 76145;
 pub const OID_BRIN_MINMAX_OPCLASS_OID: u32 = 76125;
+pub const TID_BRIN_MINMAX_OPCLASS_OID: u32 = 76143;
 pub const FLOAT4_BRIN_MINMAX_OPCLASS_OID: u32 = 76126;
 pub const FLOAT8_BRIN_MINMAX_OPCLASS_OID: u32 = 76127;
 pub const TEXT_BRIN_MINMAX_OPCLASS_OID: u32 = 76128;
@@ -83,8 +86,11 @@ pub const DATE_BRIN_MINMAX_OPCLASS_OID: u32 = 76131;
 pub const TIMESTAMP_BRIN_MINMAX_OPCLASS_OID: u32 = 76132;
 pub const TIMESTAMPTZ_BRIN_MINMAX_OPCLASS_OID: u32 = 76133;
 pub const TIMETZ_BRIN_MINMAX_OPCLASS_OID: u32 = 76134;
+pub const INTERVAL_BRIN_MINMAX_OPCLASS_OID: u32 = 76146;
 pub const BIT_BRIN_MINMAX_OPCLASS_OID: u32 = 76135;
 pub const VARBIT_BRIN_MINMAX_OPCLASS_OID: u32 = 76136;
+pub const UUID_BRIN_MINMAX_OPCLASS_OID: u32 = 76147;
+pub const PG_LSN_BRIN_MINMAX_OPCLASS_OID: u32 = 76148;
 pub const MACADDR_BRIN_MINMAX_OPCLASS_OID: u32 = 76137;
 pub const MACADDR8_BRIN_MINMAX_OPCLASS_OID: u32 = 76138;
 pub const MACADDR_BRIN_MINMAX_MULTI_OPCLASS_OID: u32 = 76139;
@@ -630,10 +636,22 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             INT8_TYPE_OID,
         ),
         brin_row(
+            NUMERIC_BRIN_MINMAX_OPCLASS_OID,
+            "numeric_minmax_ops",
+            BRIN_NUMERIC_MINMAX_FAMILY_OID,
+            NUMERIC_TYPE_OID,
+        ),
+        brin_row(
             OID_BRIN_MINMAX_OPCLASS_OID,
             "oid_minmax_ops",
             BRIN_OID_MINMAX_FAMILY_OID,
             OID_TYPE_OID,
+        ),
+        brin_row(
+            TID_BRIN_MINMAX_OPCLASS_OID,
+            "tid_minmax_ops",
+            BRIN_TID_MINMAX_FAMILY_OID,
+            TID_TYPE_OID,
         ),
         brin_row(
             FLOAT4_BRIN_MINMAX_OPCLASS_OID,
@@ -701,6 +719,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             TIMETZ_TYPE_OID,
         ),
         brin_row(
+            INTERVAL_BRIN_MINMAX_OPCLASS_OID,
+            "interval_minmax_ops",
+            BRIN_INTERVAL_MINMAX_FAMILY_OID,
+            INTERVAL_TYPE_OID,
+        ),
+        brin_row(
             BIT_BRIN_MINMAX_OPCLASS_OID,
             "bit_minmax_ops",
             BRIN_BIT_MINMAX_FAMILY_OID,
@@ -711,6 +735,18 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "varbit_minmax_ops",
             BRIN_VARBIT_MINMAX_FAMILY_OID,
             VARBIT_TYPE_OID,
+        ),
+        brin_row(
+            UUID_BRIN_MINMAX_OPCLASS_OID,
+            "uuid_minmax_ops",
+            BRIN_UUID_MINMAX_FAMILY_OID,
+            UUID_TYPE_OID,
+        ),
+        brin_row(
+            PG_LSN_BRIN_MINMAX_OPCLASS_OID,
+            "pg_lsn_minmax_ops",
+            BRIN_PG_LSN_MINMAX_FAMILY_OID,
+            PG_LSN_TYPE_OID,
         ),
         brin_row(
             MACADDR_BRIN_MINMAX_OPCLASS_OID,
@@ -749,6 +785,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "macaddr8_bloom_ops",
             BRIN_MACADDR8_BLOOM_FAMILY_OID,
             MACADDR8_TYPE_OID,
+        ),
+        brin_non_default_row(
+            INET_BRIN_MINMAX_OPCLASS_OID,
+            "inet_minmax_ops",
+            BRIN_NETWORK_MINMAX_FAMILY_OID,
+            INET_TYPE_OID,
         ),
         brin_row(
             INET_BRIN_INCLUSION_OPCLASS_OID,
@@ -1042,6 +1084,11 @@ fn hash_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassR
 }
 
 pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType) -> Option<u32> {
+    if am_oid == BRIN_AM_OID
+        && (type_oid == NAME_TYPE_OID || matches!(sql_type.kind, SqlTypeKind::Name))
+    {
+        return Some(TEXT_BRIN_MINMAX_OPCLASS_OID);
+    }
     if matches!(sql_type.element_type().kind, SqlTypeKind::Enum) {
         return match am_oid {
             BTREE_AM_OID => Some(ENUM_BTREE_OPCLASS_OID),
@@ -1072,6 +1119,13 @@ pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType)
                 && row.opcdefault
                 && (row.opcintype == type_oid
                     || opclass_accepts_sql_type(row.opcintype, sql_type)
+                    || (matches!(
+                        row.opcintype,
+                        TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
+                    ) && matches!(
+                        type_oid,
+                        NAME_TYPE_OID | TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
+                    ))
                     || (row.opcintype == ANYARRAYOID && sql_type.is_array)
                     || (row.opcintype == ANYRANGEOID && is_range)
                     || (row.opcintype == ANYMULTIRANGEOID && is_multirange)
@@ -1091,6 +1145,7 @@ fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
         SqlTypeKind::Int4 => opcintype == INT4_TYPE_OID,
         SqlTypeKind::Int8 => opcintype == INT8_TYPE_OID,
         SqlTypeKind::Oid => opcintype == OID_TYPE_OID,
+        SqlTypeKind::Tid => opcintype == TID_TYPE_OID,
         SqlTypeKind::InternalChar => opcintype == INTERNAL_CHAR_TYPE_OID,
         SqlTypeKind::Name => opcintype == NAME_TYPE_OID,
         SqlTypeKind::Text => opcintype == TEXT_TYPE_OID,
@@ -1110,6 +1165,7 @@ fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
         SqlTypeKind::VarBit => opcintype == VARBIT_TYPE_OID,
         SqlTypeKind::Cidr => opcintype == CIDR_TYPE_OID,
         SqlTypeKind::Inet => opcintype == INET_TYPE_OID,
+        SqlTypeKind::PgLsn => opcintype == PG_LSN_TYPE_OID,
         SqlTypeKind::Composite | SqlTypeKind::Record => opcintype == RECORD_TYPE_OID,
         _ => false,
     }
