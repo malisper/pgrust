@@ -1058,13 +1058,42 @@ fn render_target_entry(
         && matches!(&target.expr, Expr::Var(_) | Expr::FieldSelect { .. })
         && expr_output_name(&target.expr, ctx)
             .is_some_and(|name| name.eq_ignore_ascii_case(target_name));
-    if natural_output_matches && visible_source_count(ctx.query) == 1 {
+    if natural_output_matches && visible_source_count(ctx.query) == 1 && ctx.outers.is_empty() {
         quote_identifier_if_needed(target_name)
+    } else if natural_output_matches
+        && let Some(rendered) = sql_xml_table_output_name(target_name, ctx)
+    {
+        rendered
     } else if rendered == quote_identifier_if_needed(target_name) || natural_output_matches {
         rendered
+    } else if matches!(target.expr, Expr::Xml(_)) {
+        format!("{rendered} AS \"{}\"", target_name.replace('"', "\"\""))
     } else {
         format!("{rendered} AS {}", quote_identifier_if_needed(target_name))
     }
+}
+
+fn sql_xml_table_output_name(target_name: &str, ctx: &ViewDeparseContext<'_>) -> Option<String> {
+    ctx.query.rtable.iter().find_map(|rte| {
+        let RangeTblEntryKind::Function {
+            call: SetReturningCall::SqlXmlTable(table),
+        } = &rte.kind
+        else {
+            return None;
+        };
+        table
+            .output_columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case(target_name))
+            .then(|| {
+                let qualifier = rte
+                    .alias
+                    .as_deref()
+                    .map(quote_identifier_if_needed)
+                    .unwrap_or_else(|| "\"xmltable\"".into());
+                format!("{qualifier}.{}", quote_identifier_if_needed(target_name))
+            })
+    })
 }
 
 fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: usize) -> String {
@@ -1079,6 +1108,10 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
         } => {
             let left_sql = render_from_node(ctx, left, indent + 3);
             let right_sql = render_from_node(ctx, right, indent + 3);
+            if *kind == JoinType::Cross && range_ref_is_sql_xml_table(ctx, right) {
+                let joined = format!("{left_sql},\n{}LATERAL {right_sql}", " ".repeat(indent + 1));
+                return append_join_alias(ctx, *rtindex, joined);
+            }
             let using_cols = ctx
                 .query
                 .rtable
@@ -1137,6 +1170,23 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
             append_join_alias(ctx, *rtindex, joined)
         }
     }
+}
+
+fn range_ref_is_sql_xml_table(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode) -> bool {
+    let JoinTreeNode::RangeTblRef(index) = node else {
+        return false;
+    };
+    ctx.query
+        .rtable
+        .get(index.saturating_sub(1))
+        .is_some_and(|rte| {
+            matches!(
+                &rte.kind,
+                RangeTblEntryKind::Function {
+                    call: SetReturningCall::SqlXmlTable(_),
+                }
+            )
+        })
 }
 
 fn join_operand_requires_outer_parentheses(
@@ -1611,7 +1661,7 @@ fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) 
                 .namespaces
                 .iter()
                 .map(|namespace| {
-                    let uri = render_expr(&namespace.uri, ctx);
+                    let uri = render_xml_text_arg(&namespace.uri, ctx);
                     match namespace.name.as_deref() {
                         Some(name) => format!("{uri} AS {}", quote_identifier_if_needed(name)),
                         None => format!("DEFAULT {uri}"),
@@ -1622,9 +1672,9 @@ fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) 
         );
         rendered.push_str("), ");
     }
-    rendered.push_str(&render_expr(&table.row_path, ctx));
+    rendered.push_str(&render_xml_table_text_arg(&table.row_path, ctx));
     rendered.push_str(" PASSING ");
-    rendered.push_str(&render_expr(&table.document, ctx));
+    rendered.push_str(&render_xml_table_expr_arg(&table.document, ctx));
     rendered.push_str(" COLUMNS ");
     rendered.push_str(
         &table
@@ -1643,13 +1693,13 @@ fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) 
                             "{name} {}",
                             render_sql_json_table_type(column.sql_type, ctx.catalog)
                         );
-                        if let Some(path) = path {
-                            rendered.push_str(" PATH ");
-                            rendered.push_str(&render_expr(path, ctx));
-                        }
                         if let Some(default) = default {
                             rendered.push_str(" DEFAULT ");
-                            rendered.push_str(&render_expr(default, ctx));
+                            rendered.push_str(&render_xml_table_text_arg(default, ctx));
+                        }
+                        if let Some(path) = path {
+                            rendered.push_str(" PATH ");
+                            rendered.push_str(&render_xml_table_text_arg(path, ctx));
                         }
                         if *not_null {
                             rendered.push_str(" NOT NULL");
@@ -2526,15 +2576,23 @@ fn render_xml_expr(
             } else {
                 " NO INDENT"
             };
-            format!(
+            let target_type = xml.target_type.unwrap_or(SqlType::new(SqlTypeKind::Text));
+            let rendered = format!(
                 "XMLSERIALIZE({} {} AS {}{indent})",
                 render_xml_option(xml.xml_option),
                 render_expr(&xml.args[0], ctx),
-                render_sql_type_with_catalog(
-                    xml.target_type.unwrap_or(SqlType::new(SqlTypeKind::Text)),
-                    ctx.catalog,
+                render_sql_type_with_catalog(target_type, ctx.catalog,)
+            );
+            if !target_type.is_array
+                && matches!(target_type.kind, SqlTypeKind::Char | SqlTypeKind::Varchar)
+            {
+                format!(
+                    "({rendered})::{}",
+                    render_sql_type_with_catalog(target_type, ctx.catalog)
                 )
-            )
+            } else {
+                rendered
+            }
         }
         crate::include::nodes::primnodes::XmlExprOp::IsDocument => {
             format!("{} IS DOCUMENT", render_wrapped_expr(&xml.args[0], ctx))
@@ -2747,6 +2805,14 @@ fn render_xml_text_arg(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
         Expr::Cast(_, ty) if matches!(ty.kind, SqlTypeKind::Text) => render_expr(expr, ctx),
         _ => render_expr(expr, ctx),
     }
+}
+
+fn render_xml_table_text_arg(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    format!("({})", render_xml_text_arg(expr, ctx))
+}
+
+fn render_xml_table_expr_arg(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    format!("({})", render_expr(expr, ctx))
 }
 
 fn render_sql_json_query_function(

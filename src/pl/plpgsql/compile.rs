@@ -9,13 +9,13 @@ use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     AliasColumnSpec, ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection,
-    BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
-    CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement, CteBody,
-    DeleteStatement, FromItem, InsertSource, InsertStatement, MergeAction, MergeInsertSource,
-    MergeStatement, OnConflictAction, OnConflictClause, OnConflictTarget, OrderByItem, ParseError,
-    RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectItem, SelectStatement,
-    SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement,
-    TablePersistence, UpdateStatement, ValuesStatement, XmlTableColumn,
+    BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundScope, BoundUpdateStatement,
+    CatalogLookup, CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement,
+    CteBody, DeleteStatement, FromItem, InsertSource, InsertStatement, MergeAction,
+    MergeInsertSource, MergeStatement, OnConflictAction, OnConflictClause, OnConflictTarget,
+    OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr,
+    SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType,
+    SqlTypeKind, Statement, TablePersistence, UpdateStatement, ValuesStatement, XmlTableColumn,
     bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
@@ -184,9 +184,19 @@ pub(crate) struct CompiledForQueryTarget {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct RuntimeSqlScope {
+    pub(crate) columns: Vec<SlotScopeColumn>,
+    pub(crate) relation_scopes: Vec<(String, Vec<SlotScopeColumn>)>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum CompiledForQuerySource {
     Static {
         plan: PlannedStmt,
+    },
+    Runtime {
+        sql: String,
+        scope: RuntimeSqlScope,
     },
     NoTuples {
         sql: String,
@@ -368,6 +378,11 @@ pub(crate) enum CompiledStmt {
         expr: Option<CompiledExpr>,
         line: usize,
     },
+    ReturnRuntimeQuery {
+        sql: String,
+        scope: RuntimeSqlScope,
+        line: usize,
+    },
     ReturnSelect {
         plan: PlannedStmt,
         sql: String,
@@ -456,6 +471,17 @@ pub(crate) enum CompiledStmt {
     },
     ExecDelete {
         stmt: BoundDeleteStatement,
+    },
+    RuntimeSql {
+        sql: String,
+        scope: RuntimeSqlScope,
+    },
+    RuntimeSelectInto {
+        sql: String,
+        scope: RuntimeSqlScope,
+        targets: Vec<CompiledSelectIntoTarget>,
+        strict: bool,
+        strict_params: Vec<CompiledStrictParam>,
     },
     CreateTableAs {
         stmt: CreateTableAsStatement,
@@ -2021,25 +2047,20 @@ fn compile_return_stmt(
             sqlstate: "42804",
         }),
         (FunctionReturnContract::Scalar { setof: false, .. }, Some(expr)) => {
-            match compile_expr_text(expr, catalog, env) {
-                Ok(compiled) => Ok(CompiledStmt::Return {
-                    expr: Some(compiled),
-                    line,
-                }),
-                Err(ParseError::UnexpectedToken { actual, .. })
-                    if actual == "aggregate function" =>
-                {
-                    if let Some((sql, plan)) = compile_return_select_expr(expr, catalog, env)? {
-                        Ok(CompiledStmt::ReturnSelect { plan, sql, line })
-                    } else {
-                        Err(ParseError::UnexpectedToken {
-                            expected: "non-aggregate expression",
-                            actual,
-                        })
-                    }
-                }
-                Err(err) => Err(err),
+            if let Some((sql, plan)) = compile_return_select_expr(expr, catalog, env)? {
+                return Ok(CompiledStmt::ReturnSelect { plan, sql, line });
             }
+            if let Some(sql) = runtime_return_query_sql(expr, env)? {
+                return Ok(CompiledStmt::ReturnRuntimeQuery {
+                    sql,
+                    scope: runtime_sql_scope(env),
+                    line,
+                });
+            }
+            Ok(CompiledStmt::Return {
+                expr: Some(compile_expr_text(expr, catalog, env)?),
+                line,
+            })
         }
         (
             FunctionReturnContract::Scalar {
@@ -2068,6 +2089,21 @@ fn compile_return_stmt(
             "RETURN expr is only supported for scalar function returns".into(),
         )),
     }
+}
+
+fn runtime_return_query_sql(expr: &str, env: &CompileEnv) -> Result<Option<String>, ParseError> {
+    let Some(from_idx) = find_keyword_at_top_level(expr, "from") else {
+        return Ok(None);
+    };
+    let before_from = expr[..from_idx].trim();
+    let after_from = expr[from_idx..].trim();
+    if before_from.is_empty() || after_from.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(rewrite_plpgsql_sql_text(
+        &format!("select {before_from} {after_from}"),
+        env,
+    )?))
 }
 
 fn compile_return_next_stmt(
@@ -2467,6 +2503,17 @@ fn compile_static_query_source(
             actual: format!("{other:?}"),
         }),
     }
+}
+
+fn should_fallback_to_runtime_sql(err: &ParseError) -> bool {
+    !matches!(
+        err.unpositioned(),
+        ParseError::AmbiguousColumn(_)
+            | ParseError::DetailedError {
+                sqlstate: "42702",
+                ..
+            }
+    )
 }
 
 fn compile_return_query_stmt(
@@ -2895,7 +2942,13 @@ fn compile_exec_sql_stmt(
         split_cte_prefixed_select_into_target(sql).or_else(|| split_select_into_target(sql))
     {
         let targets = parse_select_into_assign_targets(&target_name)?;
-        return compile_select_into_stmt(&select_sql, &targets, false, catalog, env);
+        return match compile_select_into_stmt(&select_sql, &targets, false, catalog, env) {
+            Ok(stmt) => Ok(stmt),
+            Err(err) if should_fallback_to_runtime_sql(&err) => {
+                compile_runtime_select_into_stmt(&select_sql, &targets, false, env)
+            }
+            Err(err) => Err(err),
+        };
     }
 
     if let Some((target_names, select_sql, strict)) = split_select_with_into_targets(sql) {
@@ -2903,7 +2956,13 @@ fn compile_exec_sql_stmt(
             .iter()
             .map(|target| parse_select_into_assign_target(target))
             .collect::<Result<Vec<_>, _>>()?;
-        return compile_select_into_stmt(&select_sql, &targets, strict, catalog, env);
+        return match compile_select_into_stmt(&select_sql, &targets, strict, catalog, env) {
+            Ok(stmt) => Ok(stmt),
+            Err(err) if should_fallback_to_runtime_sql(&err) => {
+                compile_runtime_select_into_stmt(&select_sql, &targets, strict, env)
+            }
+            Err(err) => Err(err),
+        };
     }
     if let Some((exec_sql, target_names)) = split_dml_returning_into_targets(sql) {
         let targets = target_names
@@ -2934,51 +2993,52 @@ fn compile_exec_sql_stmt(
             line: 1,
             sql: Some(rewritten_sql.clone()),
         }),
-        Statement::Insert(stmt) => {
-            match bind_insert_with_outer_scopes(
-                &normalize_plpgsql_insert(stmt, env),
-                catalog,
-                &outer_scopes,
-            ) {
-                Ok(stmt) => Ok(CompiledStmt::ExecInsert { stmt }),
-                Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => {
-                    Ok(CompiledStmt::ExecSql { sql: rewritten_sql })
-                }
-                Err(err) => Err(err),
-            }
-        }
-        Statement::Update(stmt) => {
-            match bind_update_with_outer_scopes(
-                &normalize_plpgsql_update(stmt, env),
-                catalog,
-                &outer_scopes,
-            ) {
-                Ok(stmt) => Ok(CompiledStmt::ExecUpdate { stmt }),
-                Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => {
-                    Ok(CompiledStmt::ExecSql { sql: rewritten_sql })
-                }
-                Err(err) => Err(err),
-            }
-        }
-        Statement::Delete(stmt) => {
-            match bind_delete_with_outer_scopes(
-                &normalize_plpgsql_delete(stmt, env),
-                catalog,
-                &outer_scopes,
-            ) {
-                Ok(stmt) => Ok(CompiledStmt::ExecDelete { stmt }),
-                Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => {
-                    Ok(CompiledStmt::ExecSql { sql: rewritten_sql })
-                }
-                Err(err) => Err(err),
-            }
-        }
+        Statement::Insert(stmt) => match bind_insert_with_outer_scopes(
+            &normalize_plpgsql_insert(stmt, env),
+            catalog,
+            &outer_scopes,
+        ) {
+            Ok(stmt) => Ok(CompiledStmt::ExecInsert { stmt }),
+            Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
+                sql: rewritten_sql,
+                scope: runtime_sql_scope(env),
+            }),
+            Err(err) => Err(err),
+        },
+        Statement::Update(stmt) => match bind_update_with_outer_scopes(
+            &normalize_plpgsql_update(stmt, env),
+            catalog,
+            &outer_scopes,
+        ) {
+            Ok(stmt) => Ok(CompiledStmt::ExecUpdate { stmt }),
+            Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
+                sql: rewritten_sql,
+                scope: runtime_sql_scope(env),
+            }),
+            Err(err) => Err(err),
+        },
+        Statement::Delete(stmt) => match bind_delete_with_outer_scopes(
+            &normalize_plpgsql_delete(stmt, env),
+            catalog,
+            &outer_scopes,
+        ) {
+            Ok(stmt) => Ok(CompiledStmt::ExecDelete { stmt }),
+            Err(err) if should_defer_plpgsql_sql_to_runtime(&err) => Ok(CompiledStmt::RuntimeSql {
+                sql: rewritten_sql,
+                scope: runtime_sql_scope(env),
+            }),
+            Err(err) => Err(err),
+        },
         Statement::CreateTable(stmt) if stmt.persistence == TablePersistence::Temporary => {
             Ok(CompiledStmt::ExecSql { sql: rewritten_sql })
         }
         Statement::CreateTable(stmt) => Ok(CompiledStmt::CreateTable { stmt }),
         Statement::CreateTableAs(stmt) => Ok(CompiledStmt::CreateTableAs { stmt }),
         Statement::Analyze(_) => Ok(CompiledStmt::ExecSql { sql: rewritten_sql }),
+        Statement::CreateView(_) | Statement::DropTable(_) => Ok(CompiledStmt::RuntimeSql {
+            sql: rewritten_sql,
+            scope: runtime_sql_scope(env),
+        }),
         Statement::Set(stmt) if stmt.name.eq_ignore_ascii_case("jit") => {
             // :HACK: pgrust has no JIT subsystem; PL/pgSQL regression helpers
             // use SET LOCAL jit=0 only to stabilize EXPLAIN.
@@ -2998,12 +3058,13 @@ fn compile_exec_sql_stmt(
 }
 
 fn should_defer_plpgsql_sql_to_runtime(err: &ParseError) -> bool {
-    matches!(
-        err,
-        ParseError::UnknownTable(_)
-            | ParseError::TableDoesNotExist(_)
-            | ParseError::MissingFromClauseEntry(_)
-    )
+    should_fallback_to_runtime_sql(err)
+        && matches!(
+            err.unpositioned(),
+            ParseError::UnknownTable(_)
+                | ParseError::TableDoesNotExist(_)
+                | ParseError::MissingFromClauseEntry(_)
+        )
 }
 
 fn persistent_object_transition_table_reference(
@@ -3047,9 +3108,25 @@ fn sql_references_relation_name(lower_sql: &str, name: &str) -> bool {
     .any(|needle| lower_sql.contains(needle))
 }
 
-fn outer_scope_for_sql(env: &CompileEnv) -> crate::backend::parser::BoundScope {
-    let columns = env.slot_columns();
-    let relation_scopes = env.relation_slot_scopes();
+fn runtime_sql_scope(env: &CompileEnv) -> RuntimeSqlScope {
+    RuntimeSqlScope {
+        columns: env.slot_columns(),
+        relation_scopes: env.relation_slot_scopes(),
+    }
+}
+
+fn outer_scope_for_sql(env: &CompileEnv) -> BoundScope {
+    runtime_sql_bound_scope(&runtime_sql_scope(env))
+}
+
+pub(crate) fn runtime_sql_bound_scope(scope: &RuntimeSqlScope) -> BoundScope {
+    outer_scope_from_slot_columns(scope.columns.clone(), scope.relation_scopes.clone())
+}
+
+fn outer_scope_from_slot_columns(
+    columns: Vec<SlotScopeColumn>,
+    relation_scopes: Vec<(String, Vec<SlotScopeColumn>)>,
+) -> BoundScope {
     let desc = RelationDesc {
         columns: columns
             .iter()
@@ -3109,7 +3186,7 @@ fn outer_scope_for_sql(env: &CompileEnv) -> crate::backend::parser::BoundScope {
         }
         scope_columns.extend(relation_scope.columns);
     }
-    crate::backend::parser::BoundScope {
+    BoundScope {
         output_exprs,
         desc,
         columns: scope_columns,
@@ -3762,6 +3839,25 @@ fn compile_select_into_stmt(
     })
 }
 
+fn compile_runtime_select_into_stmt(
+    select_sql: &str,
+    target_refs: &[AssignTarget],
+    strict: bool,
+    env: &mut CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    let targets = target_refs
+        .iter()
+        .map(|target| compile_select_into_target(target, env))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CompiledStmt::RuntimeSelectInto {
+        sql: rewrite_plpgsql_sql_text(select_sql, env)?,
+        scope: runtime_sql_scope(env),
+        targets,
+        strict,
+        strict_params: strict_params_for_sql(select_sql, env),
+    })
+}
+
 fn strict_params_for_sql(sql: &str, env: &CompileEnv) -> Vec<CompiledStrictParam> {
     let mut params = env
         .vars
@@ -3827,16 +3923,25 @@ fn compile_for_query_stmt(
 
     let (source, static_plan) = match source {
         ForQuerySource::Static(sql) => {
-            let plan = compile_static_query_source(
+            match compile_static_query_source(
                 sql,
                 catalog,
                 env,
                 "FOR ... IN query LOOP supports SELECT or VALUES; use EXECUTE for dynamic SQL",
-            )?;
-            (
-                CompiledForQuerySource::Static { plan: plan.clone() },
-                Some(plan),
-            )
+            ) {
+                Ok(plan) => (
+                    CompiledForQuerySource::Static { plan: plan.clone() },
+                    Some(plan),
+                ),
+                Err(err) if should_fallback_to_runtime_sql(&err) => (
+                    CompiledForQuerySource::Runtime {
+                        sql: rewrite_plpgsql_sql_text(sql, env)?,
+                        scope: runtime_sql_scope(env),
+                    },
+                    None,
+                ),
+                Err(err) => return Err(err),
+            }
         }
         ForQuerySource::Execute {
             sql_expr,

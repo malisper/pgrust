@@ -810,42 +810,40 @@ fn parse_numeric_input_value(
 fn parse_tid_text(
     text: &str,
 ) -> Result<crate::include::access::itemptr::ItemPointerData, ExecError> {
+    fn invalid_tid_text_error(text: &str) -> ExecError {
+        ExecError::DetailedError {
+            message: format!("invalid input syntax for type tid: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        }
+    }
+
+    fn parse_block_number(block: &str, text: &str) -> Result<u32, ExecError> {
+        let block = block.trim();
+        if let Ok(block_number) = block.parse::<u32>() {
+            return Ok(block_number);
+        }
+        let signed = block
+            .parse::<i64>()
+            .map_err(|_| invalid_tid_text_error(text))?;
+        let signed_i32 = i32::try_from(signed).map_err(|_| invalid_tid_text_error(text))?;
+        Ok(signed_i32 as u32)
+    }
+
     let trimmed = text.trim();
     let inner = trimmed
         .strip_prefix('(')
         .and_then(|rest| rest.strip_suffix(')'))
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("invalid input syntax for type tid: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        })?;
+        .ok_or_else(|| invalid_tid_text_error(text))?;
     let (block, offset) = inner
         .split_once(',')
-        .ok_or_else(|| ExecError::DetailedError {
-            message: format!("invalid input syntax for type tid: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        })?;
-    let block_number = block
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| ExecError::DetailedError {
-            message: format!("invalid input syntax for type tid: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        })?;
+        .ok_or_else(|| invalid_tid_text_error(text))?;
+    let block_number = parse_block_number(block, text)?;
     let offset_number = offset
         .trim()
         .parse::<u16>()
-        .map_err(|_| ExecError::DetailedError {
-            message: format!("invalid input syntax for type tid: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        })?;
+        .map_err(|_| invalid_tid_text_error(text))?;
     Ok(crate::include::access::itemptr::ItemPointerData {
         block_number,
         offset_number,
@@ -3685,7 +3683,7 @@ fn timestamp_parse_error(
         return ExecError::DetailedError {
             message: datetime_parse_error_details(ty, text, err),
             detail: None,
-            hint: Some("Perhaps you need a different \"DateStyle\" setting.".into()),
+            hint: timestamp_field_out_of_range_datestyle_hint(text),
             sqlstate: "22008",
         };
     }
@@ -3693,6 +3691,47 @@ fn timestamp_parse_error(
         column: column.into(),
         details: datetime_parse_error_details(ty, text, err),
     }
+}
+
+fn timestamp_field_out_of_range_datestyle_hint(text: &str) -> Option<String> {
+    if timestamp_input_has_month_name(text) {
+        None
+    } else {
+        Some("Perhaps you need a different \"DateStyle\" setting.".into())
+    }
+}
+
+fn timestamp_input_has_month_name(text: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "jan"
+                    | "january"
+                    | "feb"
+                    | "february"
+                    | "mar"
+                    | "march"
+                    | "apr"
+                    | "april"
+                    | "may"
+                    | "jun"
+                    | "june"
+                    | "jul"
+                    | "july"
+                    | "aug"
+                    | "august"
+                    | "sep"
+                    | "sept"
+                    | "september"
+                    | "oct"
+                    | "october"
+                    | "nov"
+                    | "november"
+                    | "dec"
+                    | "december"
+            )
+        })
 }
 
 fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
@@ -7477,6 +7516,26 @@ mod tests {
                 ..
             } if message == "date/time field value out of range: \"13/01/2000\""
                 && hint == "Perhaps you need a different \"DateStyle\" setting."
+        ));
+    }
+
+    #[test]
+    fn timestamp_month_name_field_out_of_range_omits_datestyle_hint() {
+        let err = cast_text_value_with_config(
+            "Feb 29 17:32:01 1997",
+            SqlType::new(SqlTypeKind::Timestamp),
+            true,
+            &DateTimeConfig::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                hint: None,
+                sqlstate: "22008",
+                ..
+            } if message == "date/time field value out of range: \"Feb 29 17:32:01 1997\""
         ));
     }
 

@@ -1,7 +1,8 @@
 use super::super::*;
 use crate::backend::executor::{
-    ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot, cast_value,
-    eval_expr, execute_planned_stmt, execute_readonly_statement_with_config,
+    ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot,
+    cast_value_with_config, eval_expr, execute_planned_stmt,
+    execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
     BoundCte, CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement,
@@ -182,7 +183,7 @@ fn install_prepared_external_params(
     let mut slot = TupleSlot::empty(0);
     for binding in bindings {
         let value = eval_expr(&binding.expr, &mut slot, ctx)?;
-        let value = cast_value(value, binding.ty)?;
+        let value = cast_value_with_config(value, binding.ty, &ctx.datetime_config)?;
         ctx.expr_bindings
             .external_params
             .insert(binding.paramid, value);
@@ -2906,6 +2907,8 @@ impl Database {
             }
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let external_bindings = bind_prepared_external_params(external_params, &catalog)?;
+                let external_types = prepared_external_types(&external_bindings);
                 if restrict_nonsystem_view_enabled(gucs) {
                     reject_restricted_views_in_insert(insert_stmt, &catalog)?;
                 }
@@ -2972,8 +2975,9 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                     trigger_depth: 0,
                 };
+                install_prepared_external_params(&external_bindings, &mut ctx)?;
                 let mut locked_rels = Vec::new();
-                let result = (|| {
+                let result = with_external_param_types(&external_types, || {
                     let has_writable_ctes = insert_stmt
                         .with
                         .iter()
@@ -3232,7 +3236,7 @@ impl Database {
                         xid,
                         0,
                     )
-                })();
+                });
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);

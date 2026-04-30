@@ -1560,7 +1560,16 @@ struct PreparedSelectStatement {
     query: PreparedStatementQuery,
     query_sql: String,
     parameter_types: Vec<RawTypeName>,
+    result_columns: Option<Vec<QueryColumn>>,
+    generic_plans: usize,
+    custom_plans: usize,
     prepare_time: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreparedPlanKind {
+    Generic,
+    Custom,
 }
 
 #[derive(Debug, Clone)]
@@ -1599,6 +1608,78 @@ fn prepared_statement_error(name: &str) -> ExecError {
         hint: None,
         sqlstate: "26000",
     })
+}
+
+fn same_prepared_result_columns(left: &[QueryColumn], right: &[QueryColumn]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.sql_type == right.sql_type)
+}
+
+fn prepared_query_has_analyzed_relation(
+    query: &PreparedStatementQuery,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let mut relation_names = Vec::new();
+    collect_prepared_query_relation_names(query, &mut relation_names);
+    relation_names
+        .into_iter()
+        .filter_map(|name| catalog.lookup_any_relation(&name))
+        .any(|relation| {
+            !catalog
+                .statistic_rows_for_relation(relation.relation_oid)
+                .is_empty()
+        })
+}
+
+fn collect_prepared_query_relation_names(query: &PreparedStatementQuery, out: &mut Vec<String>) {
+    match query {
+        PreparedStatementQuery::Select(select) => collect_select_relation_names(select, out),
+        PreparedStatementQuery::Insert(insert) => {
+            out.push(insert.table_name.clone());
+            if let InsertSource::Select(select) = &insert.source {
+                collect_select_relation_names(select, out);
+            }
+        }
+        PreparedStatementQuery::Update(update) => {
+            out.push(update.table_name.clone());
+            if let Some(from) = &update.from {
+                collect_from_item_relation_names(from, out);
+            }
+        }
+    }
+}
+
+fn collect_select_relation_names(stmt: &SelectStatement, out: &mut Vec<String>) {
+    if let Some(from) = &stmt.from {
+        collect_from_item_relation_names(from, out);
+    }
+    if let Some(set_operation) = &stmt.set_operation {
+        for input in &set_operation.inputs {
+            collect_select_relation_names(input, out);
+        }
+    }
+}
+
+fn collect_from_item_relation_names(item: &FromItem, out: &mut Vec<String>) {
+    match item {
+        FromItem::Table { name, .. } => out.push(name.clone()),
+        FromItem::TableSample { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::Alias { source, .. } => collect_from_item_relation_names(source, out),
+        FromItem::DerivedTable(select) => collect_select_relation_names(select, out),
+        FromItem::Join { left, right, .. } => {
+            collect_from_item_relation_names(left, out);
+            collect_from_item_relation_names(right, out);
+        }
+        FromItem::Values { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_) => {}
+    }
 }
 
 fn prepared_statement_param_count_error(expected: usize, actual: usize) -> ExecError {
@@ -1664,6 +1745,7 @@ fn resolve_prepared_from_entry(
     }
     let statement = match prepared.query {
         PreparedStatementQuery::Select(select) => Statement::Select(select),
+        PreparedStatementQuery::Insert(insert) => Statement::Insert(insert),
         PreparedStatementQuery::Update(update) => Statement::Update(update),
     };
     let params = args
@@ -2958,6 +3040,18 @@ impl Session {
                 .unwrap_or(2),
             fold_constants: true,
         }
+    }
+
+    fn generic_prepared_planner_config(&self) -> PlannerConfig {
+        let mut config = self.planner_config();
+        // :HACK: pgrust does not yet cost generic prepared plans with
+        // PostgreSQL's parameter selectivity estimates. Keeping index paths out
+        // of generic SQL PREPARE plans matches the plancache regression shape
+        // until generic/custom planning has a real cost model.
+        config.enable_indexscan = false;
+        config.enable_indexonlyscan = false;
+        config.enable_bitmapscan = false;
+        config
     }
 
     pub(crate) fn track_activities_enabled(&self) -> bool {
@@ -8538,6 +8632,9 @@ impl Session {
             query: prepare_stmt.query.clone(),
             query_sql: prepare_stmt.query_sql.clone(),
             parameter_types: prepare_stmt.parameter_types.clone(),
+            result_columns: None,
+            generic_plans: 0,
+            custom_plans: 0,
             prepare_time: crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         };
         self.prepared_selects.insert(name.clone(), prepared.clone());
@@ -8609,8 +8706,8 @@ impl Session {
                     .collect(),
                 result_type_oids: Vec::new(),
                 from_sql: true,
-                generic_plans: 0,
-                custom_plans: 0,
+                generic_plans: prepared.generic_plans as i64,
+                custom_plans: prepared.custom_plans as i64,
             })
             .chain(self.protocol_prepared_statements.iter().cloned())
             .collect::<Vec<_>>();
@@ -8635,6 +8732,90 @@ impl Session {
             .get(&name)
             .cloned()
             .ok_or_else(|| Self::prepared_statement_error(&name))
+    }
+
+    fn choose_prepared_plan_kind(
+        &self,
+        prepared: &PreparedSelectStatement,
+        catalog: Option<&dyn CatalogLookup>,
+    ) -> PreparedPlanKind {
+        match self
+            .gucs
+            .get("plan_cache_mode")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("force_generic_plan") => PreparedPlanKind::Generic,
+            Some("force_custom_plan") => PreparedPlanKind::Custom,
+            _ if prepared.custom_plans >= 5 => PreparedPlanKind::Generic,
+            _ if catalog.is_some_and(|catalog| {
+                prepared_query_has_analyzed_relation(&prepared.query, catalog)
+            }) =>
+            {
+                PreparedPlanKind::Custom
+            }
+            _ if catalog.is_none() => PreparedPlanKind::Custom,
+            _ => PreparedPlanKind::Generic,
+        }
+    }
+
+    fn record_prepared_plan_use(
+        &mut self,
+        name: &str,
+        catalog: Option<&dyn CatalogLookup>,
+    ) -> Result<PreparedPlanKind, ExecError> {
+        let name = Self::prepared_statement_name(name);
+        let kind = {
+            let prepared = self
+                .prepared_selects
+                .get(&name)
+                .ok_or_else(|| Self::prepared_statement_error(&name))?;
+            self.choose_prepared_plan_kind(prepared, catalog)
+        };
+        let prepared = self
+            .prepared_selects
+            .get_mut(&name)
+            .ok_or_else(|| Self::prepared_statement_error(&name))?;
+        match kind {
+            PreparedPlanKind::Generic => prepared.generic_plans += 1,
+            PreparedPlanKind::Custom => prepared.custom_plans += 1,
+        }
+        let prepared = prepared.clone();
+        SESSION_PREPARED_STATEMENTS.with(|cell| {
+            cell.borrow_mut().insert(name, prepared);
+        });
+        Ok(kind)
+    }
+
+    fn check_prepared_result_shape(
+        &mut self,
+        name: &str,
+        result: &StatementResult,
+    ) -> Result<(), ExecError> {
+        let StatementResult::Query { columns, .. } = result else {
+            return Ok(());
+        };
+        let name = Self::prepared_statement_name(name);
+        let Some(prepared) = self.prepared_selects.get_mut(&name) else {
+            return Err(Self::prepared_statement_error(&name));
+        };
+        if let Some(expected) = prepared.result_columns.as_ref() {
+            if !same_prepared_result_columns(expected, columns) {
+                return Err(ExecError::DetailedError {
+                    message: "cached plan must not change result type".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
+            return Ok(());
+        }
+        prepared.result_columns = Some(columns.clone());
+        let prepared = prepared.clone();
+        SESSION_PREPARED_STATEMENTS.with(|cell| {
+            cell.borrow_mut().insert(name, prepared);
+        });
+        Ok(())
     }
 
     fn prepared_statement_arg_count_error(
@@ -8925,6 +9106,7 @@ impl Session {
             self.substitute_prepared_query(&prepared.query, &args, &prepared.parameter_types)?;
         Ok(match query {
             PreparedStatementQuery::Select(select) => Statement::Select(select),
+            PreparedStatementQuery::Insert(insert) => Statement::Insert(insert),
             PreparedStatementQuery::Update(update) => Statement::Update(update),
         })
     }
@@ -8952,6 +9134,7 @@ impl Session {
         }
         let statement = match prepared.query {
             PreparedStatementQuery::Select(select) => Statement::Select(select),
+            PreparedStatementQuery::Insert(insert) => Statement::Insert(insert),
             PreparedStatementQuery::Update(update) => Statement::Update(update),
         };
         let params = args
@@ -9022,6 +9205,9 @@ impl Session {
         let query = match query {
             PreparedStatementQuery::Select(select) => PreparedStatementQuery::Select(
                 Self::substitute_select_statement(select, &mut subst)?,
+            ),
+            PreparedStatementQuery::Insert(insert) => PreparedStatementQuery::Insert(
+                Self::substitute_insert_statement(insert, &mut subst)?,
             ),
             PreparedStatementQuery::Update(update) => PreparedStatementQuery::Update(
                 Self::substitute_update_statement(update, &mut subst)?,
@@ -10054,22 +10240,46 @@ impl Session {
         let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
         self.check_read_only_statement_allowed(db, &resolved.statement)?;
         if self.active_txn.is_some() {
+            let _plan_kind = self.record_prepared_plan_use(&execute_stmt.name, None)?;
             // Transactional prepared execution still uses the older substitution path until
             // transaction-local external-param plumbing is threaded through the large session
             // command dispatcher.
             let prepared = self.resolve_prepared_statement_to_statement(execute_stmt)?;
-            return self.execute_in_transaction(db, prepared, statement_lock_scope_id);
+            let result = self.execute_in_transaction(db, prepared, statement_lock_scope_id)?;
+            self.check_prepared_result_shape(&execute_stmt.name, &result)?;
+            return Ok(result);
         }
         let search_path = self.configured_search_path();
-        db.execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
-            self.client_id,
-            resolved.statement,
-            &resolved.params,
-            search_path.as_deref(),
-            &self.datetime_config,
-            &self.gucs,
-            self.planner_config(),
-        )
+        let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
+        let plan_kind = self
+            .record_prepared_plan_use(&execute_stmt.name, Some(&catalog as &dyn CatalogLookup))?;
+        let result = match plan_kind {
+            PreparedPlanKind::Custom => {
+                let statement = self.resolve_prepared_statement_to_statement(execute_stmt)?;
+                db.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+                    self.client_id,
+                    statement,
+                    search_path.as_deref(),
+                    &self.datetime_config,
+                    &self.gucs,
+                    self.planner_config(),
+                )
+            }
+            PreparedPlanKind::Generic => {
+                let ResolvedPreparedStatement { statement, params } = resolved;
+                db.execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
+                self.client_id,
+                statement,
+                &params,
+                search_path.as_deref(),
+                &self.datetime_config,
+                &self.gucs,
+                    self.generic_prepared_planner_config(),
+                )
+            }
+        }?;
+        self.check_prepared_result_shape(&execute_stmt.name, &result)?;
+        Ok(result)
     }
 
     fn execute_prepared_explain_statement(
@@ -10084,9 +10294,24 @@ impl Session {
                 actual: format!("{:?}", explain_stmt.statement),
             }));
         };
-        let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
+        let search_path = self.configured_search_path();
+        let plan_kind = if self.active_txn.is_some() {
+            self.record_prepared_plan_use(&execute_stmt.name, None)?
+        } else {
+            let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
+            self.record_prepared_plan_use(&execute_stmt.name, Some(&catalog as &dyn CatalogLookup))?
+        };
         let mut resolved_explain = explain_stmt.clone();
-        resolved_explain.statement = Box::new(resolved.statement);
+        match plan_kind {
+            PreparedPlanKind::Custom => {
+                resolved_explain.statement =
+                    Box::new(self.resolve_prepared_statement_to_statement(execute_stmt)?);
+            }
+            PreparedPlanKind::Generic => {
+                let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
+                resolved_explain.statement = Box::new(resolved.statement);
+            }
+        }
         if self.active_txn.is_some() {
             let fallback = self.resolve_prepared_statement_in_explain(explain_stmt)?;
             return self.execute_in_transaction(
@@ -10095,16 +10320,29 @@ impl Session {
                 statement_lock_scope_id,
             );
         }
-        let search_path = self.configured_search_path();
-        db.execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
-            self.client_id,
-            Statement::Explain(resolved_explain),
-            &resolved.params,
-            search_path.as_deref(),
-            &self.datetime_config,
-            &self.gucs,
-            self.planner_config(),
-        )
+        match plan_kind {
+            PreparedPlanKind::Custom => db
+                .execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+                    self.client_id,
+                    Statement::Explain(resolved_explain),
+                    search_path.as_deref(),
+                    &self.datetime_config,
+                    &self.gucs,
+                    self.planner_config(),
+                ),
+            PreparedPlanKind::Generic => {
+                let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
+                db.execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
+                    self.client_id,
+                    Statement::Explain(resolved_explain),
+                    &resolved.params,
+                    search_path.as_deref(),
+                    &self.datetime_config,
+                    &self.gucs,
+                    self.generic_prepared_planner_config(),
+                )
+            }
+        }
     }
 
     fn statement_timeout_duration(&self) -> Result<Option<Duration>, ExecError> {
@@ -17624,14 +17862,15 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
         }
         if lower.starts_with("header") && copy_keyword_boundary(rest, 6) {
             let after_header = rest[6..].trim_start();
-            let (word, after) = if let Some((value, after)) = parse_copy_string_token(after_header)
-            {
-                (value, after)
-            } else {
-                let (word, after) = take_copy_word(after_header);
-                (word.to_string(), after)
-            };
-            match word.to_ascii_lowercase().as_str() {
+            let (word, after, quoted) =
+                if let Some((value, after)) = parse_copy_string_token(after_header) {
+                    (value, after, true)
+                } else {
+                    let (word, after) = take_copy_word(after_header);
+                    (word.to_string(), after, false)
+                };
+            let word_lower = word.to_ascii_lowercase();
+            match word_lower.as_str() {
                 "true" | "on" | "1" => {
                     options.header = CopyHeader::Present;
                     rest = after;
@@ -17645,6 +17884,10 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
                     rest = after;
                 }
                 "" => {
+                    options.header = CopyHeader::Present;
+                    rest = after_header;
+                }
+                option if !quoted && copy_header_value_starts_next_option(option) => {
                     options.header = CopyHeader::Present;
                     rest = after_header;
                 }
@@ -17768,6 +18011,27 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
         }));
     }
     Ok(options)
+}
+
+fn copy_header_value_starts_next_option(word: &str) -> bool {
+    matches!(
+        word,
+        "with"
+            | "csv"
+            | "format"
+            | "encoding"
+            | "header"
+            | "force"
+            | "force_quote"
+            | "quote"
+            | "delimiter"
+            | "escape"
+            | "null"
+            | "default"
+            | "freeze"
+            | "on_error"
+            | "reject_limit"
+    )
 }
 
 fn parse_copy_force_quote_option<'a>(

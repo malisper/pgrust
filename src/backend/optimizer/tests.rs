@@ -742,6 +742,25 @@ fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogInde
     }
 }
 
+fn inet_btree_options(num_keys: usize) -> CatalogIndexBuildOptions {
+    CatalogIndexBuildOptions {
+        am_oid: crate::include::catalog::BTREE_AM_OID,
+        indclass: vec![crate::include::catalog::INET_BTREE_OPCLASS_OID; num_keys],
+        indclass_options: vec![Vec::new(); num_keys],
+        indcollation: vec![0; num_keys],
+        indoption: vec![0; num_keys],
+        reloptions: None,
+        indnullsnotdistinct: false,
+        indisexclusion: false,
+        indimmediate: true,
+        btree_options: None,
+        brin_options: None,
+        gist_options: None,
+        gin_options: None,
+        hash_options: None,
+    }
+}
+
 fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
     CatalogIndexBuildOptions {
         am_oid: crate::include::catalog::SPGIST_AM_OID,
@@ -858,6 +877,35 @@ fn catalog_with_indexed_items() -> Catalog {
     catalog
         .set_relation_stats(index.relation_oid, 32, 10_000.0)
         .expect("seed test catalog index stats");
+    catalog
+}
+
+fn catalog_with_indexed_inet_tbl() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "inet_tbl",
+            RelationDesc {
+                columns: vec![
+                    column_desc("c", SqlType::new(SqlTypeKind::Cidr), false),
+                    column_desc("i", SqlType::new(SqlTypeKind::Inet), false),
+                ],
+            },
+        )
+        .expect("create inet_tbl");
+    add_ready_index(
+        &mut catalog,
+        "inet_tbl",
+        "inet_idx1",
+        false,
+        false,
+        &[IndexColumnDef::from("i")],
+        Some(inet_btree_options(1)),
+        None,
+    );
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed inet table stats");
     catalog
 }
 
@@ -4014,6 +4062,27 @@ fn planner_keeps_index_scan_when_index_is_not_covering() {
         plan,
         Plan::IndexOnlyScan { .. }
     )));
+}
+
+#[test]
+fn planner_renders_inet_btree_subnet_range_keys() {
+    let catalog = catalog_with_indexed_inet_tbl();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select * from inet_tbl where i << '192.168.1.0/24'::cidr",
+        &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines.iter().any(|line| line.contains(
+            "Index Cond: ((i > '192.168.1.0/24'::inet) AND (i <= '192.168.1.255'::inet))"
+        )),
+        "expected inet btree range keys, got {lines:?}"
+    );
 }
 
 #[test]
