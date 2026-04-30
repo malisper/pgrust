@@ -4798,6 +4798,22 @@ fn explain_expr_matches_postgres_filter_formatting() {
         "(b ~~ '%2f%'::text)"
     );
 
+    let jsonpath_match = Expr::binary_op(
+        OpExprKind::JsonbPathMatch,
+        bool_ty,
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(0),
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Jsonb),
+        }),
+        Expr::Const(Value::JsonPath(r#"($."wait" == null)"#.into())),
+    );
+    assert_eq!(
+        render_explain_expr(&jsonpath_match, &["j".into()]),
+        r#"(j @@ '($."wait" == null)'::jsonpath)"#
+    );
+
     let ts = SqlType::new(SqlTypeKind::Timestamp);
     let localtimestamp = Expr::binary_op(
         OpExprKind::Lt,
@@ -14688,7 +14704,7 @@ fn generate_series_sources_can_cross_join_each_other() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
-        "select g.g, h.h from generate_series(1, 2) g, generate_series(5, 6) h order by g.g, h.h",
+        "select g.g, h.h from generate_series(1, 2) g, generate_series(5, 6) h",
     )
     .unwrap()
     {
@@ -20091,7 +20107,7 @@ fn jsonb_object_and_pretty_functions_work() {
                         .unwrap()
                     ),
                     Value::Text(
-                        "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {\n    \"c\": 3\n  }\n}"
+                        "{\n    \"a\": [\n        1,\n        2\n    ],\n    \"b\": {\n        \"c\": 3\n    }\n}"
                             .into()
                     ),
                 ]]
@@ -21606,6 +21622,28 @@ fn jsonb_subscript_reads_match_basic_pg_cases() {
         }
         other => panic!("expected slice failure, got {:?}", other),
     }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('[1,2,3]'::jsonb)[1.0]",
+    )
+    .unwrap_err()
+    {
+        ExecError::Parse(ParseError::DetailedError {
+            message,
+            hint: Some(hint),
+            ..
+        }) => {
+            assert_eq!(message, "subscript type numeric is not supported");
+            assert_eq!(
+                hint,
+                "jsonb subscript must be coercible to either integer or text."
+            );
+        }
+        other => panic!("expected numeric subscript failure, got {:?}", other),
+    }
 }
 
 #[test]
@@ -21693,6 +21731,23 @@ fn jsonb_subscript_assignment_updates_objects_arrays_and_nulls() {
             );
         }
         other => panic!("expected query result, got {other:?}"),
+    }
+
+    db.execute(1, "delete from t").unwrap();
+    db.execute(1, "insert into t values (1, 'null')").unwrap();
+    match db.execute(1, "update t set test_json[0] = '1'") {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            ..
+        }) => {
+            assert_eq!(message, "cannot replace existing key");
+            assert_eq!(
+                detail,
+                "The path assumes key is a composite object, but it is a scalar value."
+            );
+        }
+        other => panic!("expected json scalar null assignment failure, got {other:?}"),
     }
 }
 

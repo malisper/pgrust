@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
+use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::rewrite::format_stored_rule_definition;
 use crate::backend::statistics::types::{PgMcvItem, decode_pg_mcv_list_payload};
@@ -2278,18 +2279,22 @@ pub(crate) fn build_pg_stat_recovery_prefetch_rows(stats: &DatabaseStatsStore) -
 
 pub(crate) fn build_pg_user_mappings_rows(
     authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     foreign_servers: Vec<PgForeignServerRow>,
     user_mappings: Vec<PgUserMappingRow>,
     current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
-    let roles = authids
-        .into_iter()
-        .map(|row| (row.oid, (row.rolname, row.rolsuper)))
+    let authid_rows = authids;
+    let roles = authid_rows
+        .iter()
+        .map(|row| (row.oid, (row.rolname.clone(), row.rolsuper)))
         .collect::<BTreeMap<_, _>>();
     let current_user_super = roles
         .get(&current_user_oid)
         .map(|(_, rolsuper)| *rolsuper)
         .unwrap_or(current_user_oid == BOOTSTRAP_SUPERUSER_OID);
+    let effective_names =
+        information_schema_effective_acl_names(&authid_rows, &auth_members, current_user_oid);
     let servers = foreign_servers
         .into_iter()
         .map(|row| (row.oid, row))
@@ -2307,9 +2312,18 @@ pub(crate) fn build_pg_user_mappings_rows(
                     .map(|(name, _)| name.clone())
                     .unwrap_or_else(|| format!("unknown (OID={})", mapping.umuser))
             };
+            let current_user_owns_server = has_effective_membership(
+                current_user_oid,
+                server.srvowner,
+                &authid_rows,
+                &auth_members,
+            );
             let show_options = current_user_super
-                || (mapping.umuser != 0 && mapping.umuser == current_user_oid)
-                || (mapping.umuser == 0 && server.srvowner == current_user_oid);
+                || (mapping.umuser != 0
+                    && mapping.umuser == current_user_oid
+                    && (current_user_owns_server
+                        || usage_acl_grants_privilege(server.srvacl.as_deref(), &effective_names)))
+                || (mapping.umuser == 0 && current_user_owns_server);
             let umoptions = if show_options {
                 mapping.umoptions.map(|options| {
                     Value::Array(
@@ -2358,6 +2372,50 @@ fn role_name(role_names: &BTreeMap<u32, String>, oid: u32) -> String {
         .unwrap_or_else(|| format!("unknown (OID={oid})"))
 }
 
+fn information_schema_effective_acl_names(
+    authids: &[PgAuthIdRow],
+    auth_members: &[PgAuthMembersRow],
+    current_user_oid: u32,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::from([String::new()]);
+    for role in authids {
+        if has_effective_membership(current_user_oid, role.oid, authids, auth_members) {
+            names.insert(role.rolname.clone());
+        }
+    }
+    names
+}
+
+fn usage_acl_grants_privilege(acl: Option<&[String]>, effective_names: &BTreeSet<String>) -> bool {
+    acl.unwrap_or_default().iter().any(|item| {
+        parse_usage_acl_item(item)
+            .map(|(grantee, _, _)| effective_names.contains(&grantee))
+            .unwrap_or(false)
+    })
+}
+
+fn foreign_wrapper_visible(
+    wrapper: &PgForeignDataWrapperRow,
+    authids: &[PgAuthIdRow],
+    auth_members: &[PgAuthMembersRow],
+    effective_names: &BTreeSet<String>,
+    current_user_oid: u32,
+) -> bool {
+    has_effective_membership(current_user_oid, wrapper.fdwowner, authids, auth_members)
+        || usage_acl_grants_privilege(wrapper.fdwacl.as_deref(), effective_names)
+}
+
+fn foreign_server_visible(
+    server: &PgForeignServerRow,
+    authids: &[PgAuthIdRow],
+    auth_members: &[PgAuthMembersRow],
+    effective_names: &BTreeSet<String>,
+    current_user_oid: u32,
+) -> bool {
+    has_effective_membership(current_user_oid, server.srvowner, authids, auth_members)
+        || usage_acl_grants_privilege(server.srvacl.as_deref(), effective_names)
+}
+
 fn yes_or_no_value(value: bool) -> Value {
     Value::Text(if value { "YES" } else { "NO" }.into())
 }
@@ -2377,11 +2435,24 @@ fn option_pairs(options: Option<Vec<String>>) -> Vec<(String, Value)> {
 
 pub(crate) fn build_information_schema_foreign_data_wrappers_rows(
     authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     wrappers: Vec<PgForeignDataWrapperRow>,
+    current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
-    let (role_names, _) = role_maps(authids);
+    let effective_names =
+        information_schema_effective_acl_names(&authids, &auth_members, current_user_oid);
+    let (role_names, _) = role_maps(authids.clone());
     let mut rows = wrappers
         .into_iter()
+        .filter(|wrapper| {
+            foreign_wrapper_visible(
+                wrapper,
+                &authids,
+                &auth_members,
+                &effective_names,
+                current_user_oid,
+            )
+        })
         .map(|wrapper| {
             (
                 wrapper.fdwname.clone(),
@@ -2400,10 +2471,24 @@ pub(crate) fn build_information_schema_foreign_data_wrappers_rows(
 }
 
 pub(crate) fn build_information_schema_foreign_data_wrapper_options_rows(
+    authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     wrappers: Vec<PgForeignDataWrapperRow>,
+    current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
+    let effective_names =
+        information_schema_effective_acl_names(&authids, &auth_members, current_user_oid);
     let mut rows = wrappers
         .into_iter()
+        .filter(|wrapper| {
+            foreign_wrapper_visible(
+                wrapper,
+                &authids,
+                &auth_members,
+                &effective_names,
+                current_user_oid,
+            )
+        })
         .flat_map(|wrapper| {
             option_pairs(wrapper.fdwoptions)
                 .into_iter()
@@ -2427,16 +2512,29 @@ pub(crate) fn build_information_schema_foreign_data_wrapper_options_rows(
 
 pub(crate) fn build_information_schema_foreign_servers_rows(
     authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     wrappers: Vec<PgForeignDataWrapperRow>,
     servers: Vec<PgForeignServerRow>,
+    current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
-    let (role_names, _) = role_maps(authids);
+    let effective_names =
+        information_schema_effective_acl_names(&authids, &auth_members, current_user_oid);
+    let (role_names, _) = role_maps(authids.clone());
     let wrappers = wrappers
         .into_iter()
         .map(|row| (row.oid, row.fdwname))
         .collect::<BTreeMap<_, _>>();
     let mut rows = servers
         .into_iter()
+        .filter(|server| {
+            foreign_server_visible(
+                server,
+                &authids,
+                &auth_members,
+                &effective_names,
+                current_user_oid,
+            )
+        })
         .filter_map(|server| {
             let wrapper_name = wrappers.get(&server.srvfdw)?.clone();
             Some((
@@ -2464,10 +2562,24 @@ pub(crate) fn build_information_schema_foreign_servers_rows(
 }
 
 pub(crate) fn build_information_schema_foreign_server_options_rows(
+    authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     servers: Vec<PgForeignServerRow>,
+    current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
+    let effective_names =
+        information_schema_effective_acl_names(&authids, &auth_members, current_user_oid);
     let mut rows = servers
         .into_iter()
+        .filter(|server| {
+            foreign_server_visible(
+                server,
+                &authids,
+                &auth_members,
+                &effective_names,
+                current_user_oid,
+            )
+        })
         .flat_map(|server| {
             option_pairs(server.srvoptions)
                 .into_iter()
@@ -2491,12 +2603,25 @@ pub(crate) fn build_information_schema_foreign_server_options_rows(
 
 pub(crate) fn build_information_schema_user_mappings_rows(
     authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     servers: Vec<PgForeignServerRow>,
     mappings: Vec<PgUserMappingRow>,
+    current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
-    let (role_names, _) = role_maps(authids);
+    let effective_names =
+        information_schema_effective_acl_names(&authids, &auth_members, current_user_oid);
+    let (role_names, _) = role_maps(authids.clone());
     let servers = servers
         .into_iter()
+        .filter(|server| {
+            foreign_server_visible(
+                server,
+                &authids,
+                &auth_members,
+                &effective_names,
+                current_user_oid,
+            )
+        })
         .map(|row| (row.oid, row.srvname))
         .collect::<BTreeMap<_, _>>();
     let mut rows = mappings
@@ -2525,17 +2650,29 @@ pub(crate) fn build_information_schema_user_mappings_rows(
 
 pub(crate) fn build_information_schema_user_mapping_options_rows(
     authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     servers: Vec<PgForeignServerRow>,
     mappings: Vec<PgUserMappingRow>,
     current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
-    let (role_names, superusers) = role_maps(authids);
+    let effective_names =
+        information_schema_effective_acl_names(&authids, &auth_members, current_user_oid);
+    let (role_names, superusers) = role_maps(authids.clone());
     let current_user_super = superusers
         .get(&current_user_oid)
         .copied()
         .unwrap_or(current_user_oid == BOOTSTRAP_SUPERUSER_OID);
     let servers = servers
         .into_iter()
+        .filter(|server| {
+            foreign_server_visible(
+                server,
+                &authids,
+                &auth_members,
+                &effective_names,
+                current_user_oid,
+            )
+        })
         .map(|row| (row.oid, row))
         .collect::<BTreeMap<_, _>>();
     let mut rows = mappings
@@ -2551,7 +2688,13 @@ pub(crate) fn build_information_schema_user_mapping_options_rows(
             };
             let show_options = current_user_super
                 || (mapping.umuser != 0 && mapping.umuser == current_user_oid)
-                || (mapping.umuser == 0 && server.srvowner == current_user_oid);
+                || (mapping.umuser == 0
+                    && has_effective_membership(
+                        current_user_oid,
+                        server.srvowner,
+                        &authids,
+                        &auth_members,
+                    ));
             option_pairs(mapping.umoptions)
                 .into_iter()
                 .map(|(option_name, option_value)| {
@@ -2625,26 +2768,43 @@ fn usage_privilege_row(
 
 pub(crate) fn build_information_schema_usage_privileges_rows(
     authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     wrappers: Vec<PgForeignDataWrapperRow>,
     servers: Vec<PgForeignServerRow>,
+    current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
-    let (role_names, _) = role_maps(authids);
+    let authid_rows = authids;
+    let (role_names, _) = role_maps(authid_rows.clone());
+    let role_oids = authid_rows
+        .iter()
+        .map(|row| (row.rolname.clone(), row.oid))
+        .collect::<BTreeMap<_, _>>();
+    let role_is_enabled = |role_name: &str| {
+        role_oids.get(role_name).is_some_and(|role_oid| {
+            has_effective_membership(current_user_oid, *role_oid, &authid_rows, &auth_members)
+        })
+    };
+    let include_usage_row = |grantor: &str, grantee: &str| {
+        grantee.is_empty() || role_is_enabled(grantor) || role_is_enabled(grantee)
+    };
+    let grantee_has_owner_grant_options = |grantee: &str, owner_oid: u32| {
+        role_oids.get(grantee).is_some_and(|grantee_oid| {
+            has_effective_membership(*grantee_oid, owner_oid, &authid_rows, &auth_members)
+        })
+    };
     let mut rows = Vec::new();
     for wrapper in wrappers {
         let owner = role_name(&role_names, wrapper.fdwowner);
-        rows.push((
-            wrapper.fdwname.clone(),
-            owner.clone(),
-            usage_privilege_row(
-                owner.clone(),
-                owner,
-                wrapper.fdwname.clone(),
-                "FOREIGN DATA WRAPPER",
-                true,
-            ),
-        ));
-        for acl in wrapper.fdwacl.unwrap_or_default() {
+        let acl = wrapper
+            .fdwacl
+            .unwrap_or_else(|| vec![format!("{owner}=U/{owner}")]);
+        for acl in acl {
             if let Some((grantee, grantor, grantable)) = parse_usage_acl_item(&acl) {
+                if !include_usage_row(&grantor, &grantee) {
+                    continue;
+                }
+                let is_grantable =
+                    grantable || grantee_has_owner_grant_options(&grantee, wrapper.fdwowner);
                 rows.push((
                     wrapper.fdwname.clone(),
                     grantee.clone(),
@@ -2653,7 +2813,7 @@ pub(crate) fn build_information_schema_usage_privileges_rows(
                         grantee,
                         wrapper.fdwname.clone(),
                         "FOREIGN DATA WRAPPER",
-                        grantable,
+                        is_grantable,
                     ),
                 ));
             }
@@ -2661,19 +2821,16 @@ pub(crate) fn build_information_schema_usage_privileges_rows(
     }
     for server in servers {
         let owner = role_name(&role_names, server.srvowner);
-        rows.push((
-            server.srvname.clone(),
-            owner.clone(),
-            usage_privilege_row(
-                owner.clone(),
-                owner,
-                server.srvname.clone(),
-                "FOREIGN SERVER",
-                true,
-            ),
-        ));
-        for acl in server.srvacl.unwrap_or_default() {
+        let acl = server
+            .srvacl
+            .unwrap_or_else(|| vec![format!("{owner}=U/{owner}")]);
+        for acl in acl {
             if let Some((grantee, grantor, grantable)) = parse_usage_acl_item(&acl) {
+                if !include_usage_row(&grantor, &grantee) {
+                    continue;
+                }
+                let is_grantable =
+                    grantable || grantee_has_owner_grant_options(&grantee, server.srvowner);
                 rows.push((
                     server.srvname.clone(),
                     grantee.clone(),
@@ -2682,7 +2839,7 @@ pub(crate) fn build_information_schema_usage_privileges_rows(
                         grantee,
                         server.srvname.clone(),
                         "FOREIGN SERVER",
-                        grantable,
+                        is_grantable,
                     ),
                 ));
             }

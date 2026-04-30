@@ -68,7 +68,7 @@ use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
     remap_partition_row_to_child_layout, remap_partition_row_to_parent_layout,
 };
-use super::trigger::RuntimeTriggers;
+use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
@@ -98,17 +98,18 @@ use crate::include::catalog::{
     OID_TYPE_OID, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
     PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
     PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID,
-    PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_LSN_TYPE_OID,
-    PG_MAINTAIN_OID, PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
-    PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
-    PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PG_WRITE_ALL_DATA_OID,
-    PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow, PgPublicationRow,
-    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_BRIN_MINMAX_OPCLASS_OID, TEXT_TYPE_OID, TID_TYPE_OID,
-    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_pg_am_rows, builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID,
+    PG_FOREIGN_TABLE_RELATION_OID, PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID,
+    PG_LANGUAGE_RELATION_OID, PG_LSN_TYPE_OID, PG_MAINTAIN_OID, PG_NAMESPACE_RELATION_OID,
+    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_PARTITIONED_TABLE_RELATION_OID,
+    PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
+    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID,
+    PG_REWRITE_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
+    PG_USER_MAPPING_RELATION_OID, PG_WRITE_ALL_DATA_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
+    PgOpclassRow, PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID,
+    TEXT_BRIN_MINMAX_OPCLASS_OID, TEXT_TYPE_OID, TID_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -566,6 +567,20 @@ pub(crate) fn execute_explain(
             planner_config,
         );
     }
+    if analyze {
+        if let Statement::Merge(merge) = &statement {
+            return execute_explain_merge_analyze(
+                merge.clone(),
+                buffers,
+                costs,
+                summary,
+                timing,
+                catalog,
+                ctx,
+                planner_config,
+            );
+        }
+    }
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
@@ -630,7 +645,10 @@ pub(crate) fn execute_explain(
             }
             (
                 create_query_desc(bound.input_plan, None),
-                Some(bound.explain_target_name),
+                Some(explain_merge_target_name(
+                    &bound.explain_target_name,
+                    verbose,
+                )),
                 false,
             )
         }
@@ -668,11 +686,6 @@ pub(crate) fn execute_explain(
     let planning_elapsed = plan_start.elapsed();
     let planning_buffer_stats = ctx.pool.usage_stats();
     let mut lines = Vec::new();
-    if analyze && merge_target_name.is_some() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "EXPLAIN ANALYZE MERGE".into(),
-        )));
-    }
     if analyze {
         if let Some(create_table_as) = analyzed_create_table_as.as_ref() {
             execute_explain_analyze_create_table_as(create_table_as, ctx, planner_config)?;
@@ -768,6 +781,154 @@ pub(crate) fn execute_explain(
             .map(|line| vec![Value::Text(line.into())])
             .collect(),
     })
+}
+
+fn explain_merge_target_name(target_name: &str, verbose: bool) -> String {
+    if !verbose {
+        return target_name.to_string();
+    }
+    let qualify = |name: &str| {
+        if name.contains('.') {
+            name.to_string()
+        } else {
+            format!("public.{name}")
+        }
+    };
+    match target_name.rsplit_once(' ') {
+        Some((relation, alias)) if !alias.is_empty() => {
+            format!("{} {alias}", qualify(relation))
+        }
+        _ => qualify(target_name),
+    }
+}
+
+fn execute_explain_merge_analyze(
+    stmt: MergeStatement,
+    buffers: bool,
+    costs: bool,
+    summary: bool,
+    timing: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    _planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    ctx.pool.reset_usage_stats();
+    let plan_start = Instant::now();
+    let bound = crate::backend::parser::plan_merge(&stmt, catalog)?;
+    let bound = finalize_bound_merge(bound, catalog);
+    check_merge_privileges(&bound, &bound.input_plan, ctx)?;
+    enforce_merge_publication_replica_identity(&bound, catalog)?;
+    let planning_elapsed = plan_start.elapsed();
+    let planning_buffer_stats = ctx.pool.usage_stats();
+
+    let xid = ctx.ensure_write_xid()?;
+    let cid = ctx.next_command_id;
+    ctx.pool.reset_usage_stats();
+    ctx.timed = timing;
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, bound.input_plan.subplans.clone());
+    let started_at = Instant::now();
+    let run_result = run_merge(&bound, catalog, ctx, xid, cid);
+    ctx.subplans = saved_subplans;
+    ctx.timed = false;
+    let elapsed = started_at.elapsed();
+    let execution_buffer_stats = ctx.pool.usage_stats();
+    let run = run_result?;
+
+    let mut lines = Vec::new();
+    push_explain_analyze_merge_line(
+        &bound.explain_target_name,
+        run.input_state.as_ref(),
+        elapsed,
+        costs,
+        timing,
+        &mut lines,
+    );
+    push_explain_analyze_merge_tuple_counts(&run, &mut lines);
+    format_explain_lines_with_options(run.input_state.as_ref(), 1, true, costs, timing, &mut lines);
+    if !buffers {
+        lines.retain(|line| !line.trim_start().starts_with("Buffers:"));
+    }
+    if buffers {
+        lines.push("Planning:".into());
+        lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
+    }
+    if summary {
+        lines.push(format!(
+            "Planning Time: {:.3} ms",
+            planning_elapsed.as_secs_f64() * 1000.0
+        ));
+        lines.push(format!(
+            "Execution Time: {:.3} ms",
+            elapsed.as_secs_f64() * 1000.0
+        ));
+    }
+    if buffers {
+        lines.push(format_buffer_usage(execution_buffer_stats));
+    }
+
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn push_explain_analyze_merge_line(
+    target_name: &str,
+    input_state: &dyn PlanNode,
+    elapsed: std::time::Duration,
+    show_costs: bool,
+    show_timing: bool,
+    lines: &mut Vec<String>,
+) {
+    let actual = if show_timing {
+        format!(
+            "actual time=0.000..{:.3} rows=0.00 loops=1",
+            elapsed.as_secs_f64() * 1000.0
+        )
+    } else {
+        "actual rows=0.00 loops=1".into()
+    };
+    if show_costs {
+        let plan_info = input_state.plan_info();
+        lines.push(format!(
+            "Merge on {target_name}  (cost={:.2}..{:.2} rows={} width={}) ({actual})",
+            plan_info.startup_cost.as_f64(),
+            plan_info.total_cost.as_f64(),
+            plan_info.plan_rows.as_f64().round() as u64,
+            plan_info.plan_width,
+        ));
+    } else {
+        lines.push(format!("Merge on {target_name} ({actual})"));
+    }
+}
+
+fn push_explain_analyze_merge_tuple_counts(run: &MergeRunResult, lines: &mut Vec<String>) {
+    if run.input_row_count == 0 {
+        return;
+    }
+    let mut parts = Vec::new();
+    if run.action_counts.inserted > 0 {
+        parts.push(format!("inserted={}", run.action_counts.inserted));
+    }
+    if run.action_counts.updated > 0 {
+        parts.push(format!("updated={}", run.action_counts.updated));
+    }
+    if run.action_counts.deleted > 0 {
+        parts.push(format!("deleted={}", run.action_counts.deleted));
+    }
+    let skipped = run.input_row_count.saturating_sub(
+        run.action_counts.inserted + run.action_counts.updated + run.action_counts.deleted,
+    );
+    if skipped > 0 {
+        parts.push(format!("skipped={skipped}"));
+    }
+    if !parts.is_empty() {
+        lines.push(format!("  Tuples: {}", parts.join(" ")));
+    }
 }
 
 fn execute_explain_analyze_create_table_as(
@@ -10169,6 +10330,9 @@ fn catalog_relation_readable_by_public(relation_oid: u32, privilege: char) -> bo
                 | PG_COLLATION_RELATION_OID
                 | PG_CONSTRAINT_RELATION_OID
                 | PG_DESCRIPTION_RELATION_OID
+                | PG_FOREIGN_DATA_WRAPPER_RELATION_OID
+                | PG_FOREIGN_SERVER_RELATION_OID
+                | PG_FOREIGN_TABLE_RELATION_OID
                 | PG_INDEX_RELATION_OID
                 | PG_INHERITS_RELATION_OID
                 | PG_LANGUAGE_RELATION_OID
@@ -10184,6 +10348,7 @@ fn catalog_relation_readable_by_public(relation_oid: u32, privilege: char) -> bo
                 | PG_REWRITE_RELATION_OID
                 | PG_TRIGGER_RELATION_OID
                 | PG_TYPE_RELATION_OID
+                | PG_USER_MAPPING_RELATION_OID
         )
 }
 
@@ -10503,12 +10668,229 @@ struct MergeActionOutput {
     target_values: Vec<Value>,
 }
 
+#[derive(Default)]
+struct MergeActionCounts {
+    inserted: usize,
+    updated: usize,
+    deleted: usize,
+}
+
+struct MergeRunResult {
+    input_state: PlanState,
+    input_row_count: usize,
+    action_counts: MergeActionCounts,
+    affected_rows: usize,
+    returned_rows: Vec<Vec<Value>>,
+}
+
+enum MergeAfterRowEvent {
+    Insert {
+        new_values: Vec<Value>,
+    },
+    Update {
+        old_values: Vec<Value>,
+        new_values: Vec<Value>,
+    },
+    Delete {
+        old_values: Vec<Value>,
+    },
+}
+
+struct MergeRuntimeTriggers {
+    insert: Option<RuntimeTriggers>,
+    update: Option<RuntimeTriggers>,
+    delete: Option<RuntimeTriggers>,
+    insert_capture: Option<TriggerTransitionCapture>,
+    update_capture: Option<TriggerTransitionCapture>,
+    delete_capture: Option<TriggerTransitionCapture>,
+}
+
+impl MergeRuntimeTriggers {
+    fn load(
+        stmt: &BoundMergeStatement,
+        catalog: &dyn CatalogLookup,
+        ctx: &ExecutorContext,
+    ) -> Result<Self, ExecError> {
+        let target_relation = catalog.relation_by_oid(stmt.relation_oid);
+        let can_manage_insert = target_relation
+            .as_ref()
+            .is_some_and(|relation| relation.relkind != 'p' && !relation.relispartition);
+        let insert = if can_manage_insert
+            && stmt
+                .when_clauses
+                .iter()
+                .any(|clause| matches!(clause.action, BoundMergeAction::Insert { .. }))
+        {
+            let triggers = RuntimeTriggers::load(
+                catalog,
+                stmt.relation_oid,
+                &stmt.relation_name,
+                &stmt.desc,
+                TriggerOperation::Insert,
+                &[],
+                ctx.session_replication_role,
+            )?;
+            (!triggers.is_empty()).then_some(triggers)
+        } else {
+            None
+        };
+        let update = if stmt
+            .when_clauses
+            .iter()
+            .any(|clause| matches!(clause.action, BoundMergeAction::Update { .. }))
+        {
+            let modified_attnums = stmt
+                .when_clauses
+                .iter()
+                .filter_map(|clause| match &clause.action {
+                    BoundMergeAction::Update { assignments } => {
+                        Some(modified_attnums_for_update(assignments))
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let triggers = RuntimeTriggers::load(
+                catalog,
+                stmt.relation_oid,
+                &stmt.relation_name,
+                &stmt.desc,
+                TriggerOperation::Update,
+                &modified_attnums,
+                ctx.session_replication_role,
+            )?;
+            (!triggers.is_empty()).then_some(triggers)
+        } else {
+            None
+        };
+        let delete = if stmt
+            .when_clauses
+            .iter()
+            .any(|clause| matches!(clause.action, BoundMergeAction::Delete))
+        {
+            let triggers = RuntimeTriggers::load(
+                catalog,
+                stmt.relation_oid,
+                &stmt.relation_name,
+                &stmt.desc,
+                TriggerOperation::Delete,
+                &[],
+                ctx.session_replication_role,
+            )?;
+            (!triggers.is_empty()).then_some(triggers)
+        } else {
+            None
+        };
+        let insert_capture = insert
+            .as_ref()
+            .map(|triggers| triggers.new_transition_capture());
+        let update_capture = update
+            .as_ref()
+            .map(|triggers| triggers.new_transition_capture());
+        let delete_capture = delete
+            .as_ref()
+            .map(|triggers| triggers.new_transition_capture());
+        Ok(Self {
+            insert,
+            update,
+            delete,
+            insert_capture,
+            update_capture,
+            delete_capture,
+        })
+    }
+
+    fn before_statement(&self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if let Some(triggers) = &self.insert {
+            triggers.before_statement(ctx)?;
+        }
+        if let Some(triggers) = &self.update {
+            triggers.before_statement(ctx)?;
+        }
+        if let Some(triggers) = &self.delete {
+            triggers.before_statement(ctx)?;
+        }
+        Ok(())
+    }
+
+    fn after_row(
+        &mut self,
+        event: MergeAfterRowEvent,
+        ctx: &mut ExecutorContext,
+    ) -> Result<(), ExecError> {
+        match event {
+            MergeAfterRowEvent::Insert { new_values } => {
+                if let Some(triggers) = &self.insert {
+                    if let Some(capture) = self.insert_capture.as_mut() {
+                        triggers.capture_insert_row(capture, &new_values);
+                    }
+                    triggers.after_row_insert(&new_values, ctx)?;
+                    capture_copy_to_dml_notices();
+                }
+            }
+            MergeAfterRowEvent::Update {
+                old_values,
+                new_values,
+            } => {
+                if let Some(triggers) = &self.update {
+                    if let Some(capture) = self.update_capture.as_mut() {
+                        triggers.capture_update_row(capture, &old_values, &new_values);
+                    }
+                    triggers.after_row_update(&old_values, &new_values, ctx)?;
+                    capture_copy_to_dml_notices();
+                }
+            }
+            MergeAfterRowEvent::Delete { old_values } => {
+                if let Some(triggers) = &self.delete {
+                    if let Some(capture) = self.delete_capture.as_mut() {
+                        triggers.capture_delete_row(capture, &old_values);
+                    }
+                    triggers.after_row_delete(&old_values, ctx)?;
+                    capture_copy_to_dml_notices();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn after_statement(&self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if let Some(triggers) = &self.delete {
+            if let Some(capture) = self.delete_capture.as_ref() {
+                triggers.after_transition_rows(capture, ctx)?;
+                triggers.after_statement(Some(capture), ctx)?;
+            } else {
+                triggers.after_statement(None, ctx)?;
+            }
+        }
+        if let Some(triggers) = &self.update {
+            if let Some(capture) = self.update_capture.as_ref() {
+                triggers.after_transition_rows(capture, ctx)?;
+                triggers.after_statement(Some(capture), ctx)?;
+            } else {
+                triggers.after_statement(None, ctx)?;
+            }
+        }
+        if let Some(triggers) = &self.insert {
+            if let Some(capture) = self.insert_capture.as_ref() {
+                triggers.after_transition_rows(capture, ctx)?;
+                triggers.after_statement(Some(capture), ctx)?;
+            } else {
+                triggers.after_statement(None, ctx)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 fn execute_merge_insert_action(
     stmt: &BoundMergeStatement,
     catalog: &dyn CatalogLookup,
     target_columns: &[BoundAssignmentTarget],
     values: Option<&[Expr]>,
     slot: &mut TupleSlot,
+    triggers: Option<&RuntimeTriggers>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -10534,25 +10916,75 @@ fn execute_merge_insert_action(
             apply_assignment_target(&stmt.desc, &mut row_values, target, value, slot, ctx)?;
         }
     }
-    let inserted = execute_insert_rows_with_routing(
-        catalog,
-        &stmt.relation_name,
-        stmt.relation_oid,
-        stmt.rel,
-        stmt.toast,
-        stmt.toast_index.as_ref(),
-        &stmt.desc,
-        &stmt.relation_constraints,
-        &stmt.merge_insert_write_checks,
-        &stmt.indexes,
-        &[row_values],
-        None,
-        None,
-        ctx,
-        xid,
-        cid,
-    )?;
-    if let Some(inserted_values) = inserted.into_iter().next() {
+    let inserted_values = if let Some(triggers) = triggers {
+        let Some(mut row_values) = triggers.before_row_insert(row_values, ctx)? else {
+            return Ok(None);
+        };
+        capture_copy_to_dml_notices();
+        materialize_generated_columns(&stmt.desc, &mut row_values, ctx)?;
+        coerce_user_defined_base_assignments(&stmt.desc, &mut row_values, ctx)?;
+        enforce_insert_domain_constraints(&stmt.desc, &row_values, ctx)?;
+        enforce_exclusion_constraints_against_values(
+            &stmt.relation_name,
+            &stmt.desc,
+            &stmt.relation_constraints,
+            &row_values,
+            &[],
+        )?;
+        let heap_tid = write_insert_heap_row(
+            &stmt.relation_name,
+            &stmt.relation_name,
+            stmt.rel,
+            stmt.toast,
+            stmt.toast_index.as_ref(),
+            &stmt.desc,
+            &stmt.relation_constraints,
+            &stmt.merge_insert_write_checks,
+            &row_values,
+            ctx,
+            xid,
+            cid,
+        )?;
+        maintain_indexes_for_row(
+            stmt.rel,
+            &stmt.desc,
+            &stmt.indexes,
+            &row_values,
+            heap_tid,
+            ctx,
+        )?;
+        crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
+            &stmt.relation_name,
+            stmt.rel,
+            &stmt.relation_constraints.foreign_keys,
+            &row_values,
+            crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
+            ctx,
+        )?;
+        Some(row_values)
+    } else {
+        execute_insert_rows_with_routing(
+            catalog,
+            &stmt.relation_name,
+            stmt.relation_oid,
+            stmt.rel,
+            stmt.toast,
+            stmt.toast_index.as_ref(),
+            &stmt.desc,
+            &stmt.relation_constraints,
+            &stmt.merge_insert_write_checks,
+            &stmt.indexes,
+            &[row_values],
+            None,
+            None,
+            ctx,
+            xid,
+            cid,
+        )?
+        .into_iter()
+        .next()
+    };
+    if let Some(inserted_values) = inserted_values {
         let relpersistence = catalog
             .relation_by_oid(stmt.relation_oid)
             .map(|relation| relation.relpersistence)
@@ -10568,10 +11000,13 @@ fn execute_merge_insert_action(
 
 fn execute_merge_update_row(
     stmt: &BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
     target_tid: ItemPointerData,
+    target_tableoid: Option<u32>,
     original_values: &[Value],
     assignments: &[BoundAssignment],
     slot: &mut TupleSlot,
+    triggers: Option<&RuntimeTriggers>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -10602,7 +11037,30 @@ fn execute_merge_update_row(
             ctx,
         )?;
     }
+    let Some(mut updated_values) = (match triggers {
+        Some(triggers) => triggers.before_row_update(original_values, updated_values, ctx)?,
+        None => Some(updated_values),
+    }) else {
+        capture_copy_to_dml_notices();
+        return Ok(None);
+    };
+    capture_copy_to_dml_notices();
     materialize_generated_columns(&stmt.desc, &mut updated_values, ctx)?;
+    if let Some(target_tableoid) = target_tableoid
+        && target_tableoid != stmt.relation_oid
+    {
+        return execute_merge_update_child_row(
+            stmt,
+            catalog,
+            target_tableoid,
+            target_tid,
+            original_values,
+            &updated_values,
+            ctx,
+            xid,
+            cid,
+        );
+    }
     if let Some(catalog) = ctx.catalog.as_deref() {
         let namespace_oid = catalog
             .class_row_by_oid(stmt.relation_oid)
@@ -10751,14 +11209,210 @@ fn execute_merge_update_row(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_merge_update_child_row(
+    stmt: &BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
+    target_tableoid: u32,
+    target_tid: ItemPointerData,
+    original_values: &[Value],
+    updated_values: &[Value],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    let target_relation =
+        catalog
+            .relation_by_oid(target_tableoid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!(
+                    "MERGE input row referenced unknown target relation OID {target_tableoid}"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+    let relation_name = catalog
+        .class_row_by_oid(target_relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| stmt.relation_name.clone());
+    let child_old_values =
+        remap_partition_row_to_child_layout(original_values, &stmt.desc, &target_relation.desc)?;
+    let relation_constraints = bind_relation_constraints(
+        Some(&relation_name),
+        target_relation.relation_oid,
+        &target_relation.desc,
+        catalog,
+    )?;
+    let referenced_by_foreign_keys = bind_referenced_by_foreign_keys(
+        target_relation.relation_oid,
+        &target_relation.desc,
+        catalog,
+    )?;
+    let indexes = catalog.index_relations_for_heap(target_relation.relation_oid);
+    let toast_index = first_toast_index(catalog, target_relation.toast);
+    let mut root_updated_values = updated_values.to_vec();
+    let partition_update_root_oid = if target_relation.relispartition {
+        partition_root_oid(catalog, target_relation.relation_oid)?
+    } else {
+        None
+    };
+    let allow_partition_routing = partition_update_root_oid.is_some();
+    let mut child_updated_values = remap_partition_row_to_child_layout(
+        &root_updated_values,
+        &stmt.desc,
+        &target_relation.desc,
+    )?;
+    if merge_update_moves_partition(
+        catalog,
+        &target_relation,
+        partition_update_root_oid,
+        &child_updated_values,
+        ctx,
+    )? {
+        let delete_triggers = RuntimeTriggers::load(
+            catalog,
+            stmt.relation_oid,
+            &stmt.relation_name,
+            &stmt.desc,
+            TriggerOperation::Delete,
+            &[],
+            ctx.session_replication_role,
+        )?;
+        if !delete_triggers.before_row_delete(original_values, ctx)? {
+            capture_copy_to_dml_notices();
+            return Ok(None);
+        }
+        capture_copy_to_dml_notices();
+
+        let insert_triggers = RuntimeTriggers::load(
+            catalog,
+            stmt.relation_oid,
+            &stmt.relation_name,
+            &stmt.desc,
+            TriggerOperation::Insert,
+            &[],
+            ctx.session_replication_role,
+        )?;
+        let Some(triggered_values) = insert_triggers.before_row_insert(root_updated_values, ctx)?
+        else {
+            capture_copy_to_dml_notices();
+            let _ = execute_merge_delete_row(
+                stmt,
+                target_tid,
+                Some(target_tableoid),
+                original_values,
+                None,
+                ctx,
+                xid,
+            )?;
+            return Ok(None);
+        };
+        capture_copy_to_dml_notices();
+        root_updated_values = triggered_values;
+        child_updated_values = remap_partition_row_to_child_layout(
+            &root_updated_values,
+            &stmt.desc,
+            &target_relation.desc,
+        )?;
+    }
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_update_write_checks,
+        &root_updated_values,
+        ctx,
+    )?;
+    let write_result = write_updated_row(
+        &relation_name,
+        target_relation.rel,
+        target_relation.relation_oid,
+        partition_update_root_oid,
+        allow_partition_routing,
+        target_relation.toast,
+        toast_index.as_ref(),
+        &target_relation.desc,
+        &relation_constraints,
+        &[],
+        None,
+        &[],
+        returning_contains_transaction_system_var(&stmt.returning),
+        &referenced_by_foreign_keys,
+        &indexes,
+        target_tid,
+        &child_old_values,
+        &child_updated_values,
+        ctx,
+        xid,
+        cid,
+        None,
+    )?;
+    match write_result {
+        WriteUpdatedRowResult::Updated(_, write_info, no_action_checks, outbound_checks) => {
+            validate_pending_no_action_checks(no_action_checks, ctx)?;
+            validate_pending_outbound_foreign_key_checks(outbound_checks, ctx)?;
+            validate_pending_updated_exclusion_checks(
+                &[PendingUpdatedExclusionCheck {
+                    relation_oid: write_info.relation_oid,
+                    relation_name: write_info.relation_name.clone(),
+                    desc: write_info.desc.clone(),
+                    constraints: write_info.constraints.clone(),
+                    values: write_info.values.clone(),
+                }],
+                ctx,
+            )?;
+            ctx.session_stats
+                .write()
+                .note_relation_update(write_info.relation_oid);
+            Ok(Some(remap_partition_row_to_parent_layout(
+                &write_info.values,
+                &write_info.desc,
+                &stmt.desc,
+            )?))
+        }
+        WriteUpdatedRowResult::TupleUpdated(_) | WriteUpdatedRowResult::AlreadyModified => Ok(None),
+    }
+}
+
+fn merge_update_moves_partition(
+    catalog: &dyn CatalogLookup,
+    current_relation: &BoundRelation,
+    partition_update_root_oid: Option<u32>,
+    child_updated_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(root_oid) = partition_update_root_oid else {
+        return Ok(false);
+    };
+    let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
+        return Ok(false);
+    };
+    let root_values = remap_partition_row_to_parent_layout(
+        child_updated_values,
+        &current_relation.desc,
+        &root_relation.desc,
+    )?;
+    let mut proute = exec_setup_partition_tuple_routing(catalog, &root_relation)?;
+    let routed = exec_find_partition(catalog, &mut proute, &root_relation, &root_values, ctx)?;
+    Ok(routed.relation_oid != current_relation.relation_oid)
+}
+
 fn execute_merge_delete_row(
     stmt: &BoundMergeStatement,
     target_tid: ItemPointerData,
     target_tableoid: Option<u32>,
     original_values: &[Value],
+    triggers: Option<&RuntimeTriggers>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<bool, ExecError> {
+    if let Some(triggers) = triggers
+        && !triggers.before_row_delete(original_values, ctx)?
+    {
+        capture_copy_to_dml_notices();
+        return Ok(false);
+    }
+    capture_copy_to_dml_notices();
     let target_relation = target_tableoid.and_then(|oid| {
         ctx.catalog
             .as_deref()
@@ -10915,6 +11569,227 @@ fn enforce_merge_publication_replica_identity(
     Ok(())
 }
 
+fn run_merge(
+    stmt: &BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<MergeRunResult, ExecError> {
+    let mut merge_triggers = MergeRuntimeTriggers::load(stmt, catalog, ctx)?;
+    merge_triggers.before_statement(ctx)?;
+    let mut state = executor_start(stmt.input_plan.plan_tree.clone());
+    let mut affected_rows = 0usize;
+    let mut action_counts = MergeActionCounts::default();
+    let mut returned_rows = Vec::new();
+    let mut after_row_events = Vec::new();
+    let mut matched_target_rows = HashSet::new();
+    let mut input_rows = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+        Value::materialize_all(&mut row_values);
+        input_rows.push(row_values);
+    }
+    let input_row_count = input_rows.len();
+
+    for row_values in input_rows {
+        ctx.check_for_interrupts()?;
+        let target_tid = row_values
+            .get(stmt.target_ctid_index)
+            .ok_or(ExecError::DetailedError {
+                message: "merge input row is missing target ctid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(parse_tid_text)?;
+        let target_tableoid = if target_tid.is_some() {
+            Some(
+                row_values
+                    .get(stmt.target_tableoid_index)
+                    .ok_or(ExecError::DetailedError {
+                        message: "merge input row is missing target tableoid marker".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    })
+                    .and_then(parse_update_tableoid)?,
+            )
+        } else {
+            None
+        };
+        let source_present = row_values
+            .get(stmt.source_present_index)
+            .ok_or(ExecError::DetailedError {
+                message: "merge input row is missing source-present marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(merge_source_present)?;
+        if source_present
+            && let Some(target_tid) = target_tid
+            && !matched_target_rows
+                .insert((target_tableoid.unwrap_or(stmt.relation_oid), target_tid))
+        {
+            return Err(ExecError::DetailedError {
+                message: "MERGE command cannot affect row a second time".into(),
+                detail: None,
+                hint: Some(
+                    "Ensure that not more than one source row matches any one target row.".into(),
+                ),
+                sqlstate: "21000",
+            });
+        }
+
+        let target_matched = target_tid.is_some();
+        let visible_values = row_values[..stmt.visible_column_count].to_vec();
+        let target_values = visible_values[..stmt.desc.columns.len()].to_vec();
+        let source_values = visible_values[stmt.desc.columns.len()..].to_vec();
+        let mut eval_slot = TupleSlot::virtual_row(visible_values);
+
+        for clause in &stmt.when_clauses {
+            let matches = match clause.match_kind {
+                crate::backend::parser::MergeMatchKind::Matched => target_matched && source_present,
+                crate::backend::parser::MergeMatchKind::NotMatchedBySource => {
+                    target_matched && !source_present
+                }
+                crate::backend::parser::MergeMatchKind::NotMatchedByTarget => {
+                    !target_matched && source_present
+                }
+            };
+            if !matches || !merge_condition_matches(clause.condition.as_ref(), &mut eval_slot, ctx)?
+            {
+                continue;
+            }
+            let action_output = match &clause.action {
+                BoundMergeAction::DoNothing => None,
+                BoundMergeAction::Delete => {
+                    if let Some(target_tid) = target_tid
+                        && execute_merge_delete_row(
+                            stmt,
+                            target_tid,
+                            target_tableoid,
+                            &target_values,
+                            merge_triggers.delete.as_ref(),
+                            ctx,
+                            xid,
+                        )?
+                    {
+                        after_row_events.push(MergeAfterRowEvent::Delete {
+                            old_values: target_values.clone(),
+                        });
+                        Some(MergeActionOutput {
+                            action: "DELETE",
+                            old_values: Some(target_values.clone()),
+                            new_values: None,
+                            target_values: target_values.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                }
+                BoundMergeAction::Update { assignments } => {
+                    if let Some(target_tid) = target_tid {
+                        execute_merge_update_row(
+                            stmt,
+                            catalog,
+                            target_tid,
+                            target_tableoid,
+                            &target_values,
+                            assignments,
+                            &mut eval_slot,
+                            merge_triggers.update.as_ref(),
+                            ctx,
+                            xid,
+                            cid,
+                        )?
+                        .map(|updated_values| {
+                            after_row_events.push(MergeAfterRowEvent::Update {
+                                old_values: target_values.clone(),
+                                new_values: updated_values.clone(),
+                            });
+                            MergeActionOutput {
+                                action: "UPDATE",
+                                old_values: Some(target_values.clone()),
+                                new_values: Some(updated_values.clone()),
+                                target_values: updated_values,
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                }
+                BoundMergeAction::Insert {
+                    target_columns,
+                    values,
+                } => execute_merge_insert_action(
+                    stmt,
+                    catalog,
+                    target_columns,
+                    values.as_deref(),
+                    &mut eval_slot,
+                    merge_triggers.insert.as_ref(),
+                    ctx,
+                    xid,
+                    cid,
+                )?
+                .map(|inserted_values| {
+                    if merge_triggers.insert.is_some() {
+                        after_row_events.push(MergeAfterRowEvent::Insert {
+                            new_values: inserted_values.clone(),
+                        });
+                    }
+                    MergeActionOutput {
+                        action: "INSERT",
+                        old_values: None,
+                        new_values: Some(inserted_values.clone()),
+                        target_values: inserted_values,
+                    }
+                }),
+            };
+            if let Some(action_output) = action_output {
+                affected_rows += 1;
+                match action_output.action {
+                    "INSERT" => action_counts.inserted += 1,
+                    "UPDATE" => action_counts.updated += 1,
+                    "DELETE" => action_counts.deleted += 1,
+                    _ => {}
+                }
+                if !stmt.returning.is_empty() {
+                    let mut returning_values = action_output.target_values.clone();
+                    returning_values.extend(source_values.iter().cloned());
+                    returning_values.push(Value::Text(action_output.action.into()));
+                    let row = project_returning_row_with_old_new(
+                        &stmt.returning,
+                        &returning_values,
+                        None,
+                        None,
+                        action_output.old_values.as_deref(),
+                        action_output.new_values.as_deref(),
+                        ctx,
+                    )?;
+                    capture_copy_to_dml_returning_row(row.clone());
+                    returned_rows.push(row);
+                }
+            }
+            break;
+        }
+    }
+    for event in after_row_events {
+        merge_triggers.after_row(event, ctx)?;
+    }
+    merge_triggers.after_statement(ctx)?;
+    Ok(MergeRunResult {
+        input_state: state,
+        input_row_count,
+        action_counts,
+        affected_rows,
+        returned_rows,
+    })
+}
+
 pub(crate) fn execute_merge(
     stmt: BoundMergeStatement,
     catalog: &dyn CatalogLookup,
@@ -10938,185 +11813,13 @@ pub(crate) fn execute_merge(
     enforce_merge_publication_replica_identity(&stmt, catalog)?;
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.input_plan.subplans.clone());
     let result = (|| {
-        let mut state = executor_start(stmt.input_plan.plan_tree.clone());
-        let mut affected_rows = 0usize;
-        let mut returned_rows = Vec::new();
-        let mut matched_target_rows = HashSet::new();
-        let mut input_rows = Vec::new();
-        while let Some(slot) = state.exec_proc_node(ctx)? {
-            ctx.check_for_interrupts()?;
-            let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut row_values);
-            input_rows.push(row_values);
-        }
-
-        for row_values in input_rows {
-            ctx.check_for_interrupts()?;
-            let target_tid = row_values
-                .get(stmt.target_ctid_index)
-                .ok_or(ExecError::DetailedError {
-                    message: "merge input row is missing target ctid marker".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                })
-                .and_then(parse_tid_text)?;
-            let target_tableoid = if target_tid.is_some() {
-                Some(
-                    row_values
-                        .get(stmt.target_tableoid_index)
-                        .ok_or(ExecError::DetailedError {
-                            message: "merge input row is missing target tableoid marker".into(),
-                            detail: None,
-                            hint: None,
-                            sqlstate: "XX000",
-                        })
-                        .and_then(parse_update_tableoid)?,
-                )
-            } else {
-                None
-            };
-            let source_present = row_values
-                .get(stmt.source_present_index)
-                .ok_or(ExecError::DetailedError {
-                    message: "merge input row is missing source-present marker".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                })
-                .and_then(merge_source_present)?;
-            if source_present
-                && let Some(target_tid) = target_tid
-                && !matched_target_rows
-                    .insert((target_tableoid.unwrap_or(stmt.relation_oid), target_tid))
-            {
-                return Err(ExecError::DetailedError {
-                    message: "MERGE command cannot affect row a second time".into(),
-                    detail: Some(
-                        "Ensure that not more than one source row matches any one target row."
-                            .into(),
-                    ),
-                    hint: None,
-                    sqlstate: "21000",
-                });
-            }
-
-            let target_matched = target_tid.is_some();
-            let visible_values = row_values[..stmt.visible_column_count].to_vec();
-            let target_values = visible_values[..stmt.desc.columns.len()].to_vec();
-            let source_values = visible_values[stmt.desc.columns.len()..].to_vec();
-            let mut eval_slot = TupleSlot::virtual_row(visible_values);
-
-            for clause in &stmt.when_clauses {
-                let matches = match clause.match_kind {
-                    crate::backend::parser::MergeMatchKind::Matched => {
-                        target_matched && source_present
-                    }
-                    crate::backend::parser::MergeMatchKind::NotMatchedBySource => {
-                        target_matched && !source_present
-                    }
-                    crate::backend::parser::MergeMatchKind::NotMatchedByTarget => {
-                        !target_matched && source_present
-                    }
-                };
-                if !matches
-                    || !merge_condition_matches(clause.condition.as_ref(), &mut eval_slot, ctx)?
-                {
-                    continue;
-                }
-                let action_output = match &clause.action {
-                    BoundMergeAction::DoNothing => None,
-                    BoundMergeAction::Delete => {
-                        if let Some(target_tid) = target_tid
-                            && execute_merge_delete_row(
-                                &stmt,
-                                target_tid,
-                                target_tableoid,
-                                &target_values,
-                                ctx,
-                                xid,
-                            )?
-                        {
-                            Some(MergeActionOutput {
-                                action: "DELETE",
-                                old_values: Some(target_values.clone()),
-                                new_values: None,
-                                target_values: target_values.clone(),
-                            })
-                        } else {
-                            None
-                        }
-                    }
-                    BoundMergeAction::Update { assignments } => {
-                        if let Some(target_tid) = target_tid {
-                            execute_merge_update_row(
-                                &stmt,
-                                target_tid,
-                                &target_values,
-                                assignments,
-                                &mut eval_slot,
-                                ctx,
-                                xid,
-                                cid,
-                            )?
-                            .map(|updated_values| MergeActionOutput {
-                                action: "UPDATE",
-                                old_values: Some(target_values.clone()),
-                                new_values: Some(updated_values.clone()),
-                                target_values: updated_values,
-                            })
-                        } else {
-                            None
-                        }
-                    }
-                    BoundMergeAction::Insert {
-                        target_columns,
-                        values,
-                    } => execute_merge_insert_action(
-                        &stmt,
-                        catalog,
-                        target_columns,
-                        values.as_deref(),
-                        &mut eval_slot,
-                        ctx,
-                        xid,
-                        cid,
-                    )?
-                    .map(|inserted_values| MergeActionOutput {
-                        action: "INSERT",
-                        old_values: None,
-                        new_values: Some(inserted_values.clone()),
-                        target_values: inserted_values,
-                    }),
-                };
-                if let Some(action_output) = action_output {
-                    affected_rows += 1;
-                    if !stmt.returning.is_empty() {
-                        let mut returning_values = action_output.target_values.clone();
-                        returning_values.extend(source_values.iter().cloned());
-                        returning_values.push(Value::Text(action_output.action.into()));
-                        let row = project_returning_row_with_old_new(
-                            &stmt.returning,
-                            &returning_values,
-                            None,
-                            None,
-                            action_output.old_values.as_deref(),
-                            action_output.new_values.as_deref(),
-                            ctx,
-                        )?;
-                        capture_copy_to_dml_returning_row(row.clone());
-                        returned_rows.push(row);
-                    }
-                }
-                break;
-            }
-        }
+        let run = run_merge(&stmt, catalog, ctx, xid, cid)?;
         if stmt.returning.is_empty() {
-            Ok(StatementResult::AffectedRows(affected_rows))
+            Ok(StatementResult::AffectedRows(run.affected_rows))
         } else {
             Ok(build_returning_result(
                 returning_result_columns(&stmt.returning),
-                returned_rows,
+                run.returned_rows,
             ))
         }
     })();

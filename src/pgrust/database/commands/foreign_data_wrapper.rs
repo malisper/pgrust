@@ -1,5 +1,6 @@
 use super::super::*;
 use super::privilege::{acl_grants_privilege, effective_acl_grantee_names};
+use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::executor::StatementResult;
 use crate::backend::parser::{
     AlterForeignDataWrapperOwnerStatement, AlterForeignDataWrapperRenameStatement,
@@ -10,7 +11,7 @@ use crate::backend::parser::{
     CreateForeignDataWrapperStatement, CreateForeignServerStatement, CreateForeignTableStatement,
     CreateTableStatement, CreateUserMappingStatement, DropForeignDataWrapperStatement,
     DropForeignServerStatement, DropUserMappingStatement, ImportForeignSchemaStatement, ParseError,
-    TableConstraint, UserMappingUser,
+    PartitionBoundSpec, TableConstraint, UserMappingUser, serialize_partition_bound,
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail, push_warning};
@@ -113,6 +114,32 @@ fn validate_foreign_table_constraints(stmt: &CreateTableStatement) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn reject_foreign_partition_with_unique_parent_indexes(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    parent_oid: u32,
+    parent_name: &str,
+) -> Result<(), ExecError> {
+    let has_unique_index = db
+        .backend_catcache(client_id, txn_ctx)
+        .map_err(map_catalog_error)?
+        .index_rows()
+        .into_iter()
+        .any(|row| row.indrelid == parent_oid && (row.indisunique || row.indisprimary));
+    if !has_unique_index {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("cannot create foreign partition of partitioned table \"{parent_name}\""),
+        detail: Some(format!(
+            "Table \"{parent_name}\" contains indexes that are unique."
+        )),
+        hint: None,
+        sqlstate: "42809",
+    })
 }
 
 fn resolve_fdw_proc_oid(
@@ -444,10 +471,93 @@ fn role_has_direct_foreign_usage(
     })
 }
 
+fn foreign_usage_owner_default_acl(owner_name: &str) -> Vec<String> {
+    vec![format!("{owner_name}=U/{owner_name}")]
+}
+
+fn parse_foreign_usage_acl_item(item: &str) -> Option<(String, String, bool)> {
+    let (grantee, rest) = item.split_once('=')?;
+    let (privileges, grantor) = rest.split_once('/')?;
+    let mut chars = privileges.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == 'U' {
+            return Some((
+                grantee.to_string(),
+                grantor.to_string(),
+                matches!(chars.peek(), Some('*')),
+            ));
+        }
+    }
+    None
+}
+
+fn usage_privileges_for_acl_entry(grantable: bool) -> &'static str {
+    if grantable { "U*" } else { "U" }
+}
+
+fn push_or_merge_usage_acl(
+    acl: &mut Vec<(String, String, bool)>,
+    grantee: String,
+    grantor: String,
+    grantable: bool,
+) {
+    if let Some((_, _, existing_grantable)) =
+        acl.iter_mut().find(|(item_grantee, item_grantor, _)| {
+            item_grantee == &grantee && item_grantor == &grantor
+        })
+    {
+        *existing_grantable |= grantable;
+        return;
+    }
+    acl.push((grantee, grantor, grantable));
+}
+
+fn foreign_usage_acl_for_new_owner(
+    acl: Option<&[String]>,
+    old_owner_name: &str,
+    new_owner_name: &str,
+) -> Vec<String> {
+    let source = acl
+        .map(|items| items.to_vec())
+        .unwrap_or_else(|| foreign_usage_owner_default_acl(old_owner_name));
+    let mut rewritten = Vec::new();
+    push_or_merge_usage_acl(
+        &mut rewritten,
+        new_owner_name.to_string(),
+        new_owner_name.to_string(),
+        false,
+    );
+    for item in source {
+        let Some((grantee, grantor, grantable)) = parse_foreign_usage_acl_item(&item) else {
+            continue;
+        };
+        let grantee = if grantee == old_owner_name {
+            new_owner_name.to_string()
+        } else {
+            grantee
+        };
+        let grantor = if grantor == old_owner_name {
+            new_owner_name.to_string()
+        } else {
+            grantor
+        };
+        push_or_merge_usage_acl(&mut rewritten, grantee, grantor, grantable);
+    }
+    rewritten
+        .into_iter()
+        .map(|(grantee, grantor, grantable)| {
+            format!(
+                "{grantee}={}/{grantor}",
+                usage_privileges_for_acl_entry(grantable)
+            )
+        })
+        .collect()
+}
+
 fn validate_postgresql_option(
     option_name: &str,
     valid: &[&str],
-    context_hint: &str,
+    context_hint: Option<&str>,
 ) -> Result<(), ExecError> {
     if valid.iter().any(|valid_name| option_name == *valid_name) {
         return Ok(());
@@ -455,7 +565,7 @@ fn validate_postgresql_option(
     let hint = if option_name == "username" && valid.contains(&"user") {
         Some("Perhaps you meant the option \"user\".".into())
     } else {
-        Some(context_hint.into())
+        context_hint.map(Into::into)
     };
     Err(ExecError::DetailedError {
         message: format!("invalid option \"{option_name}\""),
@@ -506,7 +616,7 @@ fn validate_foreign_server_options(
                     "connect_timeout",
                     "service",
                 ],
-                "Valid options in this context are: service, connect_timeout, dbname, host, hostaddr, and port.",
+                None,
             )?;
         }
     }
@@ -531,7 +641,7 @@ fn validate_user_mapping_options(
             validate_postgresql_option(
                 name,
                 &["user", "password", "sslpassword"],
-                "Valid options in this context are: user, password, and sslpassword.",
+                Some("Valid options in this context are: user, password, and sslpassword."),
             )?;
         }
     }
@@ -769,7 +879,30 @@ impl Database {
                 .lookup_any_relation(&table_name)
                 .is_some_and(|relation| relation.namespace_oid == namespace_oid)
         {
+            push_notice(format!(
+                "relation \"{table_name}\" already exists, skipping"
+            ));
             return Ok(StatementResult::AffectedRows(0));
+        }
+        if lowered.partition_spec.is_some() {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "partitioned foreign tables are not supported".into(),
+            )));
+        }
+        if let Some(parent_oid) = lowered.partition_parent_oid
+            && let Some(bound) = lowered.partition_bound.as_ref()
+        {
+            let parent = catalog.relation_by_oid(parent_oid).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnknownTable(parent_oid.to_string()))
+            })?;
+            reject_foreign_partition_with_unique_parent_indexes(
+                self,
+                client_id,
+                Some((xid, cid)),
+                parent_oid,
+                create_stmt.partition_of.as_deref().unwrap_or(&table_name),
+            )?;
+            validate_new_partition_bound(&catalog, &parent, &table_name, bound, None)?;
         }
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -797,7 +930,37 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
-        let relation = crate::backend::parser::BoundRelation {
+        let mut next_cid = cid.saturating_add(1);
+        if !lowered.parent_oids.is_empty() {
+            let inherit_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let inherit_effect = self
+                .catalog
+                .write()
+                .create_relation_inheritance_mvcc(
+                    entry.relation_oid,
+                    &lowered.parent_oids,
+                    &inherit_ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&inherit_effect)?;
+            catalog_effects.push(inherit_effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+        let relpartbound = lowered
+            .partition_bound
+            .as_ref()
+            .map(serialize_partition_bound)
+            .transpose()
+            .map_err(ExecError::Parse)?;
+        let mut relation = crate::backend::parser::BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
             toast: None,
@@ -813,10 +976,64 @@ impl Database {
             partitioned_table: entry.partitioned_table.clone(),
             partition_spec: None,
         };
+        if lowered.partition_parent_oid.is_some() {
+            relation = self.replace_relation_partition_metadata_in_transaction(
+                client_id,
+                entry.relation_oid,
+                true,
+                relpartbound,
+                None,
+                xid,
+                next_cid,
+                configured_search_path,
+                catalog_effects,
+            )?;
+            next_cid = next_cid.saturating_add(1);
+            if lowered
+                .partition_bound
+                .as_ref()
+                .is_some_and(PartitionBoundSpec::is_default)
+                && let Some(parent_oid) = lowered.partition_parent_oid
+            {
+                self.update_partitioned_table_default_partition_in_transaction(
+                    client_id,
+                    parent_oid,
+                    entry.relation_oid,
+                    xid,
+                    next_cid,
+                    configured_search_path,
+                    catalog_effects,
+                )?;
+                next_cid = next_cid.saturating_add(1);
+            }
+        }
+        let options = format_fdw_options(&stmt.options)?;
+        let foreign_table_row = PgForeignTableRow {
+            ftrelid: entry.relation_oid,
+            ftserver: server.oid,
+            ftoptions: options,
+        };
+        let foreign_table_ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: next_cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .create_foreign_table_mvcc(foreign_table_row, &foreign_table_ctx)
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        next_cid = next_cid.saturating_add(1);
         self.install_create_table_constraints_in_transaction(
             client_id,
             xid,
-            cid.saturating_add(1),
+            next_cid,
             &table_name,
             &relation,
             &lowered,
@@ -824,19 +1041,6 @@ impl Database {
             None,
             catalog_effects,
         )?;
-        let options = format_fdw_options(&stmt.options)?;
-        let foreign_table_row = PgForeignTableRow {
-            ftrelid: entry.relation_oid,
-            ftserver: server.oid,
-            ftoptions: options,
-        };
-        let effect = self
-            .catalog
-            .write()
-            .create_foreign_table_mvcc(foreign_table_row, &ctx)
-            .map_err(map_catalog_error)?;
-        self.apply_catalog_mutation_effect_immediate(&effect)?;
-        catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -1188,8 +1392,17 @@ impl Database {
                 });
             }
         }
+        let old_owner_name = auth_catalog
+            .role_by_oid(existing.srvowner)
+            .map(|row| row.rolname.clone())
+            .unwrap_or_else(|| format!("unknown (OID={})", existing.srvowner));
         let replacement = PgForeignServerRow {
             srvowner: new_owner.oid,
+            srvacl: Some(foreign_usage_acl_for_new_owner(
+                existing.srvacl.as_deref(),
+                &old_owner_name,
+                &new_owner.rolname,
+            )),
             ..existing.clone()
         };
         let xid = self.txns.write().begin();
@@ -1300,11 +1513,12 @@ impl Database {
         let catcache = self
             .backend_catcache(client_id, None)
             .map_err(map_catalog_error)?;
-        let dependent_mappings = catcache
+        let mut dependent_mappings = catcache
             .user_mapping_rows()
             .into_iter()
             .filter(|row| row.umserver == existing.oid)
             .collect::<Vec<_>>();
+        dependent_mappings.sort_by_key(|row| row.oid);
         let dependent_tables = catcache
             .foreign_table_rows()
             .into_iter()
@@ -1722,7 +1936,7 @@ impl Database {
                 "changing the foreign-data wrapper handler can change behavior of existing foreign tables",
             );
         }
-        if stmt.validator_name.is_some() && fdwvalidator != existing.fdwvalidator {
+        if matches!(stmt.validator_name, Some(Some(_))) && fdwvalidator != existing.fdwvalidator {
             push_warning(
                 "changing the foreign-data wrapper validator can cause the options for dependent objects to become invalid",
             );
@@ -1779,7 +1993,7 @@ impl Database {
                 hint: None,
                 sqlstate: "42704",
             })?;
-        ensure_fdw_owner(self, client_id, existing.fdwowner, &stmt.fdw_name, None)?;
+        ensure_superuser_capability(self, client_id, &stmt.fdw_name, "change owner of")?;
         let auth_catalog = self
             .auth_catalog(client_id, None)
             .map_err(map_catalog_error)?;

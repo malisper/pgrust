@@ -407,6 +407,7 @@ pub enum Statement {
     AlterSequence(AlterSequenceStatement),
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
+    AlterSequenceSetSchema(AlterRelationSetSchemaStatement),
     AlterIndexRename(AlterTableRenameStatement),
     AlterIndexSet(AlterIndexSetStatement),
     AlterIndexSetTablespace(AlterTableSetTablespaceStatement),
@@ -1127,6 +1128,7 @@ pub struct TriggerReferencingSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTriggerStatement {
     pub replace_existing: bool,
+    pub is_constraint: bool,
     pub trigger_name: String,
     pub schema_name: Option<String>,
     pub table_name: String,
@@ -2461,6 +2463,7 @@ pub enum PreparedStatementQuery {
     Select(SelectStatement),
     Insert(InsertStatement),
     Update(UpdateStatement),
+    Merge(MergeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

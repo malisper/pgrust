@@ -661,6 +661,9 @@ impl<'a> PartitionedIndexInstaller<'a> {
         spec: &PartitionedIndexSpec,
     ) -> Result<(u32, bool), ExecError> {
         let relation = self.current_relation(relation.relation_oid)?;
+        if relation.relkind == 'f' {
+            return Ok((0, true));
+        }
         if let Some(attached) = self.find_attached_child_index(parent_index_oid, &relation, spec)? {
             return Ok((attached.relation_oid, attached.index_meta.indisvalid));
         }
@@ -692,6 +695,18 @@ impl<'a> PartitionedIndexInstaller<'a> {
             self.create_index_inheritance(index_entry.relation_oid, parent_index_oid)?;
             Ok((index_entry.relation_oid, true))
         }
+    }
+
+    fn partition_tree_has_foreign_table(&mut self, relation_oid: u32) -> Result<bool, ExecError> {
+        for child in self.direct_partition_children(relation_oid)? {
+            if child.relkind == 'f' {
+                return Ok(true);
+            }
+            if child.relkind == 'p' && self.partition_tree_has_foreign_table(child.relation_oid)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn reconcile_existing_partitioned_index_children(
@@ -966,6 +981,33 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CatalogEntry, ExecError> {
         if unique {
+            let interrupts = self.interrupt_state(client_id);
+            let mut check_cid = start_cid;
+            let mut installer = PartitionedIndexInstaller {
+                db: self,
+                client_id,
+                xid,
+                next_cid: &mut check_cid,
+                configured_search_path,
+                catalog_effects,
+                maintenance_work_mem_kb,
+                interrupts,
+            };
+            if installer.partition_tree_has_foreign_table(relation.relation_oid)? {
+                let relation_name = installer.relation_name(relation.relation_oid)?;
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot create unique index on partitioned table \"{}\"",
+                        relation_name
+                    ),
+                    detail: Some(format!(
+                        "Table \"{}\" contains partitions that are foreign tables.",
+                        relation_name
+                    )),
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
             let partition_spec = crate::backend::parser::relation_partition_spec(relation)
                 .map_err(ExecError::Parse)?;
             let key_count = build_options.indclass.len().min(columns.len());

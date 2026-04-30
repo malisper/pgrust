@@ -459,9 +459,16 @@ impl Database {
                 return Ok(StatementResult::AffectedRows(0));
             }
             None => {
-                return Err(ExecError::Parse(ParseError::UnknownColumn(
-                    drop_stmt.column_name.clone(),
-                )));
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" of relation \"{}\" does not exist",
+                        drop_stmt.column_name,
+                        relation_basename(&drop_stmt.table_name)
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                });
             }
         };
         if relation.desc.columns[column_index].attinhcount > 0 {

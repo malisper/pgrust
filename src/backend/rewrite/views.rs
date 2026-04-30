@@ -8,6 +8,7 @@ use crate::backend::parser::{
 use crate::backend::utils::misc::guc_datetime::{
     DateOrder, DateStyleFormat, DateTimeConfig, IntervalStyle,
 };
+use crate::backend::utils::time::date::{format_date_text, parse_date_text};
 use crate::backend::utils::time::timestamp::{
     format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
 };
@@ -304,6 +305,15 @@ pub(crate) fn render_relation_expr_sql_for_information_schema(
             parenthesize_top_level_ops: false,
         },
     )
+}
+
+pub(crate) fn render_relation_expr_sql_for_constraint(
+    expr: &Expr,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    render_relation_expr_sql(expr, relation_name, desc, catalog)
 }
 
 fn render_relation_expr_sql_with_options(
@@ -2833,6 +2843,12 @@ fn render_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
             format!(
                 "'{}'::interval",
                 render_view_interval_text(interval).replace('\'', "''")
+            )
+        }),
+        SqlTypeKind::Date => parse_date_text(text, &config).ok().map(|date| {
+            format!(
+                "'{}'::date",
+                format_date_text(date, &config).replace('\'', "''")
             )
         }),
         SqlTypeKind::Jsonb => parse_jsonb_text(text)

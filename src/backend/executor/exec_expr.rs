@@ -157,7 +157,8 @@ use crate::backend::parser::{
 };
 use crate::backend::rewrite::{
     format_stored_rule_definition_with_catalog, format_view_definition,
-    format_view_definition_unpretty, render_relation_expr_sql, stored_view_query_for_rule,
+    format_view_definition_unpretty, render_relation_expr_sql,
+    render_relation_expr_sql_for_constraint, stored_view_query_for_rule,
 };
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
@@ -5504,9 +5505,6 @@ fn canonicalize_catalog_expr_sql(
     relation_oid: u32,
     catalog: &dyn CatalogLookup,
 ) -> Option<String> {
-    if !contains_sql_json_query_function(expr_sql) {
-        return None;
-    }
     let relation = catalog.lookup_relation_by_oid(relation_oid);
     let relation_name = relation
         .as_ref()
@@ -5520,12 +5518,13 @@ fn canonicalize_catalog_expr_sql(
         .map(|relation| &relation.desc)
         .unwrap_or(&empty_desc);
     let bound = bind_relation_expr(expr_sql, relation_name.as_deref(), desc, catalog).ok()?;
-    Some(render_relation_expr_sql(
-        &bound,
-        relation_name.as_deref(),
-        desc,
-        catalog,
-    ))
+    let rendered =
+        render_relation_expr_sql_for_constraint(&bound, relation_name.as_deref(), desc, catalog);
+    if contains_sql_json_query_function(expr_sql) || rendered != expr_sql {
+        Some(rendered)
+    } else {
+        None
+    }
 }
 
 fn contains_sql_json_query_function(expr_sql: &str) -> bool {

@@ -1,4 +1,5 @@
 use super::super::*;
+use super::alter_table_work_queue::build_alter_table_work_queue;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table,
@@ -72,12 +73,6 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        let (column_name, storage) = validate_alter_table_alter_column_storage(
-            &relation.desc,
-            &alter_stmt.column_name,
-            alter_stmt.storage,
-        )?;
-
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -87,12 +82,25 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let effect = self
-            .catalog
-            .write()
-            .alter_table_set_column_storage_mvcc(relation.relation_oid, &column_name, storage, &ctx)
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
+        let work_queue = build_alter_table_work_queue(&catalog, &relation, alter_stmt.only)?;
+        for item in work_queue {
+            let (column_name, storage) = validate_alter_table_alter_column_storage(
+                &item.relation.desc,
+                &alter_stmt.column_name,
+                alter_stmt.storage,
+            )?;
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_set_column_storage_mvcc(
+                    item.relation.relation_oid,
+                    &column_name,
+                    storage,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }

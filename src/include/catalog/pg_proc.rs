@@ -99,6 +99,8 @@ pub const JSONB_EXISTS_PROC_OID: u32 = 4047;
 pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4048;
 pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4049;
 pub const JSONB_CONTAINED_PROC_OID: u32 = 4050;
+pub const JSONB_PATH_EXISTS_PROC_OID: u32 = 4010;
+pub const JSONB_PATH_MATCH_PROC_OID: u32 = 4011;
 pub const JSONB_CONCAT_PROC_OID: u32 = 3301;
 pub const GIN_COMPARE_JSONB_PROC_OID: u32 = 3480;
 pub const GIN_EXTRACT_JSONB_PROC_OID: u32 = 3482;
@@ -2007,6 +2009,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             FDW_HANDLER_TYPE_OID,
             "",
             "pg_rust_test_fdw_handler",
+            0,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            6405,
+            "test_fdw_handler",
+            FDW_HANDLER_TYPE_OID,
+            "",
+            "test_fdw_handler",
             0,
             false,
             true,

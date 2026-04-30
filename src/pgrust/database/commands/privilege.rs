@@ -440,6 +440,84 @@ fn revoke_usage_acl_entry(acl: &mut Vec<String>, grantee: &str) {
     });
 }
 
+fn usage_acl_grantee_has_grant_option(acl: &[String], grantee: &str) -> bool {
+    acl.iter().any(|item| {
+        parse_acl_item(item)
+            .map(|(item_grantee, privileges, _)| {
+                item_grantee == grantee && usage_acl_has_grant_option(&privileges)
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn cascade_revoke_usage_acl_entry(
+    acl: &mut Vec<String>,
+    grantee: &str,
+    cascade: bool,
+) -> Result<(), ExecError> {
+    let dependent_grantees = if usage_acl_grantee_has_grant_option(acl, grantee) {
+        acl.iter()
+            .filter_map(|item| {
+                parse_acl_item(item).and_then(|(item_grantee, _, grantor)| {
+                    (grantor == grantee && item_grantee != grantee).then_some(item_grantee)
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if !dependent_grantees.is_empty() && !cascade {
+        return Err(ExecError::DetailedError {
+            message: "dependent privileges exist".into(),
+            detail: None,
+            hint: Some("Use CASCADE to revoke them too.".into()),
+            sqlstate: "2BP01",
+        });
+    }
+    for dependent_grantee in dependent_grantees {
+        cascade_revoke_usage_grants_by_grantor(acl, &dependent_grantee, cascade)?;
+    }
+    acl.retain(|item| {
+        parse_acl_item(item)
+            .map(|(_, _, grantor)| grantor != grantee)
+            .unwrap_or(true)
+    });
+    revoke_usage_acl_entry(acl, grantee);
+    Ok(())
+}
+
+fn cascade_revoke_usage_grants_by_grantor(
+    acl: &mut Vec<String>,
+    grantor_name: &str,
+    cascade: bool,
+) -> Result<(), ExecError> {
+    let dependent_grantees = acl
+        .iter()
+        .filter_map(|item| {
+            parse_acl_item(item).and_then(|(item_grantee, _, grantor)| {
+                (grantor == grantor_name && item_grantee != grantor_name).then_some(item_grantee)
+            })
+        })
+        .collect::<Vec<_>>();
+    if !dependent_grantees.is_empty() && !cascade {
+        return Err(ExecError::DetailedError {
+            message: "dependent privileges exist".into(),
+            detail: None,
+            hint: Some("Use CASCADE to revoke them too.".into()),
+            sqlstate: "2BP01",
+        });
+    }
+    for dependent_grantee in dependent_grantees {
+        cascade_revoke_usage_grants_by_grantor(acl, &dependent_grantee, cascade)?;
+    }
+    acl.retain(|item| {
+        parse_acl_item(item)
+            .map(|(_, _, grantor)| grantor != grantor_name)
+            .unwrap_or(true)
+    });
+    Ok(())
+}
+
 fn grant_acl_entry(
     acl: &mut Vec<String>,
     grantee: &str,
@@ -903,6 +981,7 @@ impl Database {
                     cid,
                     catalog_effects,
                     true,
+                    stmt.cascade,
                 ),
         }
     }
@@ -1018,6 +1097,7 @@ impl Database {
                     xid,
                     cid,
                     catalog_effects,
+                    false,
                     false,
                 ),
         }
@@ -2258,6 +2338,7 @@ impl Database {
             0,
             &mut catalog_effects,
             false,
+            false,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
@@ -2282,6 +2363,7 @@ impl Database {
             0,
             &mut catalog_effects,
             true,
+            stmt.cascade,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
@@ -2300,6 +2382,7 @@ impl Database {
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         revoke: bool,
+        cascade: bool,
     ) -> Result<StatementResult, ExecError> {
         let kind = foreign_usage_object_kind(privilege)
             .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
@@ -2380,6 +2463,7 @@ impl Database {
                         &grantee_acl_names,
                         with_grant_option,
                         revoke,
+                        cascade,
                         &ctx,
                     )?;
                     catalog_effects.push(effect);
@@ -2405,6 +2489,7 @@ impl Database {
                         &grantee_acl_names,
                         with_grant_option,
                         revoke,
+                        cascade,
                         &ctx,
                     )?;
                     catalog_effects.push(effect);
@@ -2427,22 +2512,9 @@ impl Database {
         grantee_acl_names: &[String],
         with_grant_option: bool,
         revoke: bool,
+        cascade: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), ExecError> {
-        if !current_user_is_superuser
-            && !auth.has_effective_membership(existing.fdwowner, auth_catalog)
-        {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "must be owner of {} {}",
-                    ForeignUsageObjectKind::ForeignDataWrapper.owner_error_label(),
-                    object_name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42501",
-            });
-        }
         let owner_name = auth_catalog
             .role_by_oid(existing.fdwowner)
             .map(|entry| entry.rolname.clone())
@@ -2457,6 +2529,32 @@ impl Database {
                 sqlstate: "XX000",
             })?;
         let defaults = foreign_usage_owner_default_acl(&owner_name);
+        let current_user_is_owner = current_user_is_superuser
+            || auth.has_effective_membership(existing.fdwowner, auth_catalog);
+        let effective_names = effective_acl_grantee_names(auth, auth_catalog);
+        let existing_acl = existing.fdwacl.clone().unwrap_or_default();
+        let has_usage = acl_grants_privilege(&existing_acl, &effective_names, 'U');
+        let has_grant_option = acl_grants_all_options(
+            &existing_acl,
+            &effective_names,
+            FOREIGN_USAGE_PRIVILEGE_CHARS,
+        );
+        if !current_user_is_owner && !has_grant_option {
+            if !revoke && has_usage {
+                push_warning(format!(r#"no privileges were granted for "{object_name}""#));
+                return self
+                    .catalog
+                    .write()
+                    .replace_foreign_data_wrapper_mvcc(&existing, existing.clone(), ctx)
+                    .map_err(map_catalog_error);
+            }
+            return Err(ExecError::DetailedError {
+                message: format!("permission denied for foreign-data wrapper {object_name}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
         let mut acl = if revoke {
             existing.fdwacl.clone().unwrap_or_default()
         } else {
@@ -2464,7 +2562,7 @@ impl Database {
         };
         for grantee_acl_name in grantee_acl_names {
             if revoke {
-                revoke_usage_acl_entry(&mut acl, grantee_acl_name);
+                cascade_revoke_usage_acl_entry(&mut acl, grantee_acl_name, cascade)?;
             } else {
                 grant_usage_acl_entry(&mut acl, grantee_acl_name, grantor_name, with_grant_option);
             }
@@ -2489,22 +2587,9 @@ impl Database {
         grantee_acl_names: &[String],
         with_grant_option: bool,
         revoke: bool,
+        cascade: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<(u32, CatalogMutationEffect), ExecError> {
-        if !current_user_is_superuser
-            && !auth.has_effective_membership(existing.srvowner, auth_catalog)
-        {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "must be owner of {} {}",
-                    ForeignUsageObjectKind::ForeignServer.owner_error_label(),
-                    object_name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42501",
-            });
-        }
         let owner_name = auth_catalog
             .role_by_oid(existing.srvowner)
             .map(|entry| entry.rolname.clone())
@@ -2519,6 +2604,32 @@ impl Database {
                 sqlstate: "XX000",
             })?;
         let defaults = foreign_usage_owner_default_acl(&owner_name);
+        let current_user_is_owner = current_user_is_superuser
+            || auth.has_effective_membership(existing.srvowner, auth_catalog);
+        let effective_names = effective_acl_grantee_names(auth, auth_catalog);
+        let existing_acl = existing.srvacl.clone().unwrap_or_default();
+        let has_usage = acl_grants_privilege(&existing_acl, &effective_names, 'U');
+        let has_grant_option = acl_grants_all_options(
+            &existing_acl,
+            &effective_names,
+            FOREIGN_USAGE_PRIVILEGE_CHARS,
+        );
+        if !current_user_is_owner && !has_grant_option {
+            if !revoke && has_usage {
+                push_warning(format!(r#"no privileges were granted for "{object_name}""#));
+                return self
+                    .catalog
+                    .write()
+                    .replace_foreign_server_mvcc(&existing, existing.clone(), ctx)
+                    .map_err(map_catalog_error);
+            }
+            return Err(ExecError::DetailedError {
+                message: format!("permission denied for foreign server {object_name}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
         let mut acl = if revoke {
             existing.srvacl.clone().unwrap_or_default()
         } else {
@@ -2526,7 +2637,7 @@ impl Database {
         };
         for grantee_acl_name in grantee_acl_names {
             if revoke {
-                revoke_usage_acl_entry(&mut acl, grantee_acl_name);
+                cascade_revoke_usage_acl_entry(&mut acl, grantee_acl_name, cascade)?;
             } else {
                 grant_usage_acl_entry(&mut acl, grantee_acl_name, grantor_name, with_grant_option);
             }

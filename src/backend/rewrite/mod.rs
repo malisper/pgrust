@@ -22,7 +22,7 @@ pub(crate) use view_dml::{
 pub(crate) use views::{
     format_view_definition, format_view_definition_unpretty, has_stored_view_query,
     load_view_return_query, load_view_return_select, refresh_query_relation_descriptors,
-    register_stored_view_query, render_relation_expr_sql,
+    register_stored_view_query, render_relation_expr_sql, render_relation_expr_sql_for_constraint,
     render_relation_expr_sql_for_information_schema, render_view_query_sql,
     split_stored_view_definition_sql, stored_view_query_for_rule,
 };

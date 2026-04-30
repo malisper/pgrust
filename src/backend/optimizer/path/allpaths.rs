@@ -4764,12 +4764,12 @@ fn build_join_restrict_clauses(
         for restrict in inner_join_clauses {
             let clause = &restrict.clause;
             let clause_relids = &restrict.required_relids;
-            if clause_relids.len() <= 1 {
-                continue;
-            }
+            let single_side_join_clause = clause_relids.len() == 1
+                && (clause_relids == left_relids || clause_relids == right_relids);
             if relids_subset(&clause_relids, &join_relids)
-                && !relids_subset(&clause_relids, left_relids)
-                && !relids_subset(&clause_relids, right_relids)
+                && (single_side_join_clause
+                    || (!relids_subset(&clause_relids, left_relids)
+                        && !relids_subset(&clause_relids, right_relids)))
                 && !clauses
                     .iter()
                     .any(|existing: &RestrictInfo| existing.clause == *clause)
@@ -5809,7 +5809,7 @@ fn path_tie_breaker_prefers(
         cross_function_join_left_relid(right),
     ) && left_relid != right_relid
     {
-        return left_relid > right_relid;
+        return left_relid < right_relid;
     }
     if let (Some(left_relids), Some(right_relids)) = (
         cross_join_left_relid_count(left),
