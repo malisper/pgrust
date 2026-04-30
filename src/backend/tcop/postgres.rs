@@ -388,6 +388,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     ) {
         return None;
     }
+    if let ExecError::DetailedError { message, .. } = e
+        && message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+    {
+        return find_distinct_on_mismatch_position(sql);
+    }
     let value = match e {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected, ..
@@ -500,6 +505,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                     .map(|offset| index + offset + 1)
             });
         }
+        ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+            message,
+        )) if message
+            == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions" =>
+        {
+            return find_distinct_on_mismatch_position(sql);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,
@@ -539,6 +551,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 == "arguments to GROUPING must be grouping expressions of the associated query level"
             {
                 return find_grouping_call_argument_position(sql);
+            }
+            if message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions" {
+                return find_distinct_on_mismatch_position(sql);
             }
             if let Some(system_column) = check_constraint_system_column_error_name(message) {
                 return find_case_insensitive_token_position(sql, system_column);
@@ -1128,6 +1143,22 @@ fn find_grouping_call_argument_position(sql: &str) -> Option<usize> {
         .take_while(u8::is_ascii_whitespace)
         .count();
     Some(args_start + arg_offset + whitespace + 1)
+}
+
+fn find_distinct_on_mismatch_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let distinct_on = lower.find("distinct on")?;
+    let open = lower.get(distinct_on..)?.find('(')? + distinct_on;
+    let after_open = open + 1;
+    let args = sql.get(after_open..)?;
+    let close = args.find(')')?;
+    let args = &args[..close];
+    let mismatch_offset = args.find(',').map(|index| index + 1).unwrap_or(0);
+    let whitespace = args[mismatch_offset..]
+        .bytes()
+        .take_while(u8::is_ascii_whitespace)
+        .count();
+    Some(after_open + mismatch_offset + whitespace + 1)
 }
 
 fn domain_ddl_error_position(sql: &str, message: &str) -> Option<usize> {
