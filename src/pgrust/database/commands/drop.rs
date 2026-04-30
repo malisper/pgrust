@@ -343,6 +343,10 @@ enum DropTableDependency {
         relation_display_name: String,
         policy: DropPolicyPlan,
     },
+    Function {
+        proc_oid: u32,
+        display_name: String,
+    },
 }
 
 impl DropTableDependency {
@@ -381,6 +385,9 @@ impl DropTableDependency {
                 "policy {} on table {relation_display_name} depends on {referenced_kind} {referenced_name}",
                 policy.policy_name
             ),
+            Self::Function { display_name, .. } => {
+                format!("function {display_name} depends on {referenced_kind} {referenced_name}")
+            }
         }
     }
 
@@ -419,6 +426,9 @@ impl DropTableDependency {
                 "drop cascades to policy {} on table {relation_display_name}",
                 policy.policy_name
             ),
+            Self::Function { display_name, .. } => {
+                format!("drop cascades to function {display_name}")
+            }
         }
     }
 
@@ -457,6 +467,10 @@ impl DropTableDependency {
                 0,
                 format!("{relation_display_name}:{}", policy.policy_name),
             ),
+            Self::Function {
+                proc_oid,
+                display_name,
+            } => (4, *proc_oid, display_name.clone()),
         }
     }
 }
@@ -471,6 +485,8 @@ struct DropTablePlan {
     rule_drops: Vec<DropRulePlan>,
     policy_drop_oids: BTreeSet<u32>,
     policy_drops: Vec<DropPolicyPlan>,
+    proc_drop_oids: BTreeSet<u32>,
+    proc_drops: Vec<u32>,
     blocker_details: Vec<String>,
     blocker_source: Option<(char, String)>,
     notices: Vec<String>,
@@ -1133,6 +1149,18 @@ fn drop_table_direct_dependencies(
                     },
                 });
             }
+            PG_PROC_RELATION_OID if row.deptype == DEPENDENCY_NORMAL && row.objsubid == 0 => {
+                let Some(proc_row) = ctx.catalog.proc_row_by_oid(row.objid) else {
+                    continue;
+                };
+                let display_name =
+                    format_regprocedure_oid_optional(proc_row.oid, Some(ctx.catalog))
+                        .unwrap_or_else(|| format!("{}()", proc_row.proname));
+                deps.push(DropTableDependency::Function {
+                    proc_oid: proc_row.oid,
+                    display_name,
+                });
+            }
             _ => {}
         }
     }
@@ -1310,6 +1338,14 @@ fn collect_drop_table_restrict_blockers(
                     dep.blocker_detail(referenced_kind, &source_name),
                 );
             }
+            DropTableDependency::Function { .. } => {
+                record_drop_table_blocker(
+                    plan,
+                    source_relkind,
+                    source_name.clone(),
+                    dep.blocker_detail(referenced_kind, &source_name),
+                );
+            }
         }
     }
 }
@@ -1445,6 +1481,22 @@ fn plan_drop_table_relation(
                 if behavior.is_cascade() {
                     plan.notices.push(dep.cascade_notice());
                     plan.policy_drops.push(policy.clone());
+                } else {
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                }
+            }
+            DropTableDependency::Function { proc_oid, .. } => {
+                if !plan.proc_drop_oids.insert(proc_oid) {
+                    continue;
+                }
+                if behavior.is_cascade() {
+                    plan.notices.push(dep.cascade_notice());
+                    plan.proc_drops.push(proc_oid);
                 } else {
                     record_drop_table_blocker(
                         plan,
@@ -1860,8 +1912,16 @@ impl Database {
                 return Ok(StatementResult::AffectedRows(0));
             }
             [] => {
+                let message = if object_kind == "function" && !drop_stmt.arg_list_specified {
+                    format!(
+                        "could not find a function named \"{}\"",
+                        drop_stmt.function_name
+                    )
+                } else {
+                    format!("{object_kind} {display_signature} does not exist")
+                };
                 return Err(ExecError::DetailedError {
-                    message: format!("{object_kind} {display_signature} does not exist"),
+                    message,
                     detail: None,
                     hint: None,
                     sqlstate: "42883",
@@ -1887,7 +1947,7 @@ impl Database {
             .backend_catcache(client_id, txn_ctx)
             .map_err(map_catalog_error)?;
         let dependency_graph = CatalogDependencyGraph::new(&catcache);
-        let dependent_aggregate_oids = dependency_graph
+        let dependent_proc_oids = dependency_graph
             .dependents(ObjectAddress::new(PG_PROC_RELATION_OID, proc_row.oid, 0))
             .iter()
             .filter(|row| {
@@ -1899,16 +1959,15 @@ impl Database {
             .filter_map(|row| {
                 catcache
                     .proc_by_oid(row.objid)
-                    .filter(|dependent| dependent.prokind == 'a')
                     .map(|dependent| dependent.oid)
             })
             .collect::<BTreeSet<_>>();
-        if !dependent_aggregate_oids.is_empty() && !drop_stmt.cascade {
+        if !dependent_proc_oids.is_empty() && !drop_stmt.cascade {
             let target_name = format_regprocedure_oid_optional(proc_row.oid, Some(&catalog))
                 .unwrap_or_else(|| {
                     format!("{}({})", proc_row.proname, drop_stmt.arg_types.join(","))
                 });
-            let dependent_name = dependent_aggregate_oids
+            let dependent_name = dependent_proc_oids
                 .iter()
                 .next()
                 .and_then(|oid| format_regprocedure_oid_optional(*oid, Some(&catalog)))
@@ -1991,10 +2050,9 @@ impl Database {
             waiter: Some(self.txn_waiter.clone()),
             interrupts,
         };
-        let mut next_cid = cid;
-        for dependent_aggregate_oid in dependent_aggregate_oids {
+        for dependent_proc_oid in dependent_proc_oids {
             if let Some(dependent_name) =
-                format_regprocedure_oid_optional(dependent_aggregate_oid, Some(&catalog))
+                format_regprocedure_oid_optional(dependent_proc_oid, Some(&catalog))
             {
                 push_notice(format!("drop cascades to function {dependent_name}"));
             }
@@ -2010,13 +2068,13 @@ impl Database {
             let effect = self
                 .catalog
                 .write()
-                .drop_proc_by_oid_mvcc(dependent_aggregate_oid, &dependent_ctx)
+                .drop_proc_by_oid_mvcc(dependent_proc_oid, &dependent_ctx)
                 .map(|(_, effect)| effect)
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             self.session_stats_state(client_id)
                 .write()
-                .note_function_drop(dependent_aggregate_oid, &self.stats);
+                .note_function_drop(dependent_proc_oid, &self.stats);
             next_cid = next_cid.saturating_add(1);
         }
         let target_ctx = CatalogWriteContext {
@@ -2680,6 +2738,29 @@ impl Database {
                 next_cid = next_cid.saturating_add(1);
             }
 
+            for proc_oid in &plan.proc_drops {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .drop_proc_by_oid_mvcc(*proc_oid, &ctx)
+                    .map(|(_, effect)| effect)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                self.session_stats_state(client_id)
+                    .write()
+                    .note_function_drop(*proc_oid, &self.stats);
+                next_cid = next_cid.saturating_add(1);
+            }
+
             for relation_oid in &plan.relation_drop_order {
                 let (relkind, relpersistence) = catalog
                     .class_row_by_oid(*relation_oid)
@@ -3164,6 +3245,8 @@ impl Database {
                     .into_iter()
                     .map(|row| (row.oid, row.amname))
                     .collect::<BTreeMap<_, _>>();
+                let mut tail_notices = Vec::new();
+                let mut noticed_opfamily_oids = BTreeSet::new();
                 let mut opfamily_rows = catcache
                     .opfamily_rows()
                     .into_iter()
@@ -3171,18 +3254,53 @@ impl Database {
                     .collect::<Vec<_>>();
                 opfamily_rows.sort_by_key(|row| row.oid);
                 for row in opfamily_rows {
-                    notices.push(format!(
-                        "drop cascades to operator family {} for access method {}",
-                        drop_schema_display_object_name(
-                            &catcache,
-                            &visible_namespaces,
-                            row.opfnamespace,
-                            &row.opfname
+                    noticed_opfamily_oids.insert(row.oid);
+                    tail_notices.push((
+                        row.oid,
+                        format!(
+                            "drop cascades to operator family {} for access method {}",
+                            drop_schema_display_object_name(
+                                &catcache,
+                                &visible_namespaces,
+                                row.opfnamespace,
+                                &row.opfname
+                            ),
+                            access_method_names
+                                .get(&row.opfmethod)
+                                .map(String::as_str)
+                                .unwrap_or("unknown")
                         ),
-                        access_method_names
-                            .get(&row.opfmethod)
-                            .map(String::as_str)
-                            .unwrap_or("unknown")
+                    ));
+                }
+                for row in catcache
+                    .opclass_rows()
+                    .into_iter()
+                    .filter(|row| row.opcnamespace == schema.oid)
+                {
+                    if !noticed_opfamily_oids.insert(row.opcfamily) {
+                        continue;
+                    }
+                    let (family_namespace, family_name, family_method) = catcache
+                        .opfamily_rows()
+                        .into_iter()
+                        .find(|family| family.oid == row.opcfamily)
+                        .map(|family| (family.opfnamespace, family.opfname, family.opfmethod))
+                        .unwrap_or((row.opcnamespace, row.opcname, row.opcmethod));
+                    tail_notices.push((
+                        row.opcfamily,
+                        format!(
+                            "drop cascades to operator family {} for access method {}",
+                            drop_schema_display_object_name(
+                                &catcache,
+                                &visible_namespaces,
+                                family_namespace,
+                                &family_name
+                            ),
+                            access_method_names
+                                .get(&family_method)
+                                .map(String::as_str)
+                                .unwrap_or("unknown")
+                        ),
                     ));
                 }
 
@@ -3215,15 +3333,18 @@ impl Database {
                 relation_notice_rows
                     .sort_by_key(|row| (!inheritance_parent_oids.contains(&row.oid), row.oid));
                 for relation in relation_notice_rows {
-                    notices.push(format!(
-                        "drop cascades to {} {}",
-                        drop_table_relation_kind_name(relation.relkind),
-                        drop_schema_display_object_name(
-                            &catcache,
-                            &visible_namespaces,
-                            relation.relnamespace,
-                            &relation.relname
-                        )
+                    tail_notices.push((
+                        relation.oid,
+                        format!(
+                            "drop cascades to {} {}",
+                            drop_table_relation_kind_name(relation.relkind),
+                            drop_schema_display_object_name(
+                                &catcache,
+                                &visible_namespaces,
+                                relation.relnamespace,
+                                &relation.relname
+                            )
+                        ),
                     ));
                 }
 
@@ -3299,7 +3420,6 @@ impl Database {
                     ));
                 }
 
-                let mut tail_notices = Vec::new();
                 for row in catcache.type_rows().into_iter().filter(|row| {
                     row.typnamespace == schema.oid && matches!(row.typtype, 'd' | 'e')
                 }) {

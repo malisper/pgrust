@@ -94,9 +94,16 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values_with_arg_type_oids
         })?;
         let runtime_result_type =
             sql_function_runtime_result_type(row, arg_values, catalog.as_ref())?;
-        let result =
-            execute_sql_function_query(row, &arg_values, arg_type_oids, catalog.as_ref(), ctx)?;
+        let result = execute_sql_function_query(
+            row,
+            &arg_values,
+            arg_type_oids,
+            runtime_result_type,
+            catalog.as_ref(),
+            ctx,
+        )?;
         match result {
+            _ if row.prorettype == VOID_TYPE_OID => Ok(Value::Null),
             StatementResult::Query { columns, rows, .. } => sql_scalar_function_result_value(
                 row,
                 catalog.as_ref(),
@@ -198,17 +205,19 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
             )
         })?;
         let arg_type_oids = sql_function_call_arg_type_oids(args, ctx);
+        let runtime_result_type =
+            sql_function_runtime_result_type(row, &arg_values, catalog.as_ref())?;
         let result = execute_sql_function_query(
             row,
             &arg_values,
             arg_type_oids.as_deref(),
+            runtime_result_type,
             catalog.as_ref(),
             ctx,
         )?;
-        let runtime_result_type =
-            sql_function_runtime_result_type(row, &arg_values, catalog.as_ref())?;
         let expand_single_record = sql_function_declares_record_result(row, catalog.as_ref());
         match result {
+            _ if row.prorettype == VOID_TYPE_OID => Ok(Vec::new()),
             StatementResult::Query { columns, rows, .. } => {
                 let projection = sql_function_composite_projection(
                     row,
@@ -580,25 +589,29 @@ fn execute_sql_function_query(
     row: &PgProcRow,
     arg_values: &[Value],
     arg_type_oids: Option<&[u32]>,
+    runtime_result_type: Option<SqlType>,
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    let sql = inline_sql_function_body(
+    let sql = inline_sql_function_body_for_execution(
         row,
         arg_values,
         arg_type_oids,
         catalog,
         &ctx.datetime_config,
     )?;
-    let stmt = parse_statement_with_options(
-        &sql,
-        ParseOptions {
-            max_stack_depth_kb: ctx.datetime_config.max_stack_depth_kb,
-            ..ParseOptions::default()
-        },
-    )?;
+    let statements = split_sql_function_body(&sql)?;
+    if statements.is_empty() {
+        return Err(sql_function_final_statement_runtime_error(
+            row,
+            catalog,
+            runtime_result_type,
+        ));
+    }
+    let use_database_executor = statements
+        .iter()
+        .any(|statement| sql_function_statement_needs_database_executor(statement));
     let saved_expr_bindings = std::mem::take(&mut ctx.expr_bindings);
-    let restore_row_security = apply_sql_function_row_security_set_config_effect(&sql, ctx);
     let saved_snapshot_cid = if row.provolatile == 'v' {
         let saved = ctx.snapshot.current_cid;
         ctx.snapshot.current_cid = crate::backend::access::transam::xact::CommandId::MAX;
@@ -606,13 +619,106 @@ fn execute_sql_function_query(
     } else {
         None
     };
-    let result = execute_sql_function_statement(stmt, catalog, ctx);
+    let result = (|| {
+        let mut last_result = None;
+        for statement_sql in statements {
+            let statement_sql = normalize_sql_function_statement_for_execution(&statement_sql);
+            let stmt = parse_statement_with_options(
+                statement_sql.as_ref(),
+                ParseOptions {
+                    max_stack_depth_kb: ctx.datetime_config.max_stack_depth_kb,
+                    ..ParseOptions::default()
+                },
+            )?;
+            let restore_row_security =
+                apply_sql_function_row_security_set_config_effect(statement_sql.as_ref(), ctx);
+            let result = if use_database_executor {
+                execute_sql_function_statement_with_database(statement_sql.as_ref(), ctx)
+            } else {
+                execute_sql_function_statement(stmt, catalog, ctx)
+            };
+            restore_sql_function_row_security_set_config_effect(restore_row_security, ctx);
+            let result = result?;
+            last_result = Some(result);
+        }
+        Ok(last_result.unwrap_or(StatementResult::AffectedRows(0)))
+    })();
     if let Some(saved) = saved_snapshot_cid {
         ctx.snapshot.current_cid = saved;
     }
-    restore_sql_function_row_security_set_config_effect(restore_row_security, ctx);
     ctx.expr_bindings = saved_expr_bindings;
     result
+}
+
+fn sql_function_statement_needs_database_executor(statement: &str) -> bool {
+    let lower = statement.trim_start().to_ascii_lowercase();
+    starts_with_sql_command(&lower, "create") || starts_with_sql_command(&lower, "alter")
+}
+
+fn normalize_sql_function_statement_for_execution(statement: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = statement.trim_start();
+    if trimmed
+        .get(.."return".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("return"))
+        && trimmed
+            .get("return".len()..)
+            .and_then(|rest| rest.chars().next())
+            .is_none_or(|ch| ch.is_whitespace())
+    {
+        std::borrow::Cow::Owned(format!("select {}", trimmed["return".len()..].trim()))
+    } else {
+        std::borrow::Cow::Borrowed(statement)
+    }
+}
+
+fn execute_sql_function_statement_with_database(
+    statement_sql: &str,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let db = ctx.database.as_ref().ok_or_else(|| {
+        sql_function_runtime_error(
+            "LANGUAGE sql functions require database context for utility statements",
+            None,
+            "0A000",
+        )
+    })?;
+    let stmt = parse_statement_with_options(
+        statement_sql,
+        ParseOptions {
+            max_stack_depth_kb: ctx.datetime_config.max_stack_depth_kb,
+            ..ParseOptions::default()
+        },
+    )?;
+    let search_path = configured_search_path_from_gucs(&ctx.gucs);
+    db.execute_statement_with_search_path_datetime_config_and_gucs(
+        ctx.client_id,
+        stmt,
+        search_path.as_deref(),
+        &ctx.datetime_config,
+        &ctx.gucs,
+    )
+}
+
+fn configured_search_path_from_gucs(
+    gucs: &std::collections::HashMap<String, String>,
+) -> Option<Vec<String>> {
+    let value = gucs.get("search_path")?;
+    if value.trim().eq_ignore_ascii_case("default") {
+        return None;
+    }
+    Some(
+        value
+            .split(',')
+            .map(|schema| {
+                schema
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_ascii_lowercase()
+            })
+            .filter(|schema| !schema.is_empty())
+            .collect(),
+    )
 }
 
 fn apply_sql_function_row_security_set_config_effect(
@@ -1211,10 +1317,51 @@ fn sql_function_context_error(row: &PgProcRow, err: ExecError) -> ExecError {
             context: format!("SQL function \"{}\" during inlining", row.proname),
         };
     }
+    let during_startup = sql_function_final_statement_runtime_mismatch(&err);
     ExecError::WithContext {
         source: Box::new(err),
-        context: format!("SQL function \"{}\" statement 1", row.proname),
+        context: if during_startup {
+            format!("SQL function \"{}\" during startup", row.proname)
+        } else {
+            format!("SQL function \"{}\" statement 1", row.proname)
+        },
     }
+}
+
+fn sql_function_final_statement_runtime_error(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+    runtime_result_type: Option<SqlType>,
+) -> ExecError {
+    let type_name = runtime_result_type
+        .map(sql_type_name)
+        .or_else(|| {
+            catalog
+                .type_by_oid(row.prorettype)
+                .map(|row| sql_type_name(row.sql_type))
+        })
+        .unwrap_or_else(|| row.prorettype.to_string());
+    ExecError::DetailedError {
+        message: format!("return type mismatch in function declared to return {type_name}"),
+        detail: Some(
+            "Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "42P13",
+    }
+}
+
+fn sql_function_final_statement_runtime_mismatch(err: &ExecError) -> bool {
+    matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            ..
+        } if message.starts_with("return type mismatch in function declared to return ")
+            && detail == "Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING."
+    )
 }
 
 fn sql_function_inlining_error(
@@ -1241,12 +1388,101 @@ fn sql_function_inlining_error(
 
 fn normalized_sql_function_body(source: &str) -> String {
     let body = source.trim().trim_end_matches(';').trim();
+    if body
+        .get(.."return".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("return"))
+        && body
+            .get("return".len()..)
+            .and_then(|rest| rest.chars().next())
+            .is_none_or(|ch| ch.is_whitespace())
+    {
+        return format!("select {}", body["return".len()..].trim());
+    }
     sql_standard_function_body_inner(body)
         .unwrap_or(body)
         .trim()
         .trim_end_matches(';')
         .trim()
         .to_string()
+}
+
+fn split_sql_function_body(body: &str) -> Result<Vec<String>, ExecError> {
+    let body = sql_standard_function_body_inner(body).unwrap_or(body);
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = scan_sql_delimited_end(bytes, i, b'\'')?;
+                continue;
+            }
+            b'"' => {
+                i = scan_sql_delimited_end(bytes, i, b'"')?;
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_sql_dollar_string_end(body, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b';' => {
+                let statement = body[start..i].trim();
+                if !statement.is_empty() && !statement.eq_ignore_ascii_case("end") {
+                    statements.push(statement.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let statement = body[start..].trim();
+    if !statement.is_empty() && !statement.eq_ignore_ascii_case("end") {
+        statements.push(statement.to_string());
+    }
+    Ok(statements)
+}
+
+fn scan_sql_delimited_end(bytes: &[u8], start: usize, delimiter: u8) -> Result<usize, ExecError> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == delimiter {
+            if i + 1 < bytes.len() && bytes[i + 1] == delimiter {
+                i += 2;
+                continue;
+            }
+            return Ok(i + 1);
+        }
+        i += 1;
+    }
+    Err(ExecError::Parse(
+        crate::backend::parser::ParseError::UnexpectedEof,
+    ))
+}
+
+fn scan_sql_dollar_string_end(input: &str, start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+    let mut tag_end = start + 1;
+    while tag_end < bytes.len() && bytes[tag_end] != b'$' {
+        let ch = bytes[tag_end] as char;
+        if !(ch == '_' || ch.is_ascii_alphanumeric()) {
+            return None;
+        }
+        tag_end += 1;
+    }
+    if tag_end >= bytes.len() {
+        return None;
+    }
+    let tag = &input[start..=tag_end];
+    let rest = &input[tag_end + 1..];
+    let closing = rest.find(tag)?;
+    Some(tag_end + 1 + closing + tag.len())
 }
 
 fn sql_standard_function_body_inner(body: &str) -> Option<&str> {
@@ -1480,23 +1716,57 @@ fn inline_sql_function_body(
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
-    let body = normalized_sql_function_body(&row.prosrc);
-    // :HACK: This is a narrow compatibility path for regression setup helpers.
-    // Full PostgreSQL SQL-language functions need dedicated planning/execution
-    // rather than text substitution plus a readonly single-SELECT execution.
-    let lower_body = body.to_ascii_lowercase();
-    if !(starts_with_sql_command(&lower_body, "select")
-        || starts_with_sql_command(&lower_body, "values")
-        || starts_with_sql_command(&lower_body, "with")
-        || starts_with_sql_command(&lower_body, "insert"))
-    {
+    let body = row.prosrc.trim().trim_end_matches(';').trim().to_string();
+    if !sql_function_body_is_inline_select_candidate(&body) {
         return Err(sql_function_runtime_error(
-            "only single SELECT, VALUES, WITH, or INSERT LANGUAGE sql function bodies are supported",
-            Some(row.prosrc.clone()),
+            "SQL function inlining only supports SELECT bodies",
+            None,
             "0A000",
         ));
     }
+    substitute_sql_function_body_args(
+        row,
+        body,
+        args,
+        call_arg_type_oids,
+        catalog,
+        datetime_config,
+    )
+}
 
+fn inline_sql_function_body_for_execution(
+    row: &PgProcRow,
+    args: &[Value],
+    call_arg_type_oids: Option<&[u32]>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
+    let body = normalized_sql_function_body(&row.prosrc);
+    substitute_sql_function_body_args(
+        row,
+        body,
+        args,
+        call_arg_type_oids,
+        catalog,
+        datetime_config,
+    )
+}
+
+fn sql_function_body_is_inline_select_candidate(body: &str) -> bool {
+    let lower = body.trim_start().to_ascii_lowercase();
+    starts_with_sql_command(&lower, "select")
+        || starts_with_sql_command(&lower, "with")
+        || starts_with_sql_command(&lower, "values")
+}
+
+fn substitute_sql_function_body_args(
+    row: &PgProcRow,
+    body: String,
+    args: &[Value],
+    call_arg_type_oids: Option<&[u32]>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
     let arg_type_oids = effective_sql_function_arg_type_oids(row, args.len(), call_arg_type_oids);
     let mut sql = substitute_positional_args_with_catalog(
         &body,

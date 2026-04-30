@@ -9478,23 +9478,34 @@ impl Session {
                                         .collect::<Result<Vec<_>, ExecError>>()?,
                                 }
                             }
-                            crate::backend::parser::MergeAction::Insert { columns, source } => {
-                                crate::backend::parser::MergeAction::Insert {
-                                    columns: columns.clone(),
-                                    source: match source {
+                            crate::backend::parser::MergeAction::Insert {
+                                columns,
+                                overriding,
+                                source,
+                            } => crate::backend::parser::MergeAction::Insert {
+                                columns: columns
+                                    .as_ref()
+                                    .map(|columns| {
+                                        columns
+                                            .iter()
+                                            .map(|target| {
+                                                Self::substitute_assignment_target(target, subst)
+                                            })
+                                            .collect::<Result<Vec<_>, _>>()
+                                    })
+                                    .transpose()?,
+                                overriding: *overriding,
+                                source: match source {
+                                    crate::backend::parser::MergeInsertSource::Values(values) => {
                                         crate::backend::parser::MergeInsertSource::Values(
-                                            values,
-                                        ) => {
-                                            crate::backend::parser::MergeInsertSource::Values(
-                                                Self::substitute_exprs(values, subst)?,
-                                            )
-                                        }
-                                        crate::backend::parser::MergeInsertSource::DefaultValues => {
-                                            crate::backend::parser::MergeInsertSource::DefaultValues
-                                        }
-                                    },
-                                }
-                            }
+                                            Self::substitute_exprs(values, subst)?,
+                                        )
+                                    }
+                                    crate::backend::parser::MergeInsertSource::DefaultValues => {
+                                        crate::backend::parser::MergeInsertSource::DefaultValues
+                                    }
+                                },
+                            },
                         },
                     })
                 })

@@ -10034,6 +10034,8 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut return_spec = None;
     let mut language = None;
     let mut body = None;
+    let mut body_kind = None;
+    let mut body_position = None;
     let mut link_symbol = None;
     let mut cost = None;
     let mut support = None;
@@ -10106,35 +10108,48 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         }
         if keyword_at_start(rest, "as") {
             if body.is_some() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "single AS clause",
-                    actual: rest.into(),
+                return Err(ParseError::DetailedError {
+                    message: "duplicate function body specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
                 });
             }
+            body_position = string_literal_content_start_position(sql, rest);
             let (parsed, parsed_link_symbol, next_rest) = parse_create_function_body(rest)?;
             body = Some(parsed);
+            body_kind = Some(CreateFunctionBodyKind::As);
             link_symbol = parsed_link_symbol;
             rest = next_rest;
             continue;
         }
         if keyword_at_start(rest, "return") {
             if body.is_some() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "single function body",
-                    actual: rest.into(),
+                return Err(ParseError::DetailedError {
+                    message: "duplicate function body specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
                 });
             }
+            body_position = Some(sql_position_from_byte_offset(
+                sql,
+                slice_byte_offset(sql, rest),
+            ));
             let (parsed, next_rest) = parse_create_function_return_body(rest)?;
             body = Some(parsed);
+            body_kind = Some(CreateFunctionBodyKind::SqlReturn);
             language.get_or_insert_with(|| "sql".into());
             rest = next_rest;
             continue;
         }
         if keyword_at_start(rest, "begin") {
             if body.is_some() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "single function body",
-                    actual: rest.into(),
+                return Err(ParseError::DetailedError {
+                    message: "duplicate function body specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
                 });
             }
             if !consume_keyword(rest, "begin")
@@ -10147,8 +10162,18 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
                 ));
             }
             body = Some(rest.trim().to_string());
+            body_kind = Some(CreateFunctionBodyKind::SqlBeginAtomic);
+            body_position = Some(sql_position_from_byte_offset(
+                sql,
+                slice_byte_offset(sql, rest),
+            ));
             language.get_or_insert_with(|| "sql".into());
             rest = "";
+            continue;
+        }
+        if keyword_at_start(rest, "window") {
+            window = true;
+            rest = consume_keyword(rest, "window");
             continue;
         }
         if keyword_at_start(rest, "strict") {
@@ -10163,6 +10188,14 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             rest = consume_keyword(next, "input");
             strict = false;
             continue;
+        }
+        if keyword_at_start(rest, "not") {
+            let next = consume_keyword(rest, "not").trim_start();
+            if keyword_at_start(next, "leakproof") {
+                leakproof = false;
+                rest = consume_keyword(next, "leakproof");
+                continue;
+            }
         }
         if keyword_at_start(rest, "leakproof") {
             leakproof = true;
@@ -10246,6 +10279,16 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         }
     };
 
+    let language = language.ok_or(ParseError::UnexpectedEof)?;
+    let body_kind = body_kind.ok_or(ParseError::UnexpectedEof)?;
+    let body_position = if language.eq_ignore_ascii_case("sql")
+        && matches!(body_kind, CreateFunctionBodyKind::As)
+    {
+        body_position
+    } else {
+        None
+    };
+
     Ok(CreateFunctionStatement {
         schema_name,
         function_name,
@@ -10259,10 +10302,12 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         security_definer,
         volatility,
         parallel,
-        window,
-        language: language.ok_or(ParseError::UnexpectedEof)?,
+        language,
         body: body.ok_or(ParseError::UnexpectedEof)?,
+        body_kind,
+        body_position,
         link_symbol,
+        window,
         config,
     })
 }
@@ -10827,12 +10872,14 @@ fn parse_alter_routine_options(mut input: &str) -> Result<Vec<AlterRoutineOption
             let rest = consume_keyword(input, "returns").trim_start();
             let rest = consume_keyword(rest, "null").trim_start();
             let rest = consume_keyword(rest, "on").trim_start();
-            input = consume_keyword(rest, "null").trim_start();
+            let rest = consume_keyword(rest, "null").trim_start();
+            input = consume_keyword(rest, "input").trim_start();
             options.push(AlterRoutineOption::Strict(false));
         } else if keyword_at_start(input, "called") {
             let rest = consume_keyword(input, "called").trim_start();
             let rest = consume_keyword(rest, "on").trim_start();
-            input = consume_keyword(rest, "null").trim_start();
+            let rest = consume_keyword(rest, "null").trim_start();
+            input = consume_keyword(rest, "input").trim_start();
             options.push(AlterRoutineOption::Strict(false));
         } else if keyword_at_start(input, "immutable") {
             options.push(AlterRoutineOption::Volatility(
@@ -10859,6 +10906,12 @@ fn parse_alter_routine_options(mut input: &str) -> Result<Vec<AlterRoutineOption
             input = consume_keyword(input, "leakproof");
         } else if keyword_at_start(input, "not") {
             let rest = consume_keyword(input, "not").trim_start();
+            if !keyword_at_start(rest, "leakproof") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "LEAKPROOF",
+                    actual: rest.into(),
+                });
+            }
             options.push(AlterRoutineOption::Leakproof(false));
             input = consume_keyword(rest, "leakproof");
         } else if keyword_at_start(input, "parallel") {
@@ -14790,6 +14843,10 @@ fn parse_create_function_table_columns(
 
 fn parse_create_function_language(input: &str) -> Result<(String, &str), ParseError> {
     let rest = consume_keyword(input.trim_start(), "language").trim_start();
+    if let Some(token_len) = scan_string_literal_token_len(rest) {
+        let language = decode_string_literal(&rest[..token_len])?;
+        return Ok((language, &rest[token_len..]));
+    }
     let (language, rest) = parse_sql_identifier(rest)?;
     Ok((language, rest))
 }
@@ -14846,6 +14903,22 @@ fn parse_create_function_body(input: &str) -> Result<(String, Option<String>, &s
     Ok((body, None, rest))
 }
 
+fn string_literal_content_start_position(sql: &str, input: &str) -> Option<usize> {
+    let rest = consume_keyword(input.trim_start(), "as").trim_start();
+    let literal_offset = slice_byte_offset(sql, rest);
+    let bytes = rest.as_bytes();
+    let content_offset = match bytes.first().copied()? {
+        b'\'' => 1,
+        b'e' | b'E' if bytes.get(1) == Some(&b'\'') => 2,
+        b'$' => rest[1..].find('$')? + 2,
+        _ => return None,
+    };
+    Some(sql_position_from_byte_offset(
+        sql,
+        literal_offset + content_offset,
+    ))
+}
+
 fn parse_create_function_return_body(input: &str) -> Result<(String, &str), ParseError> {
     let rest = consume_keyword(input.trim_start(), "return").trim_start();
     if rest.is_empty() {
@@ -14855,9 +14928,11 @@ fn parse_create_function_return_body(input: &str) -> Result<(String, &str), Pars
         });
     }
 
-    // SQL-function shorthand uses a single expression body.
+    // SQL-standard RETURN bodies store their body form so pg_get_functiondef can
+    // distinguish them from quoted AS bodies. Runtime execution lowers them to
+    // SELECT later.
     let _ = parse_expr(rest)?;
-    Ok((format!("select {rest}"), ""))
+    Ok((format!("RETURN {rest}"), ""))
 }
 
 fn parse_sql_identifier(input: &str) -> Result<(String, &str), ParseError> {
@@ -20582,13 +20657,19 @@ fn build_merge_action(pair: Pair<'_, Rule>) -> Result<MergeAction, ParseError> {
         Rule::merge_do_nothing_action => Ok(MergeAction::DoNothing),
         Rule::merge_insert_action => {
             let mut columns = None;
+            let mut overriding = None;
             let mut source = None;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::merge_insert_columns => {
-                        let mut names = Vec::new();
-                        collect_identifiers(part, &mut names);
-                        columns = Some(names);
+                        let target_list = part
+                            .into_inner()
+                            .find(|inner| inner.as_rule() == Rule::assignment_target_list)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        columns = Some(build_assignment_target_list(target_list)?);
+                    }
+                    Rule::insert_overriding_clause => {
+                        overriding = Some(build_insert_overriding(part)?);
                     }
                     Rule::merge_insert_values_source => {
                         let values = part
@@ -20605,6 +20686,7 @@ fn build_merge_action(pair: Pair<'_, Rule>) -> Result<MergeAction, ParseError> {
             }
             Ok(MergeAction::Insert {
                 columns,
+                overriding,
                 source: source.ok_or(ParseError::UnexpectedEof)?,
             })
         }
@@ -23632,11 +23714,98 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
 }
 
 fn build_returning_clause(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
-    let select_list = pair
+    let mut old_alias = None;
+    let mut new_alias = None;
+    let mut select_list = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::returning_with_clause => {
+                let (old, new) = build_returning_with_clause(part)?;
+                old_alias = old;
+                new_alias = new;
+            }
+            Rule::select_list => select_list = Some(part),
+            _ => {}
+        }
+    }
+    let mut items = build_select_list(select_list.ok_or(ParseError::UnexpectedEof)?)?;
+    if old_alias.is_some() || new_alias.is_some() {
+        for item in &mut items {
+            rewrite_returning_alias_expr(
+                &mut item.expr,
+                old_alias.as_deref(),
+                new_alias.as_deref(),
+            );
+        }
+    }
+    Ok(items)
+}
+
+fn build_returning_with_clause(
+    pair: Pair<'_, Rule>,
+) -> Result<(Option<String>, Option<String>), ParseError> {
+    let mut old_alias = None;
+    let mut new_alias = None;
+    for option in pair
         .into_inner()
-        .find(|part| part.as_rule() == Rule::select_list)
-        .ok_or(ParseError::UnexpectedEof)?;
-    build_select_list(select_list)
+        .filter(|part| part.as_rule() == Rule::returning_option)
+    {
+        let mut identifiers = option
+            .into_inner()
+            .filter(|part| part.as_rule() == Rule::identifier);
+        let kind = build_identifier(identifiers.next().ok_or(ParseError::UnexpectedEof)?);
+        let alias = build_identifier(identifiers.next().ok_or(ParseError::UnexpectedEof)?);
+        if kind.eq_ignore_ascii_case("old") {
+            old_alias = Some(alias);
+        } else if kind.eq_ignore_ascii_case("new") {
+            new_alias = Some(alias);
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "OLD or NEW in RETURNING WITH",
+                actual: kind,
+            });
+        }
+    }
+    Ok((old_alias, new_alias))
+}
+
+fn rewrite_returning_alias_expr(
+    expr: &mut SqlExpr,
+    old_alias: Option<&str>,
+    new_alias: Option<&str>,
+) {
+    match expr {
+        SqlExpr::Column(name) => {
+            if let Some(rewritten) = rewrite_returning_alias_name(name, old_alias, new_alias) {
+                *name = rewritten;
+            }
+        }
+        SqlExpr::FieldSelect { expr, .. } => {
+            rewrite_returning_alias_expr(expr, old_alias, new_alias);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_returning_alias_name(
+    name: &str,
+    old_alias: Option<&str>,
+    new_alias: Option<&str>,
+) -> Option<String> {
+    for (alias, replacement) in [(old_alias, "old"), (new_alias, "new")] {
+        let Some(alias) = alias else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case(alias) {
+            return Some(replacement.to_string());
+        }
+        if let Some(suffix) = name.strip_prefix(alias)
+            && suffix.starts_with('.')
+        {
+            return Some(format!("{replacement}{suffix}"));
+        }
+    }
+    None
 }
 
 fn top_level_extract_expr(pair: Pair<'_, Rule>) -> bool {

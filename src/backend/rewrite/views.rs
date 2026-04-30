@@ -19,8 +19,8 @@ use crate::include::nodes::parsenodes::{
     SetOperator, ViewCheckOption, WindowFrameExclusion, WindowFrameMode,
 };
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExpr, OpExprKind,
-    QueryColumn, RelationDesc, RowsFromItem, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO,
+    Aggref, BoolExprType, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, JoinType, OpExpr,
+    OpExprKind, QueryColumn, RelationDesc, RowsFromItem, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO,
     ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SqlJsonQueryFunction,
     SqlJsonQueryFunctionKind, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
     SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
@@ -2378,6 +2378,7 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                 .collect::<Vec<_>>()
                 .join(" OR "),
         },
+        Expr::Case(case_expr) => render_case_expr(case_expr, ctx),
         Expr::Op(op) => render_op(op, ctx),
         Expr::Like {
             expr,
@@ -2462,6 +2463,23 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                 quote_identifier_if_needed(field)
             )
         }
+        Expr::ArraySubscript { array, subscripts } => {
+            let mut rendered = format!("({})", render_expr(array, ctx));
+            for subscript in subscripts {
+                rendered.push('[');
+                if let Some(lower) = &subscript.lower {
+                    rendered.push_str(&render_expr(lower, ctx));
+                }
+                if subscript.is_slice {
+                    rendered.push(':');
+                }
+                if let Some(upper) = &subscript.upper {
+                    rendered.push_str(&render_expr(upper, ctx));
+                }
+                rendered.push(']');
+            }
+            rendered
+        }
         Expr::Collate {
             expr,
             collation_oid,
@@ -2516,6 +2534,25 @@ fn render_join_qual_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
     strip_view_join_implicit_casts(&render_expr(expr, ctx))
 }
 
+fn render_case_expr(case_expr: &CaseExpr, ctx: &ViewDeparseContext<'_>) -> String {
+    let mut parts = Vec::new();
+    if let Some(arg) = &case_expr.arg {
+        parts.push(format!("CASE {}", render_expr(arg, ctx)));
+    } else {
+        parts.push("CASE".to_string());
+    }
+    for arm in &case_expr.args {
+        parts.push(format!(
+            "WHEN {} THEN {}",
+            render_wrapped_expr(&arm.expr, ctx),
+            render_expr(&arm.result, ctx)
+        ));
+    }
+    parts.push(format!("ELSE {}", render_expr(&case_expr.defresult, ctx)));
+    parts.push("END".to_string());
+    parts.join(" ")
+}
+
 fn strip_view_join_implicit_casts(rendered: &str) -> String {
     rendered
         .replace("::bigint", "")
@@ -2542,6 +2579,15 @@ fn render_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
                 format_timestamptz_text(timestamp, &config).replace('\'', "''")
             )
         }),
+        SqlTypeKind::Date => crate::backend::utils::time::date::parse_date_text(text, &config)
+            .ok()
+            .map(|date| {
+                format!(
+                    "'{}'::date",
+                    crate::backend::utils::time::date::format_date_text(date, &config)
+                        .replace('\'', "''")
+                )
+            }),
         SqlTypeKind::Interval => parse_interval_text_value(text).ok().map(|interval| {
             format!(
                 "'{}'::interval",
@@ -3272,6 +3318,12 @@ fn render_op(op: &OpExpr, ctx: &ViewDeparseContext<'_>) -> String {
                 rendered_right
             )
         }
+        (op_kind, [left, right]) if binary_op_is_comparison(op_kind) => format!(
+            "{} {} {}",
+            render_comparison_operand(left, right, ctx),
+            render_binary_operator(op_kind),
+            render_comparison_operand(right, left, ctx)
+        ),
         (op_kind, [left, right]) => format!(
             "{} {} {}",
             render_wrapped_expr(left, ctx),
@@ -3279,6 +3331,20 @@ fn render_op(op: &OpExpr, ctx: &ViewDeparseContext<'_>) -> String {
             render_wrapped_expr(right, ctx)
         ),
         _ => format!("{op:?}"),
+    }
+}
+
+fn render_comparison_operand(expr: &Expr, peer: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    let rendered = render_wrapped_expr(expr, ctx);
+    if matches!(
+        expr,
+        Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))
+    ) && expr_sql_type_hint(peer).is_some_and(|ty| !ty.is_array && ty.kind == SqlTypeKind::Text)
+        && !rendered.contains("::")
+    {
+        format!("{rendered}::text")
+    } else {
+        rendered
     }
 }
 

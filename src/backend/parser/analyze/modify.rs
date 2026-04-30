@@ -750,6 +750,7 @@ fn bind_merge_when_clause(
     catalog: &dyn CatalogLookup,
     local_ctes: &[BoundCte],
     target_desc: &RelationDesc,
+    column_defaults: &[Expr],
 ) -> Result<BoundMergeWhenClause, ParseError> {
     let action_scope = match clause.match_kind {
         MergeMatchKind::Matched => merged_scope,
@@ -832,20 +833,15 @@ fn bind_merge_when_clause(
                 .collect::<Result<Vec<_>, ParseError>>()?;
             BoundMergeAction::Update { assignments }
         }
-        MergeAction::Insert { columns, source } => {
+        MergeAction::Insert {
+            columns,
+            overriding,
+            source,
+        } => {
             let target_columns = if let Some(columns) = columns {
                 columns
                     .iter()
-                    .map(|column| {
-                        let column_index = resolve_column(target_scope, column)?;
-                        Ok(BoundAssignmentTarget {
-                            column_index,
-                            subscripts: Vec::new(),
-                            field_path: Vec::new(),
-                            indirection: Vec::new(),
-                            target_sql_type: target_desc.columns[column_index].sql_type,
-                        })
-                    })
+                    .map(|column| bind_assignment_target(column, target_scope, catalog, local_ctes))
                     .collect::<Result<Vec<_>, ParseError>>()?
             } else {
                 let width = match source {
@@ -872,51 +868,32 @@ fn bind_merge_when_clause(
                                     target,
                                     Some(expr),
                                 )?;
+                                if matches!(expr, SqlExpr::Default) {
+                                    reject_default_indirection_assignment(target)?;
+                                    return Ok(column_defaults[target.column_index].clone());
+                                }
                                 let normalized = normalize_identity_insert_expr(
                                     target_desc,
                                     target,
                                     expr,
-                                    None,
+                                    *overriding,
                                 )?;
                                 if matches!(normalized, NormalizedInsertExpr::Default) {
-                                    return Ok(target_desc.columns[target.column_index]
-                                        .default_sequence_oid
-                                        .map(|sequence_oid| {
-                                            let expr = Expr::builtin_func(
-                                                BuiltinScalarFunction::NextVal,
-                                                Some(SqlType::new(SqlTypeKind::Int8)),
-                                                false,
-                                                vec![Expr::Const(Value::Int64(i64::from(
-                                                    sequence_oid,
-                                                )))],
-                                            );
-                                            if target_desc.columns[target.column_index]
-                                                .sql_type
-                                                .kind
-                                                == SqlTypeKind::Int8
-                                            {
-                                                expr
-                                            } else {
-                                                Expr::Cast(
-                                                    Box::new(expr),
-                                                    target_desc.columns[target.column_index]
-                                                        .sql_type,
-                                                )
-                                            }
-                                        })
-                                        .unwrap_or(Expr::Const(Value::Null)));
+                                    reject_default_indirection_assignment(target)?;
+                                    return Ok(column_defaults[target.column_index].clone());
                                 }
                                 if matches!(expr, SqlExpr::Default)
                                     && target_desc.columns[target.column_index].generated.is_some()
                                 {
                                     Ok(Expr::Const(Value::Null))
                                 } else {
-                                    bind_expr_with_outer_and_ctes(
+                                    bind_insert_assignment_expr(
                                         expr,
+                                        target_desc,
+                                        target,
                                         action_scope,
                                         catalog,
                                         &[],
-                                        None,
                                         local_ctes,
                                     )
                                 }
@@ -1812,6 +1789,7 @@ pub(crate) fn plan_merge_with_outer_ctes(
                 catalog,
                 &visible_ctes,
                 &entry.desc,
+                &column_defaults,
             )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;

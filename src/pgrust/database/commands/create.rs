@@ -1,18 +1,21 @@
 use super::super::*;
 use super::privilege::{acl_grants_privilege, type_owner_default_acl};
 use super::reloptions::normalize_create_table_reloptions;
+use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::analyze::{
-    ResolvedFunctionCall, bind_scalar_expr_in_scope, is_binary_coercible_type, is_collatable_type,
-    resolve_function_call,
+    ResolvedFunctionCall, bind_delete, bind_insert, bind_scalar_expr_in_scope, bind_update,
+    is_binary_coercible_type, is_collatable_type, pg_plan_query_with_outer,
+    pg_plan_values_query_with_outer, plan_merge, resolve_function_call, with_external_param_types,
 };
 use crate::backend::parser::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AlterAggregateRenameStatement, AlterRoutineOption, CreateAggregateStatement, CreateFunctionArg,
-    CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement,
-    CreateTableAsQuery, FunctionArgMode, FunctionParallel, FunctionVolatility, OwnedSequenceSpec,
-    PartitionBoundSpec, RawTypeName, RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement,
-    parse_statement, pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    CreateFunctionBodyKind, CreateFunctionReturnSpec, CreateFunctionStatement,
+    CreateProcedureStatement, CreateTableAsQuery, FunctionArgMode, FunctionParallel,
+    FunctionVolatility, OwnedSequenceSpec, ParseError, PartitionBoundSpec, RawTypeName, RelOption,
+    RoutineSignature, SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
+    resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
@@ -25,19 +28,21 @@ use crate::backend::utils::misc::notices::{
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
-    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, DEPENDENCY_NORMAL, EVENT_TRIGGER_TYPE_OID,
+    INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID,
+    PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PG_PROC_RELATION_OID,
+    PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgDependRow, PgProcRow, RECORD_TYPE_OID,
     TRIGGER_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, Query, RangeTblEntryKind,
-    SelectStatement,
+    AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, GroupByItem, Query,
+    RangeTblEntryKind, SelectStatement,
 };
 use crate::include::nodes::primnodes::{
     Expr, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
-    SqlJsonTableBehavior, SqlJsonTableColumnKind, SqlXmlTableColumnKind, Var, attrno_index,
+    SqlJsonTableBehavior, SqlJsonTableColumnKind, SqlXmlTableColumnKind, TargetEntry, Var,
+    attrno_index,
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::sequences::pg_sequence_row;
@@ -2226,6 +2231,984 @@ fn single_values_expr(values_sql: &str) -> Option<String> {
     Some(inner.to_string())
 }
 
+fn check_function_bodies_enabled(gucs: Option<&std::collections::HashMap<String, String>>) -> bool {
+    gucs.and_then(|gucs| gucs.get("check_function_bodies"))
+        .and_then(|value| parse_bool_guc(value))
+        .unwrap_or(true)
+}
+
+fn parse_bool_guc(value: &str) -> Option<bool> {
+    match normalize_guc_name(value).as_str() {
+        "on" | "true" | "yes" | "1" | "t" => Some(true),
+        "off" | "false" | "no" | "0" | "f" => Some(false),
+        _ => None,
+    }
+}
+
+fn current_user_is_superuser(catalog: &dyn CatalogLookup) -> bool {
+    let current_user_oid = catalog.current_user_oid();
+    catalog
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.oid == current_user_oid)
+        .map(|row| row.rolsuper)
+        .unwrap_or(current_user_oid == crate::include::catalog::BOOTSTRAP_SUPERUSER_OID)
+}
+
+fn validate_sql_function_body_on_create(
+    create_stmt: &CreateFunctionStatement,
+    catalog: &dyn CatalogLookup,
+    input_args: &[(Option<String>, SqlType, u32)],
+    prorettype: u32,
+) -> Result<(), ExecError> {
+    if !matches!(create_stmt.body_kind, CreateFunctionBodyKind::As)
+        && input_args
+            .iter()
+            .any(|(_, _, oid)| sql_function_arg_type_is_polymorphic(*oid))
+    {
+        return Err(ExecError::DetailedError {
+            message: "SQL function with unquoted function body cannot have polymorphic arguments"
+                .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P13",
+        });
+    }
+    let body = sql_function_body_for_validation(create_stmt);
+    validate_sql_function_positional_params(&body, input_args.len(), create_stmt.body_position)?;
+    let statements = split_sql_function_body_for_validation(&body);
+    let Some(final_statement) = statements.last() else {
+        return Err(sql_function_final_statement_error(catalog, prorettype));
+    };
+    let external_param_types = input_args
+        .iter()
+        .enumerate()
+        .map(|(index, (_, ty, _))| (index + 1, *ty))
+        .collect::<Vec<_>>();
+    let outer_columns = input_args
+        .iter()
+        .filter_map(|(name, ty, _)| name.as_ref().map(|name| (name.clone(), *ty)))
+        .collect::<Vec<_>>();
+    let final_statement = normalize_sql_function_validation_statement(final_statement);
+    let stmt = parse_statement(final_statement.as_ref()).map_err(|err| {
+        ExecError::Parse(position_sql_function_body_parse_error(
+            err,
+            create_stmt.body_position,
+        ))
+    })?;
+    if prorettype == VOID_TYPE_OID {
+        return Ok(());
+    }
+    if sql_function_arg_type_is_polymorphic(prorettype) {
+        return Ok(());
+    }
+    if !matches!(create_stmt.body_kind, CreateFunctionBodyKind::As)
+        && sql_function_quoted_body_dml_returns_rows(&stmt)
+        && matches!(
+            create_stmt.return_spec,
+            CreateFunctionReturnSpec::Table(_)
+                | CreateFunctionReturnSpec::DerivedFromOutArgs { .. }
+        )
+    {
+        // :HACK: SQL-standard DML RETURNING bodies need the same broad
+        // acceptance PostgreSQL gives them here.  Full validation should reuse
+        // the statement-local SQL-function binding environment instead of
+        // planning the DML body as a top-level statement.
+        return Ok(());
+    }
+    if matches!(create_stmt.body_kind, CreateFunctionBodyKind::As) {
+        if sql_function_should_skip_quoted_body_return_validation(create_stmt, catalog, prorettype)
+        {
+            return Ok(());
+        }
+        if sql_function_quoted_body_dml_returns_rows(&stmt) {
+            return Ok(());
+        }
+        if !sql_function_statement_is_simple_return_validation_candidate(&stmt) {
+            return Ok(());
+        }
+    }
+    let columns = match with_external_param_types(&external_param_types, || {
+        sql_function_final_statement_columns(&stmt, catalog, &outer_columns, prorettype)
+    }) {
+        Ok(columns) => Some(columns),
+        Err(err)
+            if matches!(create_stmt.body_kind, CreateFunctionBodyKind::As)
+                && sql_function_validation_error_is_undefined_routine(&err) =>
+        {
+            None
+        }
+        Err(err) => return Err(ExecError::Parse(err)),
+    };
+    let Some(columns) = columns else {
+        return Ok(());
+    };
+    if let Some(expected_columns) = sql_function_table_return_columns(create_stmt, catalog)? {
+        return validate_sql_function_table_return_columns(&columns, &expected_columns);
+    }
+    if columns.len() != 1 {
+        return Err(sql_function_return_column_count_error(catalog, prorettype));
+    }
+    let returned_type = columns[0].sql_type;
+    if !sql_function_return_type_compatible(catalog, returned_type, prorettype) {
+        return Err(sql_function_return_type_mismatch_error(
+            catalog,
+            prorettype,
+            returned_type,
+        ));
+    }
+    Ok(())
+}
+
+fn sql_function_final_statement_columns(
+    stmt: &Statement,
+    catalog: &dyn CatalogLookup,
+    outer_columns: &[(String, SqlType)],
+    prorettype: u32,
+) -> Result<Vec<QueryColumn>, ParseError> {
+    match stmt {
+        Statement::Select(select) => {
+            pg_plan_query_with_outer(select, catalog, outer_columns).map(|planned| planned.columns())
+        }
+        Statement::Values(values) => pg_plan_values_query_with_outer(values, catalog, outer_columns)
+            .map(|planned| planned.columns()),
+        Statement::Insert(insert) if !insert.returning.is_empty() => {
+            bind_insert(insert, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
+        }
+        Statement::Update(update) if !update.returning.is_empty() => {
+            bind_update(update, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
+        }
+        Statement::Delete(delete) if !delete.returning.is_empty() => {
+            bind_delete(delete, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
+        }
+        Statement::Merge(merge) if !merge.returning.is_empty() => {
+            plan_merge(merge, catalog).map(|bound| target_entries_to_query_columns(&bound.returning))
+        }
+        _ => Err(match sql_function_final_statement_error(catalog, prorettype) {
+            ExecError::Parse(err) => err,
+            ExecError::DetailedError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+            } => ParseError::DetailedError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+            },
+            _ => ParseError::DetailedError {
+                message: format!(
+                    "return type mismatch in function declared to return {}",
+                    proc_signature_type_name(catalog, prorettype)
+                ),
+                detail: Some(
+                    "Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING."
+                        .into(),
+                ),
+                hint: None,
+                sqlstate: "42P13",
+            },
+        }),
+    }
+}
+
+fn target_entries_to_query_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+    targets
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| QueryColumn {
+            name: target.name.clone(),
+            sql_type: target.sql_type,
+            wire_type_oid: None,
+        })
+        .collect()
+}
+
+fn sql_function_table_return_columns(
+    create_stmt: &CreateFunctionStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Vec<QueryColumn>>, ExecError> {
+    let CreateFunctionReturnSpec::Table(columns) = &create_stmt.return_spec else {
+        return Ok(None);
+    };
+    let mut expected = Vec::with_capacity(columns.len());
+    for column in columns {
+        let sql_type = resolve_raw_type_name(&column.ty, catalog).map_err(ExecError::Parse)?;
+        expected.push(QueryColumn {
+            name: column.name.clone(),
+            sql_type,
+            wire_type_oid: None,
+        });
+    }
+    Ok(Some(expected))
+}
+
+fn validate_sql_function_table_return_columns(
+    actual: &[QueryColumn],
+    expected: &[QueryColumn],
+) -> Result<(), ExecError> {
+    if actual.len() != expected.len() {
+        return Err(ExecError::DetailedError {
+            message: "return type mismatch in function declared to return record".into(),
+            detail: Some(format!(
+                "Final statement returns {} columns instead of {}.",
+                actual.len(),
+                expected.len()
+            )),
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        if actual.sql_type.kind != expected.sql_type.kind
+            || actual.sql_type.is_array != expected.sql_type.is_array
+        {
+            return Err(ExecError::DetailedError {
+                message: "return type mismatch in function declared to return record".into(),
+                detail: Some(format!(
+                    "Final statement returns {} instead of {} at column {}.",
+                    format_sql_type_name(actual.sql_type),
+                    format_sql_type_name(expected.sql_type),
+                    index + 1
+                )),
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn sql_function_should_skip_quoted_body_return_validation(
+    create_stmt: &CreateFunctionStatement,
+    catalog: &dyn CatalogLookup,
+    prorettype: u32,
+) -> bool {
+    match &create_stmt.return_spec {
+        CreateFunctionReturnSpec::Table(_)
+        | CreateFunctionReturnSpec::DerivedFromOutArgs { .. } => {
+            return true;
+        }
+        CreateFunctionReturnSpec::Type { setof, .. } if *setof => return true,
+        CreateFunctionReturnSpec::Type { .. } => {}
+    }
+    sql_function_return_oid_is_composite_like(catalog, prorettype)
+}
+
+fn sql_function_return_oid_is_composite_like(catalog: &dyn CatalogLookup, oid: u32) -> bool {
+    if oid == RECORD_TYPE_OID {
+        return true;
+    }
+    if catalog.type_by_oid(oid).is_some_and(|row| {
+        matches!(
+            row.sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        ) || row.typtype == 'c'
+    }) {
+        return true;
+    }
+    catalog
+        .domain_by_type_oid(oid)
+        .is_some_and(|domain| sql_function_type_is_composite_like(catalog, domain.sql_type))
+}
+
+fn sql_function_type_is_composite_like(catalog: &dyn CatalogLookup, ty: SqlType) -> bool {
+    if matches!(ty.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
+        return true;
+    }
+    ty.type_oid != 0 && sql_function_return_oid_is_composite_like(catalog, ty.type_oid)
+}
+
+fn sql_function_quoted_body_dml_returns_rows(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Insert(stmt) => !stmt.returning.is_empty(),
+        Statement::Update(stmt) => !stmt.returning.is_empty(),
+        Statement::Delete(stmt) => !stmt.returning.is_empty(),
+        Statement::Merge(stmt) => !stmt.returning.is_empty(),
+        _ => false,
+    }
+}
+
+fn sql_function_statement_is_simple_return_validation_candidate(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Select(select) => {
+            sql_function_select_is_simple_return_validation_candidate(select)
+        }
+        Statement::Values(_) => true,
+        _ => false,
+    }
+}
+
+fn sql_function_select_is_simple_return_validation_candidate(select: &SelectStatement) -> bool {
+    !select.with_recursive
+        && select.with.is_empty()
+        && !select.distinct
+        && select.distinct_on.is_empty()
+        && select.from.is_none()
+        && select.where_clause.is_none()
+        && select.group_by.is_empty()
+        && select.having.is_none()
+        && select.window_clauses.is_empty()
+        && select.order_by.is_empty()
+        && select.limit.is_none()
+        && select.offset.is_none()
+        && select.locking_clause.is_none()
+        && select.locking_targets.is_empty()
+        && select.set_operation.is_none()
+}
+
+fn sql_function_validation_error_is_undefined_routine(err: &ParseError) -> bool {
+    matches!(
+        err.unpositioned(),
+        ParseError::DetailedError {
+            message,
+            sqlstate: "42883",
+            ..
+        } if message.starts_with("function ") && message.ends_with(" does not exist")
+    )
+}
+
+fn validate_sql_function_positional_params(
+    body: &str,
+    input_arg_count: usize,
+    body_position: Option<usize>,
+) -> Result<(), ExecError> {
+    let mut chars = body.char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
+        if ch != '$' {
+            continue;
+        }
+        let mut digits = String::new();
+        while let Some((_, digit)) = chars.peek().copied() {
+            if !digit.is_ascii_digit() {
+                break;
+            }
+            digits.push(digit);
+            chars.next();
+        }
+        if digits.is_empty() {
+            continue;
+        }
+        if let Ok(index) = digits.parse::<usize>()
+            && index > input_arg_count
+        {
+            let err = ParseError::DetailedError {
+                message: format!("there is no parameter ${index}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P02",
+            };
+            return Err(ExecError::Parse(position_sql_function_body_error_at(
+                err,
+                body,
+                offset,
+                body_position,
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn position_sql_function_body_parse_error(
+    err: ParseError,
+    body_position: Option<usize>,
+) -> ParseError {
+    let Some(body_position) = body_position else {
+        return err;
+    };
+    let inner_position = err.position().unwrap_or(1);
+    err.with_position(body_position + inner_position.saturating_sub(1))
+}
+
+fn position_sql_function_body_error_at(
+    err: ParseError,
+    body: &str,
+    byte_offset: usize,
+    body_position: Option<usize>,
+) -> ParseError {
+    let Some(body_position) = body_position else {
+        return err;
+    };
+    let char_offset = body[..byte_offset.min(body.len())].chars().count();
+    err.with_position(body_position + char_offset)
+}
+
+fn sql_function_arg_type_is_polymorphic(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYARRAYOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+            | ANYCOMPATIBLENONARRAYOID
+            | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYELEMENTOID
+            | ANYENUMOID
+            | ANYMULTIRANGEOID
+            | ANYNONARRAYOID
+            | ANYOID
+            | ANYRANGEOID
+    )
+}
+
+fn sql_function_body_for_validation(create_stmt: &CreateFunctionStatement) -> String {
+    let body = create_stmt.body.trim().trim_end_matches(';').trim();
+    if matches!(create_stmt.body_kind, CreateFunctionBodyKind::SqlReturn) {
+        return format!("select {}", body["RETURN".len()..].trim());
+    }
+    sql_standard_body_inner_for_validation(body)
+        .unwrap_or(body)
+        .to_string()
+}
+
+fn sql_standard_body_inner_for_validation(body: &str) -> Option<&str> {
+    let trimmed = body.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("begin atomic") {
+        return None;
+    }
+    let without_trailing_semicolon = trimmed.trim_end_matches(';').trim_end();
+    let lowered_without_semicolon = without_trailing_semicolon.to_ascii_lowercase();
+    let end = if lowered_without_semicolon.ends_with("end") {
+        without_trailing_semicolon.len().saturating_sub("end".len())
+    } else {
+        trimmed.len()
+    };
+    trimmed.get("begin atomic".len()..end).map(str::trim)
+}
+
+fn split_sql_function_body_for_validation(body: &str) -> Vec<String> {
+    body.split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty() && !statement.eq_ignore_ascii_case("end"))
+        .map(str::to_string)
+        .collect()
+}
+
+fn normalize_sql_function_validation_statement(statement: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = statement.trim_start();
+    if trimmed
+        .get(.."return".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("return"))
+        && trimmed
+            .get("return".len()..)
+            .and_then(|rest| rest.chars().next())
+            .is_none_or(|ch| ch.is_whitespace())
+    {
+        std::borrow::Cow::Owned(format!("select {}", trimmed["return".len()..].trim()))
+    } else {
+        std::borrow::Cow::Borrowed(statement)
+    }
+}
+
+#[derive(Default)]
+struct SqlFunctionDependencyRefs {
+    relation_oids: std::collections::BTreeSet<u32>,
+    column_refs: std::collections::BTreeSet<(u32, i16)>,
+    proc_oids: std::collections::BTreeSet<u32>,
+}
+
+fn sql_function_extra_depend_rows(
+    create_stmt: &CreateFunctionStatement,
+    catalog: &dyn CatalogLookup,
+    callable_arg_defaults: &[Option<String>],
+) -> Vec<PgDependRow> {
+    let mut refs = SqlFunctionDependencyRefs::default();
+    for default_sql in callable_arg_defaults.iter().flatten() {
+        if let Ok(expr) = crate::backend::parser::parse_expr(default_sql) {
+            collect_sql_function_expr_dependencies(&expr, catalog, &mut refs);
+        }
+    }
+
+    if !matches!(create_stmt.body_kind, CreateFunctionBodyKind::As) {
+        let body = sql_function_body_for_validation(create_stmt);
+        for statement in split_sql_function_body_for_validation(&body) {
+            let statement = normalize_sql_function_validation_statement(&statement);
+            if let Ok(stmt) = parse_statement(statement.as_ref()) {
+                collect_sql_function_statement_dependencies(&stmt, catalog, &mut refs);
+            }
+        }
+    }
+
+    let mut rows = Vec::new();
+    rows.extend(
+        refs.relation_oids.into_iter().map(|relation_oid| {
+            sql_function_extra_depend_row(PG_CLASS_RELATION_OID, relation_oid, 0)
+        }),
+    );
+    rows.extend(refs.column_refs.into_iter().map(|(relation_oid, attnum)| {
+        sql_function_extra_depend_row(PG_CLASS_RELATION_OID, relation_oid, i32::from(attnum))
+    }));
+    rows.extend(
+        refs.proc_oids
+            .into_iter()
+            .map(|proc_oid| sql_function_extra_depend_row(PG_PROC_RELATION_OID, proc_oid, 0)),
+    );
+    sort_pg_depend_rows(&mut rows);
+    rows.dedup();
+    rows
+}
+
+fn sql_function_extra_depend_row(refclassid: u32, refobjid: u32, refobjsubid: i32) -> PgDependRow {
+    PgDependRow {
+        classid: PG_PROC_RELATION_OID,
+        objid: 0,
+        objsubid: 0,
+        refclassid,
+        refobjid,
+        refobjsubid,
+        deptype: DEPENDENCY_NORMAL,
+    }
+}
+
+fn collect_sql_function_statement_dependencies(
+    stmt: &Statement,
+    catalog: &dyn CatalogLookup,
+    refs: &mut SqlFunctionDependencyRefs,
+) {
+    match stmt {
+        Statement::Select(select) => {
+            collect_sql_function_select_dependencies(select, catalog, refs)
+        }
+        Statement::Insert(insert) => {
+            if let Some(relation) = catalog.lookup_any_relation(&insert.table_name) {
+                refs.relation_oids.insert(relation.relation_oid);
+            }
+            for cte in &insert.with {
+                collect_sql_function_cte_dependencies(&cte.body, catalog, refs);
+            }
+            match &insert.source {
+                crate::backend::parser::InsertSource::Values(rows) => {
+                    for row in rows {
+                        for expr in row {
+                            collect_sql_function_expr_dependencies(expr, catalog, refs);
+                        }
+                    }
+                }
+                crate::backend::parser::InsertSource::Select(select) => {
+                    collect_sql_function_select_dependencies(select, catalog, refs);
+                }
+                crate::backend::parser::InsertSource::DefaultValues => {}
+            }
+            for target in &insert.returning {
+                collect_sql_function_expr_dependencies(&target.expr, catalog, refs);
+            }
+        }
+        Statement::Delete(delete) => {
+            if let Some(relation) = catalog.lookup_any_relation(&delete.table_name) {
+                refs.relation_oids.insert(relation.relation_oid);
+            }
+            for cte in &delete.with {
+                collect_sql_function_cte_dependencies(&cte.body, catalog, refs);
+            }
+            if let Some(where_clause) = &delete.where_clause {
+                collect_sql_function_expr_dependencies(where_clause, catalog, refs);
+            }
+            for target in &delete.returning {
+                collect_sql_function_expr_dependencies(&target.expr, catalog, refs);
+            }
+        }
+        Statement::Values(values) => {
+            for row in &values.rows {
+                for expr in row {
+                    collect_sql_function_expr_dependencies(expr, catalog, refs);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_sql_function_select_dependencies(
+    select: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    refs: &mut SqlFunctionDependencyRefs,
+) {
+    let mut relation_oids = std::collections::BTreeSet::new();
+    collect_direct_relation_oids_from_select(select, catalog, &mut Vec::new(), &mut relation_oids);
+    refs.relation_oids.extend(relation_oids);
+    collect_sql_function_simple_select_column_dependencies(select, catalog, refs);
+    for cte in &select.with {
+        collect_sql_function_cte_dependencies(&cte.body, catalog, refs);
+    }
+    for target in &select.targets {
+        collect_sql_function_expr_dependencies(&target.expr, catalog, refs);
+    }
+    for expr in select.where_clause.iter().chain(select.having.iter()) {
+        collect_sql_function_expr_dependencies(expr, catalog, refs);
+    }
+    for item in &select.group_by {
+        collect_sql_function_group_by_dependencies(item, catalog, refs);
+    }
+    for item in &select.order_by {
+        collect_sql_function_expr_dependencies(&item.expr, catalog, refs);
+    }
+    if let Some(set_operation) = &select.set_operation {
+        for input in &set_operation.inputs {
+            collect_sql_function_select_dependencies(input, catalog, refs);
+        }
+    }
+}
+
+fn collect_sql_function_cte_dependencies(
+    body: &crate::backend::parser::CteBody,
+    catalog: &dyn CatalogLookup,
+    refs: &mut SqlFunctionDependencyRefs,
+) {
+    match body {
+        crate::backend::parser::CteBody::Select(select) => {
+            collect_sql_function_select_dependencies(select, catalog, refs)
+        }
+        crate::backend::parser::CteBody::Values(values) => {
+            for row in &values.rows {
+                for expr in row {
+                    collect_sql_function_expr_dependencies(expr, catalog, refs);
+                }
+            }
+        }
+        crate::backend::parser::CteBody::Insert(insert) => {
+            collect_sql_function_statement_dependencies(
+                &Statement::Insert((**insert).clone()),
+                catalog,
+                refs,
+            )
+        }
+        crate::backend::parser::CteBody::Update(_) => {}
+        crate::backend::parser::CteBody::Delete(delete) => {
+            collect_sql_function_statement_dependencies(
+                &Statement::Delete((**delete).clone()),
+                catalog,
+                refs,
+            )
+        }
+        crate::backend::parser::CteBody::Merge(_) => {}
+        crate::backend::parser::CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_sql_function_cte_dependencies(anchor, catalog, refs);
+            collect_sql_function_select_dependencies(recursive, catalog, refs);
+        }
+    }
+}
+
+fn collect_sql_function_simple_select_column_dependencies(
+    select: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    refs: &mut SqlFunctionDependencyRefs,
+) {
+    let Some((relation_oid, desc)) = simple_select_table_relation(select, catalog) else {
+        return;
+    };
+    let mut column_names = std::collections::BTreeSet::new();
+    for target in &select.targets {
+        collect_sql_function_column_names(&target.expr, &mut column_names);
+    }
+    for expr in select.where_clause.iter().chain(select.having.iter()) {
+        collect_sql_function_column_names(expr, &mut column_names);
+    }
+    for item in &select.group_by {
+        collect_sql_function_group_by_column_names(item, &mut column_names);
+    }
+    for item in &select.order_by {
+        collect_sql_function_column_names(&item.expr, &mut column_names);
+    }
+    for column_name in column_names {
+        if let Some((index, _)) =
+            desc.columns.iter().enumerate().find(|(_, column)| {
+                !column.dropped && column.name.eq_ignore_ascii_case(&column_name)
+            })
+        {
+            refs.column_refs.insert((relation_oid, (index + 1) as i16));
+        }
+    }
+}
+
+fn simple_select_table_relation(
+    select: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Option<(u32, RelationDesc)> {
+    let from = select.from.as_ref()?;
+    let table_name = match from {
+        FromItem::Table { name, .. } => name,
+        FromItem::Alias { source, .. } => match source.as_ref() {
+            FromItem::Table { name, .. } => name,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let relation = catalog.lookup_any_relation(table_name)?;
+    Some((relation.relation_oid, relation.desc))
+}
+
+fn collect_sql_function_group_by_dependencies(
+    item: &GroupByItem,
+    catalog: &dyn CatalogLookup,
+    refs: &mut SqlFunctionDependencyRefs,
+) {
+    match item {
+        GroupByItem::Expr(expr) => collect_sql_function_expr_dependencies(expr, catalog, refs),
+        GroupByItem::List(exprs) => {
+            for expr in exprs {
+                collect_sql_function_expr_dependencies(expr, catalog, refs);
+            }
+        }
+        GroupByItem::Empty => {}
+        GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => {
+            for item in items {
+                collect_sql_function_group_by_dependencies(item, catalog, refs);
+            }
+        }
+    }
+}
+
+fn collect_sql_function_group_by_column_names(
+    item: &GroupByItem,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match item {
+        GroupByItem::Expr(expr) => collect_sql_function_column_names(expr, out),
+        GroupByItem::List(exprs) => {
+            for expr in exprs {
+                collect_sql_function_column_names(expr, out);
+            }
+        }
+        GroupByItem::Empty => {}
+        GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => {
+            for item in items {
+                collect_sql_function_group_by_column_names(item, out);
+            }
+        }
+    }
+}
+
+fn collect_sql_function_column_names(
+    expr: &crate::backend::parser::SqlExpr,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        crate::backend::parser::SqlExpr::Column(name) => {
+            let column_name = name.rsplit('.').next().unwrap_or(name);
+            out.insert(column_name.trim_matches('"').to_ascii_lowercase());
+        }
+        crate::backend::parser::SqlExpr::FuncCall { args, order_by, .. } => {
+            for arg in args.args() {
+                collect_sql_function_column_names(&arg.value, out);
+            }
+            for item in order_by {
+                collect_sql_function_column_names(&item.expr, out);
+            }
+        }
+        crate::backend::parser::SqlExpr::ScalarSubquery(select)
+        | crate::backend::parser::SqlExpr::ArraySubquery(select)
+        | crate::backend::parser::SqlExpr::Exists(select) => {
+            for target in &select.targets {
+                collect_sql_function_column_names(&target.expr, out);
+            }
+        }
+        crate::backend::parser::SqlExpr::Add(left, right)
+        | crate::backend::parser::SqlExpr::Sub(left, right)
+        | crate::backend::parser::SqlExpr::Mul(left, right)
+        | crate::backend::parser::SqlExpr::Div(left, right)
+        | crate::backend::parser::SqlExpr::Mod(left, right)
+        | crate::backend::parser::SqlExpr::Eq(left, right)
+        | crate::backend::parser::SqlExpr::NotEq(left, right)
+        | crate::backend::parser::SqlExpr::Lt(left, right)
+        | crate::backend::parser::SqlExpr::LtEq(left, right)
+        | crate::backend::parser::SqlExpr::Gt(left, right)
+        | crate::backend::parser::SqlExpr::GtEq(left, right)
+        | crate::backend::parser::SqlExpr::And(left, right)
+        | crate::backend::parser::SqlExpr::Or(left, right) => {
+            collect_sql_function_column_names(left, out);
+            collect_sql_function_column_names(right, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_sql_function_expr_dependencies(
+    expr: &crate::backend::parser::SqlExpr,
+    catalog: &dyn CatalogLookup,
+    refs: &mut SqlFunctionDependencyRefs,
+) {
+    match expr {
+        crate::backend::parser::SqlExpr::FuncCall { name, args, .. } => {
+            collect_sql_function_call_dependency(name, args, catalog, refs);
+            for arg in args.args() {
+                collect_sql_function_expr_dependencies(&arg.value, catalog, refs);
+            }
+        }
+        crate::backend::parser::SqlExpr::ScalarSubquery(select)
+        | crate::backend::parser::SqlExpr::ArraySubquery(select)
+        | crate::backend::parser::SqlExpr::Exists(select) => {
+            collect_sql_function_select_dependencies(select, catalog, refs);
+        }
+        crate::backend::parser::SqlExpr::InSubquery { expr, subquery, .. }
+        | crate::backend::parser::SqlExpr::QuantifiedSubquery {
+            left: expr,
+            subquery,
+            ..
+        } => {
+            collect_sql_function_expr_dependencies(expr, catalog, refs);
+            collect_sql_function_select_dependencies(subquery, catalog, refs);
+        }
+        crate::backend::parser::SqlExpr::Add(left, right)
+        | crate::backend::parser::SqlExpr::Sub(left, right)
+        | crate::backend::parser::SqlExpr::BitAnd(left, right)
+        | crate::backend::parser::SqlExpr::BitOr(left, right)
+        | crate::backend::parser::SqlExpr::BitXor(left, right)
+        | crate::backend::parser::SqlExpr::Shl(left, right)
+        | crate::backend::parser::SqlExpr::Shr(left, right)
+        | crate::backend::parser::SqlExpr::Mul(left, right)
+        | crate::backend::parser::SqlExpr::Div(left, right)
+        | crate::backend::parser::SqlExpr::Mod(left, right)
+        | crate::backend::parser::SqlExpr::Concat(left, right)
+        | crate::backend::parser::SqlExpr::Eq(left, right)
+        | crate::backend::parser::SqlExpr::NotEq(left, right)
+        | crate::backend::parser::SqlExpr::Lt(left, right)
+        | crate::backend::parser::SqlExpr::LtEq(left, right)
+        | crate::backend::parser::SqlExpr::Gt(left, right)
+        | crate::backend::parser::SqlExpr::GtEq(left, right)
+        | crate::backend::parser::SqlExpr::And(left, right)
+        | crate::backend::parser::SqlExpr::Or(left, right)
+        | crate::backend::parser::SqlExpr::BinaryOperator { left, right, .. } => {
+            collect_sql_function_expr_dependencies(left, catalog, refs);
+            collect_sql_function_expr_dependencies(right, catalog, refs);
+        }
+        crate::backend::parser::SqlExpr::Cast(inner, _)
+        | crate::backend::parser::SqlExpr::Not(inner)
+        | crate::backend::parser::SqlExpr::IsNull(inner)
+        | crate::backend::parser::SqlExpr::IsNotNull(inner)
+        | crate::backend::parser::SqlExpr::Negate(inner)
+        | crate::backend::parser::SqlExpr::UnaryPlus(inner)
+        | crate::backend::parser::SqlExpr::BitNot(inner)
+        | crate::backend::parser::SqlExpr::Subscript { expr: inner, .. }
+        | crate::backend::parser::SqlExpr::FieldSelect { expr: inner, .. } => {
+            collect_sql_function_expr_dependencies(inner, catalog, refs);
+        }
+        crate::backend::parser::SqlExpr::ArrayLiteral(elements)
+        | crate::backend::parser::SqlExpr::Row(elements) => {
+            for element in elements {
+                collect_sql_function_expr_dependencies(element, catalog, refs);
+            }
+        }
+        crate::backend::parser::SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                collect_sql_function_expr_dependencies(arg, catalog, refs);
+            }
+            for arm in args {
+                collect_sql_function_expr_dependencies(&arm.expr, catalog, refs);
+                collect_sql_function_expr_dependencies(&arm.result, catalog, refs);
+            }
+            if let Some(defresult) = defresult {
+                collect_sql_function_expr_dependencies(defresult, catalog, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_sql_function_call_dependency(
+    name: &str,
+    args: &crate::backend::parser::SqlCallArgs,
+    catalog: &dyn CatalogLookup,
+    refs: &mut SqlFunctionDependencyRefs,
+) {
+    let func_name = name.rsplit('.').next().unwrap_or(name);
+    for row in catalog.proc_rows_by_name(func_name) {
+        refs.proc_oids.insert(row.oid);
+    }
+    if func_name.eq_ignore_ascii_case("nextval")
+        && let Some(sequence_name) = args.args().first().and_then(|arg| match &arg.value {
+            crate::backend::parser::SqlExpr::Const(value) => value.as_text(),
+            _ => None,
+        })
+        && let Some(sequence) = catalog.lookup_any_relation(sequence_name)
+        && sequence.relkind == 'S'
+    {
+        refs.relation_oids.insert(sequence.relation_oid);
+    }
+}
+
+fn sql_function_final_statement_error(catalog: &dyn CatalogLookup, expected_oid: u32) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "return type mismatch in function declared to return {}",
+            proc_signature_type_name(catalog, expected_oid)
+        ),
+        detail: Some(
+            "Function's final statement must be SELECT or INSERT/UPDATE/DELETE/MERGE RETURNING."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "42P13",
+    }
+}
+
+fn sql_function_return_type_compatible(
+    catalog: &dyn CatalogLookup,
+    returned_type: SqlType,
+    expected_oid: u32,
+) -> bool {
+    let Some(expected) = catalog.type_by_oid(expected_oid).map(|row| row.sql_type) else {
+        return false;
+    };
+    if returned_type.kind == expected.kind
+        && returned_type.is_array == expected.is_array
+        && (returned_type.type_oid == expected.type_oid
+            || returned_type.type_oid == 0
+            || expected.type_oid == 0)
+    {
+        return true;
+    }
+    let Some(returned_oid) = catalog.type_oid_for_sql_type(returned_type) else {
+        return false;
+    };
+    if returned_oid == expected_oid {
+        return true;
+    }
+    catalog
+        .cast_by_source_target(returned_oid, expected_oid)
+        .is_some_and(|row| matches!(row.castcontext, 'i' | 'a'))
+}
+
+fn sql_function_return_column_count_error(
+    catalog: &dyn CatalogLookup,
+    expected_oid: u32,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "return type mismatch in function declared to return {}",
+            proc_signature_type_name(catalog, expected_oid)
+        ),
+        detail: Some("Final statement must return exactly one column.".into()),
+        hint: None,
+        sqlstate: "42P13",
+    }
+}
+
+fn sql_function_return_type_mismatch_error(
+    catalog: &dyn CatalogLookup,
+    expected_oid: u32,
+    returned_type: SqlType,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "return type mismatch in function declared to return {}",
+            proc_signature_type_name(catalog, expected_oid)
+        ),
+        detail: Some(format!(
+            "Actual return type is {}.",
+            format_sql_type_name(returned_type)
+        )),
+        hint: None,
+        sqlstate: "42P13",
+    }
+}
+
 pub(super) fn resolve_aggregate_proc_rows(
     catalog: &dyn CatalogLookup,
     aggregate_name: &str,
@@ -3746,10 +4729,16 @@ impl Database {
             security_definer: false,
             volatility: create_stmt.volatility,
             parallel: FunctionParallel::Unsafe,
-            window: false,
             language: create_stmt.language.clone(),
             body: create_stmt.body.clone(),
+            body_kind: if create_stmt.sql_standard_body {
+                crate::include::nodes::parsenodes::CreateFunctionBodyKind::SqlBeginAtomic
+            } else {
+                crate::include::nodes::parsenodes::CreateFunctionBodyKind::As
+            },
+            body_position: None,
             link_symbol: None,
+            window: false,
             config: Vec::new(),
         };
         self.execute_create_function_stmt_in_transaction_with_kind(
@@ -3847,6 +4836,7 @@ impl Database {
         let mut all_arg_names = Vec::new();
         let mut output_args = Vec::new();
         let mut plpgsql_arg_types = Vec::new();
+        let mut sql_function_input_args = Vec::new();
         let mut percent_type_notices = std::collections::BTreeSet::new();
         let mut provariadic = 0;
 
@@ -3877,6 +4867,7 @@ impl Database {
             if matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) {
                 callable_arg_oids.push(type_oid);
                 callable_arg_defaults.push(arg.default_expr.clone());
+                sql_function_input_args.push((arg.name.clone(), sql_type, type_oid));
                 if arg.variadic {
                     provariadic = variadic_element_type_oid(&catalog, type_oid);
                 }
@@ -4145,6 +5136,72 @@ impl Database {
                 ),
             }));
         }
+        if let Some(existing) = existing_proc.as_ref()
+            && existing.prokind != proc_kind
+        {
+            return Err(cannot_change_routine_kind_error(
+                &function_name,
+                existing.prokind,
+                None,
+            ));
+        }
+        if create_stmt.window {
+            if let Some(existing) = existing_proc.as_ref()
+                && create_stmt.replace_existing
+            {
+                return Err(cannot_change_routine_kind_error(
+                    &function_name,
+                    existing.prokind,
+                    None,
+                ));
+            }
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "CREATE FUNCTION WINDOW".into(),
+            )));
+        }
+        if language_row.oid == PG_LANGUAGE_SQL_OID && create_stmt.link_symbol.is_some() {
+            return Err(ExecError::DetailedError {
+                message: "only one AS item needed for language \"sql\"".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
+        if create_stmt.leakproof && !current_user_is_superuser(&catalog) {
+            return Err(ExecError::DetailedError {
+                message: "only superuser can define a leakproof function".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        if language_row.oid == PG_LANGUAGE_SQL_OID && check_function_bodies_enabled(gucs) {
+            let validation_result = validate_sql_function_body_on_create(
+                create_stmt,
+                &catalog,
+                &sql_function_input_args,
+                prorettype,
+            );
+            if matches!(create_stmt.body_kind, CreateFunctionBodyKind::As) {
+                validation_result.map_err(|err| {
+                    if matches!(err, ExecError::Parse(_)) {
+                        err
+                    } else {
+                        ExecError::WithContext {
+                            source: Box::new(err),
+                            context: format!("SQL function \"{}\"", create_stmt.function_name),
+                        }
+                    }
+                })?;
+            } else {
+                validation_result?;
+            }
+        }
+        let extra_depends = if language_row.oid == PG_LANGUAGE_SQL_OID {
+            sql_function_extra_depend_rows(create_stmt, &catalog, &callable_arg_defaults)
+        } else {
+            Vec::new()
+        };
 
         let prosrc = if language_row.oid == PG_LANGUAGE_C_OID {
             create_stmt
@@ -4242,11 +5299,11 @@ impl Database {
             let mut catalog_store = self.catalog.write();
             let (_oid, effect) = if let Some(existing) = existing_proc {
                 catalog_store
-                    .replace_proc_mvcc(&existing, proc_row, &ctx)
+                    .replace_proc_mvcc_with_extra_depends(&existing, proc_row, extra_depends, &ctx)
                     .map_err(map_catalog_error)?
             } else {
                 catalog_store
-                    .create_proc_mvcc(proc_row, &ctx)
+                    .create_proc_mvcc_with_extra_depends(proc_row, extra_depends, &ctx)
                     .map_err(map_catalog_error)?
             };
             effect

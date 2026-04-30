@@ -4620,13 +4620,23 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 Some(text) => {
                     let trimmed = text.trim_start();
                     if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+                        let source_is_vector = source_type.is_some_and(|source| {
+                            !source.is_array
+                                && matches!(
+                                    source.kind,
+                                    SqlTypeKind::Int2Vector | SqlTypeKind::OidVector
+                                )
+                        });
                         match array_cast_type.element_type().kind {
-                            SqlTypeKind::Int2 => parse_int2vector_array_text(text),
+                            SqlTypeKind::Int2 => {
+                                parse_int2vector_array_text(text, source_is_vector)
+                            }
                             kind if is_oid_vector_array_element(kind) => {
                                 parse_oidvector_array_text(
                                     text,
                                     array_element_type_oid(array_cast_type.element_type())
                                         .unwrap_or(OID_TYPE_OID),
+                                    source_is_vector,
                                 )
                             }
                             _ => parse_text_array_literal_with_options_and_catalog(
@@ -6161,12 +6171,17 @@ fn bytea_to_signed_int(bytes: &[u8], width: usize, ty: &'static str) -> Result<i
     }
 }
 
-fn parse_int2vector_array_text(text: &str) -> Result<Value, ExecError> {
+fn parse_int2vector_array_text(text: &str, allow_empty: bool) -> Result<Value, ExecError> {
     let mut items = Vec::new();
     for item in text.split_ascii_whitespace() {
         items.push(cast_text_to_int2(item)?);
     }
     if items.is_empty() {
+        if allow_empty {
+            return Ok(Value::PgArray(
+                ArrayValue::empty().with_element_type_oid(INT2_TYPE_OID),
+            ));
+        }
         return Err(invalid_vector_array_error("int2vector"));
     }
     Ok(Value::PgArray(
@@ -6175,12 +6190,21 @@ fn parse_int2vector_array_text(text: &str) -> Result<Value, ExecError> {
     ))
 }
 
-fn parse_oidvector_array_text(text: &str, element_type_oid: u32) -> Result<Value, ExecError> {
+fn parse_oidvector_array_text(
+    text: &str,
+    element_type_oid: u32,
+    allow_empty: bool,
+) -> Result<Value, ExecError> {
     let mut items = Vec::new();
     for item in text.split_ascii_whitespace() {
         items.push(cast_text_to_oid(item)?);
     }
     if items.is_empty() {
+        if allow_empty {
+            return Ok(Value::PgArray(
+                ArrayValue::empty().with_element_type_oid(element_type_oid),
+            ));
+        }
         return Err(invalid_vector_array_error("oidvector"));
     }
     Ok(Value::PgArray(

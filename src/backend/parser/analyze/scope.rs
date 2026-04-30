@@ -6,7 +6,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::{
     ANYOID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PG_TYPE_RELATION_OID,
-    PgPartitionedTableRow, PgProcRow,
+    PgPartitionedTableRow, PgProcRow, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
@@ -4526,6 +4526,11 @@ fn try_inline_sql_scalar_function_scan_expr(
     let Ok([target]) = <Vec<TargetEntry> as TryInto<[TargetEntry; 1]>>::try_into(targets) else {
         return Ok(None);
     };
+    if matches!(resolved.result_type.kind, SqlTypeKind::Void)
+        && !matches!(target.expr, Expr::Func(_))
+    {
+        return Ok(None);
+    }
     Ok(Some(coerce_bound_expr(
         target.expr,
         target.sql_type,
@@ -4537,6 +4542,7 @@ fn sql_function_is_set_inline_candidate(row: &PgProcRow, with_ordinality: bool) 
     row.prolang == PG_LANGUAGE_SQL_OID
         && row.prokind == 'f'
         && row.proretset
+        && row.prorettype != VOID_TYPE_OID
         && !with_ordinality
         && !row.proisstrict
         && row.provolatile != 'v'
@@ -4550,18 +4556,71 @@ fn sql_function_is_scalar_inline_candidate(row: &PgProcRow) -> bool {
         && !row.proretset
         && !row.prosecdef
         && row.proconfig.is_none()
-        && row.provolatile == 'i'
+        && (row.provolatile == 'i' || row.prorettype == VOID_TYPE_OID)
 }
 
 fn parse_sql_function_select_body(source: &str) -> Result<Option<SelectStatement>, ParseError> {
-    let body = source.trim().trim_end_matches(';').trim();
-    match parse_statement(body)? {
+    let Some(body) = sql_function_select_body_source(source) else {
+        return Ok(None);
+    };
+    match parse_statement(body.as_ref())? {
         Statement::Select(stmt) => Ok(Some(stmt)),
         Statement::Values(values) => {
             Ok(Some(crate::backend::parser::wrap_values_as_select(values)))
         }
         _ => Ok(None),
     }
+}
+
+fn sql_function_select_body_source(source: &str) -> Option<std::borrow::Cow<'_, str>> {
+    let body = source.trim().trim_end_matches(';').trim();
+    if body
+        .get(.."return".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("return"))
+        && body
+            .get("return".len()..)
+            .and_then(|rest| rest.chars().next())
+            .is_none_or(|ch| ch.is_whitespace())
+    {
+        return Some(std::borrow::Cow::Owned(format!(
+            "select {}",
+            body["return".len()..].trim()
+        )));
+    }
+    let lower = body.to_ascii_lowercase();
+    if lower.starts_with("begin atomic") {
+        let without_trailing_semicolon = body.trim_end_matches(';').trim_end();
+        let lowered_without_semicolon = without_trailing_semicolon.to_ascii_lowercase();
+        let end = if lowered_without_semicolon.ends_with("end") {
+            without_trailing_semicolon.len().saturating_sub("end".len())
+        } else {
+            body.len()
+        };
+        let inner = body.get("begin atomic".len()..end)?.trim();
+        let statements = inner
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty() && !statement.eq_ignore_ascii_case("end"))
+            .collect::<Vec<_>>();
+        if statements.len() == 1 {
+            return Some(std::borrow::Cow::Owned(statements[0].to_string()));
+        }
+        return None;
+    }
+    sql_function_quoted_body_can_inline(body).then_some(std::borrow::Cow::Borrowed(body))
+}
+
+fn sql_function_quoted_body_can_inline(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.strip_prefix("select").is_some_and(|rest| {
+        rest.chars()
+            .next()
+            .is_none_or(|ch| ch.is_whitespace() || ch == '(')
+    }) || lower.strip_prefix("values").is_some_and(|rest| {
+        rest.chars()
+            .next()
+            .is_none_or(|ch| ch.is_whitespace() || ch == '(')
+    })
 }
 
 fn select_body_is_simple_scalar_inline(stmt: &SelectStatement) -> bool {

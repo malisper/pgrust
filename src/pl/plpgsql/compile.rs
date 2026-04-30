@@ -5592,8 +5592,18 @@ fn normalize_plpgsql_merge(mut stmt: MergeStatement, env: &CompileEnv) -> MergeS
                         .map(|assignment| normalize_plpgsql_assignment(assignment, env))
                         .collect(),
                 },
-                MergeAction::Insert { columns, source } => MergeAction::Insert {
+                MergeAction::Insert {
                     columns,
+                    overriding,
+                    source,
+                } => MergeAction::Insert {
+                    columns: columns.map(|columns| {
+                        columns
+                            .into_iter()
+                            .map(|target| normalize_plpgsql_assignment_target(target, env))
+                            .collect()
+                    }),
+                    overriding,
                     source: match source {
                         MergeInsertSource::Values(values) => MergeInsertSource::Values(
                             values
