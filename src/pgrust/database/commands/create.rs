@@ -2287,6 +2287,9 @@ fn validate_sql_function_body_on_create(
     validate_sql_function_positional_params(&body, input_args.len(), create_stmt.body_position)?;
     let statements = split_sql_function_body_for_validation(&body);
     let Some(final_statement) = statements.last() else {
+        if prorettype == VOID_TYPE_OID {
+            return Ok(());
+        }
         return Err(sql_function_final_statement_error(catalog, prorettype));
     };
     let external_param_types = input_args

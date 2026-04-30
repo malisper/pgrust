@@ -527,6 +527,7 @@ pub enum BuiltinScalarFunction {
     PgFilenodeRelation,
     PgRelationSize,
     PgTableSize,
+    PgNumaAvailable,
     BrinSummarizeNewValues,
     BrinSummarizeRange,
     BrinDesummarizeRange,

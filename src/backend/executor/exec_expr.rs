@@ -1261,7 +1261,7 @@ fn function_definition_text(
     lines.extend(function_definition_config_lines(proc_row));
     let signature = lines.join("\n");
     if proc_row.prokind == 'p'
-        && let Some(body) = format_sql_standard_procedure_body(proc_row, catalog)
+        && let Some(body) = format_sql_standard_procedure_body_from_inner(proc_row, catalog)
     {
         return format!("{signature}\n{body}\n");
     }
@@ -1284,6 +1284,9 @@ fn function_definition_text(
         "$function$"
     };
     let body = proc_row.prosrc.trim().replace(tag, &format!("{tag} "));
+    if proc_row.prokind == 'p' {
+        return format!("{signature}\nAS {tag}\n{body}\n{tag}\n");
+    }
     if !body.contains('\n') {
         return format!("{signature}\nAS {tag}{body}{tag}\n");
     }
@@ -1515,6 +1518,13 @@ fn format_sql_standard_procedure_body(
     {
         return Some(body);
     }
+    format_sql_standard_procedure_body_from_inner(proc_row, catalog)
+}
+
+fn format_sql_standard_procedure_body_from_inner(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
     let inner = sql_standard_procedure_body_inner(&proc_row.prosrc)?;
     let mut lines = vec!["BEGIN ATOMIC".to_string()];
     for statement in split_sql_standard_body_statements_for_display(inner) {
@@ -13200,6 +13210,7 @@ pub(crate) fn eval_native_builtin_scalar_typed_value_call(
         | BuiltinScalarFunction::PgControlCheckpoint
         | BuiltinScalarFunction::PgControlRecovery
         | BuiltinScalarFunction::PgControlInit => Ok(eval_pg_control_record(func, ctx)),
+        BuiltinScalarFunction::PgNumaAvailable => Ok(Value::Bool(false)),
         BuiltinScalarFunction::PgReplicationOriginCreate => {
             eval_pg_replication_origin_create(values)
         }
@@ -14582,6 +14593,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
+        BuiltinScalarFunction::PgNumaAvailable => Ok(Value::Bool(false)),
         _ => unreachable!("json builtins handled by expr_json"),
     }
 }

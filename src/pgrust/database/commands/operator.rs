@@ -14,6 +14,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::parsenodes::RawTypeName;
 use crate::pgrust::database::ddl::ensure_can_set_role;
+use std::collections::BTreeMap;
 
 const INTERNAL_TYPE_OID: u32 = 2281;
 const SCHEMA_CREATE_PRIVILEGE_CHAR: char = 'C';
@@ -787,7 +788,7 @@ impl Database {
                 commutator_partner = lookup_operator_row(
                     self,
                     client_id,
-                    Some((xid, current_cid)),
+                    Some((xid, cid)),
                     Some(namespace_oid),
                     name,
                     right_type,
@@ -886,8 +887,15 @@ impl Database {
         let (operator_oid, effect) = {
             let mut catalog_store = self.catalog.write();
             if let Some(shell_row) = &replacing_shell {
+                let current_shell = lookup_operator_row_by_oid(
+                    self,
+                    client_id,
+                    Some((xid, current_cid)),
+                    shell_row.oid,
+                )?
+                .unwrap_or_else(|| shell_row.clone());
                 catalog_store
-                    .replace_operator_mvcc(shell_row, base_row.clone(), &ctx)
+                    .replace_operator_mvcc(&current_shell, base_row.clone(), &ctx)
                     .map_err(map_catalog_error)?
             } else {
                 catalog_store
@@ -943,6 +951,7 @@ impl Database {
             catalog_effects.push(effect);
             current_cid = current_cid.saturating_add(1);
         }
+        let mut partner_updates_by_oid = BTreeMap::new();
         for partner in commutator_partner
             .into_iter()
             .chain(negator_partner.into_iter())
@@ -954,6 +963,15 @@ impl Database {
             if updated.oprnegate == partner.oid {
                 partner_updated.oprnegate = operator_oid;
             }
+            partner_updates_by_oid
+                .entry(partner.oid)
+                .and_modify(|(_, row): &mut (PgOperatorRow, PgOperatorRow)| {
+                    row.oprcom = partner_updated.oprcom;
+                    row.oprnegate = partner_updated.oprnegate;
+                })
+                .or_insert((partner, partner_updated));
+        }
+        for (partner, partner_updated) in partner_updates_by_oid.into_values() {
             let effect = {
                 let mut catalog_store = self.catalog.write();
                 let ctx = CatalogWriteContext {
@@ -1365,7 +1383,9 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut current_cid = cid;
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, current_cid)), configured_search_path);
         let namespace_oid = stmt
             .schema_name
             .as_deref()
@@ -1373,7 +1393,7 @@ impl Database {
                 normalize_operator_namespace(
                     self,
                     client_id,
-                    Some((xid, cid)),
+                    Some((xid, current_cid)),
                     Some(schema),
                     configured_search_path,
                 )
@@ -1420,7 +1440,7 @@ impl Database {
         let Some(row) = lookup_operator_row(
             self,
             client_id,
-            Some((xid, cid)),
+            Some((xid, current_cid)),
             namespace_oid,
             &stmt.operator_name,
             left_type,
@@ -1450,17 +1470,51 @@ impl Database {
             }));
         };
 
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: Some(self.txn_waiter.clone()),
-            interrupts: self.interrupt_state(client_id),
-        };
+        let partner_rows = catalog
+            .operator_rows()
+            .into_iter()
+            .filter(|partner| partner.oid != row.oid)
+            .filter(|partner| partner.oprcom == row.oid || partner.oprnegate == row.oid)
+            .collect::<Vec<_>>();
+        for partner in partner_rows {
+            let mut updated = partner.clone();
+            if updated.oprcom == row.oid {
+                updated.oprcom = 0;
+            }
+            if updated.oprnegate == row.oid {
+                updated.oprnegate = 0;
+            }
+            let effect = {
+                let mut catalog_store = self.catalog.write();
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: current_cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: self.interrupt_state(client_id),
+                };
+                catalog_store
+                    .replace_operator_mvcc(&partner, updated, &ctx)
+                    .map_err(map_catalog_error)?
+                    .1
+            };
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
+        }
         let effect = {
             let mut catalog_store = self.catalog.write();
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: self.interrupt_state(client_id),
+            };
             catalog_store
                 .drop_operator_by_oid_mvcc(row.oid, &ctx)
                 .map_err(map_catalog_error)?
