@@ -1418,7 +1418,7 @@ impl CatalogStore {
             desc.storage.attalign = attr.attalign;
             desc.storage.attstorage = attr.attstorage;
             desc.storage.attcompression = attr.attcompression;
-            desc.attstattarget = attr.attstattarget;
+            desc.attstattarget = attr.attstattarget.unwrap_or(-1);
             desc.attinhcount = attr.attinhcount;
             desc.attislocal = attr.attislocal;
             desc.attacl = attr.attacl.clone();
@@ -1788,7 +1788,7 @@ pub(crate) fn relation_id_get_relation_db(
         desc.storage.attalign = attr.attalign;
         desc.storage.attstorage = attr.attstorage;
         desc.storage.attcompression = attr.attcompression;
-        desc.attstattarget = attr.attstattarget;
+        desc.attstattarget = attr.attstattarget.unwrap_or(-1);
         desc.attinhcount = attr.attinhcount;
         desc.attislocal = attr.attislocal;
         desc.attacl = attr.attacl.clone();

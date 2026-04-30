@@ -4017,6 +4017,16 @@ pub(crate) fn eval_pg_describe_object(
                         .find(|attr| i32::from(attr.attnum) == objsubid)?;
                     Some(format!("column {} of table {}", attr.attname, row.relname))
                 }),
+                "pg_class" => catalog.class_row_by_oid(objid).map(|row| {
+                    let kind = match row.relkind {
+                        'i' | 'I' => "index",
+                        'm' => "materialized view",
+                        'S' => "sequence",
+                        'v' => "view",
+                        _ => "table",
+                    };
+                    format!("{kind} {}", row.relname)
+                }),
                 _ if objsubid != 0 => None,
                 "pg_namespace" => catalog
                     .namespace_row_by_oid(objid)
@@ -6083,6 +6093,9 @@ fn parenthesized_index_expression(expr_sql: &str) -> String {
         return function_call;
     }
     if looks_like_function_call(trimmed) {
+        return trimmed.to_string();
+    }
+    if trimmed.to_ascii_lowercase().contains("collate") {
         return trimmed.to_string();
     }
     let inner = strip_outer_parens_once(trimmed);

@@ -447,7 +447,14 @@ fn sample_expression_indexes(
     let expression_indexes = catalog
         .index_relations_for_heap(relation.relation_oid)
         .into_iter()
-        .filter(|index| index.index_meta.indkey.iter().any(|attnum| *attnum == 0))
+        .filter(|index| {
+            index.index_meta.indkey.iter().any(|attnum| *attnum == 0)
+                && index
+                    .desc
+                    .columns
+                    .iter()
+                    .any(|column| column.attstattarget > 0)
+        })
         .collect::<Vec<_>>();
     if expression_indexes.is_empty() {
         return Ok(Vec::new());
@@ -480,7 +487,16 @@ fn sample_expression_indexes(
                 widths,
             });
         }
-        let selected_columns = (0..index.desc.columns.len()).collect::<Vec<_>>();
+        let selected_columns = index
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, column)| (column.attstattarget > 0).then_some(idx))
+            .collect::<Vec<_>>();
+        if selected_columns.is_empty() {
+            continue;
+        }
         let reltuples = sample_rows.len() as f64;
         let statistics = build_statistics_rows(
             index.relation_oid,

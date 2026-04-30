@@ -590,6 +590,7 @@ pub struct LoadStatement {
 pub struct ClusterStatement {
     pub table_name: String,
     pub index_name: String,
+    pub mark_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

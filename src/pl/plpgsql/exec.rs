@@ -3686,13 +3686,14 @@ fn exec_dynamic_create_table_as(
     })?;
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
+    let search_path = plpgsql_configured_search_path(ctx);
     let effect_start = ctx.catalog_effects.len();
     let result = db.execute_create_table_as_stmt_in_transaction_with_search_path(
         ctx.client_id,
         stmt,
         xid,
         cid,
-        None,
+        search_path.as_deref(),
         planner_config_from_executor_gucs(&ctx.gucs),
         Some(&ctx.gucs),
         &mut ctx.catalog_effects,

@@ -10791,7 +10791,17 @@ fn parse_cluster_table_using_index() {
     let stmt = parse_statement("cluster sorttest using sorttest_idx").unwrap();
     assert!(matches!(
         stmt,
-        Statement::Cluster(ClusterStatement { table_name, index_name })
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: false })
+            if table_name == "sorttest" && index_name == "sorttest_idx"
+    ));
+}
+
+#[test]
+fn parse_alter_table_cluster_on_index() {
+    let stmt = parse_statement("alter table sorttest cluster on sorttest_idx").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: true })
             if table_name == "sorttest" && index_name == "sorttest_idx"
     ));
 }

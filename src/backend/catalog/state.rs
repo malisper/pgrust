@@ -7,8 +7,8 @@ use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
     derived_pg_depend_rows, foreign_key_constraint_depend_rows,
-    index_backed_constraint_depend_rows, inheritance_depend_rows,
-    primary_key_owned_not_null_depend_rows, relation_constraint_depend_rows, sort_pg_depend_rows,
+    index_backed_constraint_depend_rows, primary_key_owned_not_null_depend_rows,
+    relation_constraint_depend_rows, relation_inheritance_depend_rows, sort_pg_depend_rows,
     trigger_depend_rows,
 };
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
@@ -2669,8 +2669,8 @@ impl Catalog {
                 }
             }
         }
-        self.depends.extend(inheritance_depend_rows(
-            entry.relation_oid,
+        self.depends.extend(relation_inheritance_depend_rows(
+            entry,
             &self
                 .inheritance_parents(entry.relation_oid)
                 .into_iter()

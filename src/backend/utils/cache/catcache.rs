@@ -398,7 +398,7 @@ impl CatCache {
                             .map(|row| row.typstorage)
                             .unwrap_or(column.storage.attstorage),
                         attcompression: column.storage.attcompression,
-                        attstattarget: column.attstattarget,
+                        attstattarget: (column.attstattarget >= 0).then_some(column.attstattarget),
                         attinhcount: column.attinhcount,
                         attislocal: column.attislocal,
                         attidentity: column
@@ -1301,7 +1301,7 @@ fn bootstrap_toast_attribute_rows(attrelid: u32) -> Vec<PgAttributeRow> {
             attalign: AttributeAlign::Int,
             attstorage: AttributeStorage::Plain,
             attcompression: AttributeCompression::Default,
-            attstattarget: -1,
+            attstattarget: None,
             attinhcount: 0,
             attislocal: true,
             attidentity: '\0',

@@ -1,20 +1,20 @@
-use crate::backend::catalog::catalog::CatalogEntry;
+use crate::backend::catalog::catalog::{CatalogEntry, CatalogIndexMeta};
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::{SqlTypeKind, parse_expr};
-use crate::backend::utils::cache::catcache::sql_type_oid;
+use crate::backend::parser::parse_expr;
 use crate::include::catalog::{
-    DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AM_RELATION_OID,
-    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_CONVERSION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_FOREIGN_SERVER_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
-    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TS_CONFIG_RELATION_OID,
-    PG_TS_DICT_RELATION_OID, PG_TS_PARSER_RELATION_OID, PG_TS_TEMPLATE_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgAggregateRow, PgAmRow, PgDependRow, PgForeignServerRow, PgLanguageRow,
-    PgOpclassRow, PgOpfamilyRow, PgStatisticExtRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow,
+    DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, DEPENDENCY_PARTITION_PRI,
+    DEPENDENCY_PARTITION_SEC, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+    PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_CONVERSION_RELATION_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID, PG_LANGUAGE_RELATION_OID,
+    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
+    PG_TRIGGER_RELATION_OID, PG_TS_CONFIG_RELATION_OID, PG_TS_DICT_RELATION_OID,
+    PG_TS_PARSER_RELATION_OID, PG_TS_TEMPLATE_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    PgAmRow, PgDependRow, PgForeignServerRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow,
+    PgStatisticExtRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow,
 };
 use crate::include::nodes::parsenodes::{SqlExpr, function_arg_values};
 use std::collections::BTreeSet;
@@ -34,6 +34,10 @@ pub fn sort_pg_depend_rows(rows: &mut [PgDependRow]) {
 }
 
 pub fn derived_pg_depend_rows(entry: &CatalogEntry) -> Vec<PgDependRow> {
+    if entry.index_meta.is_some() {
+        return derived_index_depend_rows(entry, None);
+    }
+
     let mut rows = derived_relation_depend_rows(
         entry.relation_oid,
         entry.namespace_oid,
@@ -41,16 +45,62 @@ pub fn derived_pg_depend_rows(entry: &CatalogEntry) -> Vec<PgDependRow> {
         entry.row_type_oid,
         &entry.desc,
     );
-    if let Some(index_meta) = &entry.index_meta {
-        rows.extend(index_meta.indkey.iter().map(|attnum| PgDependRow {
+    if let Some(partitioned_table) = &entry.partitioned_table {
+        rows.extend(partitioned_table.partattrs.iter().filter_map(|attnum| {
+            (*attnum > 0).then_some(PgDependRow {
+                classid: PG_CLASS_RELATION_OID,
+                objid: entry.relation_oid,
+                objsubid: i32::from(*attnum),
+                refclassid: PG_CLASS_RELATION_OID,
+                refobjid: entry.relation_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_INTERNAL,
+            })
+        }));
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn derived_index_depend_rows(
+    entry: &CatalogEntry,
+    heap_desc: Option<&RelationDesc>,
+) -> Vec<PgDependRow> {
+    let Some(index_meta) = &entry.index_meta else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    let mut column_attnums = BTreeSet::new();
+    let mut has_expression_key = false;
+    for attnum in &index_meta.indkey {
+        if *attnum > 0 {
+            column_attnums.insert(*attnum);
+        } else {
+            has_expression_key = true;
+        }
+    }
+    if let Some(heap_desc) = heap_desc {
+        collect_index_expr_column_attnums(index_meta, heap_desc, &mut column_attnums);
+    }
+    rows.extend(column_attnums.into_iter().map(|attnum| PgDependRow {
+        classid: PG_CLASS_RELATION_OID,
+        objid: entry.relation_oid,
+        objsubid: 0,
+        refclassid: PG_CLASS_RELATION_OID,
+        refobjid: index_meta.indrelid,
+        refobjsubid: i32::from(attnum),
+        deptype: DEPENDENCY_AUTO,
+    }));
+    if has_expression_key {
+        rows.push(PgDependRow {
             classid: PG_CLASS_RELATION_OID,
             objid: entry.relation_oid,
             objsubid: 0,
             refclassid: PG_CLASS_RELATION_OID,
             refobjid: index_meta.indrelid,
-            refobjsubid: i32::from(*attnum),
+            refobjsubid: 0,
             deptype: DEPENDENCY_AUTO,
-        }));
+        });
     }
     sort_pg_depend_rows(&mut rows);
     rows
@@ -77,6 +127,15 @@ pub fn index_backed_constraint_depend_rows(
             objsubid: 0,
             refclassid: PG_CLASS_RELATION_OID,
             refobjid: index_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_INTERNAL,
+        },
+        PgDependRow {
+            classid: PG_CLASS_RELATION_OID,
+            objid: index_oid,
+            objsubid: 0,
+            refclassid: PG_CONSTRAINT_RELATION_OID,
+            refobjid: constraint_oid,
             refobjsubid: 0,
             deptype: DEPENDENCY_INTERNAL,
         },
@@ -173,6 +232,58 @@ pub fn inheritance_depend_rows(relation_oid: u32, parent_oids: &[u32]) -> Vec<Pg
     rows
 }
 
+pub fn relation_inheritance_depend_rows(
+    entry: &CatalogEntry,
+    parent_oids: &[u32],
+) -> Vec<PgDependRow> {
+    let mut rows = if let Some(index_meta) = &entry.index_meta {
+        let mut rows = parent_oids
+            .iter()
+            .copied()
+            .map(|parent_oid| PgDependRow {
+                classid: PG_CLASS_RELATION_OID,
+                objid: entry.relation_oid,
+                objsubid: 0,
+                refclassid: PG_CLASS_RELATION_OID,
+                refobjid: parent_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_PARTITION_PRI,
+            })
+            .collect::<Vec<_>>();
+        rows.push(PgDependRow {
+            classid: PG_CLASS_RELATION_OID,
+            objid: entry.relation_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: index_meta.indrelid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_PARTITION_SEC,
+        });
+        rows
+    } else {
+        let deptype = if entry.relispartition {
+            DEPENDENCY_AUTO
+        } else {
+            DEPENDENCY_NORMAL
+        };
+        parent_oids
+            .iter()
+            .copied()
+            .map(|parent_oid| PgDependRow {
+                classid: PG_CLASS_RELATION_OID,
+                objid: entry.relation_oid,
+                objsubid: 0,
+                refclassid: PG_CLASS_RELATION_OID,
+                refobjid: parent_oid,
+                refobjsubid: 0,
+                deptype,
+            })
+            .collect::<Vec<_>>()
+    };
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
 pub fn primary_key_owned_not_null_depend_rows(
     not_null_constraint_oid: u32,
     primary_constraint_oid: u32,
@@ -253,35 +364,6 @@ pub fn derived_relation_depend_rows(
             deptype: DEPENDENCY_AUTO,
         })
     }));
-    let mut referenced_type_oids = BTreeSet::new();
-    for column in &desc.columns {
-        let type_oid = sql_type_oid(column.sql_type);
-        if type_oid != 0 {
-            referenced_type_oids.insert(type_oid);
-        }
-        if column.sql_type.is_array
-            && matches!(
-                column.sql_type.kind,
-                SqlTypeKind::Composite | SqlTypeKind::Record
-            )
-            && column.sql_type.type_oid != 0
-        {
-            referenced_type_oids.insert(column.sql_type.type_oid);
-        }
-    }
-    rows.extend(
-        referenced_type_oids
-            .into_iter()
-            .map(|type_oid| PgDependRow {
-                classid: PG_CLASS_RELATION_OID,
-                objid: relation_oid,
-                objsubid: 0,
-                refclassid: PG_TYPE_RELATION_OID,
-                refobjid: type_oid,
-                refobjsubid: 0,
-                deptype: DEPENDENCY_NORMAL,
-            }),
-    );
     rows
 }
 
@@ -326,6 +408,49 @@ fn generated_column_attrdef_depend_rows(
         }));
     }
     rows
+}
+
+fn collect_index_expr_column_attnums(
+    index_meta: &CatalogIndexMeta,
+    heap_desc: &RelationDesc,
+    out: &mut BTreeSet<i16>,
+) {
+    let column_names = heap_desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, column)| {
+            (!column.dropped).then(|| (column.name.to_ascii_lowercase(), (idx + 1) as i16))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    if let Some(indexprs) = index_meta.indexprs.as_deref()
+        && let Ok(expr_sqls) = serde_json::from_str::<Vec<String>>(indexprs)
+    {
+        for expr_sql in expr_sqls {
+            collect_expr_sql_column_attnums(&expr_sql, &column_names, out);
+        }
+    }
+    if let Some(predicate_sql) = index_meta.indpred.as_deref() {
+        collect_expr_sql_column_attnums(predicate_sql, &column_names, out);
+    }
+}
+
+fn collect_expr_sql_column_attnums(
+    expr_sql: &str,
+    column_names: &std::collections::BTreeMap<String, i16>,
+    out: &mut BTreeSet<i16>,
+) {
+    let Ok(expr) = parse_expr(expr_sql) else {
+        return;
+    };
+    let mut referenced = BTreeSet::new();
+    collect_sql_expr_column_names(&expr, &mut referenced);
+    out.extend(
+        referenced
+            .into_iter()
+            .filter_map(|name| column_names.get(&name.to_ascii_lowercase()).copied()),
+    );
 }
 
 pub(crate) fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<String>) {

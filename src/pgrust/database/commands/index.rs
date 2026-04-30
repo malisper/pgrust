@@ -781,6 +781,81 @@ pub(super) fn catalog_entry_from_bound_index_relation(
     }
 }
 
+fn index_columns_for_reindex(
+    relation: &crate::backend::parser::BoundRelation,
+    index: &crate::backend::parser::BoundIndexRelation,
+) -> Result<Vec<crate::backend::parser::IndexColumnDef>, ExecError> {
+    let mut expr_sqls = index
+        .index_meta
+        .indexprs
+        .as_deref()
+        .map(|json| {
+            serde_json::from_str::<Vec<String>>(json).map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index expression metadata",
+                    actual: "invalid index expression metadata".into(),
+                })
+            })
+        })
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter();
+    let mut columns = Vec::with_capacity(index.index_meta.indkey.len());
+    for (position, attnum) in index.index_meta.indkey.iter().copied().enumerate() {
+        let indoption = index
+            .index_meta
+            .indoption
+            .get(position)
+            .copied()
+            .unwrap_or_default();
+        if attnum == 0 {
+            let expr_sql = expr_sqls.next().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index expression SQL",
+                    actual: "missing expression index metadata".into(),
+                })
+            })?;
+            columns.push(crate::backend::parser::IndexColumnDef {
+                name: String::new(),
+                expr_sql: Some(expr_sql),
+                expr_type: index
+                    .desc
+                    .columns
+                    .get(position)
+                    .map(|column| column.sql_type),
+                collation: None,
+                opclass: None,
+                opclass_options: Vec::new(),
+                descending: indoption & 0x0001 != 0,
+                nulls_first: (indoption & 0x0002 != 0).then_some(true),
+            });
+            continue;
+        }
+        let column = relation
+            .desc
+            .columns
+            .get(attnum.saturating_sub(1) as usize)
+            .filter(|column| !column.dropped)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index column",
+                    actual: format!("invalid attnum {attnum}"),
+                })
+            })?;
+        columns.push(crate::backend::parser::IndexColumnDef {
+            name: column.name.clone(),
+            expr_sql: None,
+            expr_type: None,
+            collation: None,
+            opclass: None,
+            opclass_options: Vec::new(),
+            descending: indoption & 0x0001 != 0,
+            nulls_first: (indoption & 0x0002 != 0).then_some(true),
+        });
+    }
+    Ok(columns)
+}
+
 fn btree_reloptions(options: Option<BtreeOptions>) -> Option<Vec<String>> {
     options.map(|options| {
         vec![
@@ -3181,6 +3256,32 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
         );
+        if reindex_stmt.concurrently
+            && matches!(
+                reindex_stmt.kind,
+                crate::backend::parser::ReindexTargetKind::Index
+            )
+            && result.is_err()
+            && !catalog_effects.is_empty()
+        {
+            let err = result.err().expect("checked is_err");
+            let commit_result = self.finish_txn(
+                client_id,
+                xid,
+                Ok(StatementResult::AffectedRows(0)),
+                &catalog_effects,
+                &[],
+                &[],
+            );
+            guard.disarm();
+            if let Some(rel) = locked_rel {
+                self.table_locks.unlock_table(rel, client_id);
+            }
+            return match commit_result {
+                Ok(_) => Err(err),
+                Err(commit_err) => Err(commit_err),
+            };
+        }
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         if let Some(rel) = locked_rel {
@@ -3518,6 +3619,16 @@ impl Database {
         if concurrently && index.index_meta.indisexclusion {
             return Err(cannot_reindex_exclusion_index_concurrently_error());
         }
+        if concurrently && !index.index_meta.indisvalid {
+            return self.reindex_invalid_index_concurrently_in_transaction(
+                client_id,
+                &heap,
+                &index,
+                xid,
+                cid,
+                catalog_effects,
+            );
+        }
         self.rebuild_index_relation_in_transaction(
             client_id,
             &heap,
@@ -3542,6 +3653,73 @@ impl Database {
                 .note_relation_have_stats_false_once(index.relation_oid);
         }
         Ok(())
+    }
+
+    fn reindex_invalid_index_concurrently_in_transaction(
+        &self,
+        client_id: ClientId,
+        heap: &crate::backend::parser::BoundRelation,
+        index: &crate::backend::parser::BoundIndexRelation,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let columns = index_columns_for_reindex(heap, index)?;
+        let access_method_handler = index.index_meta.am_handler_oid.ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index access method handler",
+                actual: format!(
+                    "missing handler for access method {}",
+                    index.index_meta.am_oid
+                ),
+            })
+        })?;
+        let build_options = CatalogIndexBuildOptions {
+            am_oid: index.index_meta.am_oid,
+            indclass: index.index_meta.indclass.clone(),
+            indclass_options: index.index_meta.indclass_options.clone(),
+            indcollation: index.index_meta.indcollation.clone(),
+            indoption: index.index_meta.indoption.clone(),
+            reloptions: None,
+            indnullsnotdistinct: index.index_meta.indnullsnotdistinct,
+            indisexclusion: index.index_meta.indisexclusion,
+            indimmediate: index.index_meta.indimmediate,
+            btree_options: index.index_meta.btree_options,
+            brin_options: index.index_meta.brin_options.clone(),
+            gist_options: index.index_meta.gist_options,
+            gin_options: index.index_meta.gin_options.clone(),
+            hash_options: index.index_meta.hash_options,
+        };
+        let ccnew_name = format!("{}_ccnew", index.name);
+        let ccnew = self.build_simple_index_in_transaction(
+            client_id,
+            heap,
+            &ccnew_name,
+            None,
+            &columns,
+            index.index_meta.indpred.as_deref(),
+            index.index_meta.indisunique,
+            index.index_meta.indisprimary,
+            index.index_meta.indnullsnotdistinct,
+            xid,
+            cid,
+            index.index_meta.am_oid,
+            access_method_handler,
+            &build_options,
+            65_536,
+            true,
+            false,
+            catalog_effects,
+        )?;
+        self.cleanup_failed_index_build(
+            client_id,
+            xid,
+            cid,
+            &ccnew,
+            catalog_effects,
+            self.interrupt_state(client_id),
+        );
+        self.mark_reindexed_index_ready_valid(client_id, xid, cid, index, catalog_effects)
     }
 
     fn reindex_table_indexes_in_transaction(
@@ -3596,6 +3774,44 @@ impl Database {
         concurrently: bool,
         verbose: bool,
         target_tablespace: Option<&ReindexTablespaceTarget>,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        self.reindex_relation_indexes_in_transaction(
+            client_id,
+            catalog,
+            relation,
+            concurrently,
+            verbose,
+            xid,
+            cid,
+            catalog_effects,
+        )?;
+        if let Some(toast) = relation.toast
+            && let Some(toast_relation) = catalog.lookup_relation_by_oid(toast.relation_oid)
+        {
+            self.reindex_relation_indexes_in_transaction(
+                client_id,
+                catalog,
+                &toast_relation,
+                concurrently,
+                verbose,
+                xid,
+                cid,
+                catalog_effects,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn reindex_relation_indexes_in_transaction(
+        &self,
+        client_id: ClientId,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        relation: &crate::backend::parser::BoundRelation,
+        concurrently: bool,
+        verbose: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,

@@ -60,10 +60,6 @@ impl Database {
         let relation = resolve_cluster_table(&catalog, &stmt.table_name)?;
         let index = resolve_cluster_index(&catalog, &relation, &stmt.index_name)?;
         validate_cluster_index(&index)?;
-
-        let mut ctx =
-            self.cluster_executor_context(client_id, xid, cid, configured_search_path, &catalog)?;
-        let rows = cluster_rows_for_index(&relation, &index, &mut ctx)?;
         self.mark_clustered_index(
             client_id,
             xid,
@@ -72,6 +68,13 @@ impl Database {
             index.relation_oid,
             catalog_effects,
         )?;
+        if stmt.mark_only {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
+        let mut ctx =
+            self.cluster_executor_context(client_id, xid, cid, configured_search_path, &catalog)?;
+        let rows = cluster_rows_for_index(&relation, &index, &mut ctx)?;
         let storage_rewrites = self.rewrite_cluster_storage(
             client_id,
             xid,
