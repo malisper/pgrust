@@ -3153,6 +3153,7 @@ pub(crate) fn runtime_sql_bound_scope(scope: &RuntimeSqlScope) -> BoundScope {
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         },
     )
@@ -4452,6 +4453,7 @@ fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Ex
             varattno: user_attrno(var.slot),
             varlevelsup: 0,
             vartype: var.ty,
+            collation_oid: None,
         })),
         field: field.clone(),
         field_type: SqlType::new(SqlTypeKind::Text),

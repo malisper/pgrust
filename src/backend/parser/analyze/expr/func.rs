@@ -2653,6 +2653,7 @@ fn bind_scalar_function_call_from_bound_args(
         }
         BuiltinScalarFunction::Lower
         | BuiltinScalarFunction::Upper
+        | BuiltinScalarFunction::Casefold
         | BuiltinScalarFunction::Unistr => {
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],

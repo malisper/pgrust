@@ -5584,12 +5584,14 @@ fn current_of_predicate(binding: SystemVarBinding) -> Result<Expr, ExecError> {
         varattno: TABLE_OID_ATTR_NO,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Oid),
+        collation_oid: None,
     });
     let ctid = Expr::Var(Var {
         varno: 1,
         varattno: SELF_ITEM_POINTER_ATTR_NO,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Tid),
+        collation_oid: None,
     });
     Ok(Expr::and(
         Expr::op_auto(

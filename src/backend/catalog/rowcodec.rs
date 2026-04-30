@@ -943,6 +943,11 @@ pub(crate) fn pg_collation_row_from_values(
         collprovider: expect_char(&values[4], "collprovider")?,
         collisdeterministic: expect_bool(&values[5])?,
         collencoding: expect_int32(&values[6])?,
+        collcollate: optional_nullable_text(&values, 7)?,
+        collctype: optional_nullable_text(&values, 8)?,
+        colllocale: optional_nullable_text(&values, 9)?,
+        collicurules: optional_nullable_text(&values, 10)?,
+        collversion: optional_nullable_text(&values, 11)?,
     })
 }
 
@@ -1741,6 +1746,11 @@ fn pg_collation_row_values(row: PgCollationRow) -> Vec<Value> {
         Value::Text(row.collprovider.to_string().into()),
         Value::Bool(row.collisdeterministic),
         Value::Int32(row.collencoding),
+        nullable_text_value(row.collcollate),
+        nullable_text_value(row.collctype),
+        nullable_text_value(row.colllocale),
+        nullable_text_value(row.collicurules),
+        nullable_text_value(row.collversion),
     ]
 }
 
@@ -2663,6 +2673,10 @@ fn nullable_text(value: &Value) -> Result<Option<String>, CatalogError> {
         Value::Text(text) => Ok(Some(text.to_string())),
         _ => Err(CatalogError::Corrupt("expected nullable text value")),
     }
+}
+
+fn optional_nullable_text(values: &[Value], index: usize) -> Result<Option<String>, CatalogError> {
+    values.get(index).map(nullable_text).unwrap_or(Ok(None))
 }
 
 fn nullable_timestamptz(value: &Value) -> Result<Option<TimestampTzADT>, CatalogError> {

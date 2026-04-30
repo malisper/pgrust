@@ -17960,8 +17960,15 @@ fn create_index_catalog_paths_and_alter_table_set_parallel_workers() {
                 rows,
                 vec![
                     vec![Value::Text("default".into()), Value::Text("d".into()),],
+                    vec![Value::Text("pg_c_utf8".into()), Value::Text("b".into()),],
                     vec![Value::Text("C".into()), Value::Text("c".into())],
                     vec![Value::Text("POSIX".into()), Value::Text("c".into()),],
+                    vec![Value::Text("ucs_basic".into()), Value::Text("b".into()),],
+                    vec![Value::Text("unicode".into()), Value::Text("i".into()),],
+                    vec![
+                        Value::Text("pg_unicode_fast".into()),
+                        Value::Text("b".into()),
+                    ],
                 ]
             );
         }
@@ -18438,6 +18445,124 @@ fn create_index_without_name_uses_all_key_columns_in_default_name() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn create_builtin_provider_collations_from_options() {
+    let dir = temp_dir("builtin_collation_options");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create collation regress_builtin_c (provider = builtin, locale = 'C')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create collation regress_builtin_c_utf8 (provider = builtin, locale = 'C.UTF8')",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select collname, collprovider, collencoding, colllocale, collversion \
+             from pg_collation \
+             where collname in ('regress_builtin_c', 'regress_builtin_c_utf8') \
+             order by collname"
+        ),
+        vec![
+            vec![
+                Value::Text("regress_builtin_c".into()),
+                Value::Text("b".into()),
+                Value::Int32(-1),
+                Value::Text("C".into()),
+                Value::Text("1".into()),
+            ],
+            vec![
+                Value::Text("regress_builtin_c_utf8".into()),
+                Value::Text("b".into()),
+                Value::Int32(6),
+                Value::Text("C.UTF-8".into()),
+                Value::Text("1".into()),
+            ],
+        ]
+    );
+
+    for (locale, expected) in [
+        (
+            "C_UTF8",
+            "invalid locale name \"C_UTF8\" for builtin provider",
+        ),
+        (
+            "unicode",
+            "invalid locale name \"unicode\" for builtin provider",
+        ),
+    ] {
+        let err = db
+            .execute(
+                1,
+                &format!(
+                    "create collation regress_invalid_{locale} \
+                     (provider = builtin, locale = '{locale}')"
+                ),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ExecError::DetailedError { message, .. } if message == expected));
+    }
+}
+
+#[test]
+fn builtin_utf8_collations_drive_text_and_regex_functions() {
+    let dir = temp_dir("builtin_collation_text_runtime");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table c_text (v text collate pg_c_utf8)")
+        .unwrap();
+    db.execute(1, "create table fast_text (v text collate pg_unicode_fast)")
+        .unwrap();
+    db.execute(1, "insert into c_text values (U&'\\1E9E')")
+        .unwrap();
+    db.execute(1, "insert into fast_text values (U&'\\1E9E')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select casefold(v) from c_text"),
+        vec![vec![Value::Text("\u{00DF}".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select casefold(v) from fast_text"),
+        vec![vec![Value::Text("ss".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select lower(U&'\\0391\\03A3' collate pg_c_utf8), \
+                    lower(U&'\\0391\\03A3' collate pg_unicode_fast), \
+                    initcap(U&'\\FF11\\0061' collate pg_c_utf8)"
+        ),
+        vec![vec![
+            Value::Text("\u{03B1}\u{03C3}".into()),
+            Value::Text("\u{03B1}\u{03C2}".into()),
+            Value::Text("\u{FF11}A".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select regexp_like(U&'\\0D67' collate pg_c_utf8, '\\d'), \
+                    regexp_like(U&'\\0D67' collate pg_unicode_fast, '\\d'), \
+                    regexp_like('=' collate pg_unicode_fast, '[[:punct:]]')"
+        ),
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
 }
 
 #[test]

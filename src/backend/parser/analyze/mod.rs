@@ -3972,6 +3972,7 @@ fn named_relation_scope(
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),
@@ -4032,6 +4033,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             varattno: user_attrno(column.slot),
             varlevelsup: 0,
             vartype: column.sql_type,
+            collation_oid: None,
         }));
     }
 
@@ -4061,6 +4063,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             }));
         }
     }
@@ -8333,6 +8336,7 @@ fn bind_set_operation_query_with_outer(
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect::<Vec<_>>();

@@ -3278,6 +3278,7 @@ fn set_op_output_exprs(source_id: usize, output_columns: &[QueryColumn]) -> Vec<
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()
@@ -3419,6 +3420,7 @@ fn build_subquery_scan_path(
                         varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: sql_type,
+                        collation_oid: None,
                     }),
                     ressortgroupref: key.ressortgroupref,
                     descending: key.descending,

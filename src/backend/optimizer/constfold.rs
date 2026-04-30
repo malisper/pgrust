@@ -1555,6 +1555,7 @@ mod tests {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     }
 
@@ -1588,6 +1589,7 @@ mod tests {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype: SqlType::new(SqlTypeKind::Timestamp),
+                    collation_oid: None,
                 })),
                 SqlType::new(SqlTypeKind::TimestampTz),
             )),

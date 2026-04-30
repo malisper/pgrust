@@ -478,6 +478,7 @@ mod tests {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Name),
+            collation_oid: None,
         })
     }
 
@@ -519,6 +520,7 @@ mod tests {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     }
 
@@ -528,6 +530,7 @@ mod tests {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int8),
+            collation_oid: None,
         })
     }
 

@@ -62,6 +62,7 @@ fn var(varno: usize, attno: usize) -> crate::include::nodes::primnodes::Expr {
         varattno: attno as AttrNumber,
         varlevelsup: 0,
         vartype: int4(),
+        collation_oid: None,
     })
 }
 
@@ -75,6 +76,7 @@ fn typed_var(
         varattno: attno as AttrNumber,
         varlevelsup: 0,
         vartype,
+        collation_oid: None,
     })
 }
 
@@ -86,6 +88,7 @@ fn text_substr_partition_key() -> Expr {
         funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
         funcvariadic: false,
         implementation: ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Substring),
+        collation_oid: None,
         display_args: None,
         args: vec![
             typed_var(1, 1, SqlType::new(SqlTypeKind::Text)),
@@ -332,6 +335,7 @@ fn project_set_pathtarget(
                         varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: *sql_type,
+                        collation_oid: None,
                     })
                 }
             })
