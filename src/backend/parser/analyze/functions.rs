@@ -2290,12 +2290,16 @@ pub(super) fn validate_scalar_function_arity(
         })
         .unwrap_or_else(|| match func {
             BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::JsonToTsVector
             | BuiltinScalarFunction::JsonbToTsVector
             | BuiltinScalarFunction::ToTsQuery
             | BuiltinScalarFunction::PlainToTsQuery
             | BuiltinScalarFunction::PhraseToTsQuery
             | BuiltinScalarFunction::WebSearchToTsQuery => {
-                if matches!(func, BuiltinScalarFunction::JsonbToTsVector) {
+                if matches!(
+                    func,
+                    BuiltinScalarFunction::JsonToTsVector | BuiltinScalarFunction::JsonbToTsVector
+                ) {
                     matches!(args.len(), 2 | 3)
                 } else {
                     matches!(args.len(), 1 | 2)
@@ -2620,6 +2624,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Abs
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::OctetLength
             | BuiltinScalarFunction::BitLength
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Upper
@@ -2867,6 +2872,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::JsonbBuildArray | BuiltinScalarFunction::JsonbBuildObject => {
                 true
             }
+            BuiltinScalarFunction::JsonbConcat => args.len() == 2,
             BuiltinScalarFunction::JsonbPathExists
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
@@ -3055,6 +3061,8 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::Corr => args.len() == 2,
             AggFunc::StringAgg
             | AggFunc::JsonObjectAgg
+            | AggFunc::JsonObjectAggUnique
+            | AggFunc::JsonObjectAggUniqueStrict
             | AggFunc::JsonbObjectAgg
             | AggFunc::JsonbObjectAggUnique
             | AggFunc::JsonbObjectAggUniqueStrict => args.len() == 2,
@@ -3092,7 +3100,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TsQueryContains | BuiltinScalarFunction::TsQueryContainedBy => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
-        BuiltinScalarFunction::ToTsVector | BuiltinScalarFunction::JsonbToTsVector => {
+        BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonToTsVector
+        | BuiltinScalarFunction::JsonbToTsVector => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
         }
         BuiltinScalarFunction::ToTsQuery
@@ -4609,6 +4619,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
         ("to_tsvector_byid", BuiltinScalarFunction::ToTsVector),
+        ("json_to_tsvector", BuiltinScalarFunction::JsonToTsVector),
+        (
+            "json_to_tsvector_byid",
+            BuiltinScalarFunction::JsonToTsVector,
+        ),
         (
             "jsonb_string_to_tsvector",
             BuiltinScalarFunction::ToTsVector,
@@ -4755,6 +4770,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "jsonb_build_object",
             BuiltinScalarFunction::JsonbBuildObject,
         ),
+        ("jsonb_concat", BuiltinScalarFunction::JsonbConcat),
         ("jsonb_contains", BuiltinScalarFunction::JsonbContains),
         ("jsonb_contained", BuiltinScalarFunction::JsonbContained),
         ("jsonb_delete", BuiltinScalarFunction::JsonbDelete),
@@ -4786,6 +4802,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("rpad", BuiltinScalarFunction::RPad),
         ("repeat", BuiltinScalarFunction::Repeat),
         ("length", BuiltinScalarFunction::Length),
+        ("octet_length", BuiltinScalarFunction::OctetLength),
         ("bit_length", BuiltinScalarFunction::BitLength),
         ("array_ndims", BuiltinScalarFunction::ArrayNdims),
         ("array_dims", BuiltinScalarFunction::ArrayDims),
@@ -5785,6 +5802,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::JsonbExtractPathText
             | BuiltinScalarFunction::JsonbBuildArray
             | BuiltinScalarFunction::JsonbBuildObject
+            | BuiltinScalarFunction::JsonbConcat
             | BuiltinScalarFunction::JsonbDelete
             | BuiltinScalarFunction::JsonbDeletePath
             | BuiltinScalarFunction::JsonbSet
@@ -5800,6 +5818,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RPad
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::OctetLength
             | BuiltinScalarFunction::BitLength
             | BuiltinScalarFunction::ArrayNdims
             | BuiltinScalarFunction::ArrayDims
@@ -5990,6 +6009,8 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg
             | AggFunc::JsonObjectAgg
+            | AggFunc::JsonObjectAggUnique
+            | AggFunc::JsonObjectAggUniqueStrict
             | AggFunc::JsonbObjectAgg
             | AggFunc::JsonbObjectAggUnique
             | AggFunc::JsonbObjectAggUniqueStrict
@@ -6088,6 +6109,8 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         SQL_JSON_OBJECTAGG_FUNC | "json_objectagg" => Some(AggFunc::JsonObjectAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
+        "json_object_agg_unique" => Some(AggFunc::JsonObjectAggUnique),
+        "json_object_agg_unique_strict" => Some(AggFunc::JsonObjectAggUniqueStrict),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
         "jsonb_object_agg_unique" => Some(AggFunc::JsonbObjectAggUnique),
         "jsonb_object_agg_unique_strict" => Some(AggFunc::JsonbObjectAggUniqueStrict),

@@ -553,7 +553,7 @@ neg_add_op = @{ "-" ~ !("|" | ">") }
 bit_op = { amp_bit_op | pipe_bit_op | hash_bit_op }
 amp_bit_op = @{ "&" ~ !("&" | "<" | ">") }
 pipe_bit_op = @{ "|" ~ !("|" | "&" | ">" | "/") }
-hash_bit_op = @{ "#" ~ !("#" | ">") }
+hash_bit_op = @{ "#" ~ !("#" | ">" | "-") }
 shift_op = { left_shift_op | right_shift_op }
 left_shift_op = @{ "<<" ~ !("|" | "=" | "<") }
 right_shift_op = @{ ">>" ~ !"=" }
@@ -588,7 +588,7 @@ similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ concat_expr ~ escape_clause? }
 escape_clause = { kw_escape ~ concat_expr }
 is_document_suffix = { kw_is ~ kw_not? ~ kw_document }
 json_access_op = { "#>>" | "#>" | "->>" | "->" }
-comp_op = { "<->" | "<<<" | "##" | "?#" | "?||" | "?-|" | "===" | "~=" | "~<=~" | "~>=~" | "~<~" | "~>~" | "^@" | "&<|" | "|&>" | "<<|" | "|>>" | "<<=" | ">>=" | "&<" | "&>" | "<^" | ">^" | "<%" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~*" | "~*" | "!~" | "~" }
+comp_op = { "<->" | "<<<" | "##" | "?#" | "#-" | "?||" | "?-|" | "===" | "~=" | "~<=~" | "~>=~" | "~<~" | "~>~" | "^@" | "&<|" | "|&>" | "<<|" | "|>>" | "<<=" | ">>=" | "&<" | "&>" | "<^" | ">^" | "<%" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~*" | "~*" | "!~" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ (cast_suffix | subscript_suffix | field_select_suffix | collate_suffix | at_time_zone_suffix | at_local_suffix)* }
 cast_suffix = { "::" ~ cast_type_name }

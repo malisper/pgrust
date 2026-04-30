@@ -55,7 +55,8 @@ use super::expr_datetime::{
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
-    eval_jsonpath_operator, eval_sql_json_query_function_expr, jsonb_to_tsvector_value,
+    eval_jsonpath_operator, eval_sql_json_query_function_expr, json_to_tsvector_value,
+    jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_mac::eval_macaddr_function;
@@ -95,9 +96,10 @@ use super::expr_string::{
     eval_crc32c_function, eval_decode_function, eval_encode_function, eval_format_function,
     eval_get_bit_bytes, eval_get_byte, eval_initcap_function, eval_left_function,
     eval_length_function, eval_like, eval_lower_function, eval_lpad_function, eval_md5_function,
-    eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
-    eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
-    eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
+    eval_octet_length_function, eval_parse_ident_function,
+    eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
+    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
+    eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
     eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
     eval_quote_ident_function, eval_quote_literal_function, eval_quote_nullable_function,
@@ -136,7 +138,8 @@ use crate::backend::catalog::object_address::{
 };
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
-    JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
+    JsonbValue, decode_jsonb, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
+    jsonb_from_value, parse_json_text_input,
 };
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
@@ -9466,6 +9469,39 @@ fn text_search_parse_error(op: &'static str, message: String) -> ExecError {
     })
 }
 
+fn text_search_config_name_from_value(
+    value: &Value,
+    catalog: Option<&dyn CatalogLookup>,
+    op: &'static str,
+) -> Result<Option<String>, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    if let Some(text) = value.as_text() {
+        return Ok(Some(text.to_string()));
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
+        Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
+        _ => None,
+    };
+    if let Some(oid) = oid
+        && let Some(row) = catalog.and_then(|catalog| {
+            catalog
+                .ts_config_rows()
+                .into_iter()
+                .find(|row| row.oid == oid)
+        })
+    {
+        return Ok(Some(row.cfgname));
+    }
+    Err(ExecError::TypeMismatch {
+        op,
+        left: value.clone(),
+        right: Value::Null,
+    })
+}
+
 fn eval_ts_match_values(
     values: &[Value],
     default_config_name: Option<&str>,
@@ -9599,21 +9635,24 @@ fn eval_ts_headline_values(
         return Ok(Value::Null);
     }
     let (config_name, document, query, options) = match values {
-        [document, Value::TsQuery(query)] => (default_config_name, document.as_text(), query, None),
+        [document, Value::TsQuery(query)] => (None, document, query, None),
         [document, Value::TsQuery(query), options] => (
-            default_config_name,
-            document.as_text(),
+            None,
+            document,
             query,
-            options.as_text(),
+            ts_headline_option_text(Some(options))?,
         ),
-        [config, document, Value::TsQuery(query)] => {
-            (config.as_text(), document.as_text(), query, None)
-        }
-        [config, document, Value::TsQuery(query), options] => (
-            config.as_text(),
-            document.as_text(),
+        [config, document, Value::TsQuery(query)] => (
+            text_search_config_name_from_value(config, catalog, "ts_headline")?,
+            document,
             query,
-            options.as_text(),
+            None,
+        ),
+        [config, document, Value::TsQuery(query), options] => (
+            text_search_config_name_from_value(config, catalog, "ts_headline")?,
+            document,
+            query,
+            ts_headline_option_text(Some(options))?,
         ),
         _ => {
             return Err(ExecError::TypeMismatch {
@@ -9623,13 +9662,97 @@ fn eval_ts_headline_values(
             });
         }
     };
-    let document = document.ok_or_else(|| ExecError::TypeMismatch {
-        op: "ts_headline",
-        left: values.first().cloned().unwrap_or(Value::Null),
-        right: values.get(1).cloned().unwrap_or(Value::Null),
-    })?;
-    crate::backend::executor::ts_headline(config_name, document, query, options, catalog)
-        .map(|headline| Value::Text(headline.into()))
+    let config_name = config_name.as_deref().or(default_config_name);
+    if tsquery_is_empty(query) {
+        return ts_headline_identity(document);
+    }
+    match document {
+        Value::Json(text) => {
+            let mut json = parse_json_text_input(text.as_str())?;
+            highlight_json_strings_for_headline(&mut json, query, options, config_name, catalog)?;
+            Ok(Value::Json(CompactString::from_owned(
+                serde_json::to_string(&json).unwrap_or_else(|_| "null".into()),
+            )))
+        }
+        Value::Jsonb(bytes) => {
+            let mut json = decode_jsonb(bytes)?.to_serde();
+            highlight_json_strings_for_headline(&mut json, query, options, config_name, catalog)?;
+            Ok(Value::Jsonb(crate::backend::executor::jsonb::encode_jsonb(
+                &JsonbValue::from_serde(json)?,
+            )))
+        }
+        _ => {
+            let document = document.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "ts_headline",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            })?;
+            Ok(Value::Text(CompactString::from_owned(
+                crate::backend::executor::ts_headline(
+                    config_name,
+                    document,
+                    query,
+                    options,
+                    catalog,
+                )?,
+            )))
+        }
+    }
+}
+
+fn ts_headline_option_text(option: Option<&Value>) -> Result<Option<&str>, ExecError> {
+    let Some(option) = option else {
+        return Ok(None);
+    };
+    option
+        .as_text()
+        .map(Some)
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "ts_headline",
+            left: option.clone(),
+            right: Value::Null,
+        })
+}
+
+fn ts_headline_identity(document: &Value) -> Result<Value, ExecError> {
+    match document {
+        Value::Json(_) | Value::Jsonb(_) => Ok(document.clone()),
+        _ => {
+            let text = document.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "ts_headline",
+                left: document.clone(),
+                right: Value::Null,
+            })?;
+            Ok(Value::Text(text.into()))
+        }
+    }
+}
+
+fn highlight_json_strings_for_headline(
+    value: &mut serde_json::Value,
+    query: &crate::include::nodes::tsearch::TsQuery,
+    options: Option<&str>,
+    config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<(), ExecError> {
+    match value {
+        serde_json::Value::String(text) => {
+            *text =
+                crate::backend::executor::ts_headline(config_name, text, query, options, catalog)?;
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                highlight_json_strings_for_headline(item, query, options, config_name, catalog)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for value in fields.values_mut() {
+                highlight_json_strings_for_headline(value, query, options, config_name, catalog)?;
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+    Ok(())
 }
 
 fn eval_plpgsql_builtin_function(
@@ -9675,6 +9798,7 @@ fn eval_plpgsql_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
@@ -9685,6 +9809,7 @@ fn eval_plpgsql_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
+        BuiltinScalarFunction::OctetLength => eval_octet_length_function(&values),
         BuiltinScalarFunction::BitLength => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_bit_length_function(&values),
@@ -10405,6 +10530,7 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
     matches!(
         func,
         BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::JsonToTsVector
             | BuiltinScalarFunction::JsonbToTsVector
             | BuiltinScalarFunction::ToTsQuery
             | BuiltinScalarFunction::PlainToTsQuery
@@ -10623,32 +10749,7 @@ fn eval_text_search_builtin_function(
             let Some(value) = values.get(index) else {
                 return Ok(None);
             };
-            if matches!(value, Value::Null) {
-                return Ok(None);
-            }
-            if let Some(text) = value.as_text() {
-                return Ok(Some(text.to_string()));
-            }
-            let oid = match value {
-                Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
-                Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
-                _ => None,
-            };
-            if let Some(oid) = oid
-                && let Some(row) = catalog.and_then(|catalog| {
-                    catalog
-                        .ts_config_rows()
-                        .into_iter()
-                        .find(|row| row.oid == oid)
-                })
-            {
-                return Ok(Some(row.cfgname));
-            }
-            Err(ExecError::TypeMismatch {
-                op,
-                left: value.clone(),
-                right: Value::Null,
-            })
+            text_search_config_name_from_value(value, catalog, op)
         };
 
     match func {
@@ -10659,8 +10760,19 @@ fn eval_text_search_builtin_function(
             eval_ts_headline_values(values, default_config_name(), catalog)
         }
         BuiltinScalarFunction::ToTsVector => {
+            if let [Value::Json(_)] = values {
+                return json_to_tsvector_value(default_config_name(), &values[0], None, catalog);
+            }
             if let [Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(default_config_name(), &values[0], None, catalog);
+            }
+            if let [_, Value::Json(_)] = values {
+                return json_to_tsvector_value(
+                    arg_config_name(values, 0, "to_tsvector")?.as_deref(),
+                    &values[1],
+                    None,
+                    catalog,
+                );
             }
             if let [_, Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(
@@ -10692,6 +10804,29 @@ fn eval_text_search_builtin_function(
                 .map(Value::TsVector)
                 .map_err(|e| parse_error("to_tsvector", e))
         }
+        BuiltinScalarFunction::JsonToTsVector => match values {
+            [Value::Null, _]
+            | [_, Value::Null]
+            | [Value::Null, _, _]
+            | [_, Value::Null, _]
+            | [_, _, Value::Null] => {
+                return Ok(Value::Null);
+            }
+            [Value::Json(_), _] => {
+                json_to_tsvector_value(default_config_name(), &values[0], values.get(1), catalog)
+            }
+            [_, Value::Json(_), _] => json_to_tsvector_value(
+                arg_config_name(values, 0, "json_to_tsvector")?.as_deref(),
+                &values[1],
+                values.get(2),
+                catalog,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "json_to_tsvector",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
         BuiltinScalarFunction::JsonbToTsVector => match values {
             [Value::Null, _]
             | [_, Value::Null]
@@ -11637,6 +11772,7 @@ pub(crate) fn eval_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
@@ -12473,6 +12609,7 @@ pub(crate) fn eval_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
+        BuiltinScalarFunction::OctetLength => eval_octet_length_function(&values),
         BuiltinScalarFunction::BitLength => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_bit_length_function(&values),

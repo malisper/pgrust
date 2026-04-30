@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use crate::backend::executor::expr_range::compare_range_values;
+use crate::backend::executor::jsonb::{compare_jsonb, decode_jsonb};
 use crate::backend::executor::{
     compare_multirange_values, compare_network_values, compare_order_values, compare_tsquery,
     compare_tsvector,
@@ -62,6 +63,10 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => {
             compare_network_values(a, b)
         }
+        (Value::Jsonb(a), Value::Jsonb(b)) => match (decode_jsonb(a), decode_jsonb(b)) {
+            (Ok(left_json), Ok(right_json)) => compare_jsonb(&left_json, &right_json),
+            _ => a.cmp(b),
+        },
         (Value::Record(_), Value::Record(_)) => {
             compare_order_values(left, right, None, None, false)
                 .expect("btree record comparisons use implicit default collation")

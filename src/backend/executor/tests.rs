@@ -14658,6 +14658,25 @@ fn select_list_json_scalar_srfs_work() {
 }
 
 #[test]
+fn select_list_json_srf_after_aggregate_work() {
+    let base = temp_dir("project_set_json_after_aggregate");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*) from \
+             (select json_object_keys(json_object(array_agg(g))) \
+              from (select unnest(array['f'||n,n::text]) as g \
+                    from generate_series(1, 300) as n) x) y",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(300)]],
+    );
+}
+
+#[test]
 fn select_list_srfs_run_in_lockstep() {
     let base = temp_dir("project_set_lockstep");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -14954,6 +14973,59 @@ fn jsonb_to_tsvector_honors_filter_flags() {
             Value::TsVector(
                 crate::include::nodes::tsearch::TsVector::parse("'123':5 'aaa':1 'bbb':3")
                     .unwrap(),
+            ),
+        ]],
+    );
+}
+
+#[test]
+fn json_to_tsvector_matches_jsonb_value_flags() {
+    let base = temp_dir("json_to_tsvector_flags");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select \
+            json_to_tsvector('english', '{\"a\":\"aaa in bbb\",\"b\":123}'::json, '[\"string\",\"numeric\"]'::jsonb), \
+            jsonb_to_tsvector('english', '{\"a\":\"aaa in bbb\",\"b\":123}'::jsonb, '[\"string\",\"numeric\"]'::jsonb)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 2);
+            assert_eq!(rows[0][0], rows[0][1]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn ts_headline_json_highlights_string_values_only() {
+    let base = temp_dir("ts_headline_json");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                ts_headline('{\"a\":\"aaa bbb\",\"b\":{\"c\":\"ccc ddd fff\",\"c1\":\"ccc1 ddd1\"},\"d\":[\"ggg hhh\",\"iii jjj\"]}'::json, tsquery('bbb & ddd & hhh'), 'StartSel = <, StopSel = >'), \
+                ts_headline('{\"a\":\"aaa bbb\",\"b\":{\"c\":\"ccc ddd fff\",\"c1\":\"ccc1 ddd1\"},\"d\":[\"ggg hhh\",\"iii jjj\"]}'::jsonb, tsquery('bbb & ddd & hhh'))",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Json(
+                "{\"a\":\"aaa <bbb>\",\"b\":{\"c\":\"ccc <ddd> fff\",\"c1\":\"ccc1 ddd1\"},\"d\":[\"ggg <hhh>\",\"iii jjj\"]}".into(),
+            ),
+            Value::Jsonb(
+                crate::backend::executor::jsonb::parse_jsonb_text(
+                    "{\"a\":\"aaa <b>bbb</b>\",\"b\":{\"c\":\"ccc <b>ddd</b> fff\",\"c1\":\"ccc1 ddd1\"},\"d\":[\"ggg <b>hhh</b>\",\"iii jjj\"]}",
+                )
+                .unwrap(),
             ),
         ]],
     );
@@ -18886,6 +18958,17 @@ fn json_scalar_functions_work() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select json_typeof(NULL::json), jsonb_typeof(NULL::jsonb)",
+        )
+        .unwrap(),
+        vec![vec![Value::Null, Value::Null]],
+    );
 }
 
 #[test]
@@ -19234,6 +19317,32 @@ fn json_builders_and_object_agg_work() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_build_object(NULL, 'a')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "null value not allowed for object key" && sqlstate == "22004"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_object_agg(NULL, '{\"a\":1}'::json)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "null value not allowed for object key" && sqlstate == "22004"
+    ));
 }
 
 #[test]
@@ -19451,6 +19560,55 @@ fn invalid_json_input_errors() {
     assert!(matches!(
         err,
         ExecError::JsonInput { message, .. } if message == "invalid input syntax for type json"
+    ));
+}
+
+#[test]
+fn json_preserves_raw_text_for_extraction_and_record_expansion() {
+    let base = temp_dir("json_raw_text_preservation");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            r#"select '{"a": {"b":{"c": "foo"}}}'::json #> array['a']"#,
+        )
+        .unwrap(),
+        vec![vec![Value::Json(r#"{"b":{"c": "foo"}}"#.into())]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            r#"select b from json_to_record('{"b":{"c":16, "d":2}}'::json) as t(b json)"#,
+        )
+        .unwrap(),
+        vec![vec![Value::Json(r#"{"c":16, "d":2}"#.into())]],
+    );
+}
+
+#[test]
+fn json_text_extraction_rejects_text_incompatible_unicode_escapes() {
+    let base = temp_dir("json_text_unicode_validation");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        r#"select json '{ "a": "null \u0000 escape" }' ->> 'a'"#,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::JsonInput {
+            detail: Some(detail),
+            ..
+        } if detail == "\\u0000 cannot be converted to text."
     ));
 }
 
@@ -19879,6 +20037,52 @@ fn jsonb_delete_and_delete_path_functions_work() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn jsonb_delete_path_operator_and_concat_unknown_literals_work() {
+    let base = temp_dir("jsonb_delete_path_operator");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '{\"a\":{\"b\":[1,2,3]}}'::jsonb #- '{a,b,1}', \
+                    '{\"a\":1}'::jsonb || '{\"b\":2}', \
+                    jsonb_concat('{\"d\": \"test\", \"a\": [1, 2]}', '{\"g\": \"test2\", \"c\": {\"c1\":1, \"c2\":2}}'), \
+                    '[]'::jsonb #- '{a}', \
+                    '12345.05'::jsonb::int4, \
+                    '{\"age\":25.0}'::jsonb @> '{\"age\":25}'::jsonb, \
+                    '{\"age\":25}'::jsonb @> '{\"age\":25.0}'::jsonb, \
+                    ('[1, \"2\", null]'::jsonb)['1'], \
+                    (select count(distinct j) from (values ('1'::jsonb), ('1.0'::jsonb)) v(j)), \
+                    (select count(*) from (select j from (values ('1'::jsonb), ('1.0'::jsonb)) v(j) group by j) g)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Jsonb(
+                crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":[1,3]}}").unwrap(),
+            ),
+            Value::Jsonb(
+                crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1,\"b\":2}").unwrap(),
+            ),
+            Value::Jsonb(
+                crate::backend::executor::jsonb::parse_jsonb_text(
+                    "{\"a\":[1,2],\"c\":{\"c1\":1,\"c2\":2},\"d\":\"test\",\"g\":\"test2\"}",
+                )
+                .unwrap(),
+            ),
+            Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("[]").unwrap()),
+            Value::Int32(12345),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("\"2\"").unwrap()),
+            Value::Int64(1),
+            Value::Int64(1),
+        ]],
+    );
 }
 
 #[test]
@@ -20822,6 +21026,23 @@ fn length_accepts_bytea_argument() {
         )
         .unwrap(),
         vec![vec![Value::Int32(3)]],
+    );
+}
+
+#[test]
+fn octet_length_counts_encoded_bytes() {
+    let base = temp_dir("octet_length");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select octet_length(chr(233)), octet_length(E'\\\\001\\\\002\\\\003'::bytea), octet_length(B'101')",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(2), Value::Int32(3), Value::Int32(1)]],
     );
 }
 
@@ -23266,6 +23487,40 @@ fn jsonb_object_agg_unique_variants_work() {
         &txns,
         INVALID_TRANSACTION_ID,
         "select jsonb_object_agg_unique(mod(i, 2), i) from generate_series(0, 3) g(i)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "duplicate JSON object key value: \"0\""
+    );
+}
+
+#[test]
+fn json_object_agg_unique_variants_work() {
+    let base = temp_dir("json_object_agg_unique");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select json_object_agg_unique(i, null), \
+                    json_object_agg_unique_strict(i, null) \
+             from generate_series(1, 3) g(i)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Json("{ \"1\" : null, \"2\" : null, \"3\" : null }".into()),
+            Value::Json("{  }".into()),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_object_agg_unique(mod(i, 2), i) from generate_series(0, 3) g(i)",
     )
     .unwrap_err();
     assert_eq!(

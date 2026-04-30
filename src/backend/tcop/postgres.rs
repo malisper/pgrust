@@ -334,6 +334,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     if suppress_sql_json_query_function_runtime_position(sql, e) {
         return None;
     }
+    if suppress_legacy_json_runtime_position(sql, e) {
+        return None;
+    }
     if matches!(e, ExecError::Regex(_))
         && is_jsonpath_sql_surface(sql)
         && let Some(position) = find_jsonpath_literal_position(sql)
@@ -1121,6 +1124,83 @@ fn suppress_sql_json_query_function_runtime_position(sql: &str, e: &ExecError) -
         }
         _ => false,
     }
+}
+
+fn suppress_legacy_json_runtime_position(sql: &str, e: &ExecError) -> bool {
+    match e {
+        ExecError::WithContext { source, .. } => suppress_legacy_json_runtime_position(sql, source),
+        ExecError::DetailedError { message, .. } => {
+            (is_legacy_json_record_function_surface(sql)
+                && message.starts_with("invalid input syntax for type "))
+                || (is_unique_json_object_agg_surface(sql)
+                    && message.starts_with("duplicate JSON object key value: "))
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+            is_legacy_json_record_function_surface(sql)
+                && message.starts_with("invalid input syntax for type ")
+        }
+        ExecError::InvalidStorageValue { details, .. } => {
+            is_legacy_json_record_function_surface(sql)
+                && details.starts_with("invalid input syntax for type ")
+        }
+        ExecError::InvalidIntegerInput { .. }
+        | ExecError::IntegerOutOfRange { .. }
+        | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidUuidInput { .. }
+        | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidGeometryInput { .. }
+        | ExecError::InvalidRangeInput { .. }
+        | ExecError::InvalidBitInput { .. }
+        | ExecError::InvalidBooleanInput { .. }
+        | ExecError::InvalidFloatInput { .. }
+        | ExecError::FloatOutOfRange { .. } => is_legacy_json_record_function_surface(sql),
+        _ => false,
+    }
+}
+
+fn is_legacy_json_record_function_surface(sql: &str) -> bool {
+    find_json_function_name_index(
+        sql,
+        &[
+            "json_populate_record",
+            "json_populate_recordset",
+            "json_to_record",
+            "json_to_recordset",
+        ],
+    )
+    .is_some()
+}
+
+fn is_unique_json_object_agg_surface(sql: &str) -> bool {
+    find_json_function_name_index(
+        sql,
+        &[
+            "json_object_agg_unique",
+            "json_object_agg_unique_strict",
+            "jsonb_object_agg_unique",
+            "jsonb_object_agg_unique_strict",
+        ],
+    )
+    .is_some()
+}
+
+fn find_json_function_name_index(sql: &str, names: &[&str]) -> Option<usize> {
+    names
+        .iter()
+        .filter_map(|name| find_json_function_name_index_for(sql, name))
+        .min()
+}
+
+fn find_json_function_name_index_for(sql: &str, name: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(index) = find_ascii_keyword(sql, name, start) {
+        let after_name = skip_ascii_whitespace(sql, index + name.len(), sql.len());
+        if sql.as_bytes().get(after_name) == Some(&b'(') {
+            return Some(index);
+        }
+        start = index + name.len();
+    }
+    None
 }
 
 fn sql_json_query_function_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -15790,6 +15870,34 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             detail: Some("Token \"aaa\" is invalid.".into()),
             context: Some("JSON data, line 1: aaa".into()),
             sqlstate: "22P02",
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_omits_legacy_json_runtime_errors() {
+        let sql = "select * from json_populate_record(row('x',3,'2012-12-31 15:30:56')::jpop,'{\"c\":[100,200,false],\"x\":43.2}') q;";
+        let err = ExecError::DetailedError {
+            message: "invalid input syntax for type timestamp: \"[100,200,false]\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22007",
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "invalid input syntax for type timestamp: \"[100,200,false]\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22007",
+        });
+        assert_eq!(exec_error_position(sql, &err), None);
+
+        let sql = "select json_object_agg_unique(mod(i,100), i) from generate_series(0, 199) i;";
+        let err = ExecError::DetailedError {
+            message: "duplicate JSON object key value: \"0\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22030",
         };
         assert_eq!(exec_error_position(sql, &err), None);
     }
