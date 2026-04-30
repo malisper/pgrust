@@ -313,17 +313,25 @@ fn inline_added_column_table_constraints(
     let mut constraints = Vec::new();
     for constraint in &alter_stmt.column.constraints {
         let table_constraint = match constraint {
-            ColumnConstraint::PrimaryKey { attributes } => TableConstraint::PrimaryKey {
+            ColumnConstraint::PrimaryKey {
+                attributes,
+                tablespace,
+            } => TableConstraint::PrimaryKey {
                 attributes: attributes.clone(),
                 columns: vec![alter_stmt.column.name.clone()],
                 include_columns: Vec::new(),
                 without_overlaps: None,
+                tablespace: tablespace.clone(),
             },
-            ColumnConstraint::Unique { attributes } => TableConstraint::Unique {
+            ColumnConstraint::Unique {
+                attributes,
+                tablespace,
+            } => TableConstraint::Unique {
                 attributes: attributes.clone(),
                 columns: vec![alter_stmt.column.name.clone()],
                 include_columns: Vec::new(),
                 without_overlaps: None,
+                tablespace: tablespace.clone(),
             },
             ColumnConstraint::References {
                 attributes,
@@ -4403,6 +4411,7 @@ impl Database {
                     .saturating_add(catalog_effects.len() as u32)
                     .saturating_add(index as u32),
                 configured_search_path,
+                None,
                 None,
                 catalog_effects,
             )?;
