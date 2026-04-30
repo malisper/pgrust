@@ -8753,7 +8753,9 @@ fn currtid_invalid_tid_error(tid: ItemPointerData, relation_name: &str) -> ExecE
 }
 
 fn currtid_relation_display_name(catalog: &dyn CatalogLookup, relation_oid: u32) -> Option<String> {
-    sequence_name_for_oid(catalog, relation_oid).map(|name| name.trim_matches('"').to_string())
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|class| quote_identifier_if_needed(&class.relname))
 }
 
 fn currtid_partitioned_relation_display_name(

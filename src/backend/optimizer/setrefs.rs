@@ -2928,6 +2928,13 @@ fn lower_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::PgStatProgressCopy {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgStatProgressCopy {
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PgSequences {
             output_columns,
             with_ordinality,
@@ -3195,6 +3202,13 @@ fn fix_set_returning_call_upper_exprs(
         } => SetReturningCall::PgLockStatus {
             func_oid,
             func_variadic,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::PgStatProgressCopy {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgStatProgressCopy {
             output_columns,
             with_ordinality,
         },
@@ -4726,6 +4740,7 @@ fn validate_set_returning_call(
             validate_executable_expr(relid, plan_node, field, allowed_exec_params);
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {
@@ -5297,6 +5312,7 @@ fn validate_planner_set_returning_call(
             validate_planner_expr(relid, path_node, field);
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {

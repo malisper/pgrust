@@ -2092,7 +2092,10 @@ fn push_nonverbose_plan_details(
                 &items[..*presorted_count],
                 presorted_display_items,
                 ctx,
-            );
+            )
+            .into_iter()
+            .map(strip_sort_direction_suffix)
+            .collect::<Vec<_>>();
             let presorted_key = presorted_items.join(", ");
             if !presorted_key.is_empty() {
                 lines.push(format!("{prefix}Presorted Key: {presorted_key}"));
@@ -2779,7 +2782,10 @@ fn nonverbose_sort_items(
     display_items: &[String],
     ctx: &VerboseExplainContext,
 ) -> Vec<String> {
-    if !display_items.is_empty()
+    if !context_has_relation_aliases(ctx)
+        && (!plan_has_explicit_relation_alias(input)
+            || sort_display_items_preserve_aliases(display_items, items))
+        && !display_items.is_empty()
         && !display_items
             .iter()
             .any(|item| explain_display_item_is_debug(item))
@@ -2790,17 +2796,21 @@ fn nonverbose_sort_items(
             .map(|(display_item, item)| {
                 let mut rendered = remap_sort_display_item_through_aggregate(input, display_item)
                     .unwrap_or_else(|| display_item.clone());
-                if sort_item_needs_extra_expression_parens(&item.expr, &rendered) {
+                let has_direction = sort_display_item_has_direction(&rendered);
+                if !has_direction && sort_item_needs_extra_expression_parens(&item.expr, &rendered)
+                {
                     rendered = format!("({rendered})");
                 }
-                if item.descending && !rendered.ends_with(" DESC") {
+                if item.descending && !has_direction {
                     rendered.push_str(" DESC");
                 }
                 rendered
             })
             .collect();
     }
-    let input_names = if !context_has_relation_aliases(ctx) && leaf_relation_bases(input).len() == 1
+    let input_names = if !context_has_relation_aliases(ctx)
+        && !plan_has_explicit_relation_alias(input)
+        && leaf_relation_bases(input).len() == 1
     {
         input.column_names()
     } else {
@@ -2827,6 +2837,59 @@ fn nonverbose_sort_items(
             });
     }
     rendered
+}
+
+fn sort_display_items_preserve_aliases(
+    display_items: &[String],
+    items: &[crate::include::nodes::primnodes::OrderByEntry],
+) -> bool {
+    display_items.len() < items.len()
+        || display_items
+            .iter()
+            .any(|item| strip_sort_direction_suffix(item.clone()).contains('.'))
+}
+
+fn plan_has_explicit_relation_alias(plan: &Plan) -> bool {
+    match plan {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => relation_name
+            .rsplit_once(' ')
+            .is_some_and(|(_, alias)| inherited_root_alias(alias).is_none()),
+        Plan::BitmapIndexScan { .. }
+        | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Result { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => false,
+        _ => direct_plan_children(plan)
+            .into_iter()
+            .any(plan_has_explicit_relation_alias),
+    }
+}
+
+fn sort_display_item_has_direction(item: &str) -> bool {
+    item.ends_with(" DESC")
+        || item.ends_with(" ASC")
+        || item.contains(" DESC NULLS ")
+        || item.contains(" ASC NULLS ")
+}
+
+fn strip_sort_direction_suffix(mut item: String) -> String {
+    for suffix in [" NULLS FIRST", " NULLS LAST"] {
+        if let Some(stripped) = item.strip_suffix(suffix) {
+            item = stripped.to_string();
+            break;
+        }
+    }
+    for suffix in [" DESC", " ASC"] {
+        if let Some(stripped) = item.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    item
 }
 
 fn explain_display_item_is_debug(item: &str) -> bool {
@@ -3868,9 +3931,9 @@ fn nonverbose_index_scan_label(
             "{scan_name}{direction} using {index_name} on {relation_name} {alias}"
         ));
     }
-    let display_name = nonverbose_relation_name_without_alias(relation_name);
-    matches!(display_name, std::borrow::Cow::Owned(_))
-        .then(|| format!("{scan_name}{direction} using {index_name} on {display_name}"))
+    relation_name_with_temp_schema_stripped(relation_name).map(|relation_name| {
+        format!("{scan_name}{direction} using {index_name} on {relation_name}")
+    })
 }
 
 fn nonverbose_relation_scan_label(
@@ -4339,14 +4402,9 @@ fn nonverbose_scan_filter_column_names(input: &Plan, _ctx: &VerboseExplainContex
 }
 
 fn nonverbose_scan_relation_column_names(
-    relation_name: &str,
+    _relation_name: &str,
     desc: &crate::include::nodes::primnodes::RelationDesc,
 ) -> Vec<String> {
-    if let Some((_, alias)) = relation_name.rsplit_once(' ')
-        && inherited_root_alias(alias).is_none()
-    {
-        return qualified_scan_output_exprs(relation_name, desc);
-    }
     desc.columns
         .iter()
         .map(|column| {
@@ -7056,6 +7114,7 @@ fn render_verbose_set_returning_call(
             vec![render_verbose_function_arg(relid, ctx)]
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => Vec::new(),
         SetReturningCall::TxidSnapshotXip { arg, .. } => {
@@ -7638,12 +7697,12 @@ fn render_verbose_join_expr(
         Expr::IsNull(inner) => {
             let combined = combined_names();
             render_verbose_composite_null_test(inner, true, &combined, ctx)
-                .unwrap_or_else(|| strip_outer_parens(&render_explain_expr(expr, &combined)))
+                .unwrap_or_else(|| render_explain_expr(expr, &combined))
         }
         Expr::IsNotNull(inner) => {
             let combined = combined_names();
             render_verbose_composite_null_test(inner, false, &combined, ctx)
-                .unwrap_or_else(|| strip_outer_parens(&render_explain_expr(expr, &combined)))
+                .unwrap_or_else(|| render_explain_expr(expr, &combined))
         }
         Expr::Cast(inner, ty) => {
             if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
@@ -9314,6 +9373,7 @@ fn collect_direct_set_returning_call_subplans<'a>(
             collect_direct_expr_subplans(relid, out);
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {

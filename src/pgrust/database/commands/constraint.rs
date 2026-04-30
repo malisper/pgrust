@@ -1640,6 +1640,7 @@ impl Database {
                 cid.saturating_add(1),
                 relation,
                 &action,
+                false,
                 None,
                 catalog_effects,
             )?;
@@ -2557,6 +2558,7 @@ impl Database {
                         cid.saturating_add(1),
                         &relation,
                         &action,
+                        true,
                         configured_search_path,
                         catalog_effects,
                     )?;
@@ -2769,6 +2771,7 @@ impl Database {
                                     cid.saturating_add(1),
                                     &relation,
                                     &not_null_action,
+                                    true,
                                     configured_search_path,
                                     catalog_effects,
                                 )?;
@@ -2799,6 +2802,7 @@ impl Database {
                                     cid.saturating_add(1),
                                     &relation,
                                     &not_null_action,
+                                    true,
                                     configured_search_path,
                                     catalog_effects,
                                 )?;
@@ -4145,6 +4149,7 @@ impl Database {
         cid: CommandId,
         parent_relation: &crate::backend::parser::BoundRelation,
         action: &crate::backend::parser::NotNullConstraintAction,
+        no_inherit_conflict_hint: bool,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<(), ExecError> {
@@ -4155,6 +4160,7 @@ impl Database {
             cid,
             parent_relation,
             action,
+            no_inherit_conflict_hint,
             configured_search_path,
             catalog_effects,
             &mut visited,
@@ -4261,6 +4267,7 @@ impl Database {
         cid: CommandId,
         parent_relation: &crate::backend::parser::BoundRelation,
         action: &crate::backend::parser::NotNullConstraintAction,
+        no_inherit_conflict_hint: bool,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         visited: &mut std::collections::BTreeSet<u32>,
@@ -4341,7 +4348,7 @@ impl Database {
                     return Err(cannot_change_not_null_no_inherit_error(
                         &existing.conname,
                         &child_name,
-                        true,
+                        no_inherit_conflict_hint,
                     ));
                 }
                 let effect = self
@@ -4426,6 +4433,7 @@ impl Database {
                 cid.saturating_add(1),
                 &child_relation,
                 &child_action,
+                no_inherit_conflict_hint,
                 configured_search_path,
                 catalog_effects,
                 visited,
@@ -4446,16 +4454,36 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<(), ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        for child_relation in direct_inheritance_children(&catalog, parent_relation.relation_oid)? {
-            let Some(child_constraint) = catalog
-                .constraint_rows_for_relation(child_relation.relation_oid)
+        let child_relations = direct_inheritance_children(&catalog, parent_relation.relation_oid)?;
+        for child_relation in child_relations {
+            let lookup_cid = cid
+                .saturating_add(catalog_effects.len() as u32)
+                .saturating_add(1);
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, lookup_cid)),
+                configured_search_path,
+            );
+            let child_relation = catalog
+                .lookup_relation_by_oid(child_relation.relation_oid)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownTable(
+                        child_relation.relation_oid.to_string(),
+                    ))
+                })?;
+            let child_constraints = catalog
+                .constraint_rows()
                 .into_iter()
+                .filter(|row| row.conrelid == child_relation.relation_oid)
+                .collect::<Vec<_>>();
+            let Some(child_constraint) = child_constraints
+                .iter()
                 .find(|row| {
                     row.contype == CONSTRAINT_CHECK
                         && row.conname.eq_ignore_ascii_case(&parent_constraint.conname)
-                        && row.conbin == parent_constraint.conbin
                         && row.coninhcount > 0
                 })
+                .cloned()
             else {
                 continue;
             };
@@ -4543,7 +4571,23 @@ impl Database {
             .name
             .clone();
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        for child_relation in direct_inheritance_children(&catalog, parent_relation.relation_oid)? {
+        let child_relations = direct_inheritance_children(&catalog, parent_relation.relation_oid)?;
+        for child_relation in child_relations {
+            let lookup_cid = cid
+                .saturating_add(catalog_effects.len() as u32)
+                .saturating_add(1);
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, lookup_cid)),
+                configured_search_path,
+            );
+            let child_relation = catalog
+                .lookup_relation_by_oid(child_relation.relation_oid)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownTable(
+                        child_relation.relation_oid.to_string(),
+                    ))
+                })?;
             let child_display_name = catalog
                 .class_row_by_oid(child_relation.relation_oid)
                 .map(|row| row.relname)
@@ -5183,6 +5227,7 @@ impl Database {
                 cid.saturating_add(1),
                 &relation,
                 &action,
+                true,
                 configured_search_path,
                 catalog_effects,
             )?;
