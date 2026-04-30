@@ -34,7 +34,7 @@ use crate::include::nodes::primnodes::{
     RelationPrivilegeRequirement, RowsFromItem, RowsFromSource, SetReturningCall, SetReturningExpr,
     SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
     TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
-    WindowSpec, set_returning_call_exprs,
+    WindowSpec, attrno_index, is_special_varno, set_returning_call_exprs,
 };
 use views::rewrite_view_relation_query;
 
@@ -256,27 +256,35 @@ fn collect_query_relation_privileges_into(
     query: &Query,
     privileges: &mut Vec<RelationPrivilegeRequirement>,
 ) {
+    let mut local_privileges = query
+        .rtable
+        .iter()
+        .map(|rte| rte.permission.clone())
+        .collect::<Vec<_>>();
     for rte in &query.rtable {
-        if let Some(permission) = &rte.permission {
-            privileges.push(permission.clone());
-        }
         for qual in &rte.security_quals {
-            collect_expr_relation_privileges(qual, privileges);
+            collect_expr_relation_privileges(qual, query, &mut local_privileges, privileges);
         }
         match &rte.kind {
-            RangeTblEntryKind::Join { joinaliasvars, .. } => {
-                for expr in joinaliasvars {
-                    collect_expr_relation_privileges(expr, privileges);
-                }
-            }
+            RangeTblEntryKind::Join { .. } => {}
             RangeTblEntryKind::Values { rows, .. } => {
                 for expr in rows.iter().flatten() {
-                    collect_expr_relation_privileges(expr, privileges);
+                    collect_expr_relation_privileges(
+                        expr,
+                        query,
+                        &mut local_privileges,
+                        privileges,
+                    );
                 }
             }
             RangeTblEntryKind::Function { call } => {
                 for expr in set_returning_call_exprs(call) {
-                    collect_expr_relation_privileges(expr, privileges);
+                    collect_expr_relation_privileges(
+                        expr,
+                        query,
+                        &mut local_privileges,
+                        privileges,
+                    );
                 }
             }
             RangeTblEntryKind::Subquery { query } | RangeTblEntryKind::Cte { query, .. } => {
@@ -288,31 +296,31 @@ fn collect_query_relation_privileges_into(
         }
     }
     if let Some(jointree) = &query.jointree {
-        collect_join_tree_relation_privileges(jointree, privileges);
+        collect_join_tree_relation_privileges(jointree, query, &mut local_privileges, privileges);
     }
     for target in &query.target_list {
-        collect_expr_relation_privileges(&target.expr, privileges);
+        collect_expr_relation_privileges(&target.expr, query, &mut local_privileges, privileges);
     }
     for clause in &query.distinct_on {
-        collect_expr_relation_privileges(&clause.expr, privileges);
+        collect_expr_relation_privileges(&clause.expr, query, &mut local_privileges, privileges);
     }
     if let Some(where_qual) = &query.where_qual {
-        collect_expr_relation_privileges(where_qual, privileges);
+        collect_expr_relation_privileges(where_qual, query, &mut local_privileges, privileges);
     }
     for expr in &query.group_by {
-        collect_expr_relation_privileges(expr, privileges);
+        collect_expr_relation_privileges(expr, query, &mut local_privileges, privileges);
     }
     for accum in &query.accumulators {
-        collect_agg_accum_relation_privileges(accum, privileges);
+        collect_agg_accum_relation_privileges(accum, query, &mut local_privileges, privileges);
     }
     for clause in &query.window_clauses {
-        collect_window_clause_relation_privileges(clause, privileges);
+        collect_window_clause_relation_privileges(clause, query, &mut local_privileges, privileges);
     }
     if let Some(having_qual) = &query.having_qual {
-        collect_expr_relation_privileges(having_qual, privileges);
+        collect_expr_relation_privileges(having_qual, query, &mut local_privileges, privileges);
     }
     for clause in &query.sort_clause {
-        collect_expr_relation_privileges(&clause.expr, privileges);
+        collect_expr_relation_privileges(&clause.expr, query, &mut local_privileges, privileges);
     }
     if let Some(recursive_union) = &query.recursive_union {
         collect_query_relation_privileges_into(&recursive_union.anchor, privileges);
@@ -323,10 +331,13 @@ fn collect_query_relation_privileges_into(
             collect_query_relation_privileges_into(input, privileges);
         }
     }
+    privileges.extend(local_privileges.into_iter().flatten());
 }
 
 fn collect_join_tree_relation_privileges(
     node: &JoinTreeNode,
+    query: &Query,
+    local_privileges: &mut [Option<RelationPrivilegeRequirement>],
     privileges: &mut Vec<RelationPrivilegeRequirement>,
 ) {
     match node {
@@ -334,52 +345,68 @@ fn collect_join_tree_relation_privileges(
         JoinTreeNode::JoinExpr {
             left, right, quals, ..
         } => {
-            collect_join_tree_relation_privileges(left, privileges);
-            collect_join_tree_relation_privileges(right, privileges);
-            collect_expr_relation_privileges(quals, privileges);
+            collect_join_tree_relation_privileges(left, query, local_privileges, privileges);
+            collect_join_tree_relation_privileges(right, query, local_privileges, privileges);
+            collect_expr_relation_privileges(quals, query, local_privileges, privileges);
         }
     }
 }
 
 fn collect_agg_accum_relation_privileges(
     accum: &AggAccum,
+    query: &Query,
+    local_privileges: &mut [Option<RelationPrivilegeRequirement>],
     privileges: &mut Vec<RelationPrivilegeRequirement>,
 ) {
     for expr in &accum.args {
-        collect_expr_relation_privileges(expr, privileges);
+        collect_expr_relation_privileges(expr, query, local_privileges, privileges);
     }
     for item in &accum.order_by {
-        collect_expr_relation_privileges(&item.expr, privileges);
+        collect_expr_relation_privileges(&item.expr, query, local_privileges, privileges);
     }
     if let Some(filter) = &accum.filter {
-        collect_expr_relation_privileges(filter, privileges);
+        collect_expr_relation_privileges(filter, query, local_privileges, privileges);
     }
 }
 
 fn collect_window_clause_relation_privileges(
     clause: &WindowClause,
+    query: &Query,
+    local_privileges: &mut [Option<RelationPrivilegeRequirement>],
     privileges: &mut Vec<RelationPrivilegeRequirement>,
 ) {
     for expr in &clause.spec.partition_by {
-        collect_expr_relation_privileges(expr, privileges);
+        collect_expr_relation_privileges(expr, query, local_privileges, privileges);
     }
     for item in &clause.spec.order_by {
-        collect_expr_relation_privileges(&item.expr, privileges);
+        collect_expr_relation_privileges(&item.expr, query, local_privileges, privileges);
     }
-    collect_window_frame_bound_relation_privileges(&clause.spec.frame.start_bound, privileges);
-    collect_window_frame_bound_relation_privileges(&clause.spec.frame.end_bound, privileges);
+    collect_window_frame_bound_relation_privileges(
+        &clause.spec.frame.start_bound,
+        query,
+        local_privileges,
+        privileges,
+    );
+    collect_window_frame_bound_relation_privileges(
+        &clause.spec.frame.end_bound,
+        query,
+        local_privileges,
+        privileges,
+    );
     for func in &clause.functions {
-        collect_window_func_relation_privileges(func, privileges);
+        collect_window_func_relation_privileges(func, query, local_privileges, privileges);
     }
 }
 
 fn collect_window_frame_bound_relation_privileges(
     bound: &WindowFrameBound,
+    query: &Query,
+    local_privileges: &mut [Option<RelationPrivilegeRequirement>],
     privileges: &mut Vec<RelationPrivilegeRequirement>,
 ) {
     match bound {
         WindowFrameBound::OffsetPreceding(offset) | WindowFrameBound::OffsetFollowing(offset) => {
-            collect_expr_relation_privileges(&offset.expr, privileges);
+            collect_expr_relation_privileges(&offset.expr, query, local_privileges, privileges);
         }
         WindowFrameBound::UnboundedPreceding
         | WindowFrameBound::CurrentRow
@@ -389,41 +416,90 @@ fn collect_window_frame_bound_relation_privileges(
 
 fn collect_window_func_relation_privileges(
     func: &WindowFuncExpr,
+    query: &Query,
+    local_privileges: &mut [Option<RelationPrivilegeRequirement>],
     privileges: &mut Vec<RelationPrivilegeRequirement>,
 ) {
     if let WindowFuncKind::Aggregate(aggref) = &func.kind {
-        collect_aggref_relation_privileges(aggref, privileges);
+        collect_aggref_relation_privileges(aggref, query, local_privileges, privileges);
     }
     for arg in &func.args {
-        collect_expr_relation_privileges(arg, privileges);
+        collect_expr_relation_privileges(arg, query, local_privileges, privileges);
     }
 }
 
 fn collect_aggref_relation_privileges(
     aggref: &crate::include::nodes::primnodes::Aggref,
+    query: &Query,
+    local_privileges: &mut [Option<RelationPrivilegeRequirement>],
     privileges: &mut Vec<RelationPrivilegeRequirement>,
 ) {
     for arg in &aggref.direct_args {
-        collect_expr_relation_privileges(arg, privileges);
+        collect_expr_relation_privileges(arg, query, local_privileges, privileges);
     }
     for arg in &aggref.args {
-        collect_expr_relation_privileges(arg, privileges);
+        collect_expr_relation_privileges(arg, query, local_privileges, privileges);
     }
     for item in &aggref.aggorder {
-        collect_expr_relation_privileges(&item.expr, privileges);
+        collect_expr_relation_privileges(&item.expr, query, local_privileges, privileges);
     }
     if let Some(filter) = &aggref.aggfilter {
-        collect_expr_relation_privileges(filter, privileges);
+        collect_expr_relation_privileges(filter, query, local_privileges, privileges);
+    }
+}
+
+fn mark_selected_relation_column(
+    query: &Query,
+    local_privileges: &mut [Option<RelationPrivilegeRequirement>],
+    privileges: &mut Vec<RelationPrivilegeRequirement>,
+    var: &crate::include::nodes::primnodes::Var,
+) {
+    if var.varlevelsup != 0 || var.varno == 0 || is_special_varno(var.varno) {
+        return;
+    }
+    let rte_index = var.varno - 1;
+    if var.varattno == 0 {
+        if let Some(permission) = local_privileges.get_mut(rte_index).and_then(Option::as_mut) {
+            let Some(rte) = query.rtable.get(rte_index) else {
+                return;
+            };
+            permission.selected_columns = rte.desc.visible_column_indexes();
+        } else if let Some(RangeTblEntry {
+            kind: RangeTblEntryKind::Join { joinaliasvars, .. },
+            ..
+        }) = query.rtable.get(rte_index)
+        {
+            for expr in joinaliasvars {
+                collect_expr_relation_privileges(expr, query, local_privileges, privileges);
+            }
+        }
+        return;
+    }
+    if let Some(column_index) = attrno_index(var.varattno) {
+        if let Some(permission) = local_privileges.get_mut(rte_index).and_then(Option::as_mut) {
+            permission.selected_columns.push(column_index);
+            permission.selected_columns.sort_unstable();
+            permission.selected_columns.dedup();
+        } else if let Some(RangeTblEntry {
+            kind: RangeTblEntryKind::Join { joinaliasvars, .. },
+            ..
+        }) = query.rtable.get(rte_index)
+            && let Some(expr) = joinaliasvars.get(column_index)
+        {
+            collect_expr_relation_privileges(expr, query, local_privileges, privileges);
+        }
     }
 }
 
 fn collect_expr_relation_privileges(
     expr: &Expr,
+    query: &Query,
+    local_privileges: &mut [Option<RelationPrivilegeRequirement>],
     privileges: &mut Vec<RelationPrivilegeRequirement>,
 ) {
     match expr {
-        Expr::Var(_)
-        | Expr::Param(_)
+        Expr::Var(var) => mark_selected_relation_column(query, local_privileges, privileges, var),
+        Expr::Param(_)
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentUser
@@ -438,75 +514,89 @@ fn collect_expr_relation_privileges(
         | Expr::LocalTimestamp { .. }
         | Expr::CaseTest(_) => {}
         Expr::GroupingKey(grouping_key) => {
-            collect_expr_relation_privileges(&grouping_key.expr, privileges);
+            collect_expr_relation_privileges(
+                &grouping_key.expr,
+                query,
+                local_privileges,
+                privileges,
+            );
         }
         Expr::GroupingFunc(grouping_func) => {
             for arg in &grouping_func.args {
-                collect_expr_relation_privileges(arg, privileges);
+                collect_expr_relation_privileges(arg, query, local_privileges, privileges);
             }
         }
-        Expr::Aggref(aggref) => collect_aggref_relation_privileges(aggref, privileges),
-        Expr::WindowFunc(func) => collect_window_func_relation_privileges(func, privileges),
+        Expr::Aggref(aggref) => {
+            collect_aggref_relation_privileges(aggref, query, local_privileges, privileges)
+        }
+        Expr::WindowFunc(func) => {
+            collect_window_func_relation_privileges(func, query, local_privileges, privileges)
+        }
         Expr::Op(op) => {
             for arg in &op.args {
-                collect_expr_relation_privileges(arg, privileges);
+                collect_expr_relation_privileges(arg, query, local_privileges, privileges);
             }
         }
         Expr::Bool(bool_expr) => {
             for arg in &bool_expr.args {
-                collect_expr_relation_privileges(arg, privileges);
+                collect_expr_relation_privileges(arg, query, local_privileges, privileges);
             }
         }
         Expr::Case(case_expr) => {
             if let Some(arg) = &case_expr.arg {
-                collect_expr_relation_privileges(arg, privileges);
+                collect_expr_relation_privileges(arg, query, local_privileges, privileges);
             }
             for arm in &case_expr.args {
-                collect_expr_relation_privileges(&arm.expr, privileges);
-                collect_expr_relation_privileges(&arm.result, privileges);
+                collect_expr_relation_privileges(&arm.expr, query, local_privileges, privileges);
+                collect_expr_relation_privileges(&arm.result, query, local_privileges, privileges);
             }
-            collect_expr_relation_privileges(&case_expr.defresult, privileges);
+            collect_expr_relation_privileges(
+                &case_expr.defresult,
+                query,
+                local_privileges,
+                privileges,
+            );
         }
         Expr::Func(func) => {
             for arg in &func.args {
-                collect_expr_relation_privileges(arg, privileges);
+                collect_expr_relation_privileges(arg, query, local_privileges, privileges);
             }
         }
         Expr::SqlJsonQueryFunction(func) => {
             for child in func.child_exprs() {
-                collect_expr_relation_privileges(child, privileges);
+                collect_expr_relation_privileges(child, query, local_privileges, privileges);
             }
         }
         Expr::SetReturning(srf) => {
             for arg in set_returning_call_exprs(&srf.call) {
-                collect_expr_relation_privileges(arg, privileges);
+                collect_expr_relation_privileges(arg, query, local_privileges, privileges);
             }
         }
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
-                collect_expr_relation_privileges(testexpr, privileges);
+                collect_expr_relation_privileges(testexpr, query, local_privileges, privileges);
             }
             collect_query_relation_privileges_into(&sublink.subselect, privileges);
         }
         Expr::SubPlan(subplan) => {
             if let Some(testexpr) = &subplan.testexpr {
-                collect_expr_relation_privileges(testexpr, privileges);
+                collect_expr_relation_privileges(testexpr, query, local_privileges, privileges);
             }
             for arg in &subplan.args {
-                collect_expr_relation_privileges(arg, privileges);
+                collect_expr_relation_privileges(arg, query, local_privileges, privileges);
             }
         }
         Expr::ScalarArrayOp(saop) => {
-            collect_expr_relation_privileges(&saop.left, privileges);
-            collect_expr_relation_privileges(&saop.right, privileges);
+            collect_expr_relation_privileges(&saop.left, query, local_privileges, privileges);
+            collect_expr_relation_privileges(&saop.right, query, local_privileges, privileges);
         }
         Expr::Xml(xml) => {
             for child in xml.child_exprs() {
-                collect_expr_relation_privileges(child, privileges);
+                collect_expr_relation_privileges(child, query, local_privileges, privileges);
             }
         }
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            collect_expr_relation_privileges(inner, privileges);
+            collect_expr_relation_privileges(inner, query, local_privileges, privileges);
         }
         Expr::Like {
             expr,
@@ -520,42 +610,42 @@ fn collect_expr_relation_privileges(
             escape,
             ..
         } => {
-            collect_expr_relation_privileges(expr, privileges);
-            collect_expr_relation_privileges(pattern, privileges);
+            collect_expr_relation_privileges(expr, query, local_privileges, privileges);
+            collect_expr_relation_privileges(pattern, query, local_privileges, privileges);
             if let Some(escape) = escape {
-                collect_expr_relation_privileges(escape, privileges);
+                collect_expr_relation_privileges(escape, query, local_privileges, privileges);
             }
         }
         Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            collect_expr_relation_privileges(inner, privileges);
+            collect_expr_relation_privileges(inner, query, local_privileges, privileges);
         }
         Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right)
         | Expr::Coalesce(left, right) => {
-            collect_expr_relation_privileges(left, privileges);
-            collect_expr_relation_privileges(right, privileges);
+            collect_expr_relation_privileges(left, query, local_privileges, privileges);
+            collect_expr_relation_privileges(right, query, local_privileges, privileges);
         }
         Expr::ArrayLiteral { elements, .. } => {
             for element in elements {
-                collect_expr_relation_privileges(element, privileges);
+                collect_expr_relation_privileges(element, query, local_privileges, privileges);
             }
         }
         Expr::Row { fields, .. } => {
             for (_, expr) in fields {
-                collect_expr_relation_privileges(expr, privileges);
+                collect_expr_relation_privileges(expr, query, local_privileges, privileges);
             }
         }
         Expr::FieldSelect { expr, .. } => {
-            collect_expr_relation_privileges(expr, privileges);
+            collect_expr_relation_privileges(expr, query, local_privileges, privileges);
         }
         Expr::ArraySubscript { array, subscripts } => {
-            collect_expr_relation_privileges(array, privileges);
+            collect_expr_relation_privileges(array, query, local_privileges, privileges);
             for subscript in subscripts {
                 if let Some(lower) = &subscript.lower {
-                    collect_expr_relation_privileges(lower, privileges);
+                    collect_expr_relation_privileges(lower, query, local_privileges, privileges);
                 }
                 if let Some(upper) = &subscript.upper {
-                    collect_expr_relation_privileges(upper, privileges);
+                    collect_expr_relation_privileges(upper, query, local_privileges, privileges);
                 }
             }
         }

@@ -13,7 +13,7 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
-    expr_contains_set_returning,
+    attrno_index, expr_contains_set_returning,
 };
 use crate::include::nodes::primnodes::{
     JoinType, QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement,
@@ -341,6 +341,8 @@ fn update_privilege_requirement(
     relation: &BoundRelation,
     relation_name: impl Into<String>,
     assignments: &[BoundAssignment],
+    predicate: Option<&Expr>,
+    returning: &[TargetEntry],
 ) -> RelationPrivilegeRequirement {
     let mut requirement =
         relation_privilege_requirement(relation, relation_name, RelationPrivilegeMask::update());
@@ -348,24 +350,239 @@ fn update_privilege_requirement(
         .iter()
         .map(|assignment| assignment.column_index)
         .collect();
+    requirement.selected_columns = assignment_expr_selected_columns(assignments);
+    if let Some(predicate) = predicate {
+        collect_local_selected_columns(predicate, &mut requirement.selected_columns);
+    }
+    for target in returning {
+        collect_local_selected_columns(&target.expr, &mut requirement.selected_columns);
+    }
+    requirement.selected_columns.sort_unstable();
+    requirement.selected_columns.dedup();
+    if !requirement.selected_columns.is_empty() {
+        requirement.required.select = true;
+    }
     requirement
+}
+
+fn assignment_expr_selected_columns(assignments: &[BoundAssignment]) -> Vec<usize> {
+    let mut selected = Vec::new();
+    for assignment in assignments {
+        collect_local_selected_columns(&assignment.expr, &mut selected);
+        for subscript in &assignment.subscripts {
+            if let Some(lower) = &subscript.lower {
+                collect_local_selected_columns(lower, &mut selected);
+            }
+            if let Some(upper) = &subscript.upper {
+                collect_local_selected_columns(upper, &mut selected);
+            }
+        }
+        for step in &assignment.indirection {
+            if let BoundAssignmentTargetIndirection::Subscript(subscript) = step {
+                if let Some(lower) = &subscript.lower {
+                    collect_local_selected_columns(lower, &mut selected);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_local_selected_columns(upper, &mut selected);
+                }
+            }
+        }
+    }
+    selected.sort_unstable();
+    selected.dedup();
+    selected
+}
+
+fn collect_local_selected_columns(expr: &Expr, selected: &mut Vec<usize>) {
+    match expr {
+        Expr::Var(var) => {
+            if let Some(index) = local_modify_var_column_index(var) {
+                selected.push(index);
+            }
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. }
+        | Expr::CaseTest(_) => {}
+        Expr::GroupingKey(grouping_key) => {
+            collect_local_selected_columns(&grouping_key.expr, selected)
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_local_selected_columns(arg, selected);
+            }
+        }
+        Expr::Aggref(aggref) => {
+            for arg in &aggref.direct_args {
+                collect_local_selected_columns(arg, selected);
+            }
+            for arg in &aggref.args {
+                collect_local_selected_columns(arg, selected);
+            }
+            for item in &aggref.aggorder {
+                collect_local_selected_columns(&item.expr, selected);
+            }
+            if let Some(filter) = &aggref.aggfilter {
+                collect_local_selected_columns(filter, selected);
+            }
+        }
+        Expr::WindowFunc(func) => {
+            for arg in &func.args {
+                collect_local_selected_columns(arg, selected);
+            }
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_local_selected_columns(arg, selected);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_local_selected_columns(arg, selected);
+            }
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_local_selected_columns(arg, selected);
+            }
+            for arm in &case_expr.args {
+                collect_local_selected_columns(&arm.expr, selected);
+                collect_local_selected_columns(&arm.result, selected);
+            }
+            collect_local_selected_columns(&case_expr.defresult, selected);
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_local_selected_columns(arg, selected);
+            }
+        }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_local_selected_columns(child, selected);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            for arg in crate::include::nodes::primnodes::set_returning_call_exprs(&srf.call) {
+                collect_local_selected_columns(arg, selected);
+            }
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_local_selected_columns(testexpr, selected);
+            }
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_local_selected_columns(testexpr, selected);
+            }
+            for arg in &subplan.args {
+                collect_local_selected_columns(arg, selected);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_local_selected_columns(&saop.left, selected);
+            collect_local_selected_columns(&saop.right, selected);
+        }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_local_selected_columns(child, selected);
+            }
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            collect_local_selected_columns(inner, selected);
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_local_selected_columns(expr, selected);
+            collect_local_selected_columns(pattern, selected);
+            if let Some(escape) = escape {
+                collect_local_selected_columns(escape, selected);
+            }
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            collect_local_selected_columns(inner, selected);
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_local_selected_columns(left, selected);
+            collect_local_selected_columns(right, selected);
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_local_selected_columns(element, selected);
+            }
+        }
+        Expr::Row { fields, .. } => {
+            for (_, expr) in fields {
+                collect_local_selected_columns(expr, selected);
+            }
+        }
+        Expr::FieldSelect { expr, .. } => collect_local_selected_columns(expr, selected),
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_local_selected_columns(array, selected);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_local_selected_columns(lower, selected);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_local_selected_columns(upper, selected);
+                }
+            }
+        }
+    }
+}
+
+fn local_modify_var_column_index(var: &Var) -> Option<usize> {
+    if var.varlevelsup != 0 {
+        return None;
+    }
+    if var.varno == 1 || matches!(var.varno, OUTER_VAR | INNER_VAR) {
+        attrno_index(var.varattno)
+    } else {
+        None
+    }
 }
 
 fn on_conflict_update_privilege_requirement(
     relation: &BoundRelation,
     relation_name: impl Into<String>,
+    conflict: &BoundOnConflictClause,
     assignments: &[BoundAssignment],
+    predicate: Option<&Expr>,
+    returning: &[TargetEntry],
 ) -> RelationPrivilegeRequirement {
-    let mut requirement = relation_privilege_requirement(
-        relation,
-        relation_name,
-        RelationPrivilegeMask {
-            select: true,
-            update: true,
-            ..RelationPrivilegeMask::default()
-        },
-    );
-    requirement.selected_columns = relation.desc.visible_column_indexes();
+    let mut requirement =
+        relation_privilege_requirement(relation, relation_name, RelationPrivilegeMask::update());
+    requirement.selected_columns = on_conflict_selected_columns(conflict, assignments, predicate);
+    for target in returning {
+        collect_local_selected_columns(&target.expr, &mut requirement.selected_columns);
+    }
+    requirement.selected_columns.sort_unstable();
+    requirement.selected_columns.dedup();
+    if !requirement.selected_columns.is_empty() {
+        requirement.required.select = true;
+    }
     requirement.updated_columns = assignments
         .iter()
         .map(|assignment| assignment.column_index)
@@ -373,11 +590,58 @@ fn on_conflict_update_privilege_requirement(
     requirement
 }
 
+fn on_conflict_selected_columns(
+    conflict: &BoundOnConflictClause,
+    assignments: &[BoundAssignment],
+    predicate: Option<&Expr>,
+) -> Vec<usize> {
+    let mut selected = assignment_expr_selected_columns(assignments);
+    for index in &conflict.arbiter_indexes {
+        for attnum in index
+            .index_meta
+            .indkey
+            .iter()
+            .take(index.index_meta.indnkeyatts.max(0) as usize)
+        {
+            if let Some(column_index) = attrno_index(i32::from(*attnum)) {
+                selected.push(column_index);
+            }
+        }
+        for expr in &index.index_exprs {
+            collect_local_selected_columns(expr, &mut selected);
+        }
+        if let Some(predicate) = &index.index_predicate {
+            collect_local_selected_columns(predicate, &mut selected);
+        }
+    }
+    if let Some(predicate) = predicate {
+        collect_local_selected_columns(predicate, &mut selected);
+    }
+    selected.sort_unstable();
+    selected.dedup();
+    selected
+}
+
 fn delete_privilege_requirement(
     relation: &BoundRelation,
     relation_name: impl Into<String>,
+    predicate: Option<&Expr>,
+    returning: &[TargetEntry],
 ) -> RelationPrivilegeRequirement {
-    relation_privilege_requirement(relation, relation_name, RelationPrivilegeMask::delete())
+    let mut requirement =
+        relation_privilege_requirement(relation, relation_name, RelationPrivilegeMask::delete());
+    if let Some(predicate) = predicate {
+        collect_local_selected_columns(predicate, &mut requirement.selected_columns);
+    }
+    for target in returning {
+        collect_local_selected_columns(&target.expr, &mut requirement.selected_columns);
+    }
+    requirement.selected_columns.sort_unstable();
+    requirement.selected_columns.dedup();
+    if !requirement.selected_columns.is_empty() {
+        requirement.required.select = true;
+    }
+    requirement
 }
 
 fn merge_privilege_requirement(
@@ -4318,15 +4582,25 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         &stmt.table_name,
         &target_columns,
     )];
-    if let Some(BoundOnConflictClause {
-        action: BoundOnConflictAction::Update { assignments, .. },
-        ..
-    }) = &on_conflict
+    if let Some(
+        conflict @ BoundOnConflictClause {
+            action:
+                BoundOnConflictAction::Update {
+                    assignments,
+                    predicate,
+                    ..
+                },
+            ..
+        },
+    ) = &on_conflict
     {
         required_privileges.push(on_conflict_update_privilege_requirement(
             &entry,
             &stmt.table_name,
+            conflict,
             assignments,
+            predicate.as_ref(),
+            &returning,
         ));
     }
 
@@ -4525,6 +4799,8 @@ fn bind_simple_update(
         &entry,
         &stmt.table_name,
         &assignments,
+        predicate.as_ref(),
+        &returning,
     )];
 
     Ok(BoundUpdateStatement {
@@ -4727,6 +5003,8 @@ fn bind_update_from(
         &entry,
         &stmt.table_name,
         &assignments,
+        predicate.as_ref(),
+        &returning,
     )];
 
     Ok(BoundUpdateStatement {
@@ -4938,6 +5216,12 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
             )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+    let required_privileges = vec![delete_privilege_requirement(
+        &entry,
+        &stmt.table_name,
+        predicate.as_ref(),
+        &returning,
+    )];
 
     Ok(BoundDeleteStatement {
         targets,
@@ -4947,7 +5231,7 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
         visible_column_count: entry.desc.columns.len(),
         target_ctid_index: entry.desc.columns.len(),
         target_tableoid_index: entry.desc.columns.len() + 1,
-        required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
+        required_privileges,
         subplans: Vec::new(),
         current_of: stmt.current_of.clone(),
     })
@@ -5071,6 +5355,12 @@ fn bind_delete_using(
             )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+    let required_privileges = vec![delete_privilege_requirement(
+        &entry,
+        &stmt.table_name,
+        predicate.as_ref(),
+        &returning,
+    )];
 
     Ok(BoundDeleteStatement {
         targets,
@@ -5080,7 +5370,7 @@ fn bind_delete_using(
         visible_column_count,
         target_ctid_index: visible_column_count,
         target_tableoid_index: visible_column_count + 1,
-        required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
+        required_privileges,
         subplans: Vec::new(),
         current_of: stmt.current_of.clone(),
     })

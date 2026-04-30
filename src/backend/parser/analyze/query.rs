@@ -101,15 +101,13 @@ impl AnalyzedFrom {
                 wire_type_oid: None,
             })
             .collect::<Vec<_>>();
-        let selected_columns = desc.visible_column_indexes();
         let privilege_name = relation_name.clone();
-        let mut permission = RelationPrivilegeRequirement::new(
+        let permission = RelationPrivilegeRequirement::new(
             relation_oid,
             privilege_name,
             relkind,
             RelationPrivilegeMask::select(),
         );
-        permission.selected_columns = selected_columns;
         Self {
             rtable: vec![RangeTblEntry {
                 alias: Some(relation_name.clone()),
