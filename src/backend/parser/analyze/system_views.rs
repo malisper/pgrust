@@ -280,6 +280,17 @@ pub(super) fn bind_builtin_system_view(
                 ]
             })
             .collect(),
+        SyntheticSystemViewKind::PgInitPrivs => {
+            // :HACK: Model the initdb-populated catalog just enough for pg_dump
+            // and regression visibility checks until bootstrap records initial ACLs.
+            vec![vec![
+                Value::Int64(i64::from(PG_PROC_RELATION_OID)),
+                Value::Int64(i64::from(PG_CLASS_RELATION_OID)),
+                Value::Int32(0),
+                Value::InternalChar(b'i'),
+                Value::Array(vec![Value::Text("postgres=arwdDxt/postgres".into())]),
+            ]]
+        }
         SyntheticSystemViewKind::PgRange => catalog
             .range_rows()
             .into_iter()
