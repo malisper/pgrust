@@ -3624,6 +3624,7 @@ impl Database {
                 client_id,
                 &heap,
                 &index,
+                target_tablespace,
                 xid,
                 cid,
                 catalog_effects,
@@ -3660,6 +3661,7 @@ impl Database {
         client_id: ClientId,
         heap: &crate::backend::parser::BoundRelation,
         index: &crate::backend::parser::BoundIndexRelation,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3701,6 +3703,9 @@ impl Database {
             index.index_meta.indisunique,
             index.index_meta.indisprimary,
             index.index_meta.indnullsnotdistinct,
+            target_tablespace
+                .map(|target| target.oid)
+                .or_else(|| (index.rel.spc_oid != 0).then_some(index.rel.spc_oid)),
             xid,
             cid,
             index.index_meta.am_oid,
@@ -3748,21 +3753,6 @@ impl Database {
             cid,
             catalog_effects,
         )?;
-        if let Some(toast) = relation.toast
-            && let Some(toast_relation) = catalog.lookup_relation_by_oid(toast.relation_oid)
-        {
-            self.reindex_relation_index_set_in_transaction(
-                client_id,
-                catalog,
-                &toast_relation,
-                concurrently,
-                verbose,
-                None,
-                xid,
-                cid,
-                catalog_effects,
-            )?;
-        }
         Ok(())
     }
 
@@ -3784,6 +3774,7 @@ impl Database {
             relation,
             concurrently,
             verbose,
+            target_tablespace,
             xid,
             cid,
             catalog_effects,
@@ -3797,6 +3788,7 @@ impl Database {
                 &toast_relation,
                 concurrently,
                 verbose,
+                None,
                 xid,
                 cid,
                 catalog_effects,
@@ -3812,6 +3804,7 @@ impl Database {
         relation: &crate::backend::parser::BoundRelation,
         concurrently: bool,
         verbose: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
