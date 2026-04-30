@@ -274,6 +274,10 @@ pub enum Plan {
         plan_info: PlanEstimate,
         children: Vec<Plan>,
     },
+    BitmapAnd {
+        plan_info: PlanEstimate,
+        children: Vec<Plan>,
+    },
     BitmapHeapScan {
         plan_info: PlanEstimate,
         source_id: usize,
@@ -462,6 +466,7 @@ impl Plan {
             | Plan::IndexScan { plan_info, .. }
             | Plan::BitmapIndexScan { plan_info, .. }
             | Plan::BitmapOr { plan_info, .. }
+            | Plan::BitmapAnd { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
             | Plan::Materialize { plan_info, .. }
@@ -500,6 +505,7 @@ impl Plan {
             | Plan::IndexScan { plan_info, .. }
             | Plan::BitmapIndexScan { plan_info, .. }
             | Plan::BitmapOr { plan_info, .. }
+            | Plan::BitmapAnd { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
             | Plan::Materialize { plan_info, .. }
@@ -558,7 +564,9 @@ impl Plan {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => vec![],
+            Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } | Plan::BitmapAnd { .. } => {
+                vec![]
+            }
             Plan::BitmapHeapScan { desc, .. } => desc
                 .columns
                 .iter()

@@ -13996,6 +13996,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             Plan::CteScan { .. } => true,
             Plan::Append { children, .. }
             | Plan::BitmapOr { children, .. }
+            | Plan::BitmapAnd { children, .. }
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => children.iter().any(plan_contains_cte_scan),
             Plan::Hash { input, .. }

@@ -6,7 +6,7 @@ use crate::backend::executor::expr_ops::{
     order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
 use crate::backend::executor::{ExecError, Value, cast_value};
-use crate::backend::parser::{ParseError, is_binary_coercible_type};
+use crate::backend::parser::ParseError;
 use crate::include::catalog::builtin_type_row_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::parsenodes::{
@@ -18,7 +18,7 @@ use crate::include::nodes::primnodes::{
     Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, RowsFromSource,
     ScalarFunctionImpl, SetReturningCall, SortGroupClause, SqlJsonQueryFunction,
     SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLinkType, TargetEntry, WindowClause,
-    WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, XmlExpr, expr_sql_type_hint,
+    WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, XmlExpr,
 };
 
 pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
@@ -990,51 +990,7 @@ fn simplify_where_null_scalar_array_ops(expr: Expr) -> Expr {
                 })),
             }
         }
-        Expr::ScalarArrayOp(saop) if scalar_array_null_where_is_false(&saop) => {
-            Expr::Const(Value::Bool(false))
-        }
         other => other,
-    }
-}
-
-fn scalar_array_null_where_is_false(
-    saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
-) -> bool {
-    let Some(left_type) = transparent_scalar_array_left_type(&saop.left) else {
-        return false;
-    };
-    let Some(array_type) = scalar_array_null_array_type(&saop.right) else {
-        return matches!(*saop.right, Expr::Const(Value::Null));
-    };
-    if !array_type.is_array {
-        return false;
-    }
-    let element_type = array_type.element_type();
-    is_binary_coercible_type(left_type, element_type)
-        || is_binary_coercible_type(element_type, left_type)
-}
-
-fn scalar_array_right_is_null(expr: &Expr) -> bool {
-    matches!(expr, Expr::Const(Value::Null)) || scalar_array_null_array_type(expr).is_some()
-}
-
-fn scalar_array_null_array_type(expr: &Expr) -> Option<SqlType> {
-    match expr {
-        Expr::Cast(inner, ty) if scalar_array_right_is_null(inner) => Some(*ty),
-        Expr::Collate { expr: inner, .. } => scalar_array_null_array_type(inner),
-        _ => None,
-    }
-}
-
-fn transparent_scalar_array_left_type(expr: &Expr) -> Option<SqlType> {
-    match expr {
-        Expr::Cast(inner, target_type) => {
-            let source_type = transparent_scalar_array_left_type(inner)?;
-            is_binary_coercible_type(source_type, *target_type).then_some(*target_type)
-        }
-        Expr::Collate { expr: inner, .. } => transparent_scalar_array_left_type(inner),
-        Expr::Var(_) | Expr::Param(_) => expr_sql_type_hint(expr),
-        _ => None,
     }
 }
 
@@ -1506,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn where_scalar_array_null_folds_to_false() {
+    fn where_scalar_array_null_preserves_plan_qual() {
         let expr = Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             op: crate::backend::parser::SubqueryComparisonOp::Eq,
             use_or: true,
@@ -1518,10 +1474,10 @@ mod tests {
             collation_oid: None,
         }));
 
-        assert_eq!(
+        assert!(matches!(
             simplify_where_qual(expr).unwrap(),
-            Expr::Const(Value::Bool(false))
-        );
+            Expr::ScalarArrayOp(_)
+        ));
     }
 
     #[test]

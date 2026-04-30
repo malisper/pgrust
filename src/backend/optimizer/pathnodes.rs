@@ -59,6 +59,7 @@ impl Path {
             | Self::IndexScan { plan_info, .. }
             | Self::BitmapIndexScan { plan_info, .. }
             | Self::BitmapOr { plan_info, .. }
+            | Self::BitmapAnd { plan_info, .. }
             | Self::BitmapHeapScan { plan_info, .. }
             | Self::Filter { plan_info, .. }
             | Self::NestedLoopJoin { plan_info, .. }
@@ -106,7 +107,9 @@ impl Path {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
+            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } | Self::BitmapAnd { .. } => {
+                Vec::new()
+            }
             Self::BitmapHeapScan { desc, .. } => desc
                 .columns
                 .iter()
@@ -181,7 +184,9 @@ impl Path {
             | Self::BitmapHeapScan {
                 source_id, desc, ..
             } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
-            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
+            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } | Self::BitmapAnd { .. } => {
+                Vec::new()
+            }
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
             | Self::IncrementalSort { input, .. }
@@ -327,6 +332,7 @@ impl Path {
             | Self::IndexScan { pathtarget, .. }
             | Self::BitmapIndexScan { pathtarget, .. }
             | Self::BitmapOr { pathtarget, .. }
+            | Self::BitmapAnd { pathtarget, .. }
             | Self::BitmapHeapScan { pathtarget, .. }
             | Self::Filter { pathtarget, .. }
             | Self::NestedLoopJoin { pathtarget, .. }
@@ -356,6 +362,7 @@ impl Path {
             | Self::SeqScan { .. }
             | Self::BitmapIndexScan { .. }
             | Self::BitmapOr { .. }
+            | Self::BitmapAnd { .. }
             | Self::BitmapHeapScan { .. }
             | Self::CteScan { .. }
             | Self::WorkTableScan { .. }

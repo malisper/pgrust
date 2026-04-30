@@ -4150,6 +4150,37 @@ impl Session {
         }
     }
 
+    fn reindex_partitioned_relation_transaction_error(
+        &self,
+        catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
+        stmt: &crate::backend::parser::ReindexIndexStatement,
+    ) -> Option<ExecError> {
+        let relation = catalog.lookup_any_relation(&stmt.index_name)?;
+        let (command, kind) = match (&stmt.kind, relation.relkind) {
+            (crate::backend::parser::ReindexTargetKind::Index, 'I') => {
+                ("REINDEX INDEX", "partitioned index")
+            }
+            (crate::backend::parser::ReindexTargetKind::Table, 'p') => {
+                ("REINDEX TABLE", "partitioned table")
+            }
+            _ => return None,
+        };
+        let name = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .map(|row| {
+                let schema = catalog
+                    .namespace_row_by_oid(row.relnamespace)
+                    .map(|namespace| namespace.nspname)
+                    .unwrap_or_else(|| "public".into());
+                format!("{schema}.{}", row.relname)
+            })
+            .unwrap_or_else(|| stmt.index_name.clone());
+        Some(ExecError::Parse(
+            ParseError::ActiveSqlTransaction(command)
+                .with_context(format!("while reindexing {kind} \"{name}\"")),
+        ))
+    }
+
     fn event_trigger_command_tag(stmt: &Statement) -> Option<&'static str> {
         match stmt {
             Statement::CreateTable(_) | Statement::CreateTableAs(_) => Some("CREATE TABLE"),
@@ -11027,6 +11058,11 @@ impl Session {
                         return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(command)));
                     }
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    if let Some(err) =
+                        self.reindex_partitioned_relation_transaction_error(&catalog, reindex_stmt)
+                    {
+                        return Err(err);
+                    }
                     match reindex_stmt.kind {
                         crate::backend::parser::ReindexTargetKind::Index => {
                             if let Some(index) =

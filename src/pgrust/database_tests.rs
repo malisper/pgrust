@@ -40560,13 +40560,27 @@ fn index_matrix_non_indexed_predicate_falls_back_to_seqscan() {
 }
 
 #[test]
-fn index_matrix_or_predicate_falls_back_to_seqscan() {
+fn index_matrix_or_predicate_uses_scalar_array_index_scan() {
     let db = setup_index_matrix_db("index_matrix_or");
-    assert_explain_uses_seqscan(
+    assert_explain_uses_index(
         &db,
         1,
         "select note from items where a = 1 or a = 2",
-        "items",
+        "items_a_idx",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select note from items where a = 1 or a = 2 order by note",
+        ),
+        vec![
+            vec![Value::Text("a1".into())],
+            vec![Value::Text("a2".into())],
+            vec![Value::Text("b1".into())],
+            vec![Value::Text("b2".into())],
+            vec![Value::Text("b3".into())],
+        ]
     );
 }
 

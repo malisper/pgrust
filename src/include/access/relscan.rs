@@ -60,6 +60,20 @@ impl GistSearchItem {
             GistSearchItemKind::Page { .. } => None,
         }
     }
+
+    fn tied_unbounded_distances(&self, other: &Self) -> bool {
+        !self.distances.is_empty()
+            && self
+                .distances
+                .iter()
+                .zip(other.distances.iter())
+                .all(|(left, right)| {
+                    !left.is_null
+                        && !right.is_null
+                        && ((left.value.is_infinite() && right.value.is_infinite())
+                            || (left.value.is_nan() && right.value.is_nan()))
+                })
+    }
 }
 
 impl Ord for GistSearchItem {
@@ -87,6 +101,7 @@ impl Ord for GistSearchItem {
         match (self.is_heap(), other.is_heap()) {
             (true, false) => Ordering::Greater,
             (false, true) => Ordering::Less,
+            _ if self.tied_unbounded_distances(other) => other.ordinal.cmp(&self.ordinal),
             _ => self.ordinal.cmp(&other.ordinal),
         }
     }

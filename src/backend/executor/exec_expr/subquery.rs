@@ -204,6 +204,7 @@ fn plan_is_exists_membership_safe(plan: &Plan) -> bool {
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
         | Plan::WorkTableScan { .. } => true,
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }

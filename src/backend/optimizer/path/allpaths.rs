@@ -1252,6 +1252,48 @@ fn bool_args(expr: &Expr, op: BoolExprType) -> Option<&[Expr]> {
     }
 }
 
+fn expr_contains_subplan(expr: &Expr) -> bool {
+    match expr {
+        Expr::SubPlan(_) | Expr::SubLink(_) => true,
+        Expr::Op(op) => op.args.iter().any(expr_contains_subplan),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_subplan),
+        Expr::Func(func) => func.args.iter().any(expr_contains_subplan),
+        Expr::Case(case_expr) => {
+            case_expr.arg.as_deref().is_some_and(expr_contains_subplan)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_subplan(&arm.expr) || expr_contains_subplan(&arm.result)
+                })
+                || expr_contains_subplan(&case_expr.defresult)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_subplan(&saop.left) || expr_contains_subplan(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_subplan),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_subplan(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_subplan(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript.lower.as_ref().is_some_and(expr_contains_subplan)
+                        || subscript.upper.as_ref().is_some_and(expr_contains_subplan)
+                })
+        }
+        Expr::FieldSelect { expr, .. }
+        | Expr::Cast(expr, _)
+        | Expr::Collate { expr, .. }
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr) => expr_contains_subplan(expr),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_subplan(left) || expr_contains_subplan(right)
+        }
+        Expr::Like { expr, pattern, .. } => {
+            expr_contains_subplan(expr) || expr_contains_subplan(pattern)
+        }
+        _ => false,
+    }
+}
+
 fn split_bitmap_or_filter(filter: &Expr) -> Option<BitmapOrFilter> {
     if let Some(arms) = bool_args(filter, BoolExprType::Or) {
         return Some(BitmapOrFilter {
@@ -1295,17 +1337,22 @@ fn bitmap_or_arm_filter(arm: &Expr, common_quals: &[Expr]) -> Expr {
 }
 
 fn bitmap_or_arm_recheck(spec: &IndexPathSpec) -> Option<Expr> {
-    and_exprs(if spec.recheck_quals.is_empty() {
+    let mut quals = if spec.recheck_quals.is_empty() {
         spec.used_quals.clone()
     } else {
         spec.recheck_quals.clone()
-    })
+    };
+    quals.extend(spec.filter_quals.clone());
+    and_exprs(quals)
 }
 
-fn bitmap_or_child_index_rel(child: &Path) -> Option<RelFileLocator> {
-    match child {
-        Path::BitmapIndexScan { index_rel, .. } => Some(*index_rel),
-        _ => None,
+fn bitmap_path_uses_partial_index(path: &Path) -> bool {
+    match path {
+        Path::BitmapIndexScan { index_meta, .. } => index_meta.indpred.is_some(),
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
+            children.iter().any(bitmap_path_uses_partial_index)
+        }
+        _ => false,
     }
 }
 
@@ -1351,14 +1398,11 @@ fn collect_bitmap_or_paths(
         return Vec::new();
     }
 
-    let mut children = Vec::new();
-    let mut recheck_arms = Vec::new();
-    for arm in &or_filter.arms {
-        let arm_filter = bitmap_or_arm_filter(arm, &or_filter.common_quals);
+    let best_bitmap_child_for_filter = |candidate_filter: &Expr| -> Option<(Path, Expr)> {
         let mut best_child = None;
         for index in &indexes {
             let Some(spec) = build_index_path_spec(
-                Some(&arm_filter),
+                Some(candidate_filter),
                 None,
                 index,
                 config.retain_partial_index_filters,
@@ -1395,24 +1439,78 @@ fn collect_bitmap_or_paths(
                 best_child = Some((child_cost, child, recheck));
             }
         }
-        let Some((_, child, recheck)) = best_child else {
+        best_child.map(|(_, child, recheck)| (child, recheck))
+    };
+    let bitmap_index_signature = |path: &Path| -> Option<(String, usize)> {
+        match path {
+            Path::BitmapIndexScan {
+                index_name,
+                index_quals,
+                ..
+            } => Some((index_name.clone(), index_quals.len())),
+            _ => None,
+        }
+    };
+    let combined_arms_use_more_of_same_index =
+        |combined: &[(Path, Expr)], split: &[(Path, Expr)]| -> bool {
+            combined.len() == split.len()
+                && combined.iter().zip(split.iter()).all(
+                    |((combined_child, _), (split_child, _))| {
+                        let Some((combined_index, combined_quals)) =
+                            bitmap_index_signature(combined_child)
+                        else {
+                            return false;
+                        };
+                        let Some((split_index, split_quals)) = bitmap_index_signature(split_child)
+                        else {
+                            return false;
+                        };
+                        combined_index == split_index && combined_quals > split_quals
+                    },
+                )
+        };
+
+    let common_bitmap = and_exprs(or_filter.common_quals.clone())
+        .and_then(|common_filter| best_bitmap_child_for_filter(&common_filter));
+    let mut combined_arm_choices = Vec::new();
+    for arm in &or_filter.arms {
+        let arm_filter = bitmap_or_arm_filter(arm, &or_filter.common_quals);
+        let Some((child, recheck)) = best_bitmap_child_for_filter(&arm_filter) else {
             return Vec::new();
         };
+        combined_arm_choices.push((child, recheck));
+    }
+    let split_arm_choices = if common_bitmap.is_some() {
+        let mut choices = Vec::new();
+        for arm in &or_filter.arms {
+            let Some((child, recheck)) = best_bitmap_child_for_filter(arm) else {
+                return Vec::new();
+            };
+            choices.push((child, recheck));
+        }
+        Some(choices)
+    } else {
+        None
+    };
+    let use_combined_arms = common_bitmap.is_none()
+        || split_arm_choices.as_ref().is_some_and(|split| {
+            combined_arms_use_more_of_same_index(&combined_arm_choices, split)
+        });
+    let arm_choices = if use_combined_arms {
+        combined_arm_choices
+    } else {
+        split_arm_choices.unwrap_or_default()
+    };
+    let mut children = Vec::new();
+    let mut recheck_arms = Vec::new();
+    for (child, recheck) in arm_choices {
         children.push(child);
         recheck_arms.push(recheck);
     }
-    let distinct_indexes = children
-        .iter()
-        .filter_map(bitmap_or_child_index_rel)
-        .collect::<BTreeSet<_>>();
-    if distinct_indexes.len() < 2 {
-        return Vec::new();
-    }
-
-    let Some(recheck_expr) = or_exprs(recheck_arms) else {
+    let Some(or_recheck_expr) = or_exprs(recheck_arms) else {
         return Vec::new();
     };
-    let rows = children
+    let mut rows = children
         .iter()
         .map(|child| child.plan_info().plan_rows.as_f64())
         .sum::<f64>()
@@ -1425,12 +1523,56 @@ fn collect_bitmap_or_paths(
         .iter()
         .map(|child| child.plan_info().total_cost.as_f64())
         .sum::<f64>();
-    let total_cost = child_cost + rows * 0.01;
     let bitmapqual = Path::BitmapOr {
         plan_info: PlanEstimate::new(startup_cost, child_cost, rows, 0),
         pathtarget: PathTarget::new(Vec::new()),
         children,
     };
+    let (bitmapqual, recheck_expr, startup_cost, child_cost, filter_qual) = if let Some((
+        common_child,
+        common_recheck,
+    )) =
+        common_bitmap.filter(|_| !use_combined_arms)
+    {
+        rows = rows
+            .min(common_child.plan_info().plan_rows.as_f64())
+            .max(1.0);
+        let recheck_expr = and_exprs(vec![common_recheck, or_recheck_expr])
+            .expect("common and OR recheck quals are present");
+        let startup_cost = startup_cost + common_child.plan_info().startup_cost.as_f64();
+        let child_cost = child_cost + common_child.plan_info().total_cost.as_f64();
+        (
+            Path::BitmapAnd {
+                plan_info: PlanEstimate::new(startup_cost, child_cost, rows, 0),
+                pathtarget: PathTarget::new(Vec::new()),
+                children: vec![common_child, bitmapqual],
+            },
+            recheck_expr,
+            startup_cost,
+            child_cost,
+            Vec::new(),
+        )
+    } else {
+        let filter_qual = if or_filter.common_quals.is_empty() {
+            Vec::new()
+        } else if bitmap_path_uses_partial_index(&bitmapqual) {
+            Vec::new()
+        } else if or_filter.common_quals.len() > 1 {
+            and_exprs(or_filter.common_quals.clone())
+                .into_iter()
+                .collect()
+        } else {
+            or_exprs(or_filter.arms.clone()).into_iter().collect()
+        };
+        (
+            bitmapqual,
+            or_recheck_expr,
+            startup_cost,
+            child_cost,
+            filter_qual,
+        )
+    };
+    let total_cost = child_cost + rows * 0.01;
     vec![Path::BitmapHeapScan {
         plan_info: PlanEstimate::new(startup_cost, total_cost, rows, stats.width),
         pathtarget: slot_output_target(rtindex, &desc.columns, |column| column.sql_type),
@@ -1442,7 +1584,7 @@ fn collect_bitmap_or_paths(
         desc,
         bitmapqual: Box::new(bitmapqual),
         recheck_qual: vec![recheck_expr],
-        filter_qual: or_filter.common_quals,
+        filter_qual,
     }]
 }
 
@@ -1564,11 +1706,21 @@ fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<
                 }
             }
         }
-        Expr::Aggref(_)
-        | Expr::WindowFunc(_)
-        | Expr::SetReturning(_)
-        | Expr::SubLink(_)
-        | Expr::SubPlan(_) => {
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_expr_attrs_for_rel(testexpr, rtindex, attrs);
+            }
+            for arg in &subplan.args {
+                collect_expr_attrs_for_rel(arg, rtindex, attrs);
+            }
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_expr_attrs_for_rel(testexpr, rtindex, attrs);
+            }
+            collect_query_outer_attrs_for_rel(&sublink.subselect, rtindex, attrs);
+        }
+        Expr::Aggref(_) | Expr::WindowFunc(_) | Expr::SetReturning(_) => {
             attrs.insert(usize::MAX);
         }
         Expr::Param(_)
@@ -1585,6 +1737,163 @@ fn collect_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => {}
+    }
+}
+
+fn collect_query_outer_attrs_for_rel(query: &Query, rtindex: usize, attrs: &mut BTreeSet<usize>) {
+    for target in &query.target_list {
+        collect_outer_expr_attrs_for_rel(&target.expr, rtindex, attrs);
+    }
+    if let Some(where_qual) = &query.where_qual {
+        collect_outer_expr_attrs_for_rel(where_qual, rtindex, attrs);
+    }
+    for expr in &query.group_by {
+        collect_outer_expr_attrs_for_rel(expr, rtindex, attrs);
+    }
+    if let Some(having_qual) = &query.having_qual {
+        collect_outer_expr_attrs_for_rel(having_qual, rtindex, attrs);
+    }
+    for item in &query.sort_clause {
+        collect_outer_expr_attrs_for_rel(&item.expr, rtindex, attrs);
+    }
+    if let Some(jointree) = &query.jointree {
+        collect_join_tree_outer_attrs_for_rel(jointree, rtindex, attrs);
+    }
+    if let Some(recursive) = &query.recursive_union {
+        collect_query_outer_attrs_for_rel(&recursive.anchor, rtindex, attrs);
+        collect_query_outer_attrs_for_rel(&recursive.recursive, rtindex, attrs);
+    }
+    if let Some(set_operation) = &query.set_operation {
+        for input in &set_operation.inputs {
+            collect_query_outer_attrs_for_rel(input, rtindex, attrs);
+        }
+    }
+}
+
+fn collect_join_tree_outer_attrs_for_rel(
+    jointree: &JoinTreeNode,
+    rtindex: usize,
+    attrs: &mut BTreeSet<usize>,
+) {
+    match jointree {
+        JoinTreeNode::RangeTblRef(_) => {}
+        JoinTreeNode::JoinExpr {
+            left, right, quals, ..
+        } => {
+            collect_join_tree_outer_attrs_for_rel(left, rtindex, attrs);
+            collect_join_tree_outer_attrs_for_rel(right, rtindex, attrs);
+            collect_outer_expr_attrs_for_rel(quals, rtindex, attrs);
+        }
+    }
+}
+
+fn collect_outer_expr_attrs_for_rel(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<usize>) {
+    match expr {
+        Expr::Var(var) => {
+            if var.varlevelsup > 0
+                && (var.varno == rtindex || rte_slot_varno(var.varno) == Some(rtindex))
+                && !is_system_attr(var.varattno)
+                && let Some(index) = attrno_index(var.varattno)
+            {
+                attrs.insert(index);
+            }
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .for_each(|arg| collect_outer_expr_attrs_for_rel(arg, rtindex, attrs)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .for_each(|arg| collect_outer_expr_attrs_for_rel(arg, rtindex, attrs)),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_outer_expr_attrs_for_rel(arg, rtindex, attrs);
+            }
+            for arm in &case_expr.args {
+                collect_outer_expr_attrs_for_rel(&arm.expr, rtindex, attrs);
+                collect_outer_expr_attrs_for_rel(&arm.result, rtindex, attrs);
+            }
+            collect_outer_expr_attrs_for_rel(&case_expr.defresult, rtindex, attrs);
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .for_each(|arg| collect_outer_expr_attrs_for_rel(arg, rtindex, attrs)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .for_each(|arg| collect_outer_expr_attrs_for_rel(arg, rtindex, attrs)),
+        Expr::ScalarArrayOp(saop) => {
+            collect_outer_expr_attrs_for_rel(&saop.left, rtindex, attrs);
+            collect_outer_expr_attrs_for_rel(&saop.right, rtindex, attrs);
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .for_each(|child| collect_outer_expr_attrs_for_rel(child, rtindex, attrs)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => {
+            collect_outer_expr_attrs_for_rel(inner, rtindex, attrs)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_outer_expr_attrs_for_rel(expr, rtindex, attrs);
+            collect_outer_expr_attrs_for_rel(pattern, rtindex, attrs);
+            if let Some(escape) = escape.as_deref() {
+                collect_outer_expr_attrs_for_rel(escape, rtindex, attrs);
+            }
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_outer_expr_attrs_for_rel(left, rtindex, attrs);
+            collect_outer_expr_attrs_for_rel(right, rtindex, attrs);
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .for_each(|element| collect_outer_expr_attrs_for_rel(element, rtindex, attrs)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .for_each(|(_, expr)| collect_outer_expr_attrs_for_rel(expr, rtindex, attrs)),
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_outer_expr_attrs_for_rel(array, rtindex, attrs);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_outer_expr_attrs_for_rel(lower, rtindex, attrs);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_outer_expr_attrs_for_rel(upper, rtindex, attrs);
+                }
+            }
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_outer_expr_attrs_for_rel(testexpr, rtindex, attrs);
+            }
+            for arg in &subplan.args {
+                collect_outer_expr_attrs_for_rel(arg, rtindex, attrs);
+            }
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_outer_expr_attrs_for_rel(testexpr, rtindex, attrs);
+            }
+            collect_query_outer_attrs_for_rel(&sublink.subselect, rtindex, attrs);
+        }
+        _ => {}
     }
 }
 
@@ -1669,12 +1978,22 @@ fn collect_relation_access_paths(
                 && !index.index_meta.indkey.is_empty()
         })
     {
-        let target_index_only =
-            filter.is_none() && index_supports_index_only_attrs(index, required_index_only_attrs);
+        let target_index_only = index_supports_index_only_attrs(index, required_index_only_attrs);
         let full_index_only_scan = target_index_only
             || (!config.enable_seqscan
                 && filter.is_none()
                 && index_supports_index_only_attrs(index, &visible_user_attr_indexes(&desc)));
+        let order_removing_index_scan_available = config.enable_indexscan
+            && access_method_supports_index_scan(index.index_meta.am_oid)
+            && query_order_items.as_ref().is_some_and(|order_items| {
+                build_index_path_spec(
+                    filter.as_ref(),
+                    Some(order_items),
+                    index,
+                    config.retain_partial_index_filters,
+                )
+                .is_some_and(|spec| spec.removes_order)
+            });
         let index_spec = build_index_path_spec(
             filter.as_ref(),
             None,
@@ -1708,6 +2027,8 @@ fn collect_relation_access_paths(
                 && !prefer_plain_index_scan
                 && access_method_supports_bitmap_scan(index.index_meta.am_oid)
                 && brin_partial_bitmap_allowed(index, config)
+                && !order_removing_index_scan_available
+                && !target_index_only_unique_btree(index, target_index_only)
             {
                 paths.push(
                     estimate_bitmap_candidate(
@@ -1743,7 +2064,31 @@ fn collect_relation_access_paths(
                     &stats,
                     full_index_scan_spec(index, filter.clone()),
                     None,
-                    target_index_only,
+                    false,
+                    config,
+                    catalog,
+                )
+                .plan,
+            );
+        }
+        if config.enable_indexscan
+            && query_order_items.is_none()
+            && filter.as_ref().is_some_and(expr_contains_subplan)
+            && target_index_only
+            && access_method_supports_index_scan(index.index_meta.am_oid)
+        {
+            paths.push(
+                estimate_index_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_name.clone(),
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    full_index_scan_spec(index, filter.clone()),
+                    None,
+                    true,
                     config,
                     catalog,
                 )
@@ -1796,7 +2141,7 @@ fn collect_relation_access_paths(
                     &stats,
                     spec,
                     Some(order_items.clone()),
-                    false,
+                    target_index_only,
                     config,
                     catalog,
                 )
@@ -1821,6 +2166,15 @@ fn collect_relation_access_paths(
         paths = seq_paths;
     }
     paths
+}
+
+fn target_index_only_unique_btree(
+    index: &crate::backend::parser::BoundIndexRelation,
+    target_index_only: bool,
+) -> bool {
+    target_index_only
+        && index.index_meta.indisunique
+        && index.index_meta.am_oid == crate::include::catalog::BTREE_AM_OID
 }
 
 fn mark_seqscan_disabled(path: &mut Path) {
@@ -3915,18 +4269,6 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         .get(rtindex)
         .and_then(Option::as_ref)
         .and_then(base_filter_expr);
-    if !is_append_child_rel(root, rtindex)
-        && base_filter.as_ref().is_some_and(scalar_array_null_filter)
-    {
-        if let Some(rel) = root
-            .simple_rel_array
-            .get_mut(rtindex)
-            .and_then(Option::as_mut)
-        {
-            add_one_time_false_path(rel, rtindex, rte.desc.clone(), catalog, root.config);
-        }
-        return;
-    }
     let required_index_only_attrs = collect_required_index_only_attrs_for_root(
         root,
         rtindex,

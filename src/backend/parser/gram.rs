@@ -220,6 +220,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_alter_table_add_unnamed_constraint_statement(&sql, options)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_table_cluster_on_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_trigger_state_statement(&sql)? {
         return Ok(stmt);
     }
@@ -871,6 +874,37 @@ fn parse_column_def_sql(column_sql: &str) -> Result<ColumnDef, ParseError> {
     let mut pairs = pgrust_sql_grammar::parse_rule(Rule::column_def, column_sql)
         .map_err(|err| map_pest_error("column definition", column_sql, err))?;
     build_column_def(pairs.next().ok_or(ParseError::UnexpectedEof)?)
+}
+
+fn try_parse_alter_table_cluster_on_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter table") {
+        return Ok(None);
+    }
+    let rest = consume_keyword(trimmed, "alter table").trim_start();
+    let (_if_exists, _only, table_name, rest) = parse_alter_table_target_sql(rest)?;
+    let mut rest = rest.trim_start();
+    if !keyword_at_start(rest, "cluster") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "cluster").trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, index_name), rest) = parse_schema_qualified_name(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE CLUSTER ON statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(Some(Statement::Cluster(ClusterStatement {
+        table_name,
+        index_name: schema_name
+            .map(|schema| format!("{schema}.{index_name}"))
+            .unwrap_or(index_name),
+    })))
 }
 
 fn try_parse_alter_table_add_column_with_fdw_options(

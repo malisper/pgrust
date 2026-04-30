@@ -5622,6 +5622,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
         match plan {
             Plan::Append { children, .. }
             | Plan::BitmapOr { children, .. }
+            | Plan::BitmapAnd { children, .. }
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => {
                 for child in children {

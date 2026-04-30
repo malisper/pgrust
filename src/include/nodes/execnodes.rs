@@ -507,6 +507,7 @@ impl std::fmt::Debug for BitmapIndexScanState {
 pub enum BitmapQualState {
     Index(Box<BitmapIndexScanState>),
     Or(Box<BitmapOrState>),
+    And(Box<BitmapAndState>),
 }
 
 impl std::fmt::Debug for BitmapQualState {
@@ -514,6 +515,7 @@ impl std::fmt::Debug for BitmapQualState {
         match self {
             BitmapQualState::Index(state) => state.fmt(f),
             BitmapQualState::Or(state) => state.fmt(f),
+            BitmapQualState::And(state) => state.fmt(f),
         }
     }
 }
@@ -529,6 +531,22 @@ pub struct BitmapOrState {
 impl std::fmt::Debug for BitmapOrState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BitmapOrState")
+            .field("children", &self.children.len())
+            .finish()
+    }
+}
+
+pub struct BitmapAndState {
+    pub(crate) children: Vec<BitmapQualState>,
+    pub(crate) bitmap: TidBitmap,
+    pub(crate) executed: bool,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for BitmapAndState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitmapAndState")
             .field("children", &self.children.len())
             .finish()
     }

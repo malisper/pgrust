@@ -49,14 +49,14 @@ use crate::include::catalog::{
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState, GatherState,
-    IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState, MergeAppendState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
-    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
-    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState, ValuesState,
-    WindowAggState, WorkTableScanState,
+    AggregateState, AppendState, BitmapAndState, BitmapHeapScanState, BitmapIndexScanState,
+    BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
+    GatherState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState,
+    LockRowsState, MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState,
+    MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
+    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan, Plan,
@@ -965,6 +965,28 @@ fn expand_array_equality_scan_keys(
         .collect()
 }
 
+fn array_scan_expansion_preserves_index_order(keys: &[ScanKeyData]) -> bool {
+    let Some(array_attno) = keys.iter().find_map(|key| {
+        (key.strategy == 3 && key.argument.as_array_value().is_some())
+            .then_some(key.attribute_number)
+    }) else {
+        return true;
+    };
+    if array_attno <= 1 {
+        return true;
+    }
+    (1..array_attno).all(|attno| {
+        keys.iter().any(|key| {
+            key.attribute_number == attno
+                && key.strategy == 3
+                && key.argument.as_array_value().is_none()
+        }) && keys.iter().all(|key| {
+            key.attribute_number != attno
+                || (key.strategy == 3 && key.argument.as_array_value().is_none())
+        })
+    })
+}
+
 fn begin_index_only_scan(
     state: &mut IndexOnlyScanState,
     ctx: &mut ExecutorContext,
@@ -973,14 +995,13 @@ fn begin_index_only_scan(
         let Some(key_data) = eval_index_scan_keys(&state.keys, ctx, true)? else {
             return Ok(false);
         };
-        let mut scans = expand_array_equality_scan_keys(
-            key_data,
-            state.order_by_keys.is_empty()
-                && matches!(
-                    state.direction,
-                    crate::include::access::relscan::ScanDirection::Forward
-                ),
-        );
+        let allow_array_expansion = state.order_by_keys.is_empty()
+            && matches!(
+                state.direction,
+                crate::include::access::relscan::ScanDirection::Forward
+            )
+            && array_scan_expansion_preserves_index_order(&key_data);
+        let mut scans = expand_array_equality_scan_keys(key_data, allow_array_expansion);
         scans.reverse();
         state.pending_array_scan_keys = scans;
         state.array_scan_seen_tids.clear();
@@ -1028,14 +1049,13 @@ fn begin_index_scan(
         let Some(key_data) = eval_index_scan_keys(&state.keys, ctx, true)? else {
             return Ok(false);
         };
-        let mut scans = expand_array_equality_scan_keys(
-            key_data,
-            state.order_by_keys.is_empty()
-                && matches!(
-                    state.direction,
-                    crate::include::access::relscan::ScanDirection::Forward
-                ),
-        );
+        let allow_array_expansion = state.order_by_keys.is_empty()
+            && matches!(
+                state.direction,
+                crate::include::access::relscan::ScanDirection::Forward
+            )
+            && array_scan_expansion_preserves_index_order(&key_data);
+        let mut scans = expand_array_equality_scan_keys(key_data, allow_array_expansion);
         scans.reverse();
         state.pending_array_scan_keys = scans;
         state.array_scan_seen_tids.clear();
@@ -2892,7 +2912,7 @@ fn render_index_scan_key(
     };
     if purpose == 's' && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
         match key.strategy {
-            0 => return Some(format!("{column_name} IS NULL")),
+            0 | 3 => return Some(format!("{column_name} IS NULL")),
             1 => return Some(format!("{column_name} IS NOT NULL")),
             _ => {}
         }
@@ -2935,7 +2955,7 @@ fn render_index_scan_key(
         IndexScanKeyArgument::Const(value) => match display_type {
             Some(sql_type) => format!(
                 "{}::{}",
-                render_explain_literal(value),
+                render_explain_typed_literal(value, sql_type),
                 render_explain_sql_type_name(sql_type)
             ),
             None => render_explain_literal(value),
@@ -3112,7 +3132,12 @@ fn index_key_argument_display_type(
         {
             Some(SqlType::new(column_type.kind))
         }
-        IndexScanKeyArgument::Const(Value::Int32(_)) if column_type.kind == SqlTypeKind::Int4 => {
+        IndexScanKeyArgument::Const(Value::Int32(value))
+            if column_type.kind == SqlTypeKind::Int4 =>
+        {
+            (*value < 0).then_some(column_type)
+        }
+        IndexScanKeyArgument::Const(Value::Bool(_)) if column_type.kind == SqlTypeKind::Bool => {
             None
         }
         IndexScanKeyArgument::Const(value) => value.sql_type_hint(),
@@ -3248,6 +3273,7 @@ impl BitmapQualState {
         match self {
             BitmapQualState::Index(state) => state.fill_bitmap(ctx),
             BitmapQualState::Or(state) => state.fill_bitmap(ctx),
+            BitmapQualState::And(state) => state.fill_bitmap(ctx),
         }
     }
 
@@ -3255,6 +3281,7 @@ impl BitmapQualState {
         match self {
             BitmapQualState::Index(state) => &state.bitmap,
             BitmapQualState::Or(state) => &state.bitmap,
+            BitmapQualState::And(state) => &state.bitmap,
         }
     }
 
@@ -3262,6 +3289,7 @@ impl BitmapQualState {
         match self {
             BitmapQualState::Index(state) => state.stats.rows,
             BitmapQualState::Or(state) => state.stats.rows,
+            BitmapQualState::And(state) => state.stats.rows,
         }
     }
 
@@ -3285,6 +3313,16 @@ impl BitmapQualState {
                 );
             }
             BitmapQualState::Or(state) => {
+                format_explain_lines_with_costs(
+                    state.as_ref(),
+                    indent,
+                    analyze,
+                    show_costs,
+                    timing,
+                    lines,
+                );
+            }
+            BitmapQualState::And(state) => {
                 format_explain_lines_with_costs(
                     state.as_ref(),
                     indent,
@@ -3320,6 +3358,42 @@ impl BitmapOrState {
 
         self.executed = true;
         self.stats.rows = rows;
+        finish_eof(&mut self.stats, start, ctx);
+        Ok(())
+    }
+}
+
+impl BitmapAndState {
+    fn fill_bitmap(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if self.executed {
+            return Ok(());
+        }
+
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+
+        let mut children = self.children.iter_mut();
+        let Some(first) = children.next() else {
+            self.executed = true;
+            self.stats.rows = 0;
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(());
+        };
+        first.fill_bitmap(ctx)?;
+        self.bitmap = first.bitmap().clone();
+        let mut rows = first.rows();
+        for child in children {
+            child.fill_bitmap(ctx)?;
+            rows = rows.min(child.rows());
+            self.bitmap.intersect_with(child.bitmap());
+        }
+
+        self.executed = true;
+        self.stats.rows = rows.min(self.bitmap.len() as u64);
         finish_eof(&mut self.stats, start, ctx);
         Ok(())
     }
@@ -3442,6 +3516,58 @@ impl PlanNode for BitmapOrState {
 
     fn node_label(&self) -> String {
         "BitmapOr".into()
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        for child in &self.children {
+            child.explain(indent + 1, analyze, show_costs, timing, lines);
+        }
+    }
+}
+
+impl PlanNode for BitmapAndState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        _ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        Err(internal_exec_error(
+            "bitmap and cannot produce tuples directly",
+        ))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        None
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &EMPTY_SYSTEM_BINDINGS
+    }
+
+    fn column_names(&self) -> &[String] {
+        &[]
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "BitmapAnd".into()
     }
 
     fn explain_children(
@@ -4328,6 +4454,9 @@ fn render_explain_func_expr(
         return render_explain_jsonb_path_query_array_function(func, qualifier, column_names);
     }
     let name = match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPoint) => {
+            func.funcname.clone().unwrap_or_else(|| "point".into())
+        }
         ScalarFunctionImpl::Builtin(builtin) => builtin_scalar_function_name(builtin),
         ScalarFunctionImpl::UserDefined { proc_oid } => func
             .funcname
@@ -5397,7 +5526,11 @@ fn comparison_cast_literal_display_type(left: &Expr, right: &Expr) -> Option<Sql
         }
         _ => return None,
     };
-    matches!(sql_type.kind, SqlTypeKind::Int8 | SqlTypeKind::Numeric).then_some(sql_type)
+    matches!(
+        sql_type.kind,
+        SqlTypeKind::Int2 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+    )
+    .then_some(sql_type)
 }
 
 fn expr_has_bpchar_display_type(expr: &Expr) -> bool {
@@ -6141,7 +6274,7 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
 
 fn render_explain_typed_literal(value: &Value, sql_type: SqlType) -> String {
     match sql_type.kind {
-        SqlTypeKind::Int8 | SqlTypeKind::Numeric => {
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric => {
             format!("'{}'", render_explain_literal(value).trim_matches('\''))
         }
         _ => render_explain_literal(value),

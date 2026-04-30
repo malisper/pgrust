@@ -116,6 +116,7 @@ pub const GIST_POINT_PENALTY_PROC_OID: u32 = 76032;
 pub const GIST_POINT_PICKSPLIT_PROC_OID: u32 = 76033;
 pub const GIST_POINT_SAME_PROC_OID: u32 = 76034;
 pub const GIST_POINT_SORTSUPPORT_PROC_OID: u32 = 76035;
+pub const GIST_POINT_DISTANCE_PROC_OID: u32 = 76036;
 pub const GIST_POLY_CONSISTENT_PROC_OID: u32 = 76630;
 pub const GIST_POLY_UNION_PROC_OID: u32 = 76631;
 pub const GIST_POLY_PENALTY_PROC_OID: u32 = 76632;
@@ -15334,6 +15335,24 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[POINT_TYPE_OID, POINT_TYPE_OID, INTERNAL_TYPE_OID]),
             "gist_point_same",
             3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_POINT_DISTANCE_PROC_OID,
+            "gist_point_distance",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                POINT_TYPE_OID,
+                INT2_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "gist_point_distance",
+            5,
             false,
             false,
             'f',

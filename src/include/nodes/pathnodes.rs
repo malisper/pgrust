@@ -551,6 +551,11 @@ pub enum Path {
         pathtarget: PathTarget,
         children: Vec<Path>,
     },
+    BitmapAnd {
+        plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        children: Vec<Path>,
+    },
     BitmapHeapScan {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,

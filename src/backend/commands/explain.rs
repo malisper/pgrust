@@ -201,6 +201,7 @@ fn annotate_modify_subplan_runtime_labels(
             annotate_modify_index_key_runtime_labels(keys, outer_names, inner_names);
         }
         Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
@@ -557,7 +558,9 @@ pub(crate) fn apply_runtime_pruning_for_explain_plan(
                 }
             }
         }
-        Plan::BitmapOr { children, .. } | Plan::SetOp { children, .. } => {
+        Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => {
             *children = prune_runtime_explain_children(std::mem::take(children), ctx);
         }
         Plan::BitmapHeapScan { bitmapqual, .. } => prune_runtime_explain_box(bitmapqual, ctx),
@@ -638,6 +641,7 @@ fn renumber_append_child_aliases(plan: &mut Plan, ordinal: usize) {
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::SetOp { children, .. } => {
             for child in children {
                 renumber_append_child_aliases(child, ordinal);
@@ -2437,9 +2441,17 @@ fn nonverbose_sort_items(
     if !display_items.is_empty() {
         return display_items
             .iter()
-            .map(|item| {
-                remap_sort_display_item_through_aggregate(input, item)
-                    .unwrap_or_else(|| item.clone())
+            .zip(items.iter())
+            .map(|(display_item, item)| {
+                let mut rendered = remap_sort_display_item_through_aggregate(input, display_item)
+                    .unwrap_or_else(|| display_item.clone());
+                if sort_item_needs_extra_expression_parens(&item.expr, &rendered) {
+                    rendered = format!("({rendered})");
+                }
+                if item.descending && !rendered.ends_with(" DESC") {
+                    rendered.push_str(" DESC");
+                }
+                rendered
             })
             .collect();
     }
@@ -2447,7 +2459,8 @@ fn nonverbose_sort_items(
     {
         input.column_names()
     } else {
-        qualified_scan_output_names(input)
+        sort_input_column_names(input)
+            .or_else(|| qualified_scan_output_names(input))
             .unwrap_or_else(|| verbose_plan_output_exprs(input, ctx, true))
     };
     items
@@ -2457,6 +2470,34 @@ fn nonverbose_sort_items(
                 .unwrap_or_else(|| render_nonverbose_sort_item(item, &input_names, ctx))
         })
         .collect()
+}
+
+fn sort_input_column_names(plan: &Plan) -> Option<Vec<String>> {
+    match plan {
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        } => Some(qualified_scan_output_exprs(relation_name, desc)),
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. } => sort_input_column_names(input),
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children.first().and_then(sort_input_column_names)
+        }
+        _ => None,
+    }
 }
 
 fn partial_aggregate_append_sort_item(
@@ -2618,6 +2659,9 @@ fn render_nonverbose_sort_item(
     ctx: &VerboseExplainContext,
 ) -> String {
     let mut rendered = render_verbose_expr(&item.expr, input_names, ctx);
+    if sort_item_needs_extra_expression_parens(&item.expr, &rendered) {
+        rendered = format!("({rendered})");
+    }
     if item.descending {
         rendered.push_str(" DESC");
     }
@@ -2631,6 +2675,20 @@ fn render_nonverbose_sort_item(
         });
     }
     rendered
+}
+
+fn sort_item_needs_extra_expression_parens(expr: &Expr, rendered: &str) -> bool {
+    let already_wrapped = rendered.starts_with('(') && rendered.ends_with(')');
+    (rendered.starts_with('(') && !already_wrapped)
+        || (!already_wrapped
+            && matches!(
+                expr,
+                Expr::Func(func)
+                    if matches!(
+                        func.implementation,
+                        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoDistance)
+                    )
+            ))
 }
 
 fn render_nonverbose_aggregate_group_key(
@@ -5045,6 +5103,7 @@ fn collect_leaf_relation_bases(plan: &Plan, bases: &mut Vec<String>) {
         }
         Plan::BitmapIndexScan { .. }
         | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
         | Plan::FunctionScan { .. }
         | Plan::Result { .. }
         | Plan::Values { .. }
@@ -5192,7 +5251,8 @@ fn collect_inherited_relation_leaf_sources(
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. }
-        | Plan::BitmapOr { children, .. } => {
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => {
             for child in children {
                 collect_inherited_relation_leaf_sources(
                     child,
@@ -5542,7 +5602,7 @@ fn plan_join_output_exprs(
             desc,
             ..
         } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
-        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } | Plan::BitmapAnd { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
@@ -5947,7 +6007,7 @@ fn verbose_plan_output_exprs(
             desc,
             ..
         } => qualified_base_scan_output_exprs(relation_name, desc),
-        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } | Plan::BitmapAnd { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
@@ -7367,7 +7427,9 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => Vec::new(),
-        Plan::BitmapOr { children, .. } => children.iter().collect(),
+        Plan::BitmapOr { children, .. } | Plan::BitmapAnd { children, .. } => {
+            children.iter().collect()
+        }
         Plan::BitmapHeapScan { bitmapqual, .. } => vec![bitmapqual.as_ref()],
         Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
             flattened_append_children(children)
@@ -7550,6 +7612,7 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
         | Plan::BitmapHeapScan { .. }
         | Plan::Limit { .. }
         | Plan::LockRows { .. }

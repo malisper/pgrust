@@ -21,11 +21,11 @@ use crate::include::nodes::plannodes::{
     PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR,
-    OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, RowsFromSource, ScalarArrayOpExpr,
-    SetReturningCall, SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind,
-    XmlExpr, attrno_index, is_executor_special_varno, is_system_attr, set_returning_call_exprs,
-    user_attrno,
+    AggAccum, Aggref, BoolExpr, BuiltinScalarFunction, Expr, ExprArraySubscript, FuncExpr,
+    INNER_VAR, JoinType, OUTER_VAR, OpExpr, OrderByEntry, Param, ParamKind, QueryColumn,
+    RowsFromSource, ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SubPlan, TargetEntry,
+    Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+    is_executor_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1573,7 +1573,7 @@ fn path_single_relid(path: &Path) -> Option<usize> {
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
         Path::Values { slot_id, .. } => rte_slot_varno(*slot_id),
-        Path::BitmapOr { .. } => None,
+        Path::BitmapOr { .. } | Path::BitmapAnd { .. } => None,
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
         | Path::Projection { input, .. }
@@ -2380,6 +2380,21 @@ fn render_param_label_expr(root: &PlannerInfo, expr: &Expr, ctx: &SetRefsContext
                 [inner] => format!("({op_text}{})", render_param_label_expr(root, inner, ctx)),
                 _ => crate::backend::executor::render_explain_expr(expr, &[]),
             }
+        }
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPoint)
+            ) =>
+        {
+            let name = func.funcname.as_deref().unwrap_or("point");
+            let args = func
+                .args
+                .iter()
+                .map(|arg| render_param_label_expr(root, arg, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}({args})")
         }
         Expr::Const(value) => {
             let rendered =
@@ -3522,10 +3537,12 @@ fn index_scan_can_use_index_only(
     let covered_columns = index_meta
         .indkey
         .iter()
-        .filter_map(|attnum| {
-            (*attnum > 0)
-                .then(|| usize::try_from(*attnum).ok()?.checked_sub(1))
-                .flatten()
+        .enumerate()
+        .filter_map(|(index_pos, attnum)| {
+            if !index_scan_column_can_return(am_oid, index_meta, index_pos) {
+                return None;
+            }
+            (*attnum > 0).then(|| usize::try_from(*attnum).ok()?.checked_sub(1))?
         })
         .collect::<BTreeSet<_>>();
     if covered_columns.is_empty() {
@@ -3551,6 +3568,32 @@ fn index_scan_can_use_index_only(
             .sort_clause
             .iter()
             .all(|clause| expr_uses_only_index_keys(&clause.expr, source_id, &covered_columns))
+}
+
+fn index_scan_column_can_return(
+    am_oid: u32,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index_pos: usize,
+) -> bool {
+    if am_oid != crate::include::catalog::GIST_AM_OID {
+        return true;
+    }
+    !matches!(
+        index_meta.opfamily_oids.get(index_pos).copied(),
+        Some(
+            crate::include::catalog::GIST_POLY_FAMILY_OID
+                | crate::include::catalog::GIST_CIRCLE_FAMILY_OID
+        )
+    ) && !matches!(
+        index_meta.indclass.get(index_pos).copied(),
+        Some(
+            crate::include::catalog::POLY_GIST_OPCLASS_OID
+                | crate::include::catalog::CIRCLE_GIST_OPCLASS_OID
+        )
+    ) && !matches!(
+        index_meta.opcintype_oids.get(index_pos).copied(),
+        Some(crate::include::catalog::POLYGON_TYPE_OID | crate::include::catalog::CIRCLE_TYPE_OID)
+    )
 }
 
 fn expr_uses_only_index_keys(
@@ -3934,6 +3977,7 @@ fn collect_plan_external_exec_paramids(
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => {}
         Plan::Append { children, .. }
         | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::SetOp { children, .. } => {
             children
                 .iter()
@@ -4468,7 +4512,7 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
                 allowed_exec_params,
             );
         }
-        Plan::BitmapOr { children, .. } => {
+        Plan::BitmapOr { children, .. } | Plan::BitmapAnd { children, .. } => {
             children.iter().for_each(validate_executable_plan);
         }
         Plan::BitmapHeapScan {
@@ -4999,7 +5043,7 @@ fn validate_planner_path(path: &Path) {
         Path::BitmapIndexScan { keys, .. } => {
             validate_planner_index_scan_keys(keys, "BitmapIndexScan", "keys");
         }
-        Path::BitmapOr { children, .. } => {
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
             for child in children {
                 validate_planner_path(child);
             }
@@ -6016,6 +6060,20 @@ fn set_bitmap_or_references(
     }
 }
 
+fn set_bitmap_and_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    children: Vec<Path>,
+) -> Plan {
+    Plan::BitmapAnd {
+        plan_info,
+        children: children
+            .into_iter()
+            .map(|child| set_plan_refs(ctx, child))
+            .collect(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn set_bitmap_heap_scan_references(
     ctx: &mut SetRefsContext<'_>,
@@ -6371,6 +6429,7 @@ fn plan_contains_values_scan(plan: &Plan) -> bool {
         } => plan_contains_values_scan(input),
         Plan::Append { children, .. }
         | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().any(plan_contains_values_scan),
         Plan::NestedLoopJoin { left, right, .. }
@@ -6418,6 +6477,7 @@ fn plan_contains_sql_xml_table_scan(plan: &Plan) -> bool {
         } => plan_contains_sql_xml_table_scan(input),
         Plan::Append { children, .. }
         | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().any(plan_contains_sql_xml_table_scan),
         Plan::NestedLoopJoin { left, right, .. }
@@ -6460,6 +6520,7 @@ fn annotate_runtime_index_labels(plan: &mut Plan, param_labels: &BTreeMap<usize,
             annotate_runtime_index_key_labels(keys, param_labels);
         }
         Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
@@ -6531,6 +6592,7 @@ fn runtime_label_for_single_param(
             .iter()
             .find_map(|key| runtime_key_label_for_single_param(key, paramid, param_labels)),
         Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children
@@ -7756,6 +7818,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             children,
             ..
         } => set_bitmap_or_references(ctx, plan_info, children),
+        Path::BitmapAnd {
+            plan_info,
+            children,
+            ..
+        } => set_bitmap_and_references(ctx, plan_info, children),
         Path::BitmapHeapScan {
             plan_info,
             source_id,
