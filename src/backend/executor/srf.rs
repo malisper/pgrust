@@ -26,8 +26,8 @@ use crate::backend::utils::time::datetime::{
 };
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, INT4_TYPE_OID, REGTYPE_TYPE_OID, TEXT_TYPE_OID,
-    builtin_scalar_function_for_proc_oid,
+    BOOL_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, REGTYPE_TYPE_OID, TEXT_TYPE_OID,
+    builtin_scalar_function_for_proc_row,
 };
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
@@ -116,6 +116,10 @@ pub(crate) fn eval_set_returning_call(
             eval_partition_ancestors(relid, slot, ctx)
         }
         SetReturningCall::PgLockStatus { .. } => eval_pg_lock_status(ctx),
+        SetReturningCall::PgSequences { .. } => eval_pg_sequences(ctx),
+        SetReturningCall::InformationSchemaSequences { .. } => {
+            eval_information_schema_sequences(ctx)
+        }
         SetReturningCall::TxidSnapshotXip { arg, .. } => eval_txid_snapshot_xip(arg, slot, ctx),
         SetReturningCall::TextSearchTableFunction { kind, args, .. } => {
             eval_text_search_table_function(*kind, args, slot, ctx)
@@ -541,7 +545,7 @@ fn execute_native_set_returning_function(
         "pg_event_trigger_dropped_objects" => Some(eval_pg_event_trigger_dropped_objects()),
         "pg_stats_ext_mcvlist_items" => Some(eval_pg_mcv_list_items(&values)?),
         _ => {
-            if let Some(func) = builtin_scalar_function_for_proc_oid(row.oid) {
+            if let Some(func) = builtin_scalar_function_for_proc_row(row) {
                 let value = eval_native_builtin_scalar_value_call(func, &values, false, ctx)?;
                 Some(match value {
                     Value::Record(record) => vec![TupleSlot::virtual_row(record.fields)],
@@ -1417,6 +1421,8 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
         SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
         SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
         SetReturningCall::PgLockStatus { .. } => "pg_lock_status",
+        SetReturningCall::PgSequences { .. } => "pg_sequences",
+        SetReturningCall::InformationSchemaSequences { .. } => "information_schema.sequences",
         SetReturningCall::TxidSnapshotXip { .. } => "txid_snapshot_xip",
         SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
@@ -1883,6 +1889,143 @@ fn eval_pg_lock_status(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecErro
         .unwrap_or_default()
         .into_iter()
         .map(TupleSlot::virtual_row)
+        .collect())
+}
+
+fn sequence_catalog(ctx: &ExecutorContext) -> Result<&dyn CatalogLookup, ExecError> {
+    ctx.catalog
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "sequence view requires executor catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })
+}
+
+fn sequence_type_display(type_oid: u32) -> (&'static str, i32) {
+    match type_oid {
+        INT2_TYPE_OID => ("smallint", 16),
+        INT4_TYPE_OID => ("integer", 32),
+        INT8_TYPE_OID => ("bigint", 64),
+        _ => ("bigint", 64),
+    }
+}
+
+struct SequenceViewRow {
+    schema: String,
+    name: String,
+    owner: String,
+    type_oid: u32,
+    start: i64,
+    minvalue: i64,
+    maxvalue: i64,
+    increment: i64,
+    cycle: bool,
+    cache: i64,
+    last_value: Option<i64>,
+}
+
+fn sequence_rows(ctx: &ExecutorContext) -> Result<Vec<SequenceViewRow>, ExecError> {
+    let catalog = sequence_catalog(ctx)?;
+    let sequences = ctx
+        .sequences
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "sequence runtime is not available".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let roles = catalog.authid_rows();
+    let mut rows = Vec::new();
+    for class in catalog
+        .class_rows()
+        .into_iter()
+        .filter(|class| class.relkind == 'S')
+    {
+        let Some(data) = sequences.sequence_data(class.oid) else {
+            continue;
+        };
+        let schema = catalog
+            .namespace_row_by_oid(class.relnamespace)
+            .map(|row| row.nspname)
+            .unwrap_or_else(|| "public".to_string());
+        let owner = roles
+            .iter()
+            .find(|role| role.oid == class.relowner)
+            .map(|role| role.rolname.clone())
+            .unwrap_or_else(|| class.relowner.to_string());
+        rows.push(SequenceViewRow {
+            schema,
+            name: class.relname,
+            owner,
+            type_oid: data.options.type_oid,
+            start: data.options.start,
+            minvalue: data.options.minvalue,
+            maxvalue: data.options.maxvalue,
+            increment: data.options.increment,
+            cycle: data.options.cycle,
+            cache: data.options.cache,
+            last_value: data.state.is_called.then_some(data.state.last_value),
+        });
+    }
+    rows.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.schema.cmp(&right.schema))
+    });
+    Ok(rows)
+}
+
+fn eval_pg_sequences(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError> {
+    Ok(sequence_rows(ctx)?
+        .into_iter()
+        .map(|row| {
+            let (type_name, _) = sequence_type_display(row.type_oid);
+            let last_value = row.last_value.map(Value::Int64).unwrap_or(Value::Null);
+            TupleSlot::virtual_row(vec![
+                Value::Text(row.schema.into()),
+                Value::Text(row.name.into()),
+                Value::Text(row.owner.into()),
+                Value::Text(type_name.into()),
+                Value::Int64(row.start),
+                Value::Int64(row.minvalue),
+                Value::Int64(row.maxvalue),
+                Value::Int64(row.increment),
+                Value::Bool(row.cycle),
+                Value::Int64(row.cache),
+                last_value,
+            ])
+        })
+        .collect())
+}
+
+fn eval_information_schema_sequences(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError> {
+    let sequence_catalog = if ctx.current_database_name.eq_ignore_ascii_case("postgres") {
+        "regression".to_string()
+    } else {
+        ctx.current_database_name.clone()
+    };
+    Ok(sequence_rows(ctx)?
+        .into_iter()
+        .map(|row| {
+            let (type_name, precision) = sequence_type_display(row.type_oid);
+            TupleSlot::virtual_row(vec![
+                Value::Text(sequence_catalog.clone().into()),
+                Value::Text(row.schema.into()),
+                Value::Text(row.name.into()),
+                Value::Text(type_name.into()),
+                Value::Int32(precision),
+                Value::Int32(2),
+                Value::Int32(0),
+                Value::Text(row.start.to_string().into()),
+                Value::Text(row.minvalue.to_string().into()),
+                Value::Text(row.maxvalue.to_string().into()),
+                Value::Text(row.increment.to_string().into()),
+                Value::Text(if row.cycle { "YES" } else { "NO" }.into()),
+            ])
+        })
         .collect())
 }
 

@@ -130,6 +130,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_comment_on_operator_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_comment_on_sequence_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_comment_on_type_or_column_statement(&sql)? {
         return Ok(stmt);
     }
@@ -8784,6 +8787,7 @@ fn try_parse_sequence_statement(sql: &str) -> Result<Option<Statement>, ParseErr
     if lowered.starts_with("create sequence ")
         || lowered.starts_with("create temp sequence ")
         || lowered.starts_with("create temporary sequence ")
+        || lowered.starts_with("create unlogged sequence ")
     {
         return build_create_sequence_statement(trimmed)
             .map(|stmt| Some(Statement::CreateSequence(stmt)));
@@ -8804,6 +8808,41 @@ fn try_parse_sequence_statement(sql: &str) -> Result<Option<Statement>, ParseErr
             .map(|stmt| Some(Statement::AlterSequenceRename(stmt)));
     }
     build_alter_sequence_statement(trimmed).map(|stmt| Some(Statement::AlterSequence(stmt)))
+}
+
+fn try_parse_comment_on_sequence_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed
+        .to_ascii_lowercase()
+        .starts_with("comment on sequence ")
+    {
+        return Ok(None);
+    }
+    let Some(rest) = trimmed.get("comment on sequence".len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON SEQUENCE name IS ...",
+            actual: sql.into(),
+        });
+    };
+    let Some(is_index) = find_top_level_keyword(rest, "is") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.trim().into(),
+        });
+    };
+    let sequence_name = rest[..is_index].trim();
+    if sequence_name.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "sequence name",
+            actual: sql.into(),
+        });
+    }
+    Ok(Some(Statement::CommentOnSequence(
+        CommentOnSequenceStatement {
+            sequence_name: sequence_name.to_string(),
+            comment: parse_comment_value(&rest[is_index..], "end of COMMENT ON SEQUENCE")?,
+        },
+    )))
 }
 
 fn try_parse_alter_table_identity_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -9030,6 +9069,12 @@ fn merge_sequence_option_patch(
     if patch.increment.is_some() {
         target.increment = patch.increment;
     }
+    if patch.as_type.is_some() {
+        target.as_type = patch.as_type;
+    }
+    if patch.persistence.is_some() {
+        target.persistence = patch.persistence;
+    }
     if patch.minvalue.is_some() {
         target.minvalue = patch.minvalue;
     }
@@ -9129,9 +9174,11 @@ fn parse_sequence_owned_by(input: &str) -> Result<(SequenceOwnedByClause, &str),
             },
             rest,
         )),
-        _ => Err(ParseError::UnexpectedToken {
-            expected: "OWNED BY table.column or OWNED BY NONE",
-            actual: input.into(),
+        _ => Err(ParseError::DetailedError {
+            message: "invalid OWNED BY option".into(),
+            detail: None,
+            hint: Some("Specify OWNED BY table.column or OWNED BY NONE.".into()),
+            sqlstate: "42601",
         }),
     }
 }
@@ -9203,6 +9250,22 @@ fn parse_sequence_option_spec(input: &str) -> Result<(SequenceOptionsSpec, &str)
         if trimmed.is_empty() {
             return Ok((options, trimmed));
         }
+        if keyword_at_start(trimmed, "as") {
+            let (type_name, remainder) = parse_sequence_as_type(consume_keyword(trimmed, "as"))?;
+            options.as_type = Some(type_name);
+            rest = remainder;
+            continue;
+        }
+        if keyword_at_start(trimmed, "logged") {
+            options.persistence = Some(TablePersistence::Permanent);
+            rest = consume_keyword(trimmed, "logged");
+            continue;
+        }
+        if keyword_at_start(trimmed, "unlogged") {
+            options.persistence = Some(TablePersistence::Unlogged);
+            rest = consume_keyword(trimmed, "unlogged");
+            continue;
+        }
         if keyword_at_start(trimmed, "increment") {
             let mut next = consume_keyword(trimmed, "increment").trim_start();
             if keyword_at_start(next, "by") {
@@ -9246,10 +9309,7 @@ fn parse_sequence_option_spec(input: &str) -> Result<(SequenceOptionsSpec, &str)
             continue;
         }
         if keyword_at_start(trimmed, "cache") {
-            let (value, remainder) = parse_positive_i64_token(
-                consume_keyword(trimmed, "cache"),
-                "positive CACHE value",
-            )?;
+            let (value, remainder) = parse_signed_i64_token(consume_keyword(trimmed, "cache"))?;
             options.cache = Some(value);
             rest = remainder;
             continue;
@@ -9274,6 +9334,13 @@ fn parse_sequence_option_spec(input: &str) -> Result<(SequenceOptionsSpec, &str)
     }
 }
 
+fn parse_sequence_as_type(input: &str) -> Result<(RawTypeName, &str), ParseError> {
+    let (parts, rest) = parse_qualified_identifier_parts(input)?;
+    let type_sql = parts.join(".");
+    let type_name = parse_type_name(&type_sql)?;
+    Ok((type_name, rest))
+}
+
 fn parse_sequence_option_patch(
     input: &str,
 ) -> Result<(SequenceOptionsPatchSpec, &str), ParseError> {
@@ -9283,6 +9350,19 @@ fn parse_sequence_option_patch(
         let trimmed = rest.trim_start();
         if trimmed.is_empty() {
             return Ok((options, trimmed));
+        }
+        if keyword_at_start(trimmed, "set") {
+            let after_set = consume_keyword(trimmed, "set").trim_start();
+            if keyword_at_start(after_set, "logged") {
+                options.persistence = Some(TablePersistence::Permanent);
+                rest = consume_keyword(after_set, "logged");
+                continue;
+            }
+            if keyword_at_start(after_set, "unlogged") {
+                options.persistence = Some(TablePersistence::Unlogged);
+                rest = consume_keyword(after_set, "unlogged");
+                continue;
+            }
         }
         if keyword_at_start(trimmed, "restart") {
             let mut next = consume_keyword(trimmed, "restart").trim_start();
@@ -9303,6 +9383,12 @@ fn parse_sequence_option_patch(
         }
         if base.increment.is_some() {
             options.increment = base.increment;
+        }
+        if base.as_type.is_some() {
+            options.as_type = base.as_type;
+        }
+        if base.persistence.is_some() {
+            options.persistence = base.persistence;
         }
         if base.minvalue.is_some() {
             options.minvalue = base.minvalue;
@@ -9334,6 +9420,9 @@ fn build_create_sequence_statement(sql: &str) -> Result<CreateSequenceStatement,
     } else if keyword_at_start(rest, "temp") {
         rest = consume_keyword(rest, "temp");
         TablePersistence::Temporary
+    } else if keyword_at_start(rest, "unlogged") {
+        rest = consume_keyword(rest, "unlogged");
+        TablePersistence::Unlogged
     } else {
         TablePersistence::Permanent
     };
@@ -9360,6 +9449,7 @@ fn build_create_sequence_statement(sql: &str) -> Result<CreateSequenceStatement,
     }
     let ((schema_name, sequence_name), rest) = parse_schema_qualified_name(rest)?;
     let (options, rest) = parse_sequence_option_spec(rest)?;
+    let persistence = options.persistence.unwrap_or(persistence);
     if !rest.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "end of CREATE SEQUENCE statement",
@@ -9378,6 +9468,18 @@ fn build_create_sequence_statement(sql: &str) -> Result<CreateSequenceStatement,
 fn build_alter_sequence_statement(sql: &str) -> Result<AlterSequenceStatement, ParseError> {
     let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
     rest = consume_keyword(rest, "sequence").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
     let (parts, rest) = parse_qualified_identifier_parts(rest)?;
     let sequence_name = parts.join(".");
     let (options, rest) = parse_sequence_option_patch(rest)?;
@@ -9388,6 +9490,7 @@ fn build_alter_sequence_statement(sql: &str) -> Result<AlterSequenceStatement, P
         });
     }
     Ok(AlterSequenceStatement {
+        if_exists,
         sequence_name,
         options,
     })
@@ -9398,6 +9501,18 @@ fn build_alter_sequence_owner_statement(
 ) -> Result<AlterRelationOwnerStatement, ParseError> {
     let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
     rest = consume_keyword(rest, "sequence").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
     let (parts, rest) = parse_qualified_identifier_parts(rest)?;
     let relation_name = parts.join(".");
     let mut rest = rest.trim_start();
@@ -9411,7 +9526,7 @@ fn build_alter_sequence_owner_statement(
         });
     }
     Ok(AlterRelationOwnerStatement {
-        if_exists: false,
+        if_exists,
         only: false,
         relation_name,
         new_owner,
@@ -9423,6 +9538,18 @@ fn build_alter_sequence_rename_statement(
 ) -> Result<AlterTableRenameStatement, ParseError> {
     let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
     rest = consume_keyword(rest, "sequence").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
     let (parts, rest) = parse_qualified_identifier_parts(rest)?;
     let table_name = parts.join(".");
     let mut rest = rest.trim_start();
@@ -9436,7 +9563,7 @@ fn build_alter_sequence_rename_statement(
         });
     }
     Ok(AlterTableRenameStatement {
-        if_exists: false,
+        if_exists,
         only: false,
         table_name,
         new_table_name,
@@ -16631,6 +16758,9 @@ fn build_discard(pair: Pair<'_, Rule>) -> Result<DiscardStatement, ParseError> {
         {
             DiscardTarget::Temp
         }
+        [discard, sequences] if discard == "discard" && sequences == "sequences" => {
+            DiscardTarget::Sequences
+        }
         _ => return Err(ParseError::UnexpectedEof),
     };
     Ok(DiscardStatement { target })
@@ -17177,6 +17307,10 @@ fn build_deallocate_statement(pair: Pair<'_, Rule>) -> Result<DeallocateStatemen
 fn build_set_session_authorization(
     pair: Pair<'_, Rule>,
 ) -> Result<SetSessionAuthorizationStatement, ParseError> {
+    let is_local = pair
+        .clone()
+        .into_inner()
+        .any(|part| part.as_rule() == Rule::kw_local);
     let role_name = pair
         .into_inner()
         .find_map(|part| match part.as_rule() {
@@ -17201,7 +17335,10 @@ fn build_set_session_authorization(
         })
         .transpose()?
         .ok_or(ParseError::UnexpectedEof)?;
-    Ok(SetSessionAuthorizationStatement { role_name })
+    Ok(SetSessionAuthorizationStatement {
+        role_name,
+        is_local,
+    })
 }
 
 fn build_reset_session_authorization(
@@ -23625,7 +23762,7 @@ fn build_row_assignment(pair: Pair<'_, Rule>) -> Result<Vec<Assignment>, ParseEr
         }
     }
     let targets = targets.ok_or(ParseError::UnexpectedEof)?;
-    let exprs = split_row_assignment_expr(expr.ok_or(ParseError::UnexpectedEof)?, targets.len())?;
+    let exprs = split_row_assignment_expr(expr.ok_or(ParseError::UnexpectedEof)?, &targets)?;
     Ok(targets
         .into_iter()
         .zip(exprs)
@@ -23633,9 +23770,30 @@ fn build_row_assignment(pair: Pair<'_, Rule>) -> Result<Vec<Assignment>, ParseEr
         .collect())
 }
 
-fn split_row_assignment_expr(expr: SqlExpr, arity: usize) -> Result<Vec<SqlExpr>, ParseError> {
+fn split_row_assignment_expr(
+    expr: SqlExpr,
+    targets: &[AssignmentTarget],
+) -> Result<Vec<SqlExpr>, ParseError> {
+    let arity = targets.len();
     match expr {
         SqlExpr::Row(items) if items.len() == arity => Ok(items),
+        SqlExpr::Row(items) if items.len() == 1 && arity > 1 => {
+            if let SqlExpr::Column(name) = &items[0]
+                && let Some(relation) = name.strip_suffix(".*")
+            {
+                return Ok(targets
+                    .iter()
+                    .map(|target| SqlExpr::FieldSelect {
+                        expr: Box::new(SqlExpr::Column(relation.to_string())),
+                        field: target.column.clone(),
+                    })
+                    .collect());
+            }
+            Err(ParseError::UnexpectedToken {
+                expected: "matching row assignment values",
+                actual: "1 values".into(),
+            })
+        }
         SqlExpr::Row(items) => Err(ParseError::UnexpectedToken {
             expected: "matching row assignment values",
             actual: format!("{} values", items.len()),

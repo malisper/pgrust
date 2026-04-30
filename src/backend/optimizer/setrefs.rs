@@ -2673,6 +2673,20 @@ fn lower_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::PgSequences {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgSequences {
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::InformationSchemaSequences {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::InformationSchemaSequences {
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::TxidSnapshotXip {
             func_oid,
             func_variadic,
@@ -2926,6 +2940,20 @@ fn fix_set_returning_call_upper_exprs(
         } => SetReturningCall::PgLockStatus {
             func_oid,
             func_variadic,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::PgSequences {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgSequences {
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::InformationSchemaSequences {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::InformationSchemaSequences {
             output_columns,
             with_ordinality,
         },
@@ -4342,7 +4370,9 @@ fn validate_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             validate_executable_expr(relid, plan_node, field, allowed_exec_params);
         }
-        SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {
             validate_executable_expr(arg, plan_node, field, allowed_exec_params);
         }
@@ -4901,7 +4931,9 @@ fn validate_planner_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             validate_planner_expr(relid, path_node, field);
         }
-        SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {
             validate_planner_expr(arg, path_node, field);
         }

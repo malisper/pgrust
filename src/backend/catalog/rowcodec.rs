@@ -1013,6 +1013,10 @@ pub(crate) fn pg_constraint_row_from_values(
 pub(crate) fn pg_database_row_from_values(
     values: Vec<Value>,
 ) -> Result<PgDatabaseRow, CatalogError> {
+    let dathasloginevt = match values.get(15) {
+        Some(Value::Null) | None => false,
+        Some(value) => expect_bool(value)?,
+    };
     Ok(PgDatabaseRow {
         oid: expect_oid(&values[0])?,
         datname: expect_text(&values[1])?,
@@ -1029,6 +1033,7 @@ pub(crate) fn pg_database_row_from_values(
         daticurules: expect_nullable_text(&values[12])?,
         datcollversion: expect_nullable_text(&values[13])?,
         datacl: nullable_text_array(&values[14])?,
+        dathasloginevt,
     })
 }
 
@@ -2009,6 +2014,7 @@ fn pg_database_row_values(row: PgDatabaseRow) -> Vec<Value> {
                     .collect(),
             ))
         }),
+        Value::Bool(row.dathasloginevt),
     ]
 }
 

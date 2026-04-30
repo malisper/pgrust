@@ -1,10 +1,9 @@
 use super::super::*;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SequenceOwnedByClause};
-use crate::include::catalog::INT8_TYPE_OID;
 use crate::pgrust::database::ddl::{ensure_relation_owner, relation_kind_name};
 use crate::pgrust::database::sequences::{
     apply_sequence_option_patch, initial_sequence_state, pg_sequence_row,
-    resolve_sequence_options_spec,
+    resolve_sequence_options_spec, sequence_type_oid_for_raw_type,
 };
 use std::collections::BTreeMap;
 
@@ -14,10 +13,15 @@ fn lookup_sequence_relation_for_ddl(
 ) -> Result<BoundRelation, ExecError> {
     match catalog.lookup_any_relation(name) {
         Some(entry) if entry.relkind == 'S' => Ok(entry),
-        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
-            name: name.to_string(),
-            expected: relation_kind_name('S'),
-        })),
+        Some(entry) => Err(ExecError::DetailedError {
+            message: format!("cannot open relation \"{}\"", name.to_ascii_lowercase()),
+            detail: Some(format!(
+                "This operation is not supported for {}s.",
+                relation_kind_name(entry.relkind)
+            )),
+            hint: None,
+            sqlstate: "42809",
+        }),
         None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
             name.to_string(),
         ))),
@@ -26,6 +30,7 @@ fn lookup_sequence_relation_for_ddl(
 
 fn resolve_owned_by_clause(
     catalog: &dyn CatalogLookup,
+    sequence_namespace_oid: u32,
     clause: Option<&SequenceOwnedByClause>,
 ) -> Result<Option<SequenceOwnedByRef>, ExecError> {
     match clause {
@@ -34,9 +39,32 @@ fn resolve_owned_by_clause(
             table_name,
             column_name,
         }) => {
-            let relation = catalog.lookup_relation(table_name).ok_or_else(|| {
+            let relation = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(table_name.clone()))
             })?;
+            if relation.relkind != 'r' {
+                let object_kind_plural = if relation.relkind == 'i' {
+                    "indexes".to_string()
+                } else {
+                    format!("{}s", relation_kind_name(relation.relkind))
+                };
+                return Err(ExecError::DetailedError {
+                    message: format!(r#"sequence cannot be owned by relation "{}""#, table_name),
+                    detail: Some(format!(
+                        "This operation is not supported for {object_kind_plural}."
+                    )),
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
+            if relation.namespace_oid != sequence_namespace_oid {
+                return Err(ExecError::DetailedError {
+                    message: "sequence must be in same schema as table it is linked to".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
             let attnum = relation
                 .desc
                 .columns
@@ -46,7 +74,15 @@ fn resolve_owned_by_clause(
                     (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
                         .then_some((index + 1) as i32)
                 })
-                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))?;
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        r#"column "{}" of relation "{}" does not exist"#,
+                        column_name, table_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                })?;
             Ok(Some(SequenceOwnedByRef {
                 relation_oid: relation.relation_oid,
                 attnum,
@@ -180,10 +216,19 @@ impl Database {
                 configured_search_path,
             )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let mut options = resolve_sequence_options_spec(&create_stmt.options, INT8_TYPE_OID)
+        let type_oid = match create_stmt.options.as_type.as_ref() {
+            Some(type_name) => {
+                sequence_type_oid_for_raw_type(type_name).map_err(ExecError::Parse)?
+            }
+            None => crate::include::catalog::INT8_TYPE_OID,
+        };
+        let mut options = resolve_sequence_options_spec(&create_stmt.options, type_oid)
             .map_err(ExecError::Parse)?;
-        options.owned_by =
-            resolve_owned_by_clause(&catalog, create_stmt.options.owned_by.as_ref())?;
+        options.owned_by = resolve_owned_by_clause(
+            &catalog,
+            namespace_oid,
+            create_stmt.options.owned_by.as_ref(),
+        )?;
         let data = SequenceData {
             state: initial_sequence_state(&options),
             options,
@@ -200,12 +245,17 @@ impl Database {
                     waiter: None,
                     interrupts: Arc::clone(&interrupts),
                 };
+                let relpersistence = match persistence {
+                    TablePersistence::Permanent => 'p',
+                    TablePersistence::Unlogged => 'u',
+                    TablePersistence::Temporary => 't',
+                };
                 let result = self.catalog.write().create_relation_mvcc_with_relkind(
                     sequence_name.clone(),
                     SequenceRuntime::sequence_relation_desc(),
                     namespace_oid,
                     1,
-                    'p',
+                    relpersistence,
                     'S',
                     self.auth_state(client_id).current_user_oid(),
                     None,
@@ -213,6 +263,9 @@ impl Database {
                 );
                 match result {
                     Err(CatalogError::TableAlreadyExists(_)) if create_stmt.if_not_exists => {
+                        crate::backend::utils::misc::notices::push_notice(format!(
+                            r#"relation "{sequence_name}" already exists, skipping"#
+                        ));
                         Ok(StatementResult::AffectedRows(0))
                     }
                     Err(err) => Err(map_catalog_error(err)),
@@ -265,6 +318,28 @@ impl Database {
                     catalog_effects,
                     temp_effects,
                 )?;
+                if let Some(owned_by) = data.options.owned_by {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid,
+                        client_id,
+                        waiter: None,
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .set_sequence_owned_by_dependency_mvcc(
+                            created.entry.relation_oid,
+                            Some((owned_by.relation_oid, owned_by.attnum)),
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                }
                 sequence_effects.push(self.sequences.apply_upsert(
                     created.entry.relation_oid,
                     data,
@@ -283,7 +358,17 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_sequence_relation_for_ddl(&catalog, &alter_stmt.sequence_name)?;
+        let relation = match lookup_sequence_relation_for_ddl(&catalog, &alter_stmt.sequence_name) {
+            Ok(relation) => relation,
+            Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) if alter_stmt.if_exists => {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    r#"relation "{}" does not exist, skipping"#,
+                    alter_stmt.sequence_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            Err(err) => return Err(err),
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -327,7 +412,17 @@ impl Database {
         sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_sequence_relation_for_ddl(&catalog, &alter_stmt.sequence_name)?;
+        let relation = match lookup_sequence_relation_for_ddl(&catalog, &alter_stmt.sequence_name) {
+            Ok(relation) => relation,
+            Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) if alter_stmt.if_exists => {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    r#"relation "{}" does not exist, skipping"#,
+                    alter_stmt.sequence_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            Err(err) => return Err(err),
+        };
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.sequence_name)?;
         let current = self
             .sequences
@@ -347,8 +442,11 @@ impl Database {
             alter_stmt.options.owned_by,
             Some(SequenceOwnedByClause::None)
         ) {
-            options.owned_by =
-                resolve_owned_by_clause(&catalog, alter_stmt.options.owned_by.as_ref())?;
+            options.owned_by = resolve_owned_by_clause(
+                &catalog,
+                relation.namespace_oid,
+                alter_stmt.options.owned_by.as_ref(),
+            )?;
         }
         let mut next = current;
         next.options = options;
@@ -389,6 +487,26 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+            }
+            if let Some(persistence) = alter_stmt.options.persistence {
+                let relpersistence = match persistence {
+                    TablePersistence::Permanent => 'p',
+                    TablePersistence::Unlogged => 'u',
+                    TablePersistence::Temporary => relation.relpersistence,
+                };
+                if relpersistence != relation.relpersistence {
+                    let effect = self
+                        .catalog
+                        .write()
+                        .alter_relation_persistence_mvcc(
+                            relation.relation_oid,
+                            relpersistence,
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                }
             }
         }
         sequence_effects.push(self.sequences.apply_upsert(
@@ -440,9 +558,12 @@ impl Database {
                 }
                 None if drop_stmt.if_exists => continue,
                 None => {
-                    result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                        sequence_name.clone(),
-                    )));
+                    result = Err(ExecError::DetailedError {
+                        message: format!(r#"sequence "{sequence_name}" does not exist"#).into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P01",
+                    });
                     break;
                 }
             };
@@ -453,7 +574,15 @@ impl Database {
             if (!refs.is_empty() || !type_refs.is_empty()) && !drop_stmt.cascade {
                 let mut dependents = refs
                     .iter()
-                    .map(|(_, column_name)| format!("default for column {column_name}"))
+                    .map(|(relation_oid, column_name)| {
+                        let table_name = catalog
+                            .class_row_by_oid(*relation_oid)
+                            .map(|row| row.relname)
+                            .unwrap_or_else(|| relation_oid.to_string());
+                        format!(
+                            "default value for column {column_name} of table {table_name} depends on sequence {sequence_name}"
+                        )
+                    })
                     .collect::<Vec<_>>();
                 dependents.extend(type_refs.iter().map(|(_, name)| name.clone()));
                 result = Err(ExecError::DetailedError {
@@ -462,10 +591,8 @@ impl Database {
                         sequence_name
                     )
                     .into(),
-                    detail: Some(format!("Dependent objects: {}", dependents.join(", ")).into()),
-                    hint: Some(
-                        "Use DROP SEQUENCE ... CASCADE to drop the dependent objects too.".into(),
-                    ),
+                    detail: Some(dependents.join("\n").into()),
+                    hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
                     sqlstate: "2BP01",
                 });
                 break;

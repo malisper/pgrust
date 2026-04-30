@@ -108,7 +108,8 @@ pub(crate) use large_objects::LargeObjectRuntime;
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 pub(crate) use sequences::{
     SequenceData, SequenceMutationEffect, SequenceOwnedByRef, SequenceRuntime,
-    default_sequence_name_base, default_sequence_oid_from_default_expr, format_nextval_default_oid,
+    default_sequence_name_base, default_sequence_oid_from_default_expr,
+    default_sequence_oid_from_default_expr_with_catalog, format_nextval_default_oid,
     initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};

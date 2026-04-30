@@ -396,7 +396,10 @@ fn parse_drop_and_comment_on_subscription() {
 fn parse_set_session_authorization_string_literal() {
     assert!(matches!(
         parse_statement("set session authorization 'tenant'").unwrap(),
-        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement { role_name })
+        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
+            role_name,
+            is_local: false,
+        })
             if role_name == "tenant"
     ));
 }
@@ -5567,6 +5570,7 @@ fn parse_set_session_authorization_statement() {
         stmt,
         Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
             role_name: "regress_tenant".into(),
+            is_local: false,
         })
     );
 }
@@ -12269,7 +12273,7 @@ fn bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let catalog = catalog_with_people_partial_unique_index();
-            let stmt = match parse_statement("delete from people where id = 1").unwrap() {
+            let stmt = match parse_statement("delete from people where id = 0").unwrap() {
                 Statement::Delete(stmt) => stmt,
                 other => panic!("expected delete statement, got {other:?}"),
             };
@@ -12478,7 +12482,7 @@ fn bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weak
             let weaker_stmt = people_insert_with_on_conflict(
                 Some(inference_target_with_predicate(
                     &["id"],
-                    parse_expr("id > 1").unwrap(),
+                    parse_expr("id >= 0").unwrap(),
                 )),
                 OnConflictAction::Nothing,
                 vec![],

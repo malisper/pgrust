@@ -476,10 +476,12 @@ fn choose_index_path(
                     chosen.has_qual as u8,
                     chosen.usable_prefix,
                     chosen.removes_order as u8,
+                    chosen.index.index_meta.indnkeyatts,
                 ) > (
                     existing.has_qual as u8,
                     existing.usable_prefix,
                     existing.removes_order as u8,
+                    existing.index.index_meta.indnkeyatts,
                 ) {
                     best = Some(chosen);
                 }

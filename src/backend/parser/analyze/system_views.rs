@@ -135,6 +135,31 @@ pub(super) fn bind_builtin_system_view(
             },
         );
     }
+    if matches!(view.kind, SyntheticSystemViewKind::PgSequences) {
+        let output_columns = view.output_columns();
+        return build_function_view(
+            name,
+            output_columns.clone(),
+            SetReturningCall::PgSequences {
+                output_columns,
+                with_ordinality: false,
+            },
+        );
+    }
+    if matches!(
+        view.kind,
+        SyntheticSystemViewKind::InformationSchemaSequences
+    ) {
+        let output_columns = view.output_columns();
+        return build_function_view(
+            name,
+            output_columns.clone(),
+            SetReturningCall::InformationSchemaSequences {
+                output_columns,
+                with_ordinality: false,
+            },
+        );
+    }
     let rows = match view.kind {
         SyntheticSystemViewKind::PgEnum => catalog
             .enum_rows()
@@ -279,6 +304,9 @@ pub(super) fn bind_builtin_system_view(
                 catalog.inheritance_rows(),
             )
         }
+        SyntheticSystemViewKind::PgSequences => {
+            unreachable!("pg_sequences is bound as a function view")
+        }
         SyntheticSystemViewKind::PgRules => catalog.pg_rules_rows(),
         SyntheticSystemViewKind::PgStats => catalog.pg_stats_rows(),
         SyntheticSystemViewKind::PgStatsExt => catalog.pg_stats_ext_rows(),
@@ -331,6 +359,9 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgLocks => unreachable!("pg_locks is bound as pg_lock_status()"),
         SyntheticSystemViewKind::InformationSchemaTables => information_schema_table_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaViews => information_schema_view_rows(catalog),
+        SyntheticSystemViewKind::InformationSchemaSequences => {
+            unreachable!("information_schema.sequences is bound as a function view")
+        }
         SyntheticSystemViewKind::InformationSchemaColumns => {
             information_schema_column_rows(catalog)
         }

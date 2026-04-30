@@ -4,8 +4,8 @@ use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{
-    SequenceOptionsPatchSpec, SequenceOptionsSpec, SequenceOwnedByClause, SerialKind, SqlType,
-    SqlTypeKind,
+    CatalogLookup, RawTypeName, SequenceOptionsPatchSpec, SequenceOptionsSpec,
+    SequenceOwnedByClause, SerialKind, SqlType, SqlTypeKind,
 };
 use crate::include::catalog::{INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, PgSequenceRow};
 use crate::include::nodes::datum::Value;
@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SequenceState {
     pub(crate) last_value: i64,
+    #[serde(default)]
+    pub(crate) log_cnt: i64,
     pub(crate) is_called: bool,
 }
 
@@ -76,6 +78,16 @@ pub struct SequenceRuntime {
     data_dir: Option<PathBuf>,
     data: RwLock<HashMap<u32, SequenceData>>,
     currvals: RwLock<HashMap<(ClientId, u32), i64>>,
+    lastvals: RwLock<HashMap<ClientId, (u32, i64)>>,
+    caches: RwLock<HashMap<(ClientId, u32), SequenceCacheBlock>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SequenceCacheBlock {
+    next_value: i64,
+    last_value: i64,
+    increment: i64,
+    remaining: i64,
 }
 
 impl SequenceRuntime {
@@ -100,6 +112,8 @@ impl SequenceRuntime {
             data_dir,
             data: RwLock::new(data),
             currvals: RwLock::new(HashMap::new()),
+            lastvals: RwLock::new(HashMap::new()),
+            caches: RwLock::new(HashMap::new()),
         })
     }
 
@@ -108,6 +122,8 @@ impl SequenceRuntime {
             data_dir: None,
             data: RwLock::new(HashMap::new()),
             currvals: RwLock::new(HashMap::new()),
+            lastvals: RwLock::new(HashMap::new()),
+            caches: RwLock::new(HashMap::new()),
         }
     }
 
@@ -149,6 +165,9 @@ impl SequenceRuntime {
         persistent: bool,
     ) -> SequenceMutationEffect {
         let previous = self.data.write().insert(relation_oid, new.clone());
+        self.caches
+            .write()
+            .retain(|(_, oid), _| *oid != relation_oid);
         SequenceMutationEffect::Upsert {
             relation_oid,
             previous,
@@ -191,6 +210,12 @@ impl SequenceRuntime {
                     self.currvals
                         .write()
                         .retain(|(_, oid), _| *oid != *relation_oid);
+                    self.lastvals
+                        .write()
+                        .retain(|_, (oid, _)| *oid != *relation_oid);
+                    self.caches
+                        .write()
+                        .retain(|(_, oid), _| *oid != *relation_oid);
                     if *persistent {
                         delete_sequence_file(self.data_dir.as_deref(), *relation_oid)
                             .map_err(sequence_io_error)?;
@@ -223,13 +248,21 @@ impl SequenceRuntime {
         self.currvals
             .write()
             .retain(|(owner, _), _| *owner != client_id);
+        self.lastvals.write().remove(&client_id);
+        self.caches
+            .write()
+            .retain(|(owner, _), _| *owner != client_id);
+    }
+
+    pub(crate) fn clear_session_sequence_state(&self, client_id: ClientId) {
+        self.clear_currvals_for_client(client_id);
     }
 
     pub(crate) fn current_row(&self, relation_oid: u32) -> Option<Vec<Value>> {
         let state = self.data.read().get(&relation_oid)?.state;
         Some(vec![
             Value::Int64(state.last_value),
-            Value::Int64(0),
+            Value::Int64(state.log_cnt),
             Value::Bool(state.is_called),
         ])
     }
@@ -240,11 +273,67 @@ impl SequenceRuntime {
         relation_oid: u32,
         persistent: bool,
     ) -> Result<i64, ExecError> {
-        let next = self.allocate_value(relation_oid, persistent)?;
+        let next = self.next_cached_value(client_id, relation_oid, persistent)?;
         self.currvals
             .write()
             .insert((client_id, relation_oid), next);
+        self.lastvals
+            .write()
+            .insert(client_id, (relation_oid, next));
         Ok(next)
+    }
+
+    fn next_cached_value(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        persistent: bool,
+    ) -> Result<i64, ExecError> {
+        let cache_key = (client_id, relation_oid);
+        {
+            let mut caches = self.caches.write();
+            if let Some(block) = caches.get_mut(&cache_key)
+                && block.remaining > 0
+            {
+                let value = block.next_value;
+                block.remaining -= 1;
+                if block.remaining == 0 {
+                    let _ = block;
+                    caches.remove(&cache_key);
+                } else {
+                    block.next_value = block
+                        .next_value
+                        .checked_add(block.increment)
+                        .ok_or_else(|| sequence_bounds_error(0, block.increment, false))?;
+                }
+                return Ok(value);
+            }
+        }
+
+        let (value, block) = self.reserve_cache_block(relation_oid, persistent)?;
+        if let Some(block) = block {
+            self.caches.write().insert(cache_key, block);
+        }
+        Ok(value)
+    }
+
+    fn reserve_cache_block(
+        &self,
+        relation_oid: u32,
+        persistent: bool,
+    ) -> Result<(i64, Option<SequenceCacheBlock>), ExecError> {
+        let mut data = self.data.write();
+        let entry = data
+            .get_mut(&relation_oid)
+            .ok_or_else(|| missing_sequence_error(relation_oid))?;
+        let (first, block) = reserve_sequence_cache(entry)?;
+        if persistent
+            && let Some(existing) = sequence_file_path(self.data_dir.as_deref(), relation_oid)
+                .filter(|path| path.exists())
+        {
+            write_sequence_file_at_path(&existing, entry).map_err(sequence_io_error)?;
+        }
+        Ok((first, block))
     }
 
     pub(crate) fn allocate_value(
@@ -285,6 +374,19 @@ impl SequenceRuntime {
             })
     }
 
+    pub(crate) fn last_value(&self, client_id: ClientId) -> Result<(u32, i64), ExecError> {
+        self.lastvals
+            .read()
+            .get(&client_id)
+            .copied()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "lastval is not yet defined in this session".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "55000",
+            })
+    }
+
     pub(crate) fn set_value(
         &self,
         client_id: ClientId,
@@ -299,10 +401,11 @@ impl SequenceRuntime {
                 .get_mut(&relation_oid)
                 .ok_or_else(|| missing_sequence_error(relation_oid))?;
             if value < entry.options.minvalue || value > entry.options.maxvalue {
-                return Err(sequence_bounds_error(relation_oid));
+                return Err(setval_bounds_error(relation_oid, entry, value));
             }
             entry.state.last_value = value;
             entry.state.is_called = is_called;
+            entry.state.log_cnt = if is_called { 32 } else { 0 };
             if persistent {
                 if let Some(existing) = sequence_file_path(self.data_dir.as_deref(), relation_oid)
                     .filter(|path| path.exists())
@@ -315,9 +418,15 @@ impl SequenceRuntime {
             self.currvals
                 .write()
                 .insert((client_id, relation_oid), value);
+            self.lastvals
+                .write()
+                .insert(client_id, (relation_oid, value));
         } else {
             self.currvals.write().remove(&(client_id, relation_oid));
         }
+        self.caches
+            .write()
+            .retain(|(_, oid), _| *oid != relation_oid);
         Ok(value)
     }
 }
@@ -338,6 +447,31 @@ pub(crate) fn sequence_type_oid_for_sql_type(sql_type: SqlType) -> Result<u32, P
         _ => Err(ParseError::UnexpectedToken {
             expected: "integer sequence type",
             actual: format!("{sql_type:?}"),
+        }),
+    }
+}
+
+pub(crate) fn sequence_type_oid_for_raw_type(type_name: &RawTypeName) -> Result<u32, ParseError> {
+    match type_name {
+        RawTypeName::Builtin(sql_type) => {
+            sequence_type_oid_for_sql_type(*sql_type).map_err(|_| ParseError::DetailedError {
+                message: "sequence type must be smallint, integer, or bigint".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })
+        }
+        RawTypeName::Named { name, .. } => match name.to_ascii_lowercase().as_str() {
+            "pg_catalog.int2" | "int2" | "smallint" => Ok(INT2_TYPE_OID),
+            "pg_catalog.int4" | "int4" | "int" | "integer" => Ok(INT4_TYPE_OID),
+            "pg_catalog.int8" | "int8" | "bigint" => Ok(INT8_TYPE_OID),
+            other => Err(ParseError::UnsupportedType(other.to_string())),
+        },
+        RawTypeName::Serial(_) | RawTypeName::Record => Err(ParseError::DetailedError {
+            message: "sequence type must be smallint, integer, or bigint".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
         }),
     }
 }
@@ -381,26 +515,66 @@ pub(crate) fn default_sequence_oid_from_default_expr(default_expr: &str) -> Opti
     rest[..oid_end].trim().parse::<u32>().ok()
 }
 
+pub(crate) fn default_sequence_oid_from_default_expr_with_catalog(
+    default_expr: &str,
+    catalog: &dyn CatalogLookup,
+) -> Option<u32> {
+    if let Some(oid) = default_sequence_oid_from_default_expr(default_expr) {
+        return Some(oid);
+    }
+    let expr = default_expr.trim();
+    let rest = expr.strip_prefix("nextval(")?.trim_start();
+    let literal = rest.strip_prefix('\'')?;
+    let mut value = String::new();
+    let mut chars = literal.char_indices().peekable();
+    let mut end = None;
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '\'' {
+            if matches!(chars.peek(), Some((_, '\''))) {
+                value.push('\'');
+                let _ = chars.next();
+            } else {
+                end = Some(idx + 1);
+                break;
+            }
+        } else {
+            value.push(ch);
+        }
+    }
+    let after_literal = literal[end?..].trim_start();
+    if after_literal.to_ascii_lowercase().starts_with("::text") {
+        return None;
+    }
+    if !(after_literal.starts_with(')')
+        || after_literal.to_ascii_lowercase().starts_with("::regclass"))
+    {
+        return None;
+    }
+    catalog
+        .lookup_any_relation(&value)
+        .filter(|relation| relation.relkind == 'S')
+        .map(|relation| relation.relation_oid)
+}
+
 pub(crate) fn resolve_sequence_options_spec(
     spec: &SequenceOptionsSpec,
     type_oid: u32,
 ) -> Result<SequenceOptions, ParseError> {
-    let defaults = default_sequence_options(type_oid)?;
-    let increment = spec.increment.unwrap_or(defaults.increment);
-    let minvalue = spec
-        .minvalue
-        .unwrap_or(Some(defaults.minvalue))
-        .unwrap_or_else(|| default_minvalue(type_oid, increment));
-    let maxvalue = spec
-        .maxvalue
-        .unwrap_or(Some(defaults.maxvalue))
-        .unwrap_or_else(|| default_maxvalue(type_oid, increment));
+    let increment = spec.increment.unwrap_or(1);
+    let minvalue = match spec.minvalue {
+        Some(Some(value)) => value,
+        Some(None) | None => default_minvalue(type_oid, increment),
+    };
+    let maxvalue = match spec.maxvalue {
+        Some(Some(value)) => value,
+        Some(None) | None => default_maxvalue(type_oid, increment),
+    };
     let start = spec
         .start
         .unwrap_or_else(|| if increment > 0 { minvalue } else { maxvalue });
     let cache = spec.cache.unwrap_or(1);
     let cycle = spec.cycle.unwrap_or(false);
-    validate_sequence_numbers(minvalue, maxvalue, start, increment, cache)?;
+    validate_sequence_numbers(type_oid, minvalue, maxvalue, start, increment, cache)?;
     let owned_by = match spec.owned_by.as_ref() {
         Some(SequenceOwnedByClause::None) | None => None,
         Some(SequenceOwnedByClause::Column { .. }) => None,
@@ -421,30 +595,55 @@ pub(crate) fn apply_sequence_option_patch(
     current: &SequenceOptions,
     patch: &SequenceOptionsPatchSpec,
 ) -> Result<(SequenceOptions, Option<SequenceState>), ParseError> {
+    let type_oid = if let Some(ref as_type) = patch.as_type {
+        sequence_type_oid_for_raw_type(as_type)?
+    } else {
+        current.type_oid
+    };
     let increment = patch.increment.unwrap_or(current.increment);
-    let minvalue = patch
-        .minvalue
-        .unwrap_or(Some(current.minvalue))
-        .unwrap_or_else(|| default_minvalue(current.type_oid, increment));
-    let maxvalue = patch
-        .maxvalue
-        .unwrap_or(Some(current.maxvalue))
-        .unwrap_or_else(|| default_maxvalue(current.type_oid, increment));
+    let (old_type_min, old_type_max) = sequence_type_range(current.type_oid);
+    let (new_type_min, new_type_max) = sequence_type_range(type_oid);
+    let minvalue = match patch.minvalue {
+        Some(Some(value)) => value,
+        Some(None) => default_minvalue(type_oid, increment),
+        None if current.type_oid != type_oid && current.minvalue == old_type_min => new_type_min,
+        None if current.minvalue == default_minvalue(current.type_oid, current.increment) => {
+            default_minvalue(type_oid, increment)
+        }
+        None => current.minvalue,
+    };
+    let maxvalue = match patch.maxvalue {
+        Some(Some(value)) => value,
+        Some(None) => default_maxvalue(type_oid, increment),
+        None if current.type_oid != type_oid && current.maxvalue == old_type_max => new_type_max,
+        None if current.maxvalue == default_maxvalue(current.type_oid, current.increment) => {
+            default_maxvalue(type_oid, increment)
+        }
+        None => current.maxvalue,
+    };
     let start = patch.start.unwrap_or(current.start);
     let cache = patch.cache.unwrap_or(current.cache);
     let cycle = patch.cycle.unwrap_or(current.cycle);
-    validate_sequence_numbers(minvalue, maxvalue, start, increment, cache)?;
+    validate_sequence_numbers(type_oid, minvalue, maxvalue, start, increment, cache)?;
     let mut next = current.clone();
+    next.type_oid = type_oid;
     next.increment = increment;
     next.minvalue = minvalue;
     next.maxvalue = maxvalue;
     next.start = start;
     next.cache = cache;
     next.cycle = cycle;
-    let restart = patch.restart.map(|value| SequenceState {
-        last_value: value.unwrap_or(next.start),
-        is_called: false,
-    });
+    let restart = if let Some(value) = patch.restart {
+        let last_value = value.unwrap_or(next.start);
+        validate_restart_value(last_value, next.minvalue, next.maxvalue)?;
+        Some(SequenceState {
+            last_value,
+            log_cnt: 0,
+            is_called: false,
+        })
+    } else {
+        None
+    };
     if matches!(patch.owned_by, Some(SequenceOwnedByClause::None)) {
         next.owned_by = None;
     }
@@ -454,6 +653,7 @@ pub(crate) fn apply_sequence_option_patch(
 pub(crate) fn initial_sequence_state(options: &SequenceOptions) -> SequenceState {
     SequenceState {
         last_value: options.start,
+        log_cnt: 0,
         is_called: false,
     }
 }
@@ -499,34 +699,113 @@ fn default_maxvalue(type_oid: u32, increment: i64) -> i64 {
 }
 
 fn validate_sequence_numbers(
+    type_oid: u32,
     minvalue: i64,
     maxvalue: i64,
     start: i64,
     increment: i64,
     cache: i64,
 ) -> Result<(), ParseError> {
+    let (type_min, type_max) = sequence_type_range(type_oid);
     if increment == 0 {
-        return Err(ParseError::UnexpectedToken {
-            expected: "non-zero INCREMENT",
-            actual: "INCREMENT 0".into(),
+        return Err(ParseError::DetailedError {
+            message: "INCREMENT must not be zero".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
         });
     }
     if cache <= 0 {
-        return Err(ParseError::UnexpectedToken {
-            expected: "positive CACHE value",
-            actual: cache.to_string(),
+        return Err(ParseError::DetailedError {
+            message: format!("CACHE ({cache}) must be greater than zero"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    if minvalue < type_min || minvalue > type_max {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "MINVALUE ({minvalue}) is out of range for sequence data type {}",
+                sequence_type_name(type_oid)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    if maxvalue < type_min || maxvalue > type_max {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "MAXVALUE ({maxvalue}) is out of range for sequence data type {}",
+                sequence_type_name(type_oid)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
         });
     }
     if minvalue > maxvalue {
-        return Err(ParseError::UnexpectedToken {
-            expected: "MINVALUE <= MAXVALUE",
-            actual: format!("{minvalue} > {maxvalue}"),
+        return Err(ParseError::DetailedError {
+            message: format!("MINVALUE ({minvalue}) must be less than MAXVALUE ({maxvalue})"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
         });
     }
-    if start < minvalue || start > maxvalue {
-        return Err(ParseError::UnexpectedToken {
-            expected: "START value within sequence bounds",
-            actual: start.to_string(),
+    if start < minvalue {
+        return Err(ParseError::DetailedError {
+            message: format!("START value ({start}) cannot be less than MINVALUE ({minvalue})"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    if start > maxvalue {
+        return Err(ParseError::DetailedError {
+            message: format!("START value ({start}) cannot be greater than MAXVALUE ({maxvalue})"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok(())
+}
+
+fn sequence_type_range(type_oid: u32) -> (i64, i64) {
+    match type_oid {
+        INT2_TYPE_OID => (i16::MIN as i64, i16::MAX as i64),
+        INT4_TYPE_OID => (i32::MIN as i64, i32::MAX as i64),
+        _ => (i64::MIN, i64::MAX),
+    }
+}
+
+fn sequence_type_name(type_oid: u32) -> &'static str {
+    match type_oid {
+        INT2_TYPE_OID => "smallint",
+        INT4_TYPE_OID => "integer",
+        INT8_TYPE_OID => "bigint",
+        _ => "bigint",
+    }
+}
+
+fn validate_restart_value(value: i64, minvalue: i64, maxvalue: i64) -> Result<(), ParseError> {
+    if value < minvalue {
+        return Err(ParseError::DetailedError {
+            message: format!("RESTART value ({value}) cannot be less than MINVALUE ({minvalue})"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    if value > maxvalue {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "RESTART value ({value}) cannot be greater than MAXVALUE ({maxvalue})"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
         });
     }
     Ok(())
@@ -535,6 +814,7 @@ fn validate_sequence_numbers(
 fn advance_sequence(entry: &mut SequenceData) -> Result<i64, ExecError> {
     if !entry.state.is_called {
         entry.state.is_called = true;
+        entry.state.log_cnt = 32;
         return Ok(entry.state.last_value);
     }
 
@@ -543,14 +823,14 @@ fn advance_sequence(entry: &mut SequenceData) -> Result<i64, ExecError> {
         .state
         .last_value
         .checked_add(increment)
-        .ok_or_else(|| sequence_bounds_error(0))?;
+        .ok_or_else(|| sequence_bounds_error(0, increment, false))?;
 
     let wrapped = if increment > 0 {
         if next > entry.options.maxvalue {
             if entry.options.cycle {
                 entry.options.minvalue
             } else {
-                return Err(sequence_bounds_error(0));
+                return Err(sequence_bounds_error(0, increment, false));
             }
         } else {
             next
@@ -559,7 +839,7 @@ fn advance_sequence(entry: &mut SequenceData) -> Result<i64, ExecError> {
         if entry.options.cycle {
             entry.options.maxvalue
         } else {
-            return Err(sequence_bounds_error(0));
+            return Err(sequence_bounds_error(0, increment, false));
         }
     } else {
         next
@@ -567,21 +847,98 @@ fn advance_sequence(entry: &mut SequenceData) -> Result<i64, ExecError> {
 
     entry.state.last_value = wrapped;
     entry.state.is_called = true;
+    entry.state.log_cnt = 32;
     Ok(wrapped)
+}
+
+fn reserve_sequence_cache(
+    entry: &mut SequenceData,
+) -> Result<(i64, Option<SequenceCacheBlock>), ExecError> {
+    let increment = entry.options.increment;
+    let cache = entry.options.cache.max(1);
+    let mut values = Vec::new();
+    let mut candidate = if entry.state.is_called {
+        entry
+            .state
+            .last_value
+            .checked_add(increment)
+            .ok_or_else(|| sequence_bounds_error(0, increment, false))?
+    } else {
+        entry.state.last_value
+    };
+
+    for _ in 0..cache {
+        let value = normalize_sequence_value(entry, candidate)?;
+        values.push(value);
+        candidate = value
+            .checked_add(increment)
+            .ok_or_else(|| sequence_bounds_error(0, increment, false))?;
+    }
+
+    let first = values[0];
+    let last = *values
+        .last()
+        .expect("sequence cache reserves at least one value");
+    entry.state.last_value = last;
+    entry.state.is_called = true;
+    entry.state.log_cnt = 32;
+
+    let block = if values.len() > 1 {
+        Some(SequenceCacheBlock {
+            next_value: values[1],
+            last_value: last,
+            increment,
+            remaining: (values.len() - 1) as i64,
+        })
+    } else {
+        None
+    };
+    Ok((first, block))
+}
+
+fn normalize_sequence_value(entry: &SequenceData, value: i64) -> Result<i64, ExecError> {
+    let increment = entry.options.increment;
+    if increment > 0 && value > entry.options.maxvalue {
+        if entry.options.cycle {
+            return Ok(entry.options.minvalue);
+        }
+        return Err(sequence_bounds_error(0, increment, false));
+    }
+    if increment < 0 && value < entry.options.minvalue {
+        if entry.options.cycle {
+            return Ok(entry.options.maxvalue);
+        }
+        return Err(sequence_bounds_error(0, increment, false));
+    }
+    Ok(value)
 }
 
 fn missing_sequence_error(relation_oid: u32) -> ExecError {
     ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
 }
 
-fn sequence_bounds_error(relation_oid: u32) -> ExecError {
+fn sequence_bounds_error(relation_oid: u32, increment: i64, is_setval: bool) -> ExecError {
     let name = if relation_oid == 0 {
         "sequence".to_string()
     } else {
         format!("sequence {relation_oid}")
     };
+    let bound = if increment < 0 { "minimum" } else { "maximum" };
+    let function = if is_setval { "setval" } else { "nextval" };
     ExecError::DetailedError {
-        message: format!("nextval: reached maximum value of {name}").into(),
+        message: format!("{function}: reached {bound} value of {name}").into(),
+        detail: None,
+        hint: None,
+        sqlstate: "2200H",
+    }
+}
+
+fn setval_bounds_error(relation_oid: u32, entry: &SequenceData, value: i64) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "setval: value {value} is out of bounds for sequence {relation_oid} ({}, {})",
+            entry.options.minvalue, entry.options.maxvalue
+        ),
         detail: None,
         hint: None,
         sqlstate: "2200H",

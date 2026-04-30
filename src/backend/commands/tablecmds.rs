@@ -32,6 +32,7 @@ use crate::backend::parser::{
     VacuumStatement, bind_create_table, bind_delete, bind_generated_expr, bind_insert,
     bind_referenced_by_foreign_keys, bind_relation_constraints, bind_rule_action_statement,
     bind_scalar_expr_in_scope, bind_update, parse_expr, rewrite_bound_delete_auto_view_target,
+    rewrite_bound_insert_auto_view_target, rewrite_local_vars_for_output_exprs,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -49,9 +50,9 @@ use super::explain::{
     apply_runtime_pruning_for_explain_plan, format_buffer_usage,
     format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
     format_explain_lines_with_options, format_explain_plan_with_subplans,
-    format_explain_plan_with_subplans_and_catalog, format_verbose_explain_child_plan_with_catalog,
-    format_verbose_explain_plan_json_with_catalog, format_verbose_explain_plan_with_catalog,
-    push_explain_line,
+    format_explain_plan_with_subplans_and_catalog, format_modify_expr_subplans,
+    format_verbose_explain_child_plan_with_catalog, format_verbose_explain_plan_json_with_catalog,
+    format_verbose_explain_plan_with_catalog, push_explain_line, render_modify_join_expr,
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
@@ -108,7 +109,7 @@ use crate::include::nodes::parsenodes::{FromItem, IndexColumnDef, RelOption, Sql
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, OUTER_VAR, ParamKind, QueryColumn, RelationPrivilegeMask,
+    BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, ParamKind, QueryColumn, RelationPrivilegeMask,
     RelationPrivilegeRequirement, SubLinkType, TargetEntry, Var, attrno_index, expr_sql_type_hint,
     user_attrno,
 };
@@ -209,6 +210,7 @@ fn finalize_bound_insert(
         stmt.on_conflict
             .map(|clause| crate::backend::parser::BoundOnConflictClause {
                 arbiter_indexes: clause.arbiter_indexes,
+                arbiter_exclusion_constraints: clause.arbiter_exclusion_constraints,
                 arbiter_temporal_constraints: clause.arbiter_temporal_constraints,
                 action: match clause.action {
                     BoundOnConflictAction::Nothing => BoundOnConflictAction::Nothing,
@@ -531,6 +533,7 @@ pub(crate) fn execute_explain(
             insert,
             analyze,
             costs,
+            format,
             verbose,
             catalog,
             ctx,
@@ -861,6 +864,7 @@ fn execute_explain_insert(
     stmt: InsertStatement,
     analyze: bool,
     costs: bool,
+    format: ExplainFormat,
     verbose: bool,
     catalog: &dyn CatalogLookup,
     ctx: &ExecutorContext,
@@ -872,21 +876,32 @@ fn execute_explain_insert(
         )));
     }
 
+    let raw_target_name = stmt.table_name.clone();
+    let target_alias = stmt.table_alias.clone();
     let bound = bind_insert(&stmt, catalog)?;
+    let bound = rewrite_bound_insert_auto_view_target(bound, catalog)
+        .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
+    let bound = finalize_bound_insert(bound, catalog);
     check_relation_privilege_requirements(ctx, &bound.required_privileges)?;
-    let target_name = explain_insert_target_name(&bound, verbose, catalog);
-    let BoundInsertSource::Select(query) = bound.source else {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "EXPLAIN INSERT".into(),
-        )));
-    };
-    let [query] = pg_rewrite_query(*query, catalog)
-        .map_err(ExecError::Parse)?
-        .try_into()
-        .expect("insert-select rewrite should return a single query");
-    let query = crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
-    let planned = crate::backend::optimizer::planner_with_config(query, catalog, planner_config)?;
-    check_planned_stmt_select_privileges(&planned, ctx)?;
+    for subplan in &bound.subplans {
+        check_plan_relation_privileges(subplan, ctx, 'r')?;
+    }
+    let base_target_name = explain_insert_target_name(&bound, verbose, catalog);
+    let target_name = target_alias
+        .as_ref()
+        .map(|alias| format!("{base_target_name} {alias}"))
+        .unwrap_or(base_target_name);
+    let conflict_target_prefix = target_alias.as_deref().unwrap_or(&raw_target_name);
+
+    if matches!(format, ExplainFormat::Json) {
+        return Ok(StatementResult::Query {
+            columns: vec![QueryColumn::text("QUERY PLAN")],
+            column_names: vec!["QUERY PLAN".into()],
+            rows: vec![vec![Value::Text(
+                explain_insert_json(&target_name, &bound, conflict_target_prefix).into(),
+            )]],
+        });
+    }
 
     let mut lines = Vec::new();
     push_explain_line(
@@ -895,24 +910,16 @@ fn execute_explain_insert(
         costs,
         &mut lines,
     );
-    if verbose {
-        format_verbose_explain_child_plan_with_catalog(
-            &planned.plan_tree,
-            &planned.subplans,
-            1,
-            costs,
-            catalog,
-            &mut lines,
-        );
-    } else {
-        format_explain_child_plan_with_subplans(
-            &planned.plan_tree,
-            &planned.subplans,
-            1,
-            costs,
-            &mut lines,
-        );
-    }
+    push_explain_insert_on_conflict_lines(&bound, conflict_target_prefix, costs, &mut lines);
+    push_explain_insert_source_lines(
+        &bound,
+        conflict_target_prefix,
+        verbose,
+        costs,
+        catalog,
+        planner_config,
+        &mut lines,
+    )?;
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
@@ -921,6 +928,214 @@ fn execute_explain_insert(
             .map(|line| vec![Value::Text(line.into())])
             .collect(),
     })
+}
+
+fn push_explain_insert_source_lines(
+    bound: &BoundInsertStatement,
+    conflict_target_prefix: &str,
+    verbose: bool,
+    costs: bool,
+    catalog: &dyn CatalogLookup,
+    planner_config: PlannerConfig,
+    lines: &mut Vec<String>,
+) -> Result<(), ExecError> {
+    match &bound.source {
+        BoundInsertSource::Select(query) => {
+            let [query] = pg_rewrite_query((**query).clone(), catalog)
+                .map_err(ExecError::Parse)?
+                .try_into()
+                .expect("insert-select rewrite should return a single query");
+            let query =
+                crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
+            let planned =
+                crate::backend::optimizer::planner_with_config(query, catalog, planner_config)?;
+            if verbose {
+                format_verbose_explain_child_plan_with_catalog(
+                    &planned.plan_tree,
+                    &planned.subplans,
+                    1,
+                    costs,
+                    catalog,
+                    lines,
+                );
+            } else {
+                format_explain_child_plan_with_subplans(
+                    &planned.plan_tree,
+                    &planned.subplans,
+                    1,
+                    costs,
+                    lines,
+                );
+            }
+        }
+        BoundInsertSource::Values(_)
+        | BoundInsertSource::ProjectSetValues(_)
+        | BoundInsertSource::DefaultValues(_) => {
+            push_explain_line(
+                "  ->  Result",
+                crate::include::nodes::plannodes::PlanEstimate::default(),
+                costs,
+                lines,
+            );
+            if let Some(predicate) = explain_insert_conflict_predicate(bound) {
+                let (outer_names, inner_names) =
+                    explain_insert_conflict_column_names(bound, conflict_target_prefix);
+                format_modify_expr_subplans(
+                    predicate,
+                    &bound.subplans,
+                    &outer_names,
+                    &inner_names,
+                    1,
+                    costs,
+                    lines,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_explain_insert_on_conflict_lines(
+    bound: &BoundInsertStatement,
+    conflict_target_prefix: &str,
+    costs: bool,
+    lines: &mut Vec<String>,
+) {
+    let Some(on_conflict) = &bound.on_conflict else {
+        return;
+    };
+    match &on_conflict.action {
+        BoundOnConflictAction::Nothing => lines.push("  Conflict Resolution: NOTHING".into()),
+        BoundOnConflictAction::Update { predicate, .. } => {
+            lines.push("  Conflict Resolution: UPDATE".into());
+            if !on_conflict.arbiter_indexes.is_empty() {
+                lines.push(format!(
+                    "  Conflict Arbiter Indexes: {}",
+                    on_conflict
+                        .arbiter_indexes
+                        .iter()
+                        .map(|index| index.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if let Some(predicate) = predicate {
+                let (outer_names, inner_names) =
+                    explain_insert_conflict_column_names(bound, conflict_target_prefix);
+                lines.push(format!(
+                    "  Conflict Filter: {}",
+                    render_modify_join_expr(predicate, &outer_names, &inner_names)
+                ));
+            }
+            return;
+        }
+    }
+    if !on_conflict.arbiter_indexes.is_empty() {
+        lines.push(format!(
+            "  Conflict Arbiter Indexes: {}",
+            on_conflict
+                .arbiter_indexes
+                .iter()
+                .map(|index| index.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let _ = costs;
+}
+
+fn explain_insert_conflict_predicate(bound: &BoundInsertStatement) -> Option<&Expr> {
+    match bound.on_conflict.as_ref().map(|clause| &clause.action) {
+        Some(BoundOnConflictAction::Update {
+            predicate: Some(predicate),
+            ..
+        }) => Some(predicate),
+        _ => None,
+    }
+}
+
+fn explain_insert_conflict_column_names(
+    bound: &BoundInsertStatement,
+    target_prefix: &str,
+) -> (Vec<String>, Vec<String>) {
+    let outer = bound
+        .desc
+        .columns
+        .iter()
+        .map(|column| format!("{target_prefix}.{}", column.name))
+        .collect::<Vec<_>>();
+    let inner = bound
+        .desc
+        .columns
+        .iter()
+        .map(|column| format!("excluded.{}", column.name))
+        .collect::<Vec<_>>();
+    (outer, inner)
+}
+
+fn explain_insert_json(
+    target_name: &str,
+    bound: &BoundInsertStatement,
+    conflict_target_prefix: &str,
+) -> String {
+    let mut lines = vec![
+        "[".into(),
+        "  {".into(),
+        "    \"Plan\": {".into(),
+        "      \"Node Type\": \"ModifyTable\",".into(),
+        "      \"Operation\": \"Insert\",".into(),
+        "      \"Parallel Aware\": false,".into(),
+        "      \"Async Capable\": false,".into(),
+        format!("      \"Relation Name\": \"{target_name}\","),
+        format!("      \"Alias\": \"{target_name}\","),
+        "      \"Disabled\": false".into(),
+    ];
+    if let Some(on_conflict) = &bound.on_conflict {
+        match &on_conflict.action {
+            BoundOnConflictAction::Nothing => {
+                lines.last_mut().unwrap().push(',');
+                lines.push("      \"Conflict Resolution\": \"NOTHING\"".into());
+            }
+            BoundOnConflictAction::Update { predicate, .. } => {
+                lines.last_mut().unwrap().push(',');
+                lines.push("      \"Conflict Resolution\": \"UPDATE\",".into());
+                lines.push(format!(
+                    "      \"Conflict Arbiter Indexes\": [{}]{}",
+                    on_conflict
+                        .arbiter_indexes
+                        .iter()
+                        .map(|index| format!("\"{}\"", index.name))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if predicate.is_some() { "," } else { "" }
+                ));
+                if let Some(predicate) = predicate {
+                    let (outer_names, inner_names) =
+                        explain_insert_conflict_column_names(bound, conflict_target_prefix);
+                    lines.push(format!(
+                        "      \"Conflict Filter\": \"{}\"",
+                        render_modify_join_expr(predicate, &outer_names, &inner_names)
+                    ));
+                }
+            }
+        }
+    }
+    lines.last_mut().unwrap().push(',');
+    lines.extend([
+        "      \"Plans\": [".into(),
+        "        {".into(),
+        "          \"Node Type\": \"Result\",".into(),
+        "          \"Parent Relationship\": \"Outer\",".into(),
+        "          \"Parallel Aware\": false,".into(),
+        "          \"Async Capable\": false,".into(),
+        "          \"Disabled\": false".into(),
+        "        }".into(),
+        "      ]".into(),
+        "    }".into(),
+        "  }".into(),
+        "]".into(),
+    ]);
+    lines.join("\n")
 }
 
 #[derive(Clone)]
@@ -3809,6 +4024,30 @@ pub(crate) fn enforce_exclusion_constraints_for_write(
     Ok(())
 }
 
+pub(crate) fn exclusion_arbiter_conflicts_with_existing_row(
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    constraint: &BoundExclusionConstraint,
+    values: &[Value],
+    excluded_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+        return Ok(false);
+    }
+    let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
+    for (tid, existing) in rows {
+        if excluded_tid.is_some_and(|excluded| excluded == tid) {
+            continue;
+        }
+        if exclusion_rows_conflict(constraint, values, &existing)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn enforce_exclusion_constraints_against_values(
     relation_name: &str,
     desc: &RelationDesc,
@@ -6655,25 +6894,11 @@ pub fn execute_insert(
                         catalog, &stmt, &values, ctx,
                     )?;
                 }
-                // :HACK: Partitioned INSERT ... ON CONFLICT is only modeled
-                // enough for the publication regression: DO NOTHING can take
-                // the normal routing path when no conflict occurs, while DO
-                // UPDATE performs PostgreSQL's publication identity precheck
-                // before routing rows as inserts.
-                execute_insert_rows_with_routing(
+                execute_partitioned_insert_on_conflict_rows(
                     catalog,
-                    &stmt.relation_name,
-                    stmt.relation_oid,
-                    stmt.rel,
-                    stmt.toast,
-                    stmt.toast_index.as_ref(),
-                    &stmt.desc,
-                    &stmt.relation_constraints,
-                    &stmt.rls_write_checks,
-                    &stmt.indexes,
+                    &stmt,
+                    on_conflict,
                     &values,
-                    Some(&stmt.returning),
-                    None,
                     ctx,
                     xid,
                     cid,
@@ -6856,6 +7081,412 @@ impl PartitionResultRelInfo {
             parent_rows: Vec::new(),
             rows: Vec::new(),
         })
+    }
+}
+
+fn execute_partitioned_insert_on_conflict_rows(
+    catalog: &dyn CatalogLookup,
+    stmt: &BoundInsertStatement,
+    on_conflict: &crate::backend::parser::BoundOnConflictClause,
+    rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    let Some(target_relation) = catalog.relation_by_oid(stmt.relation_oid) else {
+        return execute_insert_on_conflict_rows(stmt, on_conflict, rows, ctx, xid, cid);
+    };
+    if target_relation.relkind != 'p' {
+        return execute_insert_on_conflict_rows(stmt, on_conflict, rows, ctx, xid, cid);
+    }
+
+    let parent_update_triggers =
+        if let BoundOnConflictAction::Update { assignments, .. } = &on_conflict.action {
+            let modified_attnums = assignments
+                .iter()
+                .map(|assignment| user_attrno(assignment.column_index) as i16)
+                .collect::<Vec<_>>();
+            Some(RuntimeTriggers::load(
+                catalog,
+                stmt.relation_oid,
+                &stmt.relation_name,
+                &stmt.desc,
+                TriggerOperation::Update,
+                &modified_attnums,
+                ctx.session_replication_role,
+            )?)
+        } else {
+            None
+        };
+    if let Some(triggers) = &parent_update_triggers {
+        triggers.before_statement(ctx)?;
+    }
+    let mut parent_update_capture = parent_update_triggers
+        .as_ref()
+        .map(|triggers| triggers.new_transition_capture());
+
+    let result = (|| {
+        let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
+        let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
+        for row in rows {
+            let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
+            let leaf_row =
+                remap_partition_row_to_child_layout(row, &target_relation.desc, &leaf.desc)?;
+            match routed.entry(leaf.relation_oid) {
+                Entry::Occupied(mut entry) => entry.get_mut().rows.push(leaf_row),
+                Entry::Vacant(entry) => {
+                    let mut result_rel_info = PartitionResultRelInfo::new(
+                        catalog,
+                        &stmt.relation_name,
+                        stmt.relation_oid,
+                        &stmt.relation_constraints,
+                        &stmt.indexes,
+                        stmt.toast_index.as_ref(),
+                        leaf,
+                    )?;
+                    result_rel_info.rows.push(leaf_row);
+                    entry.insert(result_rel_info);
+                }
+            }
+        }
+
+        let mut affected_rows = Vec::new();
+        for (_, result_rel_info) in routed {
+            let leaf_on_conflict = remap_partition_on_conflict_clause(
+                on_conflict,
+                &stmt.desc,
+                &result_rel_info.relation.desc,
+                &result_rel_info.indexes,
+            )?;
+            let leaf_stmt =
+                partition_leaf_insert_statement(stmt, &result_rel_info, leaf_on_conflict, catalog)?;
+            let leaf_rows = execute_insert_on_conflict_rows(
+                &leaf_stmt,
+                leaf_stmt
+                    .on_conflict
+                    .as_ref()
+                    .expect("leaf partition upsert requires conflict clause"),
+                &result_rel_info.rows,
+                ctx,
+                xid,
+                cid,
+            )?;
+            for leaf_row in leaf_rows {
+                let parent_row = remap_partition_row_to_parent_layout(
+                    &leaf_row,
+                    &result_rel_info.relation.desc,
+                    &stmt.desc,
+                )?;
+                if let (Some(triggers), Some(capture)) =
+                    (&parent_update_triggers, parent_update_capture.as_mut())
+                    && matches!(on_conflict.action, BoundOnConflictAction::Update { .. })
+                {
+                    triggers.capture_update_row(capture, &parent_row, &parent_row);
+                }
+                if stmt.returning.is_empty() {
+                    affected_rows.push(parent_row);
+                } else {
+                    let row = project_returning_row_with_old_new(
+                        &stmt.returning,
+                        &parent_row,
+                        None,
+                        Some(result_rel_info.relation.relation_oid),
+                        None,
+                        Some(&parent_row),
+                        ctx,
+                    )?;
+                    capture_copy_to_dml_returning_row(row.clone());
+                    affected_rows.push(row);
+                }
+            }
+        }
+        Ok(affected_rows)
+    })();
+
+    if result.is_ok()
+        && let Some(triggers) = &parent_update_triggers
+    {
+        if let Some(capture) = parent_update_capture.as_ref() {
+            triggers.after_transition_rows(capture, ctx)?;
+            triggers.after_statement(Some(capture), ctx)?;
+        } else {
+            triggers.after_statement(None, ctx)?;
+        }
+    }
+    result
+}
+
+fn partition_leaf_insert_statement(
+    parent: &BoundInsertStatement,
+    result_rel_info: &PartitionResultRelInfo,
+    on_conflict: crate::backend::parser::BoundOnConflictClause,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundInsertStatement, ExecError> {
+    Ok(BoundInsertStatement {
+        relation_name: result_rel_info.relation_name.clone(),
+        target_alias: None,
+        rel: result_rel_info.relation.rel,
+        relation_oid: result_rel_info.relation.relation_oid,
+        relkind: result_rel_info.relation.relkind,
+        toast: result_rel_info.relation.toast,
+        toast_index: result_rel_info.toast_index.clone(),
+        desc: result_rel_info.relation.desc.clone(),
+        relation_constraints: result_rel_info.relation_constraints.clone(),
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            result_rel_info.relation.relation_oid,
+            &result_rel_info.relation.desc,
+            catalog,
+        )?,
+        indexes: result_rel_info.indexes.clone(),
+        column_defaults: Vec::new(),
+        target_columns: Vec::new(),
+        overriding: parent.overriding,
+        source: BoundInsertSource::Values(Vec::new()),
+        on_conflict: Some(on_conflict),
+        raw_on_conflict: None,
+        returning: Vec::new(),
+        rls_write_checks: remap_partition_write_checks(
+            &parent.rls_write_checks,
+            &parent.desc,
+            &result_rel_info.relation.desc,
+            1,
+        ),
+        required_privileges: Vec::new(),
+        subplans: parent.subplans.clone(),
+    })
+}
+
+fn remap_partition_on_conflict_clause(
+    on_conflict: &crate::backend::parser::BoundOnConflictClause,
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+    child_indexes: &[BoundIndexRelation],
+) -> Result<crate::backend::parser::BoundOnConflictClause, ExecError> {
+    let arbiter_indexes = on_conflict
+        .arbiter_indexes
+        .iter()
+        .map(|index| map_partition_arbiter_index(index, parent_desc, child_desc, child_indexes))
+        .collect::<Result<Vec<_>, _>>()?;
+    let action = match &on_conflict.action {
+        BoundOnConflictAction::Nothing => BoundOnConflictAction::Nothing,
+        BoundOnConflictAction::Update {
+            assignments,
+            predicate,
+            conflict_visibility_checks,
+            update_write_checks,
+        } => BoundOnConflictAction::Update {
+            assignments: assignments
+                .iter()
+                .map(|assignment| remap_partition_assignment(assignment, parent_desc, child_desc))
+                .collect::<Result<Vec<_>, _>>()?,
+            predicate: predicate
+                .as_ref()
+                .map(|expr| remap_partition_conflict_expr(expr.clone(), parent_desc, child_desc))
+                .transpose()?,
+            conflict_visibility_checks: remap_partition_write_checks(
+                conflict_visibility_checks,
+                parent_desc,
+                child_desc,
+                OUTER_VAR,
+            ),
+            update_write_checks: remap_partition_write_checks(
+                update_write_checks,
+                parent_desc,
+                child_desc,
+                OUTER_VAR,
+            ),
+        },
+    };
+    Ok(crate::backend::parser::BoundOnConflictClause {
+        arbiter_indexes,
+        arbiter_exclusion_constraints: on_conflict.arbiter_exclusion_constraints.clone(),
+        arbiter_temporal_constraints: on_conflict.arbiter_temporal_constraints.clone(),
+        action,
+    })
+}
+
+fn remap_partition_assignment(
+    assignment: &BoundAssignment,
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+) -> Result<BoundAssignment, ExecError> {
+    let child_index =
+        partition_child_column_index(parent_desc, child_desc, assignment.column_index)?;
+    Ok(BoundAssignment {
+        column_index: child_index,
+        subscripts: assignment
+            .subscripts
+            .iter()
+            .cloned()
+            .map(|subscript| BoundArraySubscript {
+                is_slice: subscript.is_slice,
+                lower: subscript
+                    .lower
+                    .map(|expr| remap_partition_conflict_expr(expr, parent_desc, child_desc))
+                    .transpose()
+                    .expect("partition subscript remapping is infallible"),
+                upper: subscript
+                    .upper
+                    .map(|expr| remap_partition_conflict_expr(expr, parent_desc, child_desc))
+                    .transpose()
+                    .expect("partition subscript remapping is infallible"),
+            })
+            .collect(),
+        field_path: assignment.field_path.clone(),
+        indirection: assignment.indirection.clone(),
+        target_sql_type: child_desc.columns[child_index].sql_type,
+        expr: remap_partition_conflict_expr(assignment.expr.clone(), parent_desc, child_desc)?,
+    })
+}
+
+fn remap_partition_write_checks(
+    checks: &[RlsWriteCheck],
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+    source_varno: usize,
+) -> Vec<RlsWriteCheck> {
+    let output_exprs = partition_parent_layout_exprs(parent_desc, child_desc, source_varno);
+    checks
+        .iter()
+        .map(|check| RlsWriteCheck {
+            expr: rewrite_local_vars_for_output_exprs(
+                check.expr.clone(),
+                source_varno,
+                &output_exprs,
+            ),
+            policy_name: check.policy_name.clone(),
+            source: check.source.clone(),
+        })
+        .collect()
+}
+
+fn remap_partition_conflict_expr(
+    expr: Expr,
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+) -> Result<Expr, ExecError> {
+    let outer_exprs = partition_parent_layout_exprs(parent_desc, child_desc, OUTER_VAR);
+    let inner_exprs = partition_parent_layout_exprs(parent_desc, child_desc, INNER_VAR);
+    let expr = rewrite_local_vars_for_output_exprs(expr, OUTER_VAR, &outer_exprs);
+    Ok(rewrite_local_vars_for_output_exprs(
+        expr,
+        INNER_VAR,
+        &inner_exprs,
+    ))
+}
+
+fn partition_parent_layout_exprs(
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+    varno: usize,
+) -> Vec<Expr> {
+    parent_desc
+        .columns
+        .iter()
+        .map(|parent_column| {
+            if parent_column.dropped {
+                return Expr::Const(Value::Null);
+            }
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, child_column)| {
+                    !child_column.dropped
+                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                        && child_column.sql_type == parent_column.sql_type
+                })
+                .map(|(child_index, child_column)| {
+                    Expr::Var(Var {
+                        varno,
+                        varattno: user_attrno(child_index),
+                        varlevelsup: 0,
+                        vartype: child_column.sql_type,
+                    })
+                })
+                .unwrap_or(Expr::Const(Value::Null))
+        })
+        .collect()
+}
+
+fn partition_child_column_index(
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+    parent_index: usize,
+) -> Result<usize, ExecError> {
+    let parent_column = parent_desc
+        .columns
+        .get(parent_index)
+        .ok_or_else(|| partition_remap_error("invalid partition parent column index"))?;
+    child_desc
+        .columns
+        .iter()
+        .enumerate()
+        .find(|(_, child_column)| {
+            !child_column.dropped
+                && !parent_column.dropped
+                && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                && child_column.sql_type == parent_column.sql_type
+        })
+        .map(|(index, _)| index)
+        .ok_or_else(|| partition_remap_error("partition column is missing from child relation"))
+}
+
+fn map_partition_arbiter_index(
+    parent_index: &BoundIndexRelation,
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+    child_indexes: &[BoundIndexRelation],
+) -> Result<BoundIndexRelation, ExecError> {
+    let translated_indkey =
+        translate_partition_index_indkey(parent_index, parent_desc, child_desc)?;
+    child_indexes
+        .iter()
+        .find(|child_index| {
+            child_index.index_meta.indisunique == parent_index.index_meta.indisunique
+                && child_index.index_meta.am_oid == parent_index.index_meta.am_oid
+                && child_index.index_meta.indnkeyatts == parent_index.index_meta.indnkeyatts
+                && child_index
+                    .index_meta
+                    .indkey
+                    .iter()
+                    .take(translated_indkey.len())
+                    .copied()
+                    .eq(translated_indkey.iter().copied())
+        })
+        .cloned()
+        .ok_or_else(|| partition_remap_error("could not find matching partition arbiter index"))
+}
+
+fn translate_partition_index_indkey(
+    index: &BoundIndexRelation,
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+) -> Result<Vec<i16>, ExecError> {
+    let key_count = usize::try_from(index.index_meta.indnkeyatts)
+        .unwrap_or(index.index_meta.indkey.len())
+        .min(index.index_meta.indkey.len());
+    index
+        .index_meta
+        .indkey
+        .iter()
+        .take(key_count)
+        .map(|attnum| {
+            let Some(parent_index) = attrno_index(i32::from(*attnum)) else {
+                return Ok(*attnum);
+            };
+            partition_child_column_index(parent_desc, child_desc, parent_index)
+                .map(|child_index| user_attrno(child_index) as i16)
+        })
+        .collect()
+}
+
+fn partition_remap_error(detail: impl Into<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: "could not remap partitioned ON CONFLICT state".into(),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "XX000",
     }
 }
 
@@ -8283,6 +8914,30 @@ fn eval_implicit_insert_defaults(
     Ok((slot, values))
 }
 
+fn eval_missing_insert_defaults(
+    defaults: &[crate::backend::executor::Expr],
+    targets: &[BoundAssignmentTarget],
+    values: &mut [Value],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    slot.tts_values = values.to_vec();
+    let mut targeted = vec![false; values.len()];
+    for target in targets {
+        if let Some(mark) = targeted.get_mut(target.column_index) {
+            *mark = true;
+        }
+    }
+    for (column_index, expr) in defaults.iter().enumerate() {
+        if targeted.get(column_index).copied().unwrap_or(false) {
+            continue;
+        }
+        values[column_index] = eval_expr(expr, slot, ctx)?;
+        slot.tts_values[column_index] = values[column_index].clone();
+    }
+    Ok(())
+}
+
 fn apply_overriding_user_identity_defaults(
     stmt: &BoundInsertStatement,
     values: &mut [Value],
@@ -8324,12 +8979,8 @@ pub(crate) fn materialize_insert_rows(
         BoundInsertSource::Values(rows) => rows
             .iter()
             .map(|row| {
-                let (mut slot, mut values) = eval_implicit_insert_defaults(
-                    &stmt.column_defaults,
-                    &stmt.target_columns,
-                    stmt.desc.columns.len(),
-                    ctx,
-                )?;
+                let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
+                let mut values = vec![Value::Null; stmt.desc.columns.len()];
                 for (target, expr) in stmt.target_columns.iter().zip(row.iter()) {
                     let value = eval_expr(expr, &mut slot, ctx)?;
                     apply_assignment_target(
@@ -8341,6 +8992,13 @@ pub(crate) fn materialize_insert_rows(
                         ctx,
                     )?;
                 }
+                eval_missing_insert_defaults(
+                    &stmt.column_defaults,
+                    &stmt.target_columns,
+                    &mut values,
+                    &mut slot,
+                    ctx,
+                )?;
                 enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                 Ok(values)
             })
@@ -8351,12 +9009,7 @@ pub(crate) fn materialize_insert_rows(
                 for (row_values, mut slot) in
                     execute_insert_project_set_row(row, stmt, catalog, ctx)?
                 {
-                    let (_, mut values) = eval_implicit_insert_defaults(
-                        &stmt.column_defaults,
-                        &stmt.target_columns,
-                        stmt.desc.columns.len(),
-                        ctx,
-                    )?;
+                    let mut values = vec![Value::Null; stmt.desc.columns.len()];
                     for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
                         apply_assignment_target(
                             &stmt.desc,
@@ -8367,6 +9020,13 @@ pub(crate) fn materialize_insert_rows(
                             ctx,
                         )?;
                     }
+                    eval_missing_insert_defaults(
+                        &stmt.column_defaults,
+                        &stmt.target_columns,
+                        &mut values,
+                        &mut slot,
+                        ctx,
+                    )?;
                     apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
                     enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                     materialized.push(values);
@@ -8400,15 +9060,17 @@ pub(crate) fn materialize_insert_rows(
                 while let Some(slot) = state.exec_proc_node(ctx)? {
                     ctx.check_for_interrupts()?;
                     let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                    let (_, mut values) = eval_implicit_insert_defaults(
-                        &stmt.column_defaults,
-                        &stmt.target_columns,
-                        stmt.desc.columns.len(),
-                        ctx,
-                    )?;
+                    let mut values = vec![Value::Null; stmt.desc.columns.len()];
                     for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
                         apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
                     }
+                    eval_missing_insert_defaults(
+                        &stmt.column_defaults,
+                        &stmt.target_columns,
+                        &mut values,
+                        slot,
+                        ctx,
+                    )?;
                     apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
                     enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                     rows.push(values);

@@ -1910,8 +1910,14 @@ pub(crate) fn coerce_assignment_value_with_catalog_and_config(
 
     match value {
         Value::Null => Ok(Value::Null),
+        Value::Int16(v) if target.kind == SqlTypeKind::Int2 => {
+            cast_value_with_config(Value::Int16(*v), target, datetime_config)
+        }
         Value::Int16(v) => {
             cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
+        }
+        Value::Int32(v) if target.kind == SqlTypeKind::Int2 => {
+            cast_value_with_config(Value::Int32(*v), target, datetime_config)
         }
         Value::Int32(v) => {
             cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
@@ -1919,6 +1925,9 @@ pub(crate) fn coerce_assignment_value_with_catalog_and_config(
         Value::EnumOid(v) if matches!(target.kind, SqlTypeKind::Enum) => Ok(Value::EnumOid(*v)),
         Value::EnumOid(v) => {
             cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
+        }
+        Value::Int64(v) if target.kind == SqlTypeKind::Int2 => {
+            cast_value_with_config(Value::Int64(*v), target, datetime_config)
         }
         Value::Int64(v) => {
             cast_text_value_with_config(&v.to_string(), target, false, datetime_config)
