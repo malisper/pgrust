@@ -16,6 +16,8 @@ Key decisions:
 - Suppress caret positions for jsonb runtime path errors while keeping targeted
   positions for jsonb subscript binding errors.
 - Route scalar builtins in FROM through the single-row Result + Projection path.
+- Keep OUT-parameter/composite scalar functions in FROM on the existing row
+  function path so record metadata remains visible to later FROM items.
 - Preserve left-to-right function cross join tie-breaking so unordered
   jsonb_agg over generate_series matches PostgreSQL's regression output.
 - Use canonicalized hash lookup keys for aggregate/group-by jsonb values to
@@ -63,6 +65,13 @@ Tests run:
   - CARGO_TARGET_DIR=/tmp/pgrust-target-jsonb-las-vegas scripts/cargo_isolated.sh test --lib --quiet scalar_repeat_in_from_returns_single_row
   - CARGO_TARGET_DIR=/tmp/pgrust-target-jsonb-las-vegas scripts/run_regression.sh --test jsonb --results-dir /tmp/pgrust-jsonb-regression-las-vegas-pr-2 --timeout 180 --jobs 1 --port 55433
     Result: PASS, 1084/1084 queries matched.
+- CI follow-up:
+  - CARGO_TARGET_DIR=/tmp/pgrust-target-jsonb-las-vegas scripts/cargo_isolated.sh test --lib --quiet analyze_alias_for_scalar_record_out_function_exposes_out_columns
+  - CARGO_TARGET_DIR=/tmp/pgrust-target-jsonb-las-vegas scripts/cargo_isolated.sh test --lib --quiet analyze_lateral_scalar_record_out_function_can_feed_next_lateral_item
+  - CARGO_TARGET_DIR=/tmp/pgrust-target-jsonb-las-vegas scripts/cargo_isolated.sh test --lib --quiet build_plan_resolves_pg_lsn_arithmetic_record_function_in_from
+  - CARGO_TARGET_DIR=/tmp/pgrust-target-jsonb-las-vegas scripts/cargo_isolated.sh test --lib --quiet scalar_repeat_in_from_returns_single_row
+  - CARGO_TARGET_DIR=/tmp/pgrust-target-jsonb-las-vegas scripts/cargo_isolated.sh test --lib --quiet backend::parser::tests
+    Result: 764 passed.
 
 Remaining:
 None for the scoped jsonb regression file.

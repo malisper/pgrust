@@ -4124,7 +4124,7 @@ fn bind_single_row_function_from_item_with_ctes(
             sqlstate: "0A000",
         });
     }
-    if resolved.scalar_impl.is_some() {
+    if resolved.scalar_impl.is_some() && resolved_row_columns.is_none() {
         let expr = bind_resolved_scalar_function_call(
             resolved,
             args,
