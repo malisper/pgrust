@@ -9196,6 +9196,39 @@ fn text_search_parse_error(op: &'static str, message: String) -> ExecError {
     })
 }
 
+fn text_search_config_name_from_value(
+    value: &Value,
+    catalog: Option<&dyn CatalogLookup>,
+    op: &'static str,
+) -> Result<Option<String>, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    if let Some(text) = value.as_text() {
+        return Ok(Some(text.to_string()));
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
+        Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
+        _ => None,
+    };
+    if let Some(oid) = oid
+        && let Some(row) = catalog.and_then(|catalog| {
+            catalog
+                .ts_config_rows()
+                .into_iter()
+                .find(|row| row.oid == oid)
+        })
+    {
+        return Ok(Some(row.cfgname));
+    }
+    Err(ExecError::TypeMismatch {
+        op,
+        left: value.clone(),
+        right: Value::Null,
+    })
+}
+
 fn eval_ts_match_values(
     values: &[Value],
     default_config_name: Option<&str>,
@@ -9258,15 +9291,29 @@ fn tsquery_is_empty(query: &crate::include::nodes::tsearch::TsQuery) -> bool {
     crate::backend::executor::render_tsquery_text(query).is_empty()
 }
 
-fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
+fn eval_ts_headline_values(
+    values: &[Value],
+    default_config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
     if values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
     }
-    let (document, query, options) = match values {
-        [document, Value::TsQuery(query)] => (document, query, None),
-        [document, Value::TsQuery(query), options] => (document, query, Some(options)),
-        [_config, document, Value::TsQuery(query)] => (document, query, None),
-        [_config, document, Value::TsQuery(query), options] => (document, query, Some(options)),
+    let (config_name, document, query, options) = match values {
+        [document, Value::TsQuery(query)] => (None, document, query, None),
+        [document, Value::TsQuery(query), options] => (None, document, query, Some(options)),
+        [config, document, Value::TsQuery(query)] => (
+            text_search_config_name_from_value(config, catalog, "ts_headline")?,
+            document,
+            query,
+            None,
+        ),
+        [config, document, Value::TsQuery(query), options] => (
+            text_search_config_name_from_value(config, catalog, "ts_headline")?,
+            document,
+            query,
+            Some(options),
+        ),
         _ => {
             return Err(ExecError::TypeMismatch {
                 op: "ts_headline",
@@ -9275,6 +9322,7 @@ fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
             });
         }
     };
+    let config_name = config_name.as_deref().or(default_config_name);
     let headline_options = parse_ts_headline_options(options)?;
     if tsquery_is_empty(query) {
         return ts_headline_identity(document);
@@ -9286,14 +9334,26 @@ fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
     match document {
         Value::Json(text) => {
             let mut json = parse_json_text_input(text.as_str())?;
-            highlight_json_strings_for_headline(&mut json, &lexemes, &headline_options);
+            highlight_json_strings_for_headline(
+                &mut json,
+                &lexemes,
+                &headline_options,
+                config_name,
+                catalog,
+            )?;
             Ok(Value::Json(CompactString::from_owned(
                 serde_json::to_string(&json).unwrap_or_else(|_| "null".into()),
             )))
         }
         Value::Jsonb(bytes) => {
             let mut json = decode_jsonb(bytes)?.to_serde();
-            highlight_json_strings_for_headline(&mut json, &lexemes, &headline_options);
+            highlight_json_strings_for_headline(
+                &mut json,
+                &lexemes,
+                &headline_options,
+                config_name,
+                catalog,
+            )?;
             Ok(Value::Jsonb(crate::backend::executor::jsonb::encode_jsonb(
                 &JsonbValue::from_serde(json)?,
             )))
@@ -9304,9 +9364,15 @@ fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
                 left: values.first().cloned().unwrap_or(Value::Null),
                 right: values.get(1).cloned().unwrap_or(Value::Null),
             })?;
-            Ok(Value::Text(
-                highlight_headline_text(document, &lexemes, &headline_options).into(),
-            ))
+            Ok(Value::Text(CompactString::from_owned(
+                highlight_headline_text(
+                    document,
+                    &lexemes,
+                    &headline_options,
+                    config_name,
+                    catalog,
+                )?,
+            )))
         }
     }
 }
@@ -9363,23 +9429,26 @@ fn highlight_json_strings_for_headline(
     value: &mut serde_json::Value,
     lexemes: &[String],
     options: &TsHeadlineOptions,
-) {
+    config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<(), ExecError> {
     match value {
         serde_json::Value::String(text) => {
-            *text = highlight_headline_text(text, lexemes, options);
+            *text = highlight_headline_text(text, lexemes, options, config_name, catalog)?;
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                highlight_json_strings_for_headline(item, lexemes, options);
+                highlight_json_strings_for_headline(item, lexemes, options, config_name, catalog)?;
             }
         }
         serde_json::Value::Object(fields) => {
             for value in fields.values_mut() {
-                highlight_json_strings_for_headline(value, lexemes, options);
+                highlight_json_strings_for_headline(value, lexemes, options, config_name, catalog)?;
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
+    Ok(())
 }
 
 fn tsquery_lexemes_for_headline(node: &crate::include::nodes::tsearch::TsQueryNode) -> Vec<String> {
@@ -9413,7 +9482,9 @@ fn highlight_headline_text(
     document: &str,
     lexemes: &[String],
     options: &TsHeadlineOptions,
-) -> String {
+    config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<String, ExecError> {
     let mut out = String::with_capacity(document.len());
     let mut token = String::new();
     for ch in document.chars() {
@@ -9421,11 +9492,11 @@ fn highlight_headline_text(
             token.push(ch);
             continue;
         }
-        flush_headline_token(&mut out, &mut token, lexemes, options);
+        flush_headline_token(&mut out, &mut token, lexemes, options, config_name, catalog)?;
         out.push(ch);
     }
-    flush_headline_token(&mut out, &mut token, lexemes, options);
-    out
+    flush_headline_token(&mut out, &mut token, lexemes, options, config_name, catalog)?;
+    Ok(out)
 }
 
 fn flush_headline_token(
@@ -9433,12 +9504,13 @@ fn flush_headline_token(
     token: &mut String,
     lexemes: &[String],
     options: &TsHeadlineOptions,
-) {
+    config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<(), ExecError> {
     if token.is_empty() {
-        return;
+        return Ok(());
     }
-    let lower = token.to_ascii_lowercase();
-    if lexemes.iter().any(|lexeme| lower == *lexeme) {
+    if headline_token_matches_query_lexeme(token, lexemes, config_name, catalog)? {
         out.push_str(&options.start_sel);
         out.push_str(token);
         out.push_str(&options.stop_sel);
@@ -9446,6 +9518,27 @@ fn flush_headline_token(
         out.push_str(token);
     }
     token.clear();
+    Ok(())
+}
+
+fn headline_token_matches_query_lexeme(
+    token: &str,
+    lexemes: &[String],
+    config_name: Option<&str>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<bool, ExecError> {
+    let (token_lexemes, _) =
+        crate::backend::tsearch::tsvector_lexemes_with_config_name(config_name, token, 1, catalog)
+            .map_err(|err| text_search_parse_error("ts_headline", err))?;
+    if token_lexemes.iter().any(|token_lexeme| {
+        lexemes
+            .iter()
+            .any(|lexeme| token_lexeme.text.as_str() == lexeme)
+    }) {
+        return Ok(true);
+    }
+    let lower = token.to_ascii_lowercase();
+    Ok(lexemes.iter().any(|lexeme| lower == *lexeme))
 }
 
 fn eval_plpgsql_builtin_function(
@@ -10411,39 +10504,16 @@ fn eval_text_search_builtin_function(
             let Some(value) = values.get(index) else {
                 return Ok(None);
             };
-            if matches!(value, Value::Null) {
-                return Ok(None);
-            }
-            if let Some(text) = value.as_text() {
-                return Ok(Some(text.to_string()));
-            }
-            let oid = match value {
-                Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
-                Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
-                _ => None,
-            };
-            if let Some(oid) = oid
-                && let Some(row) = catalog.and_then(|catalog| {
-                    catalog
-                        .ts_config_rows()
-                        .into_iter()
-                        .find(|row| row.oid == oid)
-                })
-            {
-                return Ok(Some(row.cfgname));
-            }
-            Err(ExecError::TypeMismatch {
-                op,
-                left: value.clone(),
-                right: Value::Null,
-            })
+            text_search_config_name_from_value(value, catalog, op)
         };
 
     match func {
         BuiltinScalarFunction::TsMatch => {
             eval_ts_match_values(values, default_config_name(), catalog)
         }
-        BuiltinScalarFunction::TsHeadline => eval_ts_headline_values(values),
+        BuiltinScalarFunction::TsHeadline => {
+            eval_ts_headline_values(values, default_config_name(), catalog)
+        }
         BuiltinScalarFunction::ToTsVector => {
             if let [Value::Json(_)] = values {
                 return json_to_tsvector_value(default_config_name(), &values[0], None, catalog);
