@@ -2,6 +2,7 @@ use super::*;
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
+use crate::include::nodes::primnodes::SubLinkType;
 pub(crate) enum BoundSelectTargets {
     Plain(Vec<TargetEntry>),
 }
@@ -93,21 +94,34 @@ fn bind_select_item_once(
     )?;
     let input_resno = input_resno_for_scope_expr(scope, &typed.expr);
     Ok(vec![BoundScalarSelectTarget {
-        output_name: select_item_output_name(item),
+        output_name: select_item_output_name(item, &typed.expr),
         expr: typed.expr,
         sql_type: typed.sql_type,
         input_resno,
     }])
 }
 
-fn select_item_output_name(item: &SelectItem) -> String {
+fn select_item_output_name(item: &SelectItem, expr: &Expr) -> String {
     if item.output_name == "?column?"
-        && let SqlExpr::ScalarSubquery(select) = &item.expr
-        && let Some(target) = select.targets.first()
+        && let Some(name) = bound_expr_output_name(expr)
     {
-        return target.output_name.clone();
+        return name;
     }
     item.output_name.clone()
+}
+
+fn bound_expr_output_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::SubLink(sublink) if matches!(sublink.sublink_type, SubLinkType::ExprSubLink) => {
+            sublink.subselect.target_list.first().map(|target| {
+                match bound_expr_output_name(&target.expr) {
+                    Some(inner_name) if target.name == "?column?" => inner_name,
+                    _ => target.name.clone(),
+                }
+            })
+        }
+        _ => None,
+    }
 }
 
 fn bound_scalar_items_from_target_entries(

@@ -8364,6 +8364,30 @@ fn build_plan_rejects_forward_cte_references() {
 }
 
 #[test]
+fn build_plan_propagates_nested_scalar_subquery_column_names() {
+    let cases = [
+        (
+            "select ( with cte(foo) as ( values(id) )
+                      select (select foo from cte) )
+             from people",
+            "foo",
+        ),
+        (
+            "select ( with cte(foo) as ( values(id) )
+                      values((select foo from cte)) )
+             from people",
+            "column1",
+        ),
+    ];
+    let catalog = catalog();
+    for (sql, expected) in cases {
+        let stmt = parse_select(sql).unwrap();
+        let plan = build_plan(&stmt, &catalog).unwrap();
+        assert_eq!(plan.column_names(), vec![expected.to_string()], "{sql}");
+    }
+}
+
+#[test]
 fn parse_boolean_is_predicates_lower_to_existing_ast() {
     let stmt = parse_select(
         "select b is true, b is not false, b is unknown, b is not unknown from people",
