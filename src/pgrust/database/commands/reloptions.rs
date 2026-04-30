@@ -1,8 +1,9 @@
 use super::super::*;
 use crate::backend::parser::RelOption;
 use crate::backend::utils::misc::notices::push_notice;
+use crate::include::access::gin::GinOptions;
 use crate::include::access::nbtree::BtreeOptions;
-use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
+use crate::include::catalog::{BTREE_AM_OID, GIN_AM_OID, PG_CATALOG_NAMESPACE_OID};
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_index_relation_for_alter_index};
 
 #[derive(Debug, Clone, Default)]
@@ -230,6 +231,66 @@ pub(super) fn normalize_btree_reloptions(
         }
     }
     Ok((Some(resolved), Some(reloptions)))
+}
+
+fn normalize_gin_reloptions(
+    options: &[RelOption],
+) -> Result<(Option<GinOptions>, Option<Vec<String>>), ExecError> {
+    if options.is_empty() {
+        return Ok((None, None));
+    }
+
+    let mut resolved = GinOptions::default();
+    let mut reloptions = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for option in options {
+        if let Some((namespace, _)) = option.name.split_once('.') {
+            return Err(unrecognized_parameter_namespace(namespace));
+        }
+        let name = option.name.to_ascii_lowercase();
+        if !seen.insert(name.clone()) {
+            return Err(duplicate_parameter(&name));
+        }
+        match name.as_str() {
+            "fastupdate" => {
+                let value = normalize_bool_option(&name, &option.value)?;
+                resolved.fastupdate = value == "true";
+                reloptions.push(format!("{name}={value}"));
+            }
+            "gin_pending_list_limit" => {
+                let value = normalize_int_option(&name, &option.value, 1, i32::MAX as i64)?;
+                resolved.pending_list_limit_kb = value
+                    .parse::<u32>()
+                    .map_err(|_| invalid_int_option(&name, &option.value))?;
+                reloptions.push(format!("{name}={value}"));
+            }
+            _ => return Err(unrecognized_parameter(&name)),
+        }
+    }
+    Ok((Some(resolved), Some(reloptions)))
+}
+
+fn gin_options_from_reloptions(reloptions: Option<&[String]>) -> GinOptions {
+    let mut options = GinOptions::default();
+    let Some(reloptions) = reloptions else {
+        return options;
+    };
+    for option in reloptions {
+        let Some((name, value)) = option.split_once('=') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("fastupdate") {
+            options.fastupdate = matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "on" | "yes" | "1"
+            );
+        } else if name.eq_ignore_ascii_case("gin_pending_list_limit")
+            && let Ok(limit) = value.parse::<u32>()
+        {
+            options.pending_list_limit_kb = limit;
+        }
+    }
+    options
 }
 
 pub(super) fn set_reloptions(
@@ -485,7 +546,15 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.index_name)?;
-        let (_btree_options, updates) = normalize_btree_reloptions(&alter_stmt.options)?;
+        let access_method_oid = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .map(|row| row.relam)
+            .unwrap_or(BTREE_AM_OID);
+        let updates = match access_method_oid {
+            BTREE_AM_OID => normalize_btree_reloptions(&alter_stmt.options)?.1,
+            GIN_AM_OID => normalize_gin_reloptions(&alter_stmt.options)?.1,
+            _ => normalize_btree_reloptions(&alter_stmt.options)?.1,
+        };
         let current = catalog
             .class_row_by_oid(relation.relation_oid)
             .and_then(|row| row.reloptions);
@@ -502,10 +571,19 @@ impl Database {
         let effect = self
             .catalog
             .write()
-            .alter_relation_reloptions_mvcc(relation.relation_oid, reloptions, &ctx)
+            .alter_relation_reloptions_mvcc(relation.relation_oid, reloptions.clone(), &ctx)
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
+        if access_method_oid == GIN_AM_OID && relation.relkind == 'i' {
+            let options = gin_options_from_reloptions(reloptions.as_deref());
+            crate::backend::access::gin::gin_update_options(
+                &self.pool,
+                client_id,
+                relation.rel,
+                &options,
+            )?;
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }

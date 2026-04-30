@@ -18,7 +18,7 @@ execute_arg_chunk = _{
     | "(" ~ execute_arg? ~ ")"
     | !("," | ")") ~ ANY
 }
-deallocate_stmt = { kw_deallocate ~ (kw_prepare? ~ identifier | kw_all) }
+deallocate_stmt = { kw_deallocate ~ (kw_all | kw_prepare? ~ identifier) }
 
 analyze_stmt = { kw_analyze ~ analyze_option_block? ~ maintenance_target_list? }
 checkpoint_stmt = { kw_checkpoint }

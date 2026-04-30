@@ -2456,6 +2456,7 @@ pub struct PrepareStatement {
     pub parameter_types: Vec<RawTypeName>,
     pub query: PreparedStatementQuery,
     pub query_sql: String,
+    pub source_sql: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

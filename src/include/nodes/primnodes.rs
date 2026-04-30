@@ -528,6 +528,7 @@ pub enum BuiltinScalarFunction {
     PgRelationSize,
     PgTableSize,
     PgNumaAvailable,
+    GinCleanPendingList,
     BrinSummarizeNewValues,
     BrinSummarizeRange,
     BrinDesummarizeRange,

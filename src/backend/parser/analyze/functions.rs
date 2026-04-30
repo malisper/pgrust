@@ -2476,6 +2476,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
             BuiltinScalarFunction::PgRelationSize => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgNumaAvailable => args.is_empty(),
+            BuiltinScalarFunction::GinCleanPendingList => args.len() == 1,
             BuiltinScalarFunction::BrinSummarizeNewValues => args.len() == 1,
             BuiltinScalarFunction::BrinSummarizeRange
             | BuiltinScalarFunction::BrinDesummarizeRange => args.len() == 2,
@@ -3959,6 +3960,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
         ("pg_numa_available", BuiltinScalarFunction::PgNumaAvailable),
+        (
+            "gin_clean_pending_list",
+            BuiltinScalarFunction::GinCleanPendingList,
+        ),
         (
             "brin_summarize_new_values",
             BuiltinScalarFunction::BrinSummarizeNewValues,
@@ -5826,6 +5831,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationSize
             | BuiltinScalarFunction::PgNumaAvailable
+            | BuiltinScalarFunction::GinCleanPendingList
             | BuiltinScalarFunction::BrinSummarizeNewValues
             | BuiltinScalarFunction::BrinSummarizeRange
             | BuiltinScalarFunction::BrinDesummarizeRange

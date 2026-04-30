@@ -3670,7 +3670,6 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     &resolved,
                 )?;
-                let alias_single_function_output = resolved_row_columns.is_none();
                 let output_columns = resolved_row_columns.unwrap_or_else(|| {
                     vec![QueryColumn {
                         name: resolved.proname.clone(),
@@ -3688,6 +3687,8 @@ fn bind_function_from_item_with_ctes(
                     &mut output_columns,
                     &mut desc_columns,
                 );
+                let alias_single_function_output =
+                    output_columns.len() == 1 || (with_ordinality && output_columns.len() == 2);
                 if let Some((plan, scope, alias_single_function_output)) =
                     try_inline_sql_set_function_from_item(
                         name,
@@ -4026,7 +4027,6 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
         grouped_outer,
         &resolved,
     )?;
-    let alias_single_function_output = resolved_row_columns.is_none();
     let output_columns = resolved_row_columns.unwrap_or_else(|| {
         vec![QueryColumn {
             name: resolved.proname.clone(),
@@ -4040,6 +4040,8 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
         .map(|col| column_desc(col.name.clone(), col.sql_type, true))
         .collect::<Vec<_>>();
     maybe_append_function_ordinality(with_ordinality, &mut output_columns, &mut desc_columns);
+    let alias_single_function_output =
+        output_columns.len() == 1 || (with_ordinality && output_columns.len() == 2);
     if let Some((plan, scope, alias_single_function_output)) =
         try_inline_sql_set_function_from_item(
             name,
