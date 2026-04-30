@@ -9722,10 +9722,13 @@ impl PlanNode for CteScanState {
             None
         };
         begin_node(&mut self.stats, ctx)?;
+        let pinned_table = ctx.pinned_cte_tables.get(&self.cte_id).cloned();
         let table = ctx
             .cte_tables
             .entry(self.cte_id)
-            .or_insert_with(|| Rc::new(RefCell::new(Default::default())))
+            .or_insert_with(|| {
+                pinned_table.unwrap_or_else(|| Rc::new(RefCell::new(Default::default())))
+            })
             .clone();
         loop {
             ctx.check_for_interrupts()?;

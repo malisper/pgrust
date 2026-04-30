@@ -145,7 +145,10 @@ pub(crate) use rules::{
 };
 pub use scope::BoundRelation;
 use scope::*;
-pub(crate) use scope::{BoundCte, BoundScope, scope_for_relation, shift_scope_rtindexes};
+pub(crate) use scope::{
+    BoundCte, BoundModifyingCte, BoundScope, BoundWritableCte, scope_for_relation,
+    shift_scope_rtindexes,
+};
 use sqlfunc_inline::*;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -6883,6 +6886,13 @@ pub(crate) fn bound_cte_from_query_rows(
         self_reference: false,
         worktable_id: 0,
     }
+}
+
+pub(crate) fn bound_cte_from_query_columns(
+    name: String,
+    output_columns: Vec<QueryColumn>,
+) -> BoundCte {
+    bound_cte_from_query_rows(name, output_columns, &[])
 }
 
 pub fn build_values_plan(

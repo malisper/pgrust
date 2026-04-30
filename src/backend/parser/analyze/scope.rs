@@ -83,6 +83,20 @@ pub(crate) struct BoundCte {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct BoundWritableCte {
+    pub(crate) cte: BoundCte,
+    pub(crate) source: BoundModifyingCte,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum BoundModifyingCte {
+    Insert(BoundInsertStatement),
+    Update(BoundUpdateStatement),
+    Delete(BoundDeleteStatement),
+    Merge(BoundMergeStatement),
+}
+
+#[derive(Debug, Clone)]
 pub struct BoundRelation {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
@@ -890,7 +904,9 @@ fn passthrough_cte_target<'a>(cte: &'a BoundCte, ctes: &'a [BoundCte]) -> Option
             return None;
         }
     }
-    ctes.iter().find(|candidate| candidate.cte_id == cte_id)
+    ctes.iter().find(|candidate| {
+        candidate.cte_id == cte_id && candidate.desc.columns.len() == cte.desc.columns.len()
+    })
 }
 
 pub(super) fn bind_from_item_with_ctes(

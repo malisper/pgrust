@@ -538,7 +538,15 @@ pub(crate) fn execute_explain(
     } = stmt;
     let statement = *statement;
     if !analyze && explain_statement_has_writable_ctes(&statement) {
-        return Ok(explain_placeholder_result("Result"));
+        return execute_explain_writable_ctes(
+            statement,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        );
     }
     if let Statement::Update(update) = statement {
         return execute_explain_update(
@@ -811,6 +819,137 @@ fn explain_placeholder_result(label: &str) -> StatementResult {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
         rows: vec![vec![Value::Text(label.into())]],
+    }
+}
+
+fn execute_explain_writable_ctes(
+    statement: Statement,
+    costs: bool,
+    format: ExplainFormat,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    let ctes = statement_top_level_ctes(&statement);
+    let mut lines = Vec::new();
+    for cte in ctes.iter().filter(|cte| cte_body_is_writable(&cte.body)) {
+        if !matches!(
+            cte.body,
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_)
+        ) {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "WITH clause containing a data-modifying statement must be at the top level".into(),
+            )));
+        }
+        lines.push(format!("CTE {}", cte.name));
+        let producer_lines = explain_writable_cte_producer_lines(
+            &cte.body,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?;
+        for (index, line) in producer_lines.into_iter().enumerate() {
+            if index == 0 {
+                lines.push(format!("  ->  {line}"));
+            } else {
+                lines.push(format!("    {line}"));
+            }
+        }
+    }
+    if let Some(cte) = ctes.iter().find(|cte| cte_body_is_writable(&cte.body)) {
+        lines.push(format!("  ->  CTE Scan on {}", cte.name));
+    }
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn explain_writable_cte_producer_lines(
+    body: &CteBody,
+    costs: bool,
+    format: ExplainFormat,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<Vec<String>, ExecError> {
+    let result = match body {
+        CteBody::Insert(stmt) => execute_explain_insert(
+            (**stmt).clone(),
+            false,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?,
+        CteBody::Update(stmt) => execute_explain_update(
+            (**stmt).clone(),
+            false,
+            costs,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?,
+        CteBody::Delete(stmt) => execute_explain_delete(
+            (**stmt).clone(),
+            false,
+            costs,
+            verbose,
+            catalog,
+            planner_config,
+        )?,
+        CteBody::Merge(stmt) => {
+            let bound = crate::backend::parser::plan_merge(stmt, catalog)?;
+            let mut lines = Vec::new();
+            let state = executor_start(bound.input_plan.plan_tree);
+            push_explain_line(
+                &format!("Merge on {}", bound.explain_target_name),
+                state.plan_info(),
+                costs,
+                &mut lines,
+            );
+            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, true, &mut lines);
+            return Ok(lines);
+        }
+        _ => return Ok(vec!["Result".into()]),
+    };
+    Ok(statement_result_text_lines(result))
+}
+
+fn statement_result_text_lines(result: StatementResult) -> Vec<String> {
+    match result {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .filter_map(|row| match row.into_iter().next() {
+                Some(Value::Text(text)) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect(),
+        StatementResult::AffectedRows(_) => Vec::new(),
+    }
+}
+
+fn statement_top_level_ctes(statement: &Statement) -> Vec<CommonTableExpr> {
+    match statement {
+        Statement::Select(stmt) => stmt.with.clone(),
+        Statement::Insert(stmt) => stmt.with.clone(),
+        Statement::Update(stmt) => stmt.with.clone(),
+        Statement::Delete(stmt) => stmt.with.clone(),
+        Statement::Merge(stmt) => stmt.with.clone(),
+        Statement::Values(stmt) => stmt.with.clone(),
+        _ => Vec::new(),
     }
 }
 
