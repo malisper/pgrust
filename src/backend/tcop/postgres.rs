@@ -352,14 +352,6 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         return None;
     }
     if let ExecError::Parse(parse_error) = e
-        && matches!(
-            parse_error.unpositioned(),
-            crate::backend::parser::ParseError::TempTableInNonTempSchema(_)
-        )
-    {
-        return None;
-    }
-    if let ExecError::Parse(parse_error) = e
         && let Some(position) = parse_error.position()
     {
         return Some(position);

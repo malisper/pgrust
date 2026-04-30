@@ -1880,6 +1880,13 @@ fn render_target_entry(
     {
         rendered.push_str("::text");
     }
+    if target_needs_grouped_join_using_cast(target, ctx) && !rendered.contains("::") {
+        let quoted_target_name = quote_target_output_name(target, target_name, ctx);
+        return format!(
+            "({rendered})::{} AS {quoted_target_name}",
+            render_sql_type_with_catalog(target.sql_type, ctx.catalog)
+        );
+    }
     let natural_output_matches = matches!(&target.expr, Expr::Var(_) | Expr::FieldSelect { .. })
         && expr_output_name(&target.expr, ctx)
             .is_some_and(|name| name.eq_ignore_ascii_case(target_name))
@@ -1901,6 +1908,36 @@ fn render_target_entry(
     } else {
         format!("{rendered} AS {quoted_target_name}")
     }
+}
+
+fn target_needs_grouped_join_using_cast(
+    target: &TargetEntry,
+    ctx: &ViewDeparseContext<'_>,
+) -> bool {
+    if ctx.query.group_by.is_empty() || target.sql_type.is_array {
+        return false;
+    }
+    let Expr::Var(var) = &target.expr else {
+        return false;
+    };
+    if var.varlevelsup != 0 {
+        return false;
+    }
+    let Some(column_index) = attrno_index(var.varattno) else {
+        return false;
+    };
+    let Some(rte) = ctx.query.rtable.get(var.varno.saturating_sub(1)) else {
+        return false;
+    };
+    matches!(
+        &rte.kind,
+        RangeTblEntryKind::Join {
+            jointype:
+                JoinType::Left | JoinType::Right | JoinType::Full | JoinType::Semi | JoinType::Anti,
+            joinmergedcols,
+            ..
+        } if column_index < *joinmergedcols
+    )
 }
 
 fn quote_target_output_name(
