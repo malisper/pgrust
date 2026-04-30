@@ -7452,51 +7452,9 @@ fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, Par
     if !lowered.starts_with("drop function ") {
         return Ok(None);
     }
-    if drop_function_has_multiple_items(trimmed)? {
-        return Ok(Some(Statement::DropRoutine(
-            build_drop_function_as_routine_statement(trimmed)?,
-        )));
-    }
     Ok(Some(Statement::DropFunction(
         build_drop_function_statement(trimmed)?,
     )))
-}
-
-fn drop_function_has_multiple_items(sql: &str) -> Result<bool, ParseError> {
-    let rest = sql
-        .get("drop function".len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let rest = consume_keywords(rest, &["if", "exists"])
-        .unwrap_or(rest)
-        .trim_start();
-    let (routine_list, _) = split_drop_routine_suffix(rest)?;
-    Ok(split_top_level_items(routine_list, ',')?.len() > 1)
-}
-
-fn build_drop_function_as_routine_statement(
-    sql: &str,
-) -> Result<DropProcedureStatement, ParseError> {
-    let mut rest = sql
-        .get("drop function".len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let mut if_exists = false;
-    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
-        if_exists = true;
-        rest = next.trim_start();
-    }
-    let (routine_list, cascade) = split_drop_routine_suffix(rest)?;
-    let procedures = split_top_level_items(routine_list, ',')?
-        .into_iter()
-        .filter(|item| !item.trim().is_empty())
-        .map(|item| parse_drop_routine_item(&item))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(DropProcedureStatement {
-        if_exists,
-        procedures,
-        cascade,
-    })
 }
 
 fn try_parse_drop_table_statement(sql: &str) -> Result<Option<Statement>, ParseError> {

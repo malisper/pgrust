@@ -109,3 +109,36 @@ Result: PASS, 180/180 queries matched after the lsyscache lookup fix.
 
 Remaining:
 Force-push rebased PR branch and re-check GitHub mergeability.
+
+---
+
+Goal:
+Fix failed PR #366 merge-queue cargo-test-run (2/2).
+
+Key decisions:
+The failing CI test was `parse_drop_function_statement_with_multiple_names`.
+The rebase left a stale parser branch that converted multi-item `DROP FUNCTION`
+into generic `DropRoutine`, bypassing `DropFunctionStatement.additional_functions`.
+Removed that branch so `DROP FUNCTION` always parses as `DropFunction`; `DROP
+ROUTINE` still uses `DropRoutine`.
+
+Files touched:
+src/backend/parser/gram.rs
+
+Tests run:
+cargo fmt
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/cargo_isolated.sh test --lib --quiet parse_drop_function_statement_with_multiple_names
+Result: PASS, 1 passed.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/cargo_isolated.sh test --lib --quiet
+Result: FAIL, 4028 passed, 4 failed, 1 ignored. The failures were database view tests unrelated to the parser change and all four passed when rerun individually.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/cargo_isolated.sh test --lib --quiet auto_view_errors_preserve_postgres_column_specific_text
+Result: PASS, 1 passed.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/cargo_isolated.sh test --lib --quiet materialized_view_rejects_row_locks_and_renders_viewdef
+Result: PASS, 1 passed.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/cargo_isolated.sh test --lib --quiet nested_simple_views_auto_dml_returning_route_to_base_table
+Result: PASS, 1 passed.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/cargo_isolated.sh test --lib --quiet view_instead_of_triggers_fire_statement_triggers_and_return_rows
+Result: PASS, 1 passed.
+
+Remaining:
+Push the parser fix and re-check PR #366 CI.
