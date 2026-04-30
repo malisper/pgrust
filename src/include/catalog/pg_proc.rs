@@ -3233,6 +3233,30 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             )
         },
         proc_row(
+            3842,
+            "pg_relation_is_updatable",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_relation_is_updatable",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            3843,
+            "pg_column_is_updatable",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID, INT2_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_column_is_updatable",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             6121,
             "pg_relation_is_publishable",
             BOOL_TYPE_OID,
@@ -6110,6 +6134,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             FLOAT8_TYPE_OID,
             &oid_argtypes(&[FLOAT8_TYPE_OID]),
             "dsin",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1605,
+            "cos",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "dcos",
             1,
             false,
             true,
@@ -12558,6 +12594,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRelationFilenode,
         ),
         (
+            "pg_relation_is_updatable",
+            BuiltinScalarFunction::PgRelationIsUpdatable,
+        ),
+        (
+            "pg_column_is_updatable",
+            BuiltinScalarFunction::PgColumnIsUpdatable,
+        ),
+        (
             "pg_filenode_relation",
             BuiltinScalarFunction::PgFilenodeRelation,
         ),
@@ -13748,6 +13792,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("dpi", BuiltinScalarFunction::Pi),
         ("sin", BuiltinScalarFunction::Sin),
         ("dsin", BuiltinScalarFunction::Sin),
+        ("cos", BuiltinScalarFunction::Cos),
+        ("dcos", BuiltinScalarFunction::Cos),
         ("cbrt", BuiltinScalarFunction::Cbrt),
         ("dcbrt", BuiltinScalarFunction::Cbrt),
         ("power", BuiltinScalarFunction::Power),
@@ -14110,6 +14156,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
+        ),
+        (
+            "pg_relation_is_updatable",
+            BuiltinScalarFunction::PgRelationIsUpdatable,
+        ),
+        (
+            "pg_column_is_updatable",
+            BuiltinScalarFunction::PgColumnIsUpdatable,
         ),
     ]
 }

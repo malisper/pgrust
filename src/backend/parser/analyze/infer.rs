@@ -1552,6 +1552,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(
                     BuiltinScalarFunction::Cbrt
                     | BuiltinScalarFunction::Sin
+                    | BuiltinScalarFunction::Cos
                     | BuiltinScalarFunction::Sinh
                     | BuiltinScalarFunction::Cosh
                     | BuiltinScalarFunction::Tanh

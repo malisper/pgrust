@@ -31,7 +31,7 @@ use crate::backend::parser::{
     select_statement_references_table, update_statement_references_table, validate_rule_definition,
 };
 use crate::backend::rewrite::split_stored_rule_action_sql;
-use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
+use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError, classify_view_dml_rules};
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::include::catalog::PgRewriteRow;
 use crate::include::nodes::parsenodes::{
@@ -745,13 +745,29 @@ pub(crate) fn prepare_bound_insert_for_execution(
     stmt: crate::backend::parser::BoundInsertStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<PreparedBoundStatement<crate::backend::parser::BoundInsertStatement>, ExecError> {
-    if stmt.relkind != 'v'
-        || relation_has_user_rules_for_event(stmt.relation_oid, RuleEvent::Insert, catalog)
-    {
+    if stmt.relkind != 'v' {
         return Ok(PreparedBoundStatement {
             stmt,
             extra_lock_requests: Vec::new(),
         });
+    }
+    let rule_classification =
+        classify_view_dml_rules(stmt.relation_oid, ViewDmlEvent::Insert, catalog);
+    if rule_classification.unconditional_instead {
+        return Ok(PreparedBoundStatement {
+            stmt,
+            extra_lock_requests: Vec::new(),
+        });
+    }
+    if rule_classification.conditional_instead {
+        let relation_name = stmt.relation_name.clone();
+        return Err(auto_view_prepare_error(
+            &relation_name,
+            ViewDmlEvent::Insert,
+            ViewDmlRewriteError::NestedUserRuleMix(
+                "Views with conditional DO INSTEAD rules are not automatically updatable.".into(),
+            ),
+        ));
     }
     if relation_has_instead_row_trigger(catalog, stmt.relation_oid, TriggerOperation::Insert) {
         return Ok(PreparedBoundStatement {
@@ -759,7 +775,6 @@ pub(crate) fn prepare_bound_insert_for_execution(
             stmt,
         });
     }
-
     let view_name = stmt.relation_name.clone();
     let view_rel = stmt.rel;
     let stmt = rewrite_bound_insert_auto_view_target(stmt, catalog)
@@ -780,11 +795,23 @@ pub(crate) fn prepare_bound_update_for_execution(
             extra_lock_requests: Vec::new(),
         });
     };
-    if relation_has_user_rules_for_event(view_target.relation_oid, RuleEvent::Update, catalog) {
+    let rule_classification =
+        classify_view_dml_rules(view_target.relation_oid, ViewDmlEvent::Update, catalog);
+    if rule_classification.unconditional_instead {
         return Ok(PreparedBoundStatement {
             stmt,
             extra_lock_requests: Vec::new(),
         });
+    }
+    if rule_classification.conditional_instead {
+        let relation_name = view_target.relation_name.clone();
+        return Err(auto_view_prepare_error(
+            &relation_name,
+            ViewDmlEvent::Update,
+            ViewDmlRewriteError::NestedUserRuleMix(
+                "Views with conditional DO INSTEAD rules are not automatically updatable.".into(),
+            ),
+        ));
     }
     if relation_has_instead_row_trigger(catalog, view_target.relation_oid, TriggerOperation::Update)
     {
@@ -814,11 +841,23 @@ pub(crate) fn prepare_bound_delete_for_execution(
             extra_lock_requests: Vec::new(),
         });
     };
-    if relation_has_user_rules_for_event(view_target.relation_oid, RuleEvent::Delete, catalog) {
+    let rule_classification =
+        classify_view_dml_rules(view_target.relation_oid, ViewDmlEvent::Delete, catalog);
+    if rule_classification.unconditional_instead {
         return Ok(PreparedBoundStatement {
             stmt,
             extra_lock_requests: Vec::new(),
         });
+    }
+    if rule_classification.conditional_instead {
+        let relation_name = view_target.relation_name.clone();
+        return Err(auto_view_prepare_error(
+            &relation_name,
+            ViewDmlEvent::Delete,
+            ViewDmlRewriteError::NestedUserRuleMix(
+                "Views with conditional DO INSTEAD rules are not automatically updatable.".into(),
+            ),
+        ));
     }
     if relation_has_instead_row_trigger(catalog, view_target.relation_oid, TriggerOperation::Delete)
     {
@@ -4097,6 +4136,7 @@ fn auto_view_prepare_error(
     err: ViewDmlRewriteError,
 ) -> ExecError {
     match err {
+        ViewDmlRewriteError::Parse(err) => ExecError::Parse(err),
         ViewDmlRewriteError::DeferredFeature(detail) => {
             ExecError::Parse(ParseError::FeatureNotSupported(detail))
         }
@@ -4119,6 +4159,20 @@ fn auto_view_prepare_error(
             detail: None,
             hint: None,
             sqlstate: "42601",
+        },
+        ViewDmlRewriteError::UnsupportedViewShapeForView {
+            relation_name,
+            detail,
+        } => ExecError::DetailedError {
+            message: format!("cannot {} view \"{}\"", event_verb(event), relation_name),
+            detail: Some(detail),
+            hint: Some(format!(
+                "To enable {} the view, provide an INSTEAD OF {} trigger or an unconditional ON {} DO INSTEAD rule.",
+                event_gerund(event),
+                event_name(event),
+                event_name(event),
+            )),
+            sqlstate: "55000",
         },
         other => ExecError::DetailedError {
             message: format!("cannot {} view \"{}\"", event_verb(event), relation_name),

@@ -17,7 +17,7 @@ pub(crate) use rules::{
 };
 pub(crate) use view_dml::{
     NonUpdatableViewColumnReason, ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError,
-    ViewPrivilegeContext, resolve_auto_updatable_view_target,
+    ViewPrivilegeContext, classify_view_dml_rules, resolve_auto_updatable_view_target,
 };
 pub(crate) use views::{
     format_view_definition, format_view_definition_unpretty, has_stored_view_query,

@@ -1,7 +1,7 @@
 use super::query::AnalyzedFrom;
 use super::*;
 use crate::backend::rewrite::{
-    ViewDmlEvent, load_view_return_query, load_view_return_select,
+    ViewDmlEvent, classify_view_dml_rules, load_view_return_query, load_view_return_select,
     render_relation_expr_sql_for_information_schema,
 };
 use crate::backend::utils::cache::system_view_registry::{
@@ -653,7 +653,7 @@ fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>
                 'v' | 'f' => view_metadata
                     .get(&relation.relation_oid)
                     .and_then(|updatability| updatability.columns.get(index))
-                    .is_some_and(|entry| entry.insertable || entry.updatable),
+                    .is_some_and(|entry| entry.updatable),
                 _ => false,
             };
             let type_oid = catalog.type_oid_for_sql_type(column.sql_type).unwrap_or(0);
@@ -1592,6 +1592,27 @@ fn view_definition_and_check_option(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
 ) -> (String, &'static str) {
+    let reloption_check_option = catalog
+        .class_row_by_oid(relation_oid)
+        .and_then(|row| row.reloptions)
+        .and_then(|options| {
+            if options.is_empty() {
+                return Some("NONE");
+            }
+            options.into_iter().find_map(|option| {
+                let (name, value) = option
+                    .split_once('=')
+                    .map(|(name, value)| (name, value))
+                    .unwrap_or((option.as_str(), ""));
+                name.eq_ignore_ascii_case("check_option").then(|| {
+                    match value.to_ascii_lowercase().as_str() {
+                        "local" => "LOCAL",
+                        "cascaded" => "CASCADED",
+                        _ => "NONE",
+                    }
+                })
+            })
+        });
     if let Some(relation) = catalog.relation_by_oid(relation_oid)
         && let Ok(definition) =
             crate::backend::rewrite::format_view_definition(relation_oid, &relation.desc, catalog)
@@ -1605,11 +1626,11 @@ fn view_definition_and_check_option(
         let (_, check_option) = crate::backend::rewrite::split_stored_view_definition_sql(&sql);
         return (
             definition,
-            match check_option {
+            reloption_check_option.unwrap_or(match check_option {
                 crate::include::nodes::parsenodes::ViewCheckOption::None => "NONE",
                 crate::include::nodes::parsenodes::ViewCheckOption::Local => "LOCAL",
                 crate::include::nodes::parsenodes::ViewCheckOption::Cascaded => "CASCADED",
-            },
+            }),
         );
     }
     let sql = catalog
@@ -1622,11 +1643,11 @@ fn view_definition_and_check_option(
         crate::backend::rewrite::split_stored_view_definition_sql(&sql);
     (
         normalize_stored_view_definition_for_information_schema(definition),
-        match check_option {
+        reloption_check_option.unwrap_or(match check_option {
             crate::include::nodes::parsenodes::ViewCheckOption::None => "NONE",
             crate::include::nodes::parsenodes::ViewCheckOption::Local => "LOCAL",
             crate::include::nodes::parsenodes::ViewCheckOption::Cascaded => "CASCADED",
-        },
+        }),
     )
 }
 
@@ -1690,6 +1711,98 @@ fn describe_view_updatability(
     )
 }
 
+pub(crate) fn pg_relation_is_updatable_events(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    include_triggers: bool,
+) -> i32 {
+    const UPDATE_EVENT: i32 = 1 << 2;
+    const INSERT_EVENT: i32 = 1 << 3;
+    const DELETE_EVENT: i32 = 1 << 4;
+    const ALL_EVENTS: i32 = UPDATE_EVENT | INSERT_EVENT | DELETE_EVENT;
+
+    let Some(relation) = catalog
+        .relation_by_oid(relation_oid)
+        .or_else(|| catalog.lookup_relation_by_oid(relation_oid))
+    else {
+        return 0;
+    };
+    match relation.relkind {
+        'r' | 'p' => ALL_EVENTS,
+        'v' => {
+            let updatability = describe_view_updatability(relation_oid, &relation.desc, catalog);
+            let mut events = 0;
+            if updatability.updatable {
+                events |= UPDATE_EVENT;
+            }
+            if updatability.insertable {
+                events |= INSERT_EVENT;
+            }
+            if updatability.deletable {
+                events |= DELETE_EVENT;
+            }
+            if include_triggers {
+                if updatability.trigger_updatable {
+                    events |= UPDATE_EVENT;
+                }
+                if updatability.trigger_insertable {
+                    events |= INSERT_EVENT;
+                }
+                if updatability.trigger_deletable {
+                    events |= DELETE_EVENT;
+                }
+            }
+            events
+        }
+        _ => 0,
+    }
+}
+
+pub(crate) fn pg_column_is_updatable(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    attnum: i16,
+    include_triggers: bool,
+) -> bool {
+    const UPDATE_EVENT: i32 = 1 << 2;
+    const DELETE_EVENT: i32 = 1 << 4;
+    const REQUIRED_EVENTS: i32 = UPDATE_EVENT | DELETE_EVENT;
+
+    let Some(column_index) = attrno_index(i32::from(attnum)) else {
+        return false;
+    };
+    let Some(relation) = catalog
+        .relation_by_oid(relation_oid)
+        .or_else(|| catalog.lookup_relation_by_oid(relation_oid))
+    else {
+        return false;
+    };
+    if relation
+        .desc
+        .columns
+        .get(column_index)
+        .is_none_or(|column| column.dropped)
+    {
+        return false;
+    }
+    match relation.relkind {
+        'r' | 'p' => true,
+        'v' => {
+            let updatability = describe_view_updatability(relation_oid, &relation.desc, catalog);
+            let column_updatable = updatability
+                .columns
+                .get(column_index)
+                .is_some_and(|column| column.updatable);
+            let trigger_updatable = include_triggers && updatability.trigger_updatable;
+            let relation_events =
+                pg_relation_is_updatable_events(catalog, relation_oid, include_triggers);
+            (relation_events & REQUIRED_EVENTS) == REQUIRED_EVENTS
+                && (column_updatable || trigger_updatable)
+        }
+        _ => false,
+    }
+}
+
 fn describe_view_updatability_inner(
     relation_oid: u32,
     relation_desc: &RelationDesc,
@@ -1712,6 +1825,7 @@ fn describe_view_updatability_inner(
     let raw_select = load_view_return_select(relation_oid, None, catalog, expanded_views)?;
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, expanded_views)?;
     let auto = describe_auto_updatable_view_shape(
+        relation_oid,
         &raw_select,
         &query,
         relation_desc,
@@ -1719,21 +1833,40 @@ fn describe_view_updatability_inner(
         expanded_views,
     );
 
+    let insert_rules = classify_view_dml_rules(relation_oid, ViewDmlEvent::Insert, catalog);
+    let update_rules = classify_view_dml_rules(relation_oid, ViewDmlEvent::Update, catalog);
+    let delete_rules = classify_view_dml_rules(relation_oid, ViewDmlEvent::Delete, catalog);
+    let mut columns = auto.columns;
+    if insert_rules.unconditional_instead {
+        for (column, updatability) in relation_desc.columns.iter().zip(columns.iter_mut()) {
+            if !column.dropped {
+                updatability.insertable = true;
+            }
+        }
+    }
+    if update_rules.unconditional_instead && delete_rules.unconditional_instead {
+        for (column, updatability) in relation_desc.columns.iter().zip(columns.iter_mut()) {
+            if !column.dropped {
+                updatability.updatable = true;
+            }
+        }
+    }
     Ok(ViewUpdatability {
-        insertable: auto.insertable
-            || has_unconditional_instead_rule(relation_oid, ViewDmlEvent::Insert, catalog),
-        updatable: auto.updatable
-            || has_unconditional_instead_rule(relation_oid, ViewDmlEvent::Update, catalog),
-        deletable: auto.deletable
-            || has_unconditional_instead_rule(relation_oid, ViewDmlEvent::Delete, catalog),
+        insertable: insert_rules.unconditional_instead
+            || (auto.insertable && !insert_rules.conditional_instead),
+        updatable: update_rules.unconditional_instead
+            || (auto.updatable && !update_rules.conditional_instead),
+        deletable: delete_rules.unconditional_instead
+            || (auto.deletable && !delete_rules.conditional_instead),
         trigger_insertable,
         trigger_updatable,
         trigger_deletable,
-        columns: auto.columns,
+        columns,
     })
 }
 
 fn describe_auto_updatable_view_shape(
+    current_relation_oid: u32,
     raw_select: &SelectStatement,
     query: &Query,
     relation_desc: &RelationDesc,
@@ -1768,28 +1901,30 @@ fn describe_auto_updatable_view_shape(
         return result;
     };
     let RangeTblEntryKind::Relation {
-        relation_oid,
-        relkind,
+        relation_oid: base_relation_oid,
+        relkind: base_relkind,
         ..
     } = &base_rte.kind
     else {
         return result;
     };
+    let base_relation_oid = *base_relation_oid;
+    let base_relkind = *base_relkind;
 
     let mut any_insertable = false;
     let mut any_updatable = false;
-    let nested = if *relkind == 'v' {
+    let nested = if base_relkind == 'v' {
         let Some(base_relation) = catalog
-            .lookup_relation_by_oid(*relation_oid)
-            .or_else(|| catalog.relation_by_oid(*relation_oid))
+            .lookup_relation_by_oid(base_relation_oid)
+            .or_else(|| catalog.relation_by_oid(base_relation_oid))
         else {
             return result;
         };
         let mut next_expanded = expanded_views.to_vec();
-        next_expanded.push(*relation_oid);
+        next_expanded.push(current_relation_oid);
         Some(
             describe_view_updatability_inner(
-                *relation_oid,
+                base_relation_oid,
                 &base_relation.desc,
                 catalog,
                 &next_expanded,
@@ -1817,8 +1952,8 @@ fn describe_auto_updatable_view_shape(
             continue;
         };
 
-        result.columns[index] = match *relkind {
-            'r' if !is_system_attr(var.varattno) => ViewColumnUpdatability {
+        result.columns[index] = match base_relkind {
+            'r' | 'p' if !is_system_attr(var.varattno) => ViewColumnUpdatability {
                 insertable: true,
                 updatable: true,
             },
@@ -1834,8 +1969,8 @@ fn describe_auto_updatable_view_shape(
         any_updatable |= result.columns[index].updatable;
     }
 
-    match *relkind {
-        'r' => {
+    match base_relkind {
+        'r' | 'p' => {
             result.insertable = any_insertable;
             result.updatable = any_updatable;
             result.deletable = true;
@@ -1852,22 +1987,6 @@ fn describe_auto_updatable_view_shape(
     }
 
     result
-}
-
-fn has_unconditional_instead_rule(
-    relation_oid: u32,
-    event: ViewDmlEvent,
-    catalog: &dyn CatalogLookup,
-) -> bool {
-    catalog
-        .rewrite_rows_for_relation(relation_oid)
-        .into_iter()
-        .any(|row| {
-            row.rulename != "_RETURN"
-                && row.ev_type == view_event_rule_code(event)
-                && row.is_instead
-                && row.ev_qual.trim().is_empty()
-        })
 }
 
 fn has_instead_trigger(
@@ -1888,14 +2007,6 @@ fn has_instead_trigger(
 
 fn yes_or_no(value: bool) -> Value {
     Value::Text(if value { "YES" } else { "NO" }.into())
-}
-
-fn view_event_rule_code(event: ViewDmlEvent) -> char {
-    match event {
-        ViewDmlEvent::Update => '2',
-        ViewDmlEvent::Insert => '3',
-        ViewDmlEvent::Delete => '4',
-    }
 }
 
 fn expr_contains_sublink(expr: &Expr) -> bool {

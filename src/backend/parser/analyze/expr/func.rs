@@ -3593,6 +3593,7 @@ fn bind_scalar_function_call_from_bound_args(
         | BuiltinScalarFunction::Sign
         | BuiltinScalarFunction::Cbrt
         | BuiltinScalarFunction::Sin
+        | BuiltinScalarFunction::Cos
         | BuiltinScalarFunction::Sinh
         | BuiltinScalarFunction::Cosh
         | BuiltinScalarFunction::Tanh

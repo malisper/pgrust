@@ -12,8 +12,8 @@ use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
-    attrno_index, expr_contains_set_returning, expr_sql_type_hint,
+    CaseExpr, CaseWhen, INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO,
+    TargetEntry, Var, attrno_index, expr_contains_set_returning, expr_sql_type_hint,
 };
 use crate::include::nodes::primnodes::{
     JoinType, QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement,
@@ -36,6 +36,7 @@ pub struct BoundInsertStatement {
     pub target_columns: Vec<BoundAssignmentTarget>,
     pub overriding: Option<OverridingKind>,
     pub source: BoundInsertSource,
+    pub source_defaults: Vec<Vec<bool>>,
     pub on_conflict: Option<BoundOnConflictClause>,
     pub raw_on_conflict: Option<crate::include::nodes::parsenodes::OnConflictClause>,
     pub returning: Vec<TargetEntry>,
@@ -2072,8 +2073,13 @@ fn merge_mutating_event(stmt: &MergeStatement) -> Option<ViewDmlEvent> {
         })
 }
 
-fn map_merge_view_rewrite_error(relation_name: &str, err: ViewDmlRewriteError) -> ParseError {
+fn map_merge_view_rewrite_error(
+    relation_name: &str,
+    event: ViewDmlEvent,
+    err: ViewDmlRewriteError,
+) -> ParseError {
     match err {
+        ViewDmlRewriteError::Parse(err) => err,
         ViewDmlRewriteError::DeferredFeature(detail) => ParseError::FeatureNotSupported(detail),
         ViewDmlRewriteError::NonUpdatableColumn {
             column_name,
@@ -2087,22 +2093,65 @@ fn map_merge_view_rewrite_error(relation_name: &str, err: ViewDmlRewriteError) -
             hint: None,
             sqlstate: "55000",
         },
-        ViewDmlRewriteError::MultipleAssignments(column_name) => {
-            ParseError::UnexpectedToken {
-                expected: "single assignment per base column",
-                actual: format!("multiple assignments to same column \"{}\"", column_name),
-            }
-        }
+        ViewDmlRewriteError::MultipleAssignments(column_name) => ParseError::UnexpectedToken {
+            expected: "single assignment per base column",
+            actual: format!("multiple assignments to same column \"{}\"", column_name),
+        },
+        ViewDmlRewriteError::UnsupportedViewShapeForView {
+            relation_name,
+            detail,
+        } => ParseError::DetailedError {
+            message: merge_view_action_error_message(&relation_name, event),
+            detail: Some(detail),
+            hint: Some(merge_view_action_hint(event)),
+            sqlstate: "55000",
+        },
         other => ParseError::DetailedError {
-            message: format!("cannot execute MERGE on view \"{}\"", relation_name),
+            message: merge_view_action_error_message(relation_name, event),
             detail: Some(other.detail()),
-            hint: Some(
-                "To enable MERGE on the view, provide suitable INSTEAD OF triggers or unconditional DO INSTEAD rules."
-                    .into(),
-            ),
+            hint: Some(merge_view_action_hint(event)),
             sqlstate: "55000",
         },
     }
+}
+
+fn merge_view_action_error_message(relation_name: &str, event: ViewDmlEvent) -> String {
+    match event {
+        ViewDmlEvent::Insert => format!("cannot insert into view \"{}\"", relation_name),
+        ViewDmlEvent::Update => format!("cannot update view \"{}\"", relation_name),
+        ViewDmlEvent::Delete => format!("cannot delete from view \"{}\"", relation_name),
+    }
+}
+
+fn merge_view_action_hint(event: ViewDmlEvent) -> String {
+    match event {
+        ViewDmlEvent::Insert => {
+            "To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT trigger."
+        }
+        ViewDmlEvent::Update => {
+            "To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger."
+        }
+        ViewDmlEvent::Delete => {
+            "To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger."
+        }
+    }
+    .into()
+}
+
+fn merge_rules_not_supported_error(relation_name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("cannot execute MERGE on relation \"{}\"", relation_name),
+        detail: Some("MERGE is not supported for relations with rules.".into()),
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn relation_has_dml_rules(relation_oid: u32, catalog: &dyn CatalogLookup) -> bool {
+    catalog
+        .rewrite_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| row.rulename != "_RETURN" && matches!(row.ev_type, '2' | '3' | '4'))
 }
 
 fn rewrite_merge_when_clause_auto_view(
@@ -2130,7 +2179,14 @@ fn rewrite_merge_when_clause_auto_view(
                 .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
             reject_duplicate_auto_view_targets(
                 &resolved.base_relation.desc,
-                assignments.iter().map(|assignment| assignment.column_index),
+                assignments.iter().map(|assignment| {
+                    (
+                        assignment.column_index,
+                        assignment.subscripts.is_empty()
+                            && assignment.field_path.is_empty()
+                            && assignment.indirection.is_empty(),
+                    )
+                }),
             )?;
             BoundMergeAction::Update { assignments }
         }
@@ -2156,7 +2212,14 @@ fn rewrite_merge_when_clause_auto_view(
                 .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
             reject_duplicate_auto_view_targets(
                 &resolved.base_relation.desc,
-                target_columns.iter().map(|target| target.column_index),
+                target_columns.iter().map(|target| {
+                    (
+                        target.column_index,
+                        target.subscripts.is_empty()
+                            && target.field_path.is_empty()
+                            && target.indirection.is_empty(),
+                    )
+                }),
             )?;
             BoundMergeAction::Insert {
                 target_columns,
@@ -2629,6 +2692,12 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
     let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_merge_relation(catalog, &stmt.target_table)?;
+    if entry.relkind == 'v'
+        && merge_mutating_event(stmt).is_some()
+        && relation_has_dml_rules(entry.relation_oid, catalog)
+    {
+        return Err(merge_rules_not_supported_error(&stmt.target_table));
+    }
     let auto_view_target = if entry.relkind == 'v'
         && let Some(event) = merge_mutating_event(stmt)
     {
@@ -2640,7 +2709,7 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
                 catalog,
                 &[],
             )
-            .map_err(|err| map_merge_view_rewrite_error(&stmt.target_table, err))?,
+            .map_err(|err| map_merge_view_rewrite_error(&stmt.target_table, event, err))?,
         )
     } else {
         None
@@ -2655,6 +2724,11 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
             relation_display_name(catalog, execution_relation.relation_oid, &stmt.target_table)
         })
         .unwrap_or_else(|| stmt.target_table.clone());
+    if auto_view_target.is_some()
+        && relation_has_dml_rules(execution_relation.relation_oid, catalog)
+    {
+        return Err(merge_rules_not_supported_error(&execution_relation_name));
+    }
     let column_defaults =
         bind_insert_column_defaults(&execution_relation.desc, catalog, &visible_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
@@ -2685,6 +2759,13 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
             .and_then(|rte| rte.permission.as_mut())
     {
         permission.check_as_user_oid = view_check_as_user_oid(entry.relation_oid, catalog);
+    }
+    if let Some(predicate) = auto_view_target
+        .as_ref()
+        .and_then(|target| target.combined_predicate.clone())
+        && let Some(rte) = target_base.rtable.get_mut(0)
+    {
+        rte.security_quals.push(predicate);
     }
     target_base.output_exprs = generated_relation_output_exprs(&execution_relation.desc, catalog)?;
     let (target_from, target_visible_count, target_tableoid_input_index) =
@@ -2748,13 +2829,7 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
         None,
         &visible_ctes,
     )?;
-    let join_condition = and_predicates(
-        Some(join_condition),
-        auto_view_target
-            .as_ref()
-            .and_then(|target| target.combined_predicate.clone()),
-    )
-    .unwrap_or(Expr::Const(Value::Bool(true)));
+    let join_condition = join_condition;
 
     let projected_target_output_exprs = projected_output_exprs(&execution_relation.desc, 0);
     let action_target_output_exprs = if let Some(resolved) = auto_view_target.as_ref() {
@@ -2789,6 +2864,7 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
         scope_with_returning_pseudo_row_exprs(
             returning_merged_scope,
             &entry.desc,
+            Some(entry.relation_oid),
             view_returning_pseudo_output_exprs(
                 &resolved.visible_output_exprs,
                 &resolved.base_relation.desc,
@@ -2883,7 +2959,13 @@ pub(crate) fn plan_merge_with_outer_scopes_and_ctes(
             .into_iter()
             .map(|clause| rewrite_merge_when_clause_auto_view(clause, &entry.desc, resolved))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| map_merge_view_rewrite_error(&stmt.target_table, err))?;
+            .map_err(|err| {
+                map_merge_view_rewrite_error(
+                    &stmt.target_table,
+                    merge_mutating_event(stmt).unwrap_or(ViewDmlEvent::Insert),
+                    err,
+                )
+            })?;
     }
 
     let joined = AnalyzedFrom::join(
@@ -3545,10 +3627,13 @@ fn map_auto_view_column_index(
 
 fn reject_duplicate_auto_view_targets(
     desc: &RelationDesc,
-    column_indexes: impl IntoIterator<Item = usize>,
+    column_targets: impl IntoIterator<Item = (usize, bool)>,
 ) -> Result<(), ViewDmlRewriteError> {
     let mut seen = std::collections::BTreeSet::new();
-    for column_index in column_indexes {
+    for (column_index, whole_column_assignment) in column_targets {
+        if !whole_column_assignment {
+            continue;
+        }
         if !seen.insert(column_index) {
             let column_name = desc
                 .columns
@@ -3586,6 +3671,142 @@ fn reject_duplicate_whole_column_assignments(
         }
     }
     Ok(())
+}
+
+fn rewrite_auto_view_insert_source(
+    source: BoundInsertSource,
+    source_defaults: &[Vec<bool>],
+    view_targets: &[BoundAssignmentTarget],
+    base_targets: &[BoundAssignmentTarget],
+    view_desc: &RelationDesc,
+    view_column_defaults: &[Expr],
+    base_column_defaults: &[Expr],
+) -> BoundInsertSource {
+    match source {
+        BoundInsertSource::DefaultValues(_) => BoundInsertSource::DefaultValues(
+            base_targets
+                .iter()
+                .map(|target| base_column_defaults[target.column_index].clone())
+                .collect(),
+        ),
+        BoundInsertSource::Values(rows) => {
+            BoundInsertSource::Values(rewrite_auto_view_insert_value_rows(
+                rows,
+                source_defaults,
+                view_targets,
+                base_targets,
+                view_desc,
+                view_column_defaults,
+                base_column_defaults,
+            ))
+        }
+        BoundInsertSource::ProjectSetValues(rows) => {
+            BoundInsertSource::ProjectSetValues(rewrite_auto_view_insert_value_rows(
+                rows,
+                source_defaults,
+                view_targets,
+                base_targets,
+                view_desc,
+                view_column_defaults,
+                base_column_defaults,
+            ))
+        }
+        BoundInsertSource::Select(query) => BoundInsertSource::Select(query),
+    }
+}
+
+fn reject_generated_auto_view_insert_targets(
+    base_desc: &RelationDesc,
+    base_targets: &[BoundAssignmentTarget],
+    source: &BoundInsertSource,
+    source_defaults: &[Vec<bool>],
+) -> Result<(), ViewDmlRewriteError> {
+    match source {
+        BoundInsertSource::DefaultValues(_) => Ok(()),
+        BoundInsertSource::Select(_) => {
+            for target in base_targets {
+                reject_generated_insert_target(base_desc, target)
+                    .map_err(ViewDmlRewriteError::Parse)?;
+            }
+            Ok(())
+        }
+        BoundInsertSource::Values(rows) | BoundInsertSource::ProjectSetValues(rows) => {
+            for row_index in 0..rows.len() {
+                for (target_index, target) in base_targets.iter().enumerate() {
+                    let is_default = source_defaults
+                        .get(row_index)
+                        .and_then(|row| row.get(target_index))
+                        .copied()
+                        .unwrap_or(false);
+                    if !is_default {
+                        reject_generated_insert_target(base_desc, target)
+                            .map_err(ViewDmlRewriteError::Parse)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn reject_generated_insert_target(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+) -> Result<(), ParseError> {
+    let Some(column) = desc.columns.get(target.column_index) else {
+        return Ok(());
+    };
+    if column.generated.is_none() {
+        return Ok(());
+    }
+    Err(generated_insert_error(&column.name))
+}
+
+fn rewrite_auto_view_insert_value_rows(
+    rows: Vec<Vec<Expr>>,
+    source_defaults: &[Vec<bool>],
+    view_targets: &[BoundAssignmentTarget],
+    base_targets: &[BoundAssignmentTarget],
+    view_desc: &RelationDesc,
+    view_column_defaults: &[Expr],
+    base_column_defaults: &[Expr],
+) -> Vec<Vec<Expr>> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            row.into_iter()
+                .enumerate()
+                .map(|(target_index, expr)| {
+                    if !source_defaults
+                        .get(row_index)
+                        .and_then(|row| row.get(target_index))
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        return expr;
+                    }
+                    let Some(view_target) = view_targets.get(target_index) else {
+                        return expr;
+                    };
+                    if view_desc
+                        .columns
+                        .get(view_target.column_index)
+                        .is_some_and(column_has_stored_default)
+                    {
+                        return view_column_defaults
+                            .get(view_target.column_index)
+                            .cloned()
+                            .unwrap_or(expr);
+                    }
+                    base_targets
+                        .get(target_index)
+                        .and_then(|target| base_column_defaults.get(target.column_index))
+                        .cloned()
+                        .unwrap_or(expr)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn rewrite_auto_view_returning_targets(
@@ -4122,11 +4343,56 @@ fn view_returning_pseudo_output_exprs(
     varno: usize,
 ) -> Vec<Expr> {
     let base_output_exprs = returning_pseudo_output_exprs(base_desc, varno);
+    let absent_expr = pseudo_row_absent_expr(base_desc, varno);
     output_exprs
         .iter()
         .cloned()
-        .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_output_exprs))
+        .map(|expr| {
+            let expr = rewrite_local_vars_for_output_exprs(expr, 1, &base_output_exprs);
+            null_when_pseudo_row_absent(expr, absent_expr.clone())
+        })
         .collect()
+}
+
+fn pseudo_row_absent_expr(desc: &RelationDesc, varno: usize) -> Option<Expr> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !column.dropped)
+        .map(|(index, column)| {
+            let expr = Expr::Var(Var {
+                varno,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            });
+            if !column.sql_type.is_array
+                && matches!(
+                    column.sql_type.kind,
+                    SqlTypeKind::Composite | SqlTypeKind::Record
+                )
+            {
+                Expr::IsNotDistinctFrom(Box::new(expr), Box::new(Expr::Const(Value::Null)))
+            } else {
+                Expr::IsNull(Box::new(expr))
+            }
+        })
+        .reduce(Expr::and)
+}
+
+fn null_when_pseudo_row_absent(expr: Expr, absent_expr: Option<Expr>) -> Expr {
+    let Some(absent_expr) = absent_expr else {
+        return expr;
+    };
+    Expr::Case(Box::new(CaseExpr {
+        casetype: expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        arg: None,
+        args: vec![CaseWhen {
+            expr: absent_expr,
+            result: Expr::Const(Value::Null),
+        }],
+        defresult: Box::new(expr),
+    }))
 }
 
 fn scope_for_pseudo_relation(relation_name: &str, desc: &RelationDesc, varno: usize) -> BoundScope {
@@ -4161,16 +4427,22 @@ fn scope_for_pseudo_relation(relation_name: &str, desc: &RelationDesc, varno: us
 fn bind_auto_view_on_conflict_clause(
     clause: &crate::include::nodes::parsenodes::OnConflictClause,
     view_relation_name: &str,
-    _base_relation_name: &str,
+    base_relation_name: &str,
     view_desc: &RelationDesc,
     resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundOnConflictClause, ViewDmlRewriteError> {
-    let arbiters = super::on_conflict::resolve_arbiters(
+    let arbiter_scope = {
+        let mut scope = scope_for_relation(Some(view_relation_name), view_desc);
+        scope.output_exprs = resolved.visible_output_exprs.clone();
+        scope
+    };
+    let arbiters = super::on_conflict::resolve_arbiters_with_inference_scope(
         clause,
-        view_relation_name,
+        base_relation_name,
         resolved.base_relation.relation_oid,
         &resolved.base_relation.desc,
+        &arbiter_scope,
         catalog,
     )
     .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
@@ -4292,7 +4564,14 @@ fn bind_auto_view_on_conflict_clause(
                 .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
             reject_duplicate_auto_view_targets(
                 &resolved.base_relation.desc,
-                assignments.iter().map(|assignment| assignment.column_index),
+                assignments.iter().map(|assignment| {
+                    (
+                        assignment.column_index,
+                        assignment.subscripts.is_empty()
+                            && assignment.field_path.is_empty()
+                            && assignment.indirection.is_empty(),
+                    )
+                }),
             )?;
             let predicate = clause
                 .where_clause
@@ -4374,7 +4653,20 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
     reject_duplicate_auto_view_targets(
         &resolved.base_relation.desc,
-        target_columns.iter().map(|target| target.column_index),
+        target_columns.iter().map(|target| {
+            (
+                target.column_index,
+                target.subscripts.is_empty()
+                    && target.field_path.is_empty()
+                    && target.indirection.is_empty(),
+            )
+        }),
+    )?;
+    reject_generated_auto_view_insert_targets(
+        &resolved.base_relation.desc,
+        &target_columns,
+        &stmt.source,
+        &stmt.source_defaults,
     )?;
     let mut required_privileges = stmt.required_privileges.clone();
     for context in &resolved.privilege_contexts {
@@ -4405,18 +4697,39 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         !stmt.returning.is_empty(),
         catalog,
     )?;
-    let base_column_defaults =
+    let mut base_column_defaults =
         bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])
             .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
-    let source = match stmt.source {
-        BoundInsertSource::DefaultValues(_) => BoundInsertSource::DefaultValues(
-            target_columns
-                .iter()
-                .map(|target| base_column_defaults[target.column_index].clone())
-                .collect(),
-        ),
-        other => other,
-    };
+    let view_column_defaults = bind_insert_column_defaults(&stmt.desc, catalog, &[])
+        .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
+    let explicitly_targeted_view_columns = stmt
+        .target_columns
+        .iter()
+        .map(|target| target.column_index)
+        .collect::<std::collections::BTreeSet<_>>();
+    for (view_column_index, view_column) in stmt.desc.columns.iter().enumerate() {
+        if explicitly_targeted_view_columns.contains(&view_column_index)
+            || !column_has_stored_default(view_column)
+        {
+            continue;
+        }
+        let base_column_index = map_auto_view_column_index(
+            &stmt.desc,
+            &resolved.updatable_column_map,
+            &resolved.non_updatable_column_reasons,
+            view_column_index,
+        )?;
+        base_column_defaults[base_column_index] = view_column_defaults[view_column_index].clone();
+    }
+    let source = rewrite_auto_view_insert_source(
+        stmt.source,
+        &stmt.source_defaults,
+        &stmt.target_columns,
+        &target_columns,
+        &stmt.desc,
+        &view_column_defaults,
+        &base_column_defaults,
+    );
 
     Ok(BoundInsertStatement {
         relation_name: relation_name.clone(),
@@ -4445,6 +4758,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         target_columns,
         overriding: stmt.overriding,
         source,
+        source_defaults: Vec::new(),
         on_conflict,
         raw_on_conflict: None,
         returning: rewrite_auto_view_returning_targets(
@@ -4682,7 +4996,14 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
     reject_duplicate_auto_view_targets(
         &resolved.base_relation.desc,
-        assignments.iter().map(|assignment| assignment.column_index),
+        assignments.iter().map(|assignment| {
+            (
+                assignment.column_index,
+                assignment.subscripts.is_empty()
+                    && assignment.field_path.is_empty()
+                    && assignment.indirection.is_empty(),
+            )
+        }),
     )?;
     let mut required_privileges = stmt.required_privileges.clone();
     for context in &resolved.privilege_contexts {
@@ -5075,6 +5396,12 @@ fn bind_insert_column_defaults(
         .collect()
 }
 
+fn column_has_stored_default(column: &crate::include::nodes::primnodes::ColumnDesc) -> bool {
+    column.default_expr.is_some()
+        || column.default_sequence_oid.is_some()
+        || column.missing_default_value.is_some()
+}
+
 fn visible_assignment_targets(desc: &RelationDesc) -> Vec<BoundAssignmentTarget> {
     desc.visible_column_indexes()
         .into_iter()
@@ -5252,6 +5579,35 @@ pub(super) fn ensure_generated_assignment_allowed(
     Ok(())
 }
 
+pub(super) fn ensure_generated_insert_assignment_allowed(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    expr: Option<&SqlExpr>,
+) -> Result<(), ParseError> {
+    let Some(column) = desc.columns.get(target.column_index) else {
+        return Ok(());
+    };
+    if column.generated.is_none() {
+        return Ok(());
+    }
+    if target.subscripts.is_empty()
+        && target.field_path.is_empty()
+        && expr.is_none_or(|expr| matches!(expr, SqlExpr::Default))
+    {
+        return Ok(());
+    }
+    Err(generated_insert_error(&column.name))
+}
+
+fn generated_insert_error(column_name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("cannot insert a non-DEFAULT value into column \"{column_name}\""),
+        detail: Some(format!("Column \"{column_name}\" is a generated column.")),
+        hint: None,
+        sqlstate: "428C9",
+    }
+}
+
 enum NormalizedInsertExpr<'a> {
     Default,
     Expr(&'a SqlExpr),
@@ -5363,7 +5719,7 @@ pub fn bind_insert_prepared(
             .collect::<Result<Vec<_>, _>>()?;
         for column_index in &target_columns {
             if entry.desc.columns[*column_index].generated.is_some() {
-                ensure_generated_assignment_allowed(
+                ensure_generated_insert_assignment_allowed(
                     &entry.desc,
                     &BoundAssignmentTarget {
                         column_index: *column_index,
@@ -5401,7 +5757,7 @@ pub fn bind_insert_prepared(
 
     for column_index in &target_columns {
         if entry.desc.columns[*column_index].generated.is_some() {
-            ensure_generated_assignment_allowed(
+            ensure_generated_insert_assignment_allowed(
                 &entry.desc,
                 &BoundAssignmentTarget {
                     column_index: *column_index,
@@ -5524,6 +5880,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         &visible_ctes,
     )?;
 
+    let mut source_defaults = Vec::new();
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
             let expanded_rows = rows
@@ -5556,6 +5913,14 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                     });
                 }
             }
+            source_defaults = expanded_rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| matches!(cell, InsertValuesCell::Raw(SqlExpr::Default)))
+                        .collect()
+                })
+                .collect();
             let bound_rows = expanded_rows
                 .iter()
                 .map(|row| {
@@ -5696,7 +6061,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                     Some(&SqlExpr::Const(Value::Null)),
                 )?;
                 if entry.desc.columns[target.column_index].generated.is_some() {
-                    ensure_generated_assignment_allowed(
+                    ensure_generated_insert_assignment_allowed(
                         &entry.desc,
                         target,
                         Some(&SqlExpr::Const(Value::Null)),
@@ -5838,6 +6203,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         target_columns,
         overriding: stmt.overriding,
         source,
+        source_defaults,
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
             entry.relation_oid,
             &entry.desc,

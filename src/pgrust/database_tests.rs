@@ -16144,6 +16144,18 @@ fn information_schema_view_metadata_tracks_updatable_views() {
     session
         .execute(
             &db,
+            "create view ro_view8 as select a, b from base_tbl order by a offset 1",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view ro_view9 as select a, b from base_tbl order by a limit 1",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
             "create view rw_view14 as select ctid, a, b from base_tbl",
         )
         .unwrap();
@@ -16171,6 +16183,8 @@ fn information_schema_view_metadata_tracks_updatable_views() {
         ),
         vec![
             vec![Value::Text("ro_view1".into()), Value::Text("NO".into())],
+            vec![Value::Text("ro_view8".into()), Value::Text("NO".into())],
+            vec![Value::Text("ro_view9".into()), Value::Text("NO".into())],
             vec![Value::Text("rw_view14".into()), Value::Text("YES".into())],
             vec![Value::Text("rw_view15".into()), Value::Text("YES".into())],
             vec![Value::Text("rw_view16".into()), Value::Text("YES".into())],
@@ -16189,6 +16203,16 @@ fn information_schema_view_metadata_tracks_updatable_views() {
         vec![
             vec![
                 Value::Text("ro_view1".into()),
+                Value::Text("NO".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view8".into()),
+                Value::Text("NO".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view9".into()),
                 Value::Text("NO".into()),
                 Value::Text("NO".into()),
             ],
@@ -16227,6 +16251,26 @@ fn information_schema_view_metadata_tracks_updatable_views() {
             ],
             vec![
                 Value::Text("ro_view1".into()),
+                Value::Text("b".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view8".into()),
+                Value::Text("a".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view8".into()),
+                Value::Text("b".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view9".into()),
+                Value::Text("a".into()),
+                Value::Text("NO".into()),
+            ],
+            vec![
+                Value::Text("ro_view9".into()),
                 Value::Text("b".into()),
                 Value::Text("NO".into()),
             ],

@@ -47,7 +47,9 @@ use crate::backend::parser::{
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::rewrite::split_stored_rule_action_sql;
-use crate::backend::rewrite::{RlsWriteCheck, ViewDmlEvent, resolve_auto_updatable_view_target};
+use crate::backend::rewrite::{
+    RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, resolve_auto_updatable_view_target,
+};
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
@@ -1210,7 +1212,7 @@ fn execute_explain_update(
 ) -> Result<StatementResult, ExecError> {
     let bound = bind_update(&stmt, catalog)?;
     let bound = rewrite_bound_update_auto_view_target(bound, catalog)
-        .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
+        .map_err(explain_auto_view_rewrite_error)?;
     let bound = finalize_bound_update_stmt(bound, catalog);
     let bound = apply_update_constraint_exclusion(bound, catalog, planner_config);
     let mut analyze_rows = None;
@@ -1231,6 +1233,10 @@ fn execute_explain_update(
     })
 }
 
+fn explain_auto_view_rewrite_error(err: ViewDmlRewriteError) -> ExecError {
+    ExecError::Parse(ParseError::FeatureNotSupported(err.detail()))
+}
+
 fn execute_explain_delete(
     stmt: DeleteStatement,
     analyze: bool,
@@ -1247,7 +1253,7 @@ fn execute_explain_delete(
 
     let bound = bind_delete(&stmt, catalog)?;
     let bound = rewrite_bound_delete_auto_view_target(bound, catalog)
-        .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
+        .map_err(explain_auto_view_rewrite_error)?;
     let bound = finalize_bound_delete_stmt(bound, catalog);
     let bound = apply_delete_constraint_exclusion(bound, catalog, planner_config);
     let lines = explain_delete_lines(&stmt, &bound, catalog, costs, verbose)?;
@@ -1662,7 +1668,7 @@ fn execute_explain_insert(
     let target_alias = stmt.table_alias.clone();
     let bound = bind_insert(&stmt, catalog)?;
     let bound = rewrite_bound_insert_auto_view_target(bound, catalog)
-        .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
+        .map_err(explain_auto_view_rewrite_error)?;
     let bound = finalize_bound_insert(bound, catalog);
     check_relation_privilege_requirements(ctx, &bound.required_privileges)?;
     for subplan in &bound.subplans {
@@ -9974,6 +9980,7 @@ fn partition_leaf_insert_statement(
         target_columns: Vec::new(),
         overriding: parent.overriding,
         source: BoundInsertSource::Values(Vec::new()),
+        source_defaults: Vec::new(),
         on_conflict: Some(on_conflict),
         raw_on_conflict: None,
         returning: Vec::new(),

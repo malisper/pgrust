@@ -1611,10 +1611,20 @@ fn render_plain_query(ctx: &ViewDeparseContext<'_>, output_names: Option<&[Strin
                 .join(", ")
         ));
     }
+    append_limit_offset_lines(&mut lines, ctx);
     if let Some(locking_clause) = ctx.query.locking_clause {
         lines.push(format!(" {}", locking_clause.sql()));
     }
     lines.join("\n") + ";"
+}
+
+fn append_limit_offset_lines(lines: &mut Vec<String>, ctx: &ViewDeparseContext<'_>) {
+    if let Some(limit_count) = ctx.query.limit_count {
+        lines.push(format!("  LIMIT {limit_count}"));
+    }
+    if let Some(limit_offset) = ctx.query.limit_offset {
+        lines.push(format!("  OFFSET {limit_offset}"));
+    }
 }
 
 fn render_select_intro(ctx: &ViewDeparseContext<'_>) -> String {
@@ -3526,6 +3536,12 @@ fn render_set_operation_query(
                 .collect::<Vec<_>>()
                 .join(", "),
         );
+    }
+    let mut limit_offset = Vec::new();
+    append_limit_offset_lines(&mut limit_offset, ctx);
+    if !limit_offset.is_empty() {
+        sql.push('\n');
+        sql.push_str(&limit_offset.join("\n"));
     }
     sql.push(';');
     sql

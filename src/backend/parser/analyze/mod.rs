@@ -27,6 +27,7 @@ mod system_views;
 mod window;
 
 pub(crate) use self::scope::{ScopeColumn, ScopeRelation};
+pub(crate) use system_views::{pg_column_is_updatable, pg_relation_is_updatable_events};
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
