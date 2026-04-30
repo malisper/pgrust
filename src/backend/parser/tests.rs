@@ -8349,11 +8349,17 @@ fn build_plan_cte_shadows_catalog_table() {
 
 #[test]
 fn build_plan_rejects_forward_cte_references() {
-    let stmt =
-        parse_select("with y as (select * from x), x as (values (1)) select * from y").unwrap();
+    let sql = "with y as (select * from x), x as (values (1)) select * from y";
+    let stmt = parse_select(sql).unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert_eq!(err.position(), sql.find("x)").map(|index| index + 1));
     assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::UnknownTable(name)) if name == "x"
+        err.unpositioned(),
+        ParseError::DetailedError { message, detail: Some(detail), hint: Some(hint), sqlstate }
+            if message == "relation \"x\" does not exist"
+                && detail == "There is a WITH item named \"x\", but it cannot be referenced from this part of the query."
+                && hint == "Use WITH RECURSIVE, or re-order the WITH items to remove forward references."
+                && *sqlstate == "42P01"
     ));
 }
 

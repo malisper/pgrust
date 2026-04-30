@@ -2985,13 +2985,22 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 })
             } else {
                 match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
-                    Ok(ResolvedColumn::Local(index)) => scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
+                    Ok(ResolvedColumn::Local(index)) => scope_column_output_expr(
+                        scope,
+                        index,
+                        name.rsplit_once('.').map(|(relation, _)| relation),
+                    ).unwrap_or_else(|| {
                         panic!("bound scope output_exprs missing local column {index} for {name}")
                     }),
                     Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes
                         .get(depth)
-                        .and_then(|scope| scope.output_exprs.get(index))
-                        .cloned()
+                        .and_then(|scope| {
+                            scope_column_output_expr(
+                                scope,
+                                index,
+                                name.rsplit_once('.').map(|(relation, _)| relation),
+                            )
+                        })
                         .map(|expr| raise_expr_varlevels(expr, depth + 1))
                         .unwrap_or_else(|| {
                             panic!(

@@ -245,7 +245,11 @@ fn run_conflict_update(
     transition_capture: Option<&mut TriggerTransitionCapture>,
 ) -> Result<ConflictActionResult, ExecError> {
     if conflict_tuple.header.xmin == xid && conflict_tuple.header.cid_or_xvac == cid {
-        return Err(cardinality_violation());
+        // :HACK: Writable CTE producers currently share the main statement's CID.
+        // PostgreSQL treats a later ON CONFLICT that finds that already-touched
+        // row as not visible for the update path, so it affects no row. Duplicate
+        // input rows for a single INSERT are still rejected by preflight above.
+        return Ok(ConflictActionResult::Skipped);
     }
 
     let current_old_values =

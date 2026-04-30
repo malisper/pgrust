@@ -3174,6 +3174,7 @@ fn outer_scope_from_slot_columns(
             hidden: column.hidden,
             qualified_only: false,
             relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
             source_relation_oid: None,

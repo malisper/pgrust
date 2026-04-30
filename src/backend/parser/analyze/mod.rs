@@ -3923,6 +3923,7 @@ fn named_relation_scope(
             hidden: false,
             qualified_only: false,
             relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
             source_relation_oid: None,
@@ -3946,6 +3947,7 @@ fn named_relation_scope(
                 hidden: column.dropped,
                 qualified_only: false,
                 relation_names: vec![(*relation_name).to_string()],
+                relation_output_exprs: Vec::new(),
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
                 source_relation_oid: None,
@@ -4017,6 +4019,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             hidden: column.hidden,
             qualified_only: false,
             relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
             source_relation_oid: None,
@@ -4046,6 +4049,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
                 hidden: column.hidden,
                 qualified_only: true,
                 relation_names: vec![relation_name.clone()],
+                relation_output_exprs: Vec::new(),
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
                 source_relation_oid: None,
@@ -4677,7 +4681,14 @@ fn bind_ctes(
                     grouped_outer.clone(),
                     &visible,
                     expanded_views,
-                )?;
+                )
+                .map_err(|err| {
+                    if with_recursive {
+                        err
+                    } else {
+                        non_recursive_cte_forward_reference_error(err, ctes, cte_index, &cte.body)
+                    }
+                })?;
                 apply_cte_column_names(&cte.name, cte.location, query, desc, &cte.column_names)?
             }
         };
@@ -4694,6 +4705,41 @@ fn bind_ctes(
         .into_iter()
         .map(|bound| bound.expect("all CTEs are bound"))
         .collect())
+}
+
+fn non_recursive_cte_forward_reference_error(
+    err: ParseError,
+    ctes: &[CommonTableExpr],
+    current_index: usize,
+    body: &CteBody,
+) -> ParseError {
+    let ParseError::UnknownTable(name) = err else {
+        return err;
+    };
+    if !ctes
+        .iter()
+        .enumerate()
+        .any(|(index, cte)| index >= current_index && cte.name.eq_ignore_ascii_case(&name))
+    {
+        return ParseError::UnknownTable(name);
+    }
+    let position = cte_body_table_reference_locations(body, &name)
+        .into_iter()
+        .next();
+    positioned_if_available(
+        ParseError::DetailedError {
+            message: format!("relation \"{name}\" does not exist"),
+            detail: Some(format!(
+                "There is a WITH item named \"{name}\", but it cannot be referenced from this part of the query."
+            )),
+            hint: Some(
+                "Use WITH RECURSIVE, or re-order the WITH items to remove forward references."
+                    .into(),
+            ),
+            sqlstate: "42P01",
+        },
+        position,
+    )
 }
 
 fn recursive_cte_binding_order(ctes: &[CommonTableExpr]) -> Result<Vec<usize>, ParseError> {
@@ -6402,6 +6448,26 @@ fn select_statement_table_reference_locations(
     locations
 }
 
+fn cte_body_table_reference_locations(body: &CteBody, table_name: &str) -> Vec<usize> {
+    match body {
+        CteBody::Select(stmt) => select_statement_table_reference_locations(stmt, table_name),
+        CteBody::Values(_) => Vec::new(),
+        CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            let mut locations = cte_body_table_reference_locations(anchor, table_name);
+            locations.extend(select_statement_table_reference_locations(
+                recursive, table_name,
+            ));
+            locations
+        }
+        CteBody::Insert(stmt) => insert_statement_table_reference_locations(stmt, table_name),
+        CteBody::Update(stmt) => update_statement_table_reference_locations(stmt, table_name),
+        CteBody::Delete(stmt) => delete_statement_table_reference_locations(stmt, table_name),
+        CteBody::Merge(stmt) => merge_statement_table_reference_locations(stmt, table_name),
+    }
+}
+
 fn from_item_table_reference_locations(
     from: &FromItem,
     table_name: &str,
@@ -6450,6 +6516,23 @@ pub(crate) fn insert_statement_references_table(stmt: &InsertStatement, table_na
             .any(|item| sql_expr_references_table(&item.expr, table_name))
 }
 
+fn insert_statement_table_reference_locations(
+    stmt: &InsertStatement,
+    table_name: &str,
+) -> Vec<usize> {
+    let mut locations = stmt
+        .with
+        .iter()
+        .flat_map(|cte| cte_body_table_reference_locations(&cte.body, table_name))
+        .collect::<Vec<_>>();
+    if let InsertSource::Select(select) = &stmt.source {
+        locations.extend(select_statement_table_reference_locations(
+            select, table_name,
+        ));
+    }
+    locations
+}
+
 pub(crate) fn update_statement_references_table(stmt: &UpdateStatement, table_name: &str) -> bool {
     stmt.with
         .iter()
@@ -6472,6 +6555,21 @@ pub(crate) fn update_statement_references_table(stmt: &UpdateStatement, table_na
             .any(|item| sql_expr_references_table(&item.expr, table_name))
 }
 
+fn update_statement_table_reference_locations(
+    stmt: &UpdateStatement,
+    table_name: &str,
+) -> Vec<usize> {
+    let mut locations = stmt
+        .with
+        .iter()
+        .flat_map(|cte| cte_body_table_reference_locations(&cte.body, table_name))
+        .collect::<Vec<_>>();
+    if let Some(from) = &stmt.from {
+        from_item_table_reference_locations(from, table_name, &mut locations);
+    }
+    locations
+}
+
 pub(crate) fn delete_statement_references_table(stmt: &DeleteStatement, table_name: &str) -> bool {
     stmt.with
         .iter()
@@ -6489,6 +6587,21 @@ pub(crate) fn delete_statement_references_table(stmt: &DeleteStatement, table_na
             .returning
             .iter()
             .any(|item| sql_expr_references_table(&item.expr, table_name))
+}
+
+fn delete_statement_table_reference_locations(
+    stmt: &DeleteStatement,
+    table_name: &str,
+) -> Vec<usize> {
+    let mut locations = stmt
+        .with
+        .iter()
+        .flat_map(|cte| cte_body_table_reference_locations(&cte.body, table_name))
+        .collect::<Vec<_>>();
+    if let Some(using) = &stmt.using {
+        from_item_table_reference_locations(using, table_name, &mut locations);
+    }
+    locations
 }
 
 pub(crate) fn merge_statement_references_table(stmt: &MergeStatement, table_name: &str) -> bool {
@@ -6520,6 +6633,19 @@ pub(crate) fn merge_statement_references_table(stmt: &MergeStatement, table_name
             .returning
             .iter()
             .any(|item| sql_expr_references_table(&item.expr, table_name))
+}
+
+fn merge_statement_table_reference_locations(
+    stmt: &MergeStatement,
+    table_name: &str,
+) -> Vec<usize> {
+    let mut locations = stmt
+        .with
+        .iter()
+        .flat_map(|cte| cte_body_table_reference_locations(&cte.body, table_name))
+        .collect::<Vec<_>>();
+    from_item_table_reference_locations(&stmt.source, table_name, &mut locations);
+    locations
 }
 
 fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {

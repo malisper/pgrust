@@ -3724,6 +3724,48 @@ fn on_conflict_do_update_where_false_skips_row() {
 }
 
 #[test]
+fn on_conflict_update_skips_row_already_touched_by_writable_cte() {
+    let base = temp_dir("upsert_writable_cte_same_row");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table people (id int primary key, name text, note text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into people (id, name, note) values (2, 'seed', 'old')",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "with simpletup as (
+               select 2 id, 'green' name
+             ),
+             upsert_cte as (
+               insert into people (id, name) values (2, 'blue')
+               on conflict (id) do update
+               set name = (select name from simpletup where simpletup.id = people.id)
+               returning id, name
+             )
+             insert into people (id, name) values (2, 'red')
+             on conflict (id) do update
+             set name = (select name from upsert_cte where upsert_cte.id = people.id)
+             returning id, name",
+        )
+        .unwrap(),
+        Vec::new(),
+    );
+
+    assert_query_rows(
+        db.execute(1, "select id, name from people").unwrap(),
+        vec![vec![Value::Int32(2), Value::Text("green".into())]],
+    );
+}
+
+#[test]
 fn on_conflict_do_update_rejects_duplicate_input_rows() {
     let mut harness = SeededSqlHarness::new(
         "upsert_duplicate_input_rows",
@@ -24803,6 +24845,43 @@ fn aggregate_subquery_can_reference_outer_visible_cte() {
         )
         .unwrap(),
         vec![vec![Value::Int64(3)]],
+    );
+}
+
+#[test]
+fn join_using_qualified_star_keeps_null_extended_side() {
+    let mut harness = SeededSqlHarness::new("join_using_qualified_star", Catalog::default());
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "with recursive
+                   x(id) as (
+                     values (1)
+                     union all
+                     select id + 1 from x where id < 5
+                   ),
+                   y(id) as (
+                     values (1)
+                     union all
+                     select id + 1 from y where id < 10
+                   )
+                 select y.*, x.* from y left join x using (id)",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(2)],
+            vec![Value::Int32(3), Value::Int32(3)],
+            vec![Value::Int32(4), Value::Int32(4)],
+            vec![Value::Int32(5), Value::Int32(5)],
+            vec![Value::Int32(6), Value::Null],
+            vec![Value::Int32(7), Value::Null],
+            vec![Value::Int32(8), Value::Null],
+            vec![Value::Int32(9), Value::Null],
+            vec![Value::Int32(10), Value::Null],
+        ],
     );
 }
 
