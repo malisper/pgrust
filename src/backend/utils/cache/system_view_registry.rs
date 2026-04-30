@@ -55,6 +55,12 @@ pub enum SyntheticSystemViewKind {
     InformationSchemaViews,
     InformationSchemaSequences,
     InformationSchemaColumns,
+    InformationSchemaRoutines,
+    InformationSchemaParameters,
+    InformationSchemaRoutineRoutineUsage,
+    InformationSchemaRoutineSequenceUsage,
+    InformationSchemaRoutineColumnUsage,
+    InformationSchemaRoutineTableUsage,
     InformationSchemaColumnColumnUsage,
     InformationSchemaColumnDomainUsage,
     InformationSchemaDomainConstraints,
@@ -257,6 +263,16 @@ const INFORMATION_SCHEMA_TABLES_ALIASES: &[&str] = &["information_schema.tables"
 const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
 const INFORMATION_SCHEMA_SEQUENCES_ALIASES: &[&str] = &["information_schema.sequences"];
 const INFORMATION_SCHEMA_COLUMNS_ALIASES: &[&str] = &["information_schema.columns"];
+const INFORMATION_SCHEMA_ROUTINES_ALIASES: &[&str] = &["information_schema.routines"];
+const INFORMATION_SCHEMA_PARAMETERS_ALIASES: &[&str] = &["information_schema.parameters"];
+const INFORMATION_SCHEMA_ROUTINE_ROUTINE_USAGE_ALIASES: &[&str] =
+    &["information_schema.routine_routine_usage"];
+const INFORMATION_SCHEMA_ROUTINE_SEQUENCE_USAGE_ALIASES: &[&str] =
+    &["information_schema.routine_sequence_usage"];
+const INFORMATION_SCHEMA_ROUTINE_COLUMN_USAGE_ALIASES: &[&str] =
+    &["information_schema.routine_column_usage"];
+const INFORMATION_SCHEMA_ROUTINE_TABLE_USAGE_ALIASES: &[&str] =
+    &["information_schema.routine_table_usage"];
 const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES: &[&str] =
     &["information_schema.column_column_usage"];
 const INFORMATION_SCHEMA_COLUMN_DOMAIN_USAGE_ALIASES: &[&str] =
@@ -1132,6 +1148,45 @@ const INFORMATION_SCHEMA_COLUMNS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("is_updatable"),
 ];
 
+const INFORMATION_SCHEMA_ROUTINES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("specific_schema"),
+    SyntheticSystemViewColumn::text("specific_name"),
+    SyntheticSystemViewColumn::text("routine_schema"),
+    SyntheticSystemViewColumn::text("routine_name"),
+];
+
+const INFORMATION_SCHEMA_PARAMETERS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("specific_schema"),
+    SyntheticSystemViewColumn::text("specific_name"),
+    SyntheticSystemViewColumn::new("ordinal_position", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("parameter_name"),
+    SyntheticSystemViewColumn::text("parameter_default"),
+];
+
+const INFORMATION_SCHEMA_ROUTINE_ROUTINE_USAGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("specific_name"),
+    SyntheticSystemViewColumn::text("routine_name"),
+];
+
+const INFORMATION_SCHEMA_ROUTINE_SEQUENCE_USAGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("routine_schema"),
+    SyntheticSystemViewColumn::text("routine_name"),
+    SyntheticSystemViewColumn::text("sequence_name"),
+];
+
+const INFORMATION_SCHEMA_ROUTINE_COLUMN_USAGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("routine_schema"),
+    SyntheticSystemViewColumn::text("routine_name"),
+    SyntheticSystemViewColumn::text("table_name"),
+    SyntheticSystemViewColumn::text("column_name"),
+];
+
+const INFORMATION_SCHEMA_ROUTINE_TABLE_USAGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("routine_schema"),
+    SyntheticSystemViewColumn::text("routine_name"),
+    SyntheticSystemViewColumn::text("table_name"),
+];
+
 const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("table_catalog"),
     SyntheticSystemViewColumn::text("table_schema"),
@@ -1663,6 +1718,48 @@ const SYNTHETIC_SYSTEM_VIEWS: &[SyntheticSystemView] = &[
         canonical_name: "information_schema.columns",
         aliases: INFORMATION_SCHEMA_COLUMNS_ALIASES,
         columns: INFORMATION_SCHEMA_COLUMNS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaRoutines,
+        canonical_name: "information_schema.routines",
+        aliases: INFORMATION_SCHEMA_ROUTINES_ALIASES,
+        columns: INFORMATION_SCHEMA_ROUTINES_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaParameters,
+        canonical_name: "information_schema.parameters",
+        aliases: INFORMATION_SCHEMA_PARAMETERS_ALIASES,
+        columns: INFORMATION_SCHEMA_PARAMETERS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaRoutineRoutineUsage,
+        canonical_name: "information_schema.routine_routine_usage",
+        aliases: INFORMATION_SCHEMA_ROUTINE_ROUTINE_USAGE_ALIASES,
+        columns: INFORMATION_SCHEMA_ROUTINE_ROUTINE_USAGE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaRoutineSequenceUsage,
+        canonical_name: "information_schema.routine_sequence_usage",
+        aliases: INFORMATION_SCHEMA_ROUTINE_SEQUENCE_USAGE_ALIASES,
+        columns: INFORMATION_SCHEMA_ROUTINE_SEQUENCE_USAGE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaRoutineColumnUsage,
+        canonical_name: "information_schema.routine_column_usage",
+        aliases: INFORMATION_SCHEMA_ROUTINE_COLUMN_USAGE_ALIASES,
+        columns: INFORMATION_SCHEMA_ROUTINE_COLUMN_USAGE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaRoutineTableUsage,
+        canonical_name: "information_schema.routine_table_usage",
+        aliases: INFORMATION_SCHEMA_ROUTINE_TABLE_USAGE_ALIASES,
+        columns: INFORMATION_SCHEMA_ROUTINE_TABLE_USAGE_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

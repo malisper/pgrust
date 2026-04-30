@@ -797,20 +797,15 @@ fn proc_rows_by_name(
     name: &str,
 ) -> Vec<PgProcRow> {
     let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
-    let mut rows = SearchSysCacheList1(
-        db,
-        client_id,
-        txn_ctx,
-        SysCacheId::PROCNAMEARGSNSP,
-        catalog_name_key(normalized),
-    )
-    .map(|tuples| {
-        tuples
+    let base_name = normalized
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(normalized);
+    let mut rows = with_backend_catcache(db, client_id, txn_ctx, |catcache| {
+        catcache
+            .proc_rows_by_name(base_name)
             .into_iter()
-            .filter_map(|tuple| match tuple {
-                SysCacheTuple::Proc(row) => Some(row),
-                _ => None,
-            })
+            .cloned()
             .collect::<Vec<_>>()
     })
     .unwrap_or_default();

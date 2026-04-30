@@ -815,6 +815,13 @@ pub enum CreateFunctionReturnSpec {
     DerivedFromOutArgs { setof_record: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateFunctionBodyKind {
+    As,
+    SqlReturn,
+    SqlBeginAtomic,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateFunctionStatement {
     pub schema_name: Option<String>,
@@ -829,10 +836,12 @@ pub struct CreateFunctionStatement {
     pub security_definer: bool,
     pub volatility: FunctionVolatility,
     pub parallel: FunctionParallel,
-    pub window: bool,
     pub language: String,
     pub body: String,
+    pub body_kind: CreateFunctionBodyKind,
+    pub body_position: Option<usize>,
     pub link_symbol: Option<String>,
+    pub window: bool,
     pub config: Vec<AlterRoutineOption>,
 }
 

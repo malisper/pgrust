@@ -8,7 +8,7 @@ use crate::backend::parser::{
     resolve_raw_type_name,
 };
 use crate::backend::utils::misc::guc::normalize_guc_name;
-use crate::include::catalog::{INTERNAL_TYPE_OID, PgProcRow};
+use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, INTERNAL_TYPE_OID, PgProcRow};
 use crate::pgrust::database::ddl::ensure_can_set_role;
 
 fn normalize_ident(name: &str) -> String {
@@ -40,6 +40,16 @@ fn reset_proc_config(row: &mut PgProcRow, name: &str) {
             row.proconfig = None;
         }
     }
+}
+
+fn current_user_is_superuser(catalog: &dyn CatalogLookup) -> bool {
+    let current_user_oid = catalog.current_user_oid();
+    catalog
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.oid == current_user_oid)
+        .map(|row| row.rolsuper)
+        .unwrap_or(current_user_oid == BOOTSTRAP_SUPERUSER_OID)
 }
 
 fn routine_arg_type_oid(
@@ -438,7 +448,17 @@ fn apply_routine_options(
                 };
             }
             AlterRoutineOption::SecurityDefiner(value) => row.prosecdef = *value,
-            AlterRoutineOption::Leakproof(value) => row.proleakproof = *value,
+            AlterRoutineOption::Leakproof(value) => {
+                if *value && !row.proleakproof && !current_user_is_superuser(catalog) {
+                    return Err(ExecError::DetailedError {
+                        message: "only superuser can define a leakproof function".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42501",
+                    });
+                }
+                row.proleakproof = *value;
+            }
             AlterRoutineOption::Parallel(parallel) => {
                 row.proparallel = match parallel {
                     FunctionParallel::Safe => 's',

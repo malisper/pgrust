@@ -1206,12 +1206,31 @@ fn relation_display_name(
     relation_oid: u32,
     heap_rel: RelFileLocator,
 ) -> String {
-    let base_name = catalog
-        .class_row_by_oid(relation_oid)
-        .map(|row| row.relname)
+    let class_row = catalog.class_row_by_oid(relation_oid);
+    let base_name = class_row
+        .as_ref()
+        .map(|row| {
+            catalog
+                .namespace_row_by_oid(row.relnamespace)
+                .map(|namespace| {
+                    if matches!(namespace.nspname.as_str(), "public" | "pg_catalog") {
+                        row.relname.clone()
+                    } else {
+                        format!("{}.{}", namespace.nspname, row.relname)
+                    }
+                })
+                .unwrap_or_else(|| row.relname.clone())
+        })
         .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number));
+    let unqualified_name = class_row
+        .as_ref()
+        .map(|row| row.relname.as_str())
+        .unwrap_or(base_name.as_str());
     match &rte.alias {
-        Some(alias) if !alias.eq_ignore_ascii_case(&base_name) => {
+        Some(alias)
+            if !alias.eq_ignore_ascii_case(&base_name)
+                && !alias.eq_ignore_ascii_case(unqualified_name) =>
+        {
             format!("{base_name} {alias}")
         }
         _ => base_name,

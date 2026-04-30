@@ -10014,6 +10014,8 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut return_spec = None;
     let mut language = None;
     let mut body = None;
+    let mut body_kind = None;
+    let mut body_position = None;
     let mut link_symbol = None;
     let mut cost = None;
     let mut support = None;
@@ -10086,35 +10088,48 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         }
         if keyword_at_start(rest, "as") {
             if body.is_some() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "single AS clause",
-                    actual: rest.into(),
+                return Err(ParseError::DetailedError {
+                    message: "duplicate function body specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
                 });
             }
+            body_position = string_literal_content_start_position(sql, rest);
             let (parsed, parsed_link_symbol, next_rest) = parse_create_function_body(rest)?;
             body = Some(parsed);
+            body_kind = Some(CreateFunctionBodyKind::As);
             link_symbol = parsed_link_symbol;
             rest = next_rest;
             continue;
         }
         if keyword_at_start(rest, "return") {
             if body.is_some() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "single function body",
-                    actual: rest.into(),
+                return Err(ParseError::DetailedError {
+                    message: "duplicate function body specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
                 });
             }
+            body_position = Some(sql_position_from_byte_offset(
+                sql,
+                slice_byte_offset(sql, rest),
+            ));
             let (parsed, next_rest) = parse_create_function_return_body(rest)?;
             body = Some(parsed);
+            body_kind = Some(CreateFunctionBodyKind::SqlReturn);
             language.get_or_insert_with(|| "sql".into());
             rest = next_rest;
             continue;
         }
         if keyword_at_start(rest, "begin") {
             if body.is_some() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "single function body",
-                    actual: rest.into(),
+                return Err(ParseError::DetailedError {
+                    message: "duplicate function body specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
                 });
             }
             if !consume_keyword(rest, "begin")
@@ -10127,8 +10142,18 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
                 ));
             }
             body = Some(rest.trim().to_string());
+            body_kind = Some(CreateFunctionBodyKind::SqlBeginAtomic);
+            body_position = Some(sql_position_from_byte_offset(
+                sql,
+                slice_byte_offset(sql, rest),
+            ));
             language.get_or_insert_with(|| "sql".into());
             rest = "";
+            continue;
+        }
+        if keyword_at_start(rest, "window") {
+            window = true;
+            rest = consume_keyword(rest, "window");
             continue;
         }
         if keyword_at_start(rest, "strict") {
@@ -10143,6 +10168,14 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             rest = consume_keyword(next, "input");
             strict = false;
             continue;
+        }
+        if keyword_at_start(rest, "not") {
+            let next = consume_keyword(rest, "not").trim_start();
+            if keyword_at_start(next, "leakproof") {
+                leakproof = false;
+                rest = consume_keyword(next, "leakproof");
+                continue;
+            }
         }
         if keyword_at_start(rest, "leakproof") {
             leakproof = true;
@@ -10226,6 +10259,16 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         }
     };
 
+    let language = language.ok_or(ParseError::UnexpectedEof)?;
+    let body_kind = body_kind.ok_or(ParseError::UnexpectedEof)?;
+    let body_position = if language.eq_ignore_ascii_case("sql")
+        && matches!(body_kind, CreateFunctionBodyKind::As)
+    {
+        body_position
+    } else {
+        None
+    };
+
     Ok(CreateFunctionStatement {
         schema_name,
         function_name,
@@ -10239,10 +10282,12 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         security_definer,
         volatility,
         parallel,
-        window,
-        language: language.ok_or(ParseError::UnexpectedEof)?,
+        language,
         body: body.ok_or(ParseError::UnexpectedEof)?,
+        body_kind,
+        body_position,
         link_symbol,
+        window,
         config,
     })
 }
@@ -10744,12 +10789,14 @@ fn parse_alter_routine_options(mut input: &str) -> Result<Vec<AlterRoutineOption
             let rest = consume_keyword(input, "returns").trim_start();
             let rest = consume_keyword(rest, "null").trim_start();
             let rest = consume_keyword(rest, "on").trim_start();
-            input = consume_keyword(rest, "null").trim_start();
+            let rest = consume_keyword(rest, "null").trim_start();
+            input = consume_keyword(rest, "input").trim_start();
             options.push(AlterRoutineOption::Strict(false));
         } else if keyword_at_start(input, "called") {
             let rest = consume_keyword(input, "called").trim_start();
             let rest = consume_keyword(rest, "on").trim_start();
-            input = consume_keyword(rest, "null").trim_start();
+            let rest = consume_keyword(rest, "null").trim_start();
+            input = consume_keyword(rest, "input").trim_start();
             options.push(AlterRoutineOption::Strict(false));
         } else if keyword_at_start(input, "immutable") {
             options.push(AlterRoutineOption::Volatility(
@@ -10776,6 +10823,12 @@ fn parse_alter_routine_options(mut input: &str) -> Result<Vec<AlterRoutineOption
             input = consume_keyword(input, "leakproof");
         } else if keyword_at_start(input, "not") {
             let rest = consume_keyword(input, "not").trim_start();
+            if !keyword_at_start(rest, "leakproof") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "LEAKPROOF",
+                    actual: rest.into(),
+                });
+            }
             options.push(AlterRoutineOption::Leakproof(false));
             input = consume_keyword(rest, "leakproof");
         } else if keyword_at_start(input, "parallel") {
@@ -14584,6 +14637,10 @@ fn parse_create_function_table_columns(
 
 fn parse_create_function_language(input: &str) -> Result<(String, &str), ParseError> {
     let rest = consume_keyword(input.trim_start(), "language").trim_start();
+    if let Some(token_len) = scan_string_literal_token_len(rest) {
+        let language = decode_string_literal(&rest[..token_len])?;
+        return Ok((language, &rest[token_len..]));
+    }
     let (language, rest) = parse_sql_identifier(rest)?;
     Ok((language, rest))
 }
@@ -14640,6 +14697,22 @@ fn parse_create_function_body(input: &str) -> Result<(String, Option<String>, &s
     Ok((body, None, rest))
 }
 
+fn string_literal_content_start_position(sql: &str, input: &str) -> Option<usize> {
+    let rest = consume_keyword(input.trim_start(), "as").trim_start();
+    let literal_offset = slice_byte_offset(sql, rest);
+    let bytes = rest.as_bytes();
+    let content_offset = match bytes.first().copied()? {
+        b'\'' => 1,
+        b'e' | b'E' if bytes.get(1) == Some(&b'\'') => 2,
+        b'$' => rest[1..].find('$')? + 2,
+        _ => return None,
+    };
+    Some(sql_position_from_byte_offset(
+        sql,
+        literal_offset + content_offset,
+    ))
+}
+
 fn parse_create_function_return_body(input: &str) -> Result<(String, &str), ParseError> {
     let rest = consume_keyword(input.trim_start(), "return").trim_start();
     if rest.is_empty() {
@@ -14649,9 +14722,11 @@ fn parse_create_function_return_body(input: &str) -> Result<(String, &str), Pars
         });
     }
 
-    // SQL-function shorthand uses a single expression body.
+    // SQL-standard RETURN bodies store their body form so pg_get_functiondef can
+    // distinguish them from quoted AS bodies. Runtime execution lowers them to
+    // SELECT later.
     let _ = parse_expr(rest)?;
-    Ok((format!("select {rest}"), ""))
+    Ok((format!("RETURN {rest}"), ""))
 }
 
 fn parse_sql_identifier(input: &str) -> Result<(String, &str), ParseError> {
