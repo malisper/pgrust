@@ -421,7 +421,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
             "public" | "pg_catalog" => row.relname.clone(),
             other => format!("{other}.{}", row.relname),
         };
-        let rel = catalog_relation_locator(row.oid, row.relfilenode, db_oid);
+        let rel = catalog_relation_locator(row.oid, row.relfilenode, row.reltablespace, db_oid);
         let btree_options =
             load_btree_options_from_reloptions(row.relam, row.relkind, row.reloptions.as_deref());
         let gist_options =
@@ -678,7 +678,12 @@ fn load_brin_options_from_metapage(
     (pages_per_range > 0).then_some(BrinOptions { pages_per_range })
 }
 
-fn catalog_relation_locator(relation_oid: u32, relfilenode: u32, db_oid: u32) -> RelFileLocator {
+fn catalog_relation_locator(
+    relation_oid: u32,
+    relfilenode: u32,
+    reltablespace: u32,
+    db_oid: u32,
+) -> RelFileLocator {
     if let Some(kind) = bootstrap_catalog_kinds()
         .into_iter()
         .find(|kind| kind.relation_oid() == relation_oid)
@@ -694,7 +699,7 @@ fn catalog_relation_locator(relation_oid: u32, relfilenode: u32, db_oid: u32) ->
         };
     }
     RelFileLocator {
-        spc_oid: 0,
+        spc_oid: reltablespace,
         db_oid,
         rel_number: relfilenode,
     }

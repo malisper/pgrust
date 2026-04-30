@@ -16,6 +16,7 @@ pub(super) struct PartitionedIndexSpec {
     pub predicate_sql: Option<String>,
     pub unique: bool,
     pub nulls_not_distinct: bool,
+    pub tablespace_oid: Option<u32>,
     pub access_method_oid: u32,
     pub access_method_handler: u32,
     pub build_options: CatalogIndexBuildOptions,
@@ -517,6 +518,24 @@ impl<'a> PartitionedIndexInstaller<'a> {
             )
             .map_err(map_catalog_error)?;
         self.apply_effect(effect)?;
+        if let Some(tablespace_oid) = spec.tablespace_oid
+            && tablespace_oid != index_entry.rel.spc_oid
+        {
+            let cid = self.take_cid();
+            let ctx = self.write_ctx(cid);
+            let effect = self
+                .db
+                .catalog
+                .write()
+                .set_relation_tablespace_mvcc(index_entry.relation_oid, tablespace_oid, false, &ctx)
+                .map_err(map_catalog_error)?;
+            index_entry.rel = effect.created_rels.first().copied().unwrap_or_else(|| {
+                let mut rel = index_entry.rel;
+                rel.spc_oid = tablespace_oid;
+                rel
+            });
+            self.apply_effect(effect)?;
+        }
         if !valid {
             self.set_index_valid(index_entry.relation_oid, false)?;
             if let Some(meta) = index_entry.index_meta.as_mut() {
@@ -595,6 +614,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
             spec.unique,
             false,
             spec.nulls_not_distinct,
+            spec.tablespace_oid,
             self.xid,
             index_cid,
             spec.access_method_oid,
@@ -812,11 +832,17 @@ impl<'a> PartitionedIndexInstaller<'a> {
                     actual: format!("missing access method {access_method_oid}"),
                 })
             })?;
+        let tablespace_oid = self
+            .catalog()
+            .class_row_by_oid(index.relation_oid)
+            .map(|row| row.reltablespace)
+            .unwrap_or(index.rel.spc_oid);
         Ok(PartitionedIndexSpec {
             columns,
             predicate_sql: index.index_meta.indpred.clone(),
             unique: index.index_meta.indisunique,
             nulls_not_distinct: index.index_meta.indnullsnotdistinct,
+            tablespace_oid: Some(tablespace_oid),
             access_method_oid,
             access_method_handler,
             build_options: CatalogIndexBuildOptions {
@@ -934,6 +960,7 @@ impl Database {
         access_method_oid: u32,
         access_method_handler: u32,
         build_options: &CatalogIndexBuildOptions,
+        tablespace_oid: Option<u32>,
         maintenance_work_mem_kb: usize,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -972,6 +999,7 @@ impl Database {
                     without_overlaps: None,
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    tablespace: None,
                     deferrable: false,
                     initially_deferred: false,
                 }],
@@ -996,6 +1024,7 @@ impl Database {
             predicate_sql: predicate_sql.map(str::to_string),
             unique,
             nulls_not_distinct,
+            tablespace_oid,
             access_method_oid,
             access_method_handler,
             build_options: CatalogIndexBuildOptions {

@@ -4811,6 +4811,8 @@ impl Session {
             | Statement::AlterTableRename(_)
             | Statement::AlterTableSetSchema(_)
             | Statement::AlterTableSetTablespace(_)
+            | Statement::AlterIndexSetTablespace(_)
+            | Statement::AlterMoveAllTablespace(_)
             | Statement::AlterTableSetPersistence(_)
             | Statement::AlterTableSet(_)
             | Statement::AlterTableReset(_)
@@ -7174,6 +7176,32 @@ impl Session {
                     )
                 }
             }
+            Statement::DropTablespace(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    db.execute_drop_tablespace_stmt(self.client_id, drop_stmt)
+                }
+            }
+            Statement::AlterTablespace(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    db.execute_alter_tablespace_stmt(self.client_id, alter_stmt)
+                }
+            }
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_domain_stmt_with_search_path(
@@ -7486,6 +7514,7 @@ impl Session {
                     self.client_id,
                     create_stmt,
                     search_path.as_deref(),
+                    Some(&self.gucs),
                     self.maintenance_work_mem_kb()?,
                 )
             }
@@ -7629,6 +7658,37 @@ impl Session {
                         alter_stmt,
                         search_path.as_deref(),
                     )
+                }
+            }
+            Statement::AlterIndexSetTablespace(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_set_tablespace_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterMoveAllTablespace(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    db.execute_alter_move_all_tablespace_stmt(self.client_id, alter_stmt)
                 }
             }
             Statement::AlterTableSetPersistence(ref alter_stmt) => {
@@ -8204,6 +8264,7 @@ impl Session {
                         alter_stmt,
                         search_path.as_deref(),
                         Some(&self.datetime_config),
+                        Some(&self.gucs),
                     )
                 }
             }
@@ -8716,6 +8777,7 @@ impl Session {
                         0,
                         search_path.as_deref(),
                         self.planner_config(),
+                        Some(&self.gucs),
                     )
                 }
             }
@@ -12565,6 +12627,7 @@ impl Session {
                         xid,
                         cid,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                         maintenance_work_mem_kb,
                         catalog_effects,
                     )
@@ -12921,10 +12984,45 @@ impl Session {
                         })?;
                     self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                     let search_path = self.configured_search_path();
-                    db.execute_alter_table_set_tablespace_stmt_with_search_path(
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_set_tablespace_stmt_in_transaction_with_search_path(
                         client_id,
                         alter_stmt,
+                        xid,
+                        cid,
                         search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterIndexSetTablespace(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let relation = catalog
+                        .lookup_any_relation(&alter_stmt.table_name)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(
+                                alter_stmt.table_name.clone(),
+                            ))
+                        })?;
+                    self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_set_tablespace_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterMoveAllTablespace(ref alter_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_move_all_tablespace_stmt_in_transaction(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
                     )
                 }
                 Statement::AlterTableSetPersistence(ref alter_stmt) => {
@@ -13567,6 +13665,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         Some(&self.datetime_config),
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                     )
                 }
@@ -15309,15 +15408,36 @@ impl Session {
                         &mut txn.catalog_effects,
                     )
                 }
+                Statement::DropTablespace(ref drop_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_drop_tablespace_stmt_in_transaction(
+                        client_id,
+                        drop_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterTablespace(ref alter_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_tablespace_stmt_in_transaction(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
                 Statement::CreateTable(ref create_stmt) => {
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
-                    db.execute_create_table_stmt_in_transaction_with_search_path(
+                    db.execute_create_table_stmt_in_transaction_with_search_path_and_gucs(
                         client_id,
                         create_stmt,
                         xid,
                         cid,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                         &mut txn.temp_effects,
                         &mut txn.sequence_effects,
@@ -15548,6 +15668,7 @@ impl Session {
                         cid,
                         search_path.as_deref(),
                         planner_config,
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                         &mut txn.temp_effects,
                     )

@@ -789,6 +789,7 @@ fn execute_explain_analyze_create_table_as(
         cid,
         None,
         planner_config,
+        Some(&ctx.gucs),
         &mut ctx.catalog_effects,
         &mut ctx.temp_effects,
     )?;

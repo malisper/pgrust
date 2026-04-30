@@ -1091,6 +1091,16 @@ pub(crate) fn pg_tablespace_row_from_values(
         oid: expect_oid(&values[0])?,
         spcname: expect_text(&values[1])?,
         spcowner: expect_oid(&values[2])?,
+        spcacl: values
+            .get(3)
+            .map(nullable_text_array)
+            .transpose()?
+            .flatten(),
+        spcoptions: values
+            .get(4)
+            .map(nullable_text_array)
+            .transpose()?
+            .flatten(),
     })
 }
 
@@ -2100,6 +2110,8 @@ fn pg_tablespace_row_values(row: PgTablespaceRow) -> Vec<Value> {
         Value::Int32(row.oid as i32),
         Value::Text(row.spcname.into()),
         Value::Int32(row.spcowner as i32),
+        nullable_array_value(row.spcacl.map(text_array_value)),
+        nullable_array_value(row.spcoptions.map(text_array_value)),
     ]
 }
 

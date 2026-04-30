@@ -12,6 +12,10 @@ use super::operator::{
     lookup_operator_row, operator_signature_display, resolve_operator_type_oid,
     unsupported_postfix_operator_error,
 };
+use super::tablespace::{
+    ensure_non_global_relation_tablespace, ensure_tablespace_create_privilege,
+    tablespace_oid_by_name,
+};
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{
@@ -26,6 +30,7 @@ use crate::backend::parser::{
     AlterTableSetPersistenceStatement, AlterTableSetTablespaceStatement, BoundRelation,
     CatalogLookup, TablePersistence, parse_type_name, resolve_raw_type_name,
 };
+use crate::backend::storage::smgr::{ForkNumber, segment_path};
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
@@ -47,6 +52,7 @@ use crate::pgrust::database::ddl::{
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -60,6 +66,59 @@ struct AddColumnTarget {
 }
 
 const AUTOVACUUM_CLIENT_ID_BASE: ClientId = 0xFF00_0000;
+
+pub(super) fn copy_rewritten_relation_storage(
+    base_dir: &std::path::Path,
+    effect: &CatalogMutationEffect,
+) -> Result<(), ExecError> {
+    for (old_rel, new_rel) in effect
+        .dropped_rels
+        .iter()
+        .copied()
+        .zip(effect.created_rels.iter().copied())
+    {
+        copy_relation_storage_files(base_dir, old_rel, new_rel)?;
+    }
+    Ok(())
+}
+
+fn copy_relation_storage_files(
+    base_dir: &std::path::Path,
+    old_rel: RelFileLocator,
+    new_rel: RelFileLocator,
+) -> Result<(), ExecError> {
+    for fork in [
+        ForkNumber::Main,
+        ForkNumber::Fsm,
+        ForkNumber::VisibilityMap,
+        ForkNumber::Init,
+    ] {
+        let mut segno = 0;
+        loop {
+            let source = segment_path(base_dir, old_rel, fork, segno);
+            if !source.exists() {
+                break;
+            }
+            let target = segment_path(base_dir, new_rel, fork, segno);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|err| ExecError::DetailedError {
+                    message: format!("could not create tablespace directory: {err}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "58030",
+                })?;
+            }
+            fs::copy(&source, &target).map_err(|err| ExecError::DetailedError {
+                message: format!("could not move relation storage to tablespace: {err}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58030",
+            })?;
+            segno += 1;
+        }
+    }
+    Ok(())
+}
 
 fn reject_composite_rowtype_non_null_default_dependency(
     catalog: &dyn CatalogLookup,
@@ -1268,38 +1327,97 @@ impl Database {
         alter_stmt: &AlterTableSetTablespaceStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let table_name = alter_stmt.table_name.to_ascii_lowercase();
-        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = catalog.lookup_any_relation(&table_name) else {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_table_set_tablespace_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_table_set_tablespace_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableSetTablespaceStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let relation_name = alter_stmt.table_name.to_ascii_lowercase();
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let Some(relation) = catalog.lookup_any_relation(&relation_name) else {
             if alter_stmt.if_exists {
                 push_notice(format!(
-                    r#"relation "{table_name}" does not exist, skipping"#
+                    r#"relation "{relation_name}" does not exist, skipping"#
                 ));
                 return Ok(StatementResult::AffectedRows(0));
             }
-            return Err(ExecError::Parse(ParseError::TableDoesNotExist(table_name)));
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                relation_name,
+            )));
         };
-        let cache = self
-            .backend_catcache(client_id, None)
-            .map_err(map_catalog_error)?;
-        if !cache.tablespace_rows().into_iter().any(|row| {
-            row.spcname
-                .eq_ignore_ascii_case(&alter_stmt.tablespace_name)
-        }) {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "tablespace \"{}\" does not exist",
-                    alter_stmt.tablespace_name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42704",
-            });
+        if matches!(relation.relkind, 'S' | 'v' | 'c' | 'f') {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: relation_name,
+                expected: "relation with storage",
+            }));
+        }
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        let tablespace_oid = tablespace_oid_by_name(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &alter_stmt.tablespace_name,
+        )?;
+        ensure_non_global_relation_tablespace(&alter_stmt.tablespace_name, tablespace_oid, false)?;
+        ensure_tablespace_create_privilege(self, client_id, Some((xid, cid)), tablespace_oid)?;
+        let current_tablespace_oid = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?
+            .class_by_oid(relation.relation_oid)
+            .map(|row| row.reltablespace)
+            .unwrap_or(relation.rel.spc_oid);
+        if current_tablespace_oid == tablespace_oid {
+            return Ok(StatementResult::AffectedRows(0));
         }
 
-        // :HACK: pgrust does not model per-relation tablespace file placement
-        // yet. Keep this as a rewrite-compatible metadata path for regression
-        // coverage and account the IO that PostgreSQL exposes for the rewrite.
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .set_relation_tablespace_mvcc(relation.relation_oid, tablespace_oid, true, &ctx)
+            .map_err(map_catalog_error)?;
+        for old_rel in &effect.dropped_rels {
+            self.pool
+                .flush_relation(*old_rel)
+                .map_err(|err| ExecError::DetailedError {
+                    message: format!("could not flush relation before tablespace move: {err:?}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "58030",
+                })?;
+        }
+        copy_rewritten_relation_storage(&self.cluster.base_dir, &effect)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+
         let stats_state = self.session_stats_state(client_id);
         let mut stats = stats_state.write();
         if relation.relpersistence == 't' {

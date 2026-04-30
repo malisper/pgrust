@@ -821,6 +821,7 @@ impl Database {
             &relation,
             &lowered,
             configured_search_path,
+            None,
             catalog_effects,
         )?;
         let options = format_fdw_options(&stmt.options)?;

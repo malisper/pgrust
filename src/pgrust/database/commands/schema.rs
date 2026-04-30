@@ -183,12 +183,13 @@ impl Database {
                         )?;
                     }
                     Statement::CreateTable(create_stmt) => {
-                        self.execute_create_table_stmt_in_transaction_with_search_path(
+                        self.execute_create_table_stmt_in_transaction_with_search_path_and_gucs(
                             client_id,
                             create_stmt,
                             xid,
                             element_cid,
                             Some(&schema_search_path),
+                            None,
                             catalog_effects,
                             temp_effects,
                             sequence_effects,
@@ -216,6 +217,7 @@ impl Database {
                             xid,
                             element_cid,
                             Some(&schema_search_path),
+                            None,
                             maintenance_work_mem_kb,
                             catalog_effects,
                         )?;
