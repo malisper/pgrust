@@ -1262,6 +1262,13 @@ fn rewrite_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::PgStatProgressCopy {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgStatProgressCopy {
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PgSequences {
             output_columns,
             with_ordinality,

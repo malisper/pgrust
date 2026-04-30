@@ -1096,6 +1096,7 @@ fn collect_set_returning_call_rule_dependencies(
             }
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => {}
     }
@@ -1127,7 +1128,8 @@ fn set_returning_proc_oid(call: &SetReturningCall) -> Option<u32> {
         | SetReturningCall::TxidSnapshotXip { func_oid, .. } => *func_oid,
         SetReturningCall::UserDefined { proc_oid, .. } => *proc_oid,
         SetReturningCall::RowsFrom { .. } => 0,
-        SetReturningCall::PgSequences { .. }
+        SetReturningCall::PgStatProgressCopy { .. }
+        | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. }
         | SetReturningCall::TextSearchTableFunction { .. }
         | SetReturningCall::SqlJsonTable(_)

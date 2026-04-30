@@ -1485,6 +1485,10 @@ pub enum SetReturningCall {
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
+    PgStatProgressCopy {
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
     PgSequences {
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
@@ -1557,6 +1561,7 @@ impl SetReturningCall {
             | SetReturningCall::PartitionTree { output_columns, .. }
             | SetReturningCall::PartitionAncestors { output_columns, .. }
             | SetReturningCall::PgLockStatus { output_columns, .. }
+            | SetReturningCall::PgStatProgressCopy { output_columns, .. }
             | SetReturningCall::PgSequences { output_columns, .. }
             | SetReturningCall::InformationSchemaSequences { output_columns, .. }
             | SetReturningCall::TxidSnapshotXip { output_columns, .. }
@@ -1619,6 +1624,10 @@ impl SetReturningCall {
                 output_columns: existing,
                 ..
             }
+            | SetReturningCall::PgStatProgressCopy {
+                output_columns: existing,
+                ..
+            }
             | SetReturningCall::PgSequences {
                 output_columns: existing,
                 ..
@@ -1677,6 +1686,9 @@ impl SetReturningCall {
                 with_ordinality, ..
             }
             | SetReturningCall::PgLockStatus {
+                with_ordinality, ..
+            }
+            | SetReturningCall::PgStatProgressCopy {
                 with_ordinality, ..
             }
             | SetReturningCall::PgSequences {
@@ -1803,6 +1815,13 @@ impl SetReturningCall {
             } => SetReturningCall::PgLockStatus {
                 func_oid,
                 func_variadic,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::PgStatProgressCopy {
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::PgStatProgressCopy {
                 output_columns,
                 with_ordinality,
             },
@@ -2058,6 +2077,13 @@ impl SetReturningCall {
             } => SetReturningCall::PgLockStatus {
                 func_oid,
                 func_variadic,
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::PgStatProgressCopy {
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::PgStatProgressCopy {
                 output_columns,
                 with_ordinality,
             },
@@ -3367,6 +3393,7 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => Vec::new(),
         SetReturningCall::TxidSnapshotXip { arg, .. } => vec![arg],

@@ -3495,7 +3495,7 @@ impl Database {
                     .into_iter()
                     .map(|row| (row.oid, row.amname))
                     .collect::<BTreeMap<_, _>>();
-                let mut tail_notices = Vec::new();
+                let mut pre_text_search_notices = Vec::new();
                 let mut noticed_opfamily_oids = BTreeSet::new();
                 let mut opfamily_rows = catcache
                     .opfamily_rows()
@@ -3505,7 +3505,7 @@ impl Database {
                 opfamily_rows.sort_by_key(|row| row.oid);
                 for row in opfamily_rows {
                     noticed_opfamily_oids.insert(row.oid);
-                    tail_notices.push((
+                    pre_text_search_notices.push((
                         row.oid,
                         format!(
                             "drop cascades to operator family {} for access method {}",
@@ -3530,13 +3530,18 @@ impl Database {
                     if !noticed_opfamily_oids.insert(row.opcfamily) {
                         continue;
                     }
-                    let (family_namespace, family_name, family_method) = catcache
+                    let Some((family_namespace, family_name, family_method)) = catcache
                         .opfamily_rows()
                         .into_iter()
                         .find(|family| family.oid == row.opcfamily)
                         .map(|family| (family.opfnamespace, family.opfname, family.opfmethod))
-                        .unwrap_or((row.opcnamespace, row.opcname, row.opcmethod));
-                    tail_notices.push((
+                    else {
+                        continue;
+                    };
+                    if family_namespace != schema.oid {
+                        continue;
+                    }
+                    pre_text_search_notices.push((
                         row.opcfamily,
                         format!(
                             "drop cascades to operator family {} for access method {}",
@@ -3583,7 +3588,7 @@ impl Database {
                 relation_notice_rows
                     .sort_by_key(|row| (!inheritance_parent_oids.contains(&row.oid), row.oid));
                 for relation in relation_notice_rows {
-                    tail_notices.push((
+                    pre_text_search_notices.push((
                         relation.oid,
                         format!(
                             "drop cascades to {} {}",
@@ -3597,6 +3602,12 @@ impl Database {
                         ),
                     ));
                 }
+                pre_text_search_notices.sort_by_key(|(oid, _)| *oid);
+                notices.extend(
+                    pre_text_search_notices
+                        .into_iter()
+                        .map(|(_, notice)| notice),
+                );
 
                 let mut ts_dict_rows = catcache
                     .ts_dict_rows()
@@ -3670,6 +3681,7 @@ impl Database {
                     ));
                 }
 
+                let mut tail_notices = Vec::new();
                 for row in catcache.type_rows().into_iter().filter(|row| {
                     row.typnamespace == schema.oid && matches!(row.typtype, 'd' | 'e')
                 }) {
