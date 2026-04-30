@@ -1788,7 +1788,16 @@ fn analyze_expression_index_reports_nested_sql_function_context() {
         )
         .unwrap();
     session
-        .execute(&db, "create index on expr_analyze_ctx(wrap_do_analyze(i))")
+        .execute(
+            &db,
+            "create index expr_analyze_ctx_expr_idx on expr_analyze_ctx(wrap_do_analyze(i))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index expr_analyze_ctx_expr_idx alter column 1 set statistics 100",
+        )
         .unwrap();
     session
         .execute(&db, "insert into expr_analyze_ctx values (1), (2)")

@@ -384,6 +384,7 @@ pub fn derived_relation_depend_rows(
     rows.extend(
         referenced_type_oids
             .into_iter()
+            .filter(|type_oid| !is_pinned_depend_object(PG_TYPE_RELATION_OID, *type_oid))
             .map(|type_oid| PgDependRow {
                 classid: PG_CLASS_RELATION_OID,
                 objid: relation_oid,
