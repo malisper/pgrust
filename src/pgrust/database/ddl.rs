@@ -1737,6 +1737,13 @@ pub(super) fn automatic_alter_type_cast_allowed(
     if is_text_like_type(from) && is_text_like_type(to) {
         return true;
     }
+    if !from.is_array
+        && !to.is_array
+        && matches!(from.kind, SqlTypeKind::Bool)
+        && is_text_like_type(to)
+    {
+        return true;
+    }
     let Some(source_oid) = catalog.type_oid_for_sql_type(from) else {
         return false;
     };

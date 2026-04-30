@@ -592,6 +592,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = insert_domain_array_literal_position(sql, message) {
                 return Some(position);
             }
+            if detail.as_deref().is_some_and(|detail| {
+                detail == "Cannot create a primary key or unique constraint using such an index."
+            }) && message.starts_with("index \"")
+                && message.contains("does not have default sorting behavior")
+            {
+                return find_alter_table_add_using_index_constraint_position(sql);
+            }
             if message.starts_with("cannot subscript type ") {
                 return find_subscript_expression_position(sql);
             }
@@ -977,6 +984,17 @@ fn domain_ddl_error_position(sql: &str, message: &str) -> Option<usize> {
         }
         _ => None,
     }
+}
+
+fn find_alter_table_add_using_index_constraint_position(sql: &str) -> Option<usize> {
+    let lower = sql.trim_start().to_ascii_lowercase();
+    if !lower.starts_with("alter table ") || !lower.contains(" using index ") {
+        return None;
+    }
+    find_case_insensitive_token_position(sql, "UNIQUE")
+        .or_else(|| find_case_insensitive_token_position(sql, "PRIMARY KEY"))
+        .or_else(|| find_case_insensitive_token_position(sql, "ADD CONSTRAINT"))
+        .or_else(|| find_case_insensitive_token_position(sql, "USING INDEX"))
 }
 
 fn find_create_domain_base_type_position(sql: &str) -> Option<usize> {

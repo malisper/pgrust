@@ -8149,7 +8149,8 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         }
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
-        | Plan::BitmapOr { children, .. } => {
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => {
             for child in children {
                 collect_plan_relation_oids(child, oids);
             }
@@ -8206,7 +8207,8 @@ fn plan_contains_lock_rows(plan: &Plan) -> bool {
         Plan::LockRows { .. } => true,
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
-        | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_lock_rows),
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_lock_rows),
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }

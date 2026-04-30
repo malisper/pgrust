@@ -161,6 +161,12 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
         if preferred_unqualified_left_join_above_nulltest(current, candidate) {
             return false;
         }
+        if preferred_bitmap_and_heap(candidate) && !preferred_bitmap_and_heap(current) {
+            return true;
+        }
+        if preferred_bitmap_and_heap(current) && !preferred_bitmap_and_heap(candidate) {
+            return false;
+        }
         if preferred_reassociated_lateral_values_hash_join(candidate, current) {
             return true;
         }
@@ -293,8 +299,23 @@ fn expr_contains_null_test(expr: &Expr) -> bool {
     }
 }
 
+fn preferred_bitmap_and_heap(path: &Path) -> bool {
+    match path {
+        Path::BitmapHeapScan { bitmapqual, .. } => bitmap_tree_contains_and(bitmapqual),
+        _ => false,
+    }
+}
+
 fn path_rows_at_most(path: &Path, max_rows: f64) -> bool {
     path.plan_info().plan_rows.as_f64() <= max_rows
+}
+
+fn bitmap_tree_contains_and(path: &Path) -> bool {
+    match path {
+        Path::BitmapAnd { .. } => true,
+        Path::BitmapOr { children, .. } => children.iter().any(bitmap_tree_contains_and),
+        _ => false,
+    }
 }
 
 fn preferred_parameterized_append_inner_nested_loop(path: &Path) -> bool {
@@ -638,6 +659,7 @@ fn contains_seq_scan(path: &Path) -> bool {
         } => contains_seq_scan(input),
         Path::Append { children, .. }
         | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
         | Path::MergeAppend { children, .. }
         | Path::SetOp { children, .. } => children.iter().any(contains_seq_scan),
         Path::NestedLoopJoin { left, right, .. }
@@ -680,6 +702,7 @@ fn contains_disabled_seq_scan(path: &Path) -> bool {
         } => contains_disabled_seq_scan(input),
         Path::Append { children, .. }
         | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
         | Path::MergeAppend { children, .. }
         | Path::SetOp { children, .. } => children.iter().any(contains_disabled_seq_scan),
         Path::NestedLoopJoin { left, right, .. }

@@ -3048,7 +3048,8 @@ fn path_uses_seqscan(path: &Path) -> bool {
         Path::SeqScan { .. } => true,
         Path::Append { children, .. }
         | Path::MergeAppend { children, .. }
-        | Path::BitmapOr { children, .. } => children.iter().any(path_uses_seqscan),
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. } => children.iter().any(path_uses_seqscan),
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
         | Path::Projection { input, .. }
@@ -3088,7 +3089,8 @@ fn path_uses_indexscan(path: &Path) -> bool {
         Path::IndexOnlyScan { .. } | Path::IndexScan { .. } | Path::BitmapIndexScan { .. } => true,
         Path::Append { children, .. }
         | Path::MergeAppend { children, .. }
-        | Path::BitmapOr { children, .. } => children.iter().any(path_uses_indexscan),
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. } => children.iter().any(path_uses_indexscan),
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
         | Path::Projection { input, .. }

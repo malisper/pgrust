@@ -1368,6 +1368,16 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|child| rebase_plan_subplan_ids(child, base))
                 .collect(),
         },
+        Plan::BitmapAnd {
+            plan_info,
+            children,
+        } => Plan::BitmapAnd {
+            plan_info,
+            children: children
+                .into_iter()
+                .map(|child| rebase_plan_subplan_ids(child, base))
+                .collect(),
+        },
         Plan::BitmapHeapScan {
             plan_info,
             source_id,
@@ -1856,6 +1866,16 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             children,
         } => Plan::BitmapOr {
+            plan_info,
+            children: children
+                .into_iter()
+                .map(|child| finalize_plan_subqueries(child, catalog, subplans))
+                .collect(),
+        },
+        Plan::BitmapAnd {
+            plan_info,
+            children,
+        } => Plan::BitmapAnd {
             plan_info,
             children: children
                 .into_iter()

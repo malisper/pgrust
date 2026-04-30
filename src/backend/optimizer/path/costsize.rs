@@ -443,6 +443,35 @@ pub(super) fn optimize_path_with_config(
                     children,
                 }
             }
+            Path::BitmapAnd {
+                pathtarget,
+                children,
+                ..
+            } => {
+                let children = children
+                    .into_iter()
+                    .map(|child| optimize_path_with_config(child, catalog, config))
+                    .collect::<Vec<_>>();
+                let startup_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().startup_cost.as_f64())
+                    .sum::<f64>();
+                let total_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().total_cost.as_f64())
+                    .sum::<f64>();
+                let rows = children
+                    .iter()
+                    .map(|child| child.plan_info().plan_rows.as_f64())
+                    .reduce(f64::min)
+                    .map(clamp_rows)
+                    .unwrap_or(0.0);
+                Path::BitmapAnd {
+                    plan_info: PlanEstimate::new(startup_cost, total_cost, rows, 0),
+                    pathtarget,
+                    children,
+                }
+            }
             Path::BitmapHeapScan {
                 pathtarget,
                 source_id,
@@ -4348,7 +4377,9 @@ fn path_contains_runtime_index_arg(path: &Path) -> bool {
         Path::BitmapIndexScan { keys, .. } => keys
             .iter()
             .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
-        Path::BitmapOr { children, .. } => children.iter().any(path_contains_runtime_index_arg),
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
+            children.iter().any(path_contains_runtime_index_arg)
+        }
         Path::BitmapHeapScan { bitmapqual, .. } => path_contains_runtime_index_arg(bitmapqual),
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
@@ -4549,6 +4580,7 @@ fn contains_seq_scan(path: &Path) -> bool {
         } => contains_seq_scan(input),
         Path::Append { children, .. }
         | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
         | Path::MergeAppend { children, .. }
         | Path::SetOp { children, .. } => children.iter().any(contains_seq_scan),
         Path::NestedLoopJoin { left, right, .. }
@@ -5224,7 +5256,7 @@ fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
-        Path::BitmapOr { children, .. } => children
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => children
             .iter()
             .any(|child| path_uses_outer_relids(child, relids)),
         Path::BitmapHeapScan {
@@ -5445,7 +5477,9 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
-        Path::BitmapOr { children, .. } => children.iter().any(path_uses_immediate_outer_columns),
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
+            children.iter().any(path_uses_immediate_outer_columns)
+        }
         Path::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
@@ -10037,9 +10071,18 @@ fn btree_index_scan_key_for_qual(
         super::super::IndexStrategyLookup::RegexPrefix { exact: true } => {
             Some(qual.index_expr.clone())
         }
+        _ if scalar_array_null_display_expr(&qual.expr) => Some(qual.expr.clone()),
         _ => row_prefix_index_expr(index, &qual.expr, strategy),
     };
     IndexScanKey::new((index_pos + 1) as i16, strategy, argument).with_display_expr(display_expr)
+}
+
+fn scalar_array_null_display_expr(expr: &Expr) -> bool {
+    matches!(
+        strip_casts(expr),
+        Expr::ScalarArrayOp(saop)
+            if saop.use_or && matches!(const_argument(&saop.right), Some(Value::Null))
+    )
 }
 
 fn row_prefix_scan_key(
@@ -10359,7 +10402,43 @@ fn indexable_qual_with_argument(
         })
     }
 
+    fn bool_mk(key_expr: &Expr, value: bool, expr: &Expr) -> Option<IndexableQual> {
+        (expr_sql_type(key_expr).kind == SqlTypeKind::Bool).then(|| IndexableQual {
+            column: expr_column_index(key_expr),
+            key_expr: strip_casts(key_expr).clone(),
+            lookup: super::super::IndexStrategyLookup::Operator {
+                oid: 0,
+                kind: OpExprKind::Eq,
+            },
+            argument: IndexScanKeyArgument::Const(Value::Bool(value)),
+            index_expr: expr.clone(),
+            recheck_expr: Some(expr.clone()),
+            expr: expr.clone(),
+            residual_expr: None,
+            is_not_null: false,
+            row_prefix: false,
+        })
+    }
+
     match strip_casts(expr) {
+        key @ Expr::Var(_) => bool_mk(key, true, expr),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Not => {
+            let [inner] = bool_expr.args.as_slice() else {
+                return None;
+            };
+            bool_mk(strip_casts(inner), false, expr)
+        }
+        Expr::IsNotDistinctFrom(left, right) => {
+            match (strip_casts(left), const_argument(right)) {
+                (key, Some(Value::Bool(value))) => return bool_mk(key, value, expr),
+                _ => {}
+            }
+            match (const_argument(left), strip_casts(right)) {
+                (Some(Value::Bool(value)), key) => return bool_mk(key, value, expr),
+                _ => {}
+            }
+            None
+        }
         Expr::Like {
             expr: like_expr,
             pattern,
@@ -10824,7 +10903,7 @@ fn gist_order_match(
             if simple_index_column(index, index_pos) != Some(column) {
                 return None;
             }
-            let right_type_oid = value_type_oid(&argument);
+            let right_type_oid = index_argument_type_oid(&argument);
             let left_type_oid = index_operator_type_oid(index, index_pos);
             let strategy = left_type_oid
                 .zip(right_type_oid)
@@ -10852,7 +10931,7 @@ fn gist_order_match(
         }) else {
             return (Vec::new(), None);
         };
-        keys.push(IndexScanKey::const_value(
+        keys.push(IndexScanKey::new(
             (index_pos + 1) as i16,
             strategy,
             argument,
@@ -10884,26 +10963,35 @@ fn index_operator_type_oid(index: &BoundIndexRelation, index_pos: usize) -> Opti
         })
 }
 
-fn gist_order_item(item: &OrderByEntry) -> Option<(usize, u32, Value)> {
+fn gist_order_item(item: &OrderByEntry) -> Option<(usize, u32, IndexScanKeyArgument)> {
     match strip_casts(&item.expr) {
         Expr::Func(func) if func.args.len() == 2 => {
             let left = strip_casts(&func.args[0]);
             let right = &func.args[1];
-            if let (Some(column), Some(value)) =
-                (expr_column_index(left), const_gist_argument_value(right))
+            if let (Some(column), Some(argument)) =
+                (expr_column_index(left), gist_order_argument(right))
             {
-                return Some((column, func.funcid, value));
+                return Some((column, func.funcid, argument));
             }
-            if let (Some(value), Some(column)) = (
-                const_gist_argument_value(&func.args[0]),
+            if let (Some(argument), Some(column)) = (
+                gist_order_argument(&func.args[0]),
                 expr_column_index(strip_casts(&func.args[1])),
             ) {
-                return Some((column, commuted_function_proc_oid(func.funcid)?, value));
+                return Some((column, commuted_function_proc_oid(func.funcid)?, argument));
             }
             None
         }
         _ => None,
     }
+}
+
+fn gist_order_argument(expr: &Expr) -> Option<IndexScanKeyArgument> {
+    const_gist_argument_value(expr)
+        .map(IndexScanKeyArgument::Const)
+        .or_else(|| {
+            (runtime_index_argument_expr(expr) && expr_contains_runtime_input(expr))
+                .then(|| IndexScanKeyArgument::Runtime(expr.clone()))
+        })
 }
 
 fn expr_column_index(expr: &Expr) -> Option<usize> {

@@ -99,6 +99,26 @@ impl TidBitmap {
         }
     }
 
+    pub fn intersect_with(&mut self, other: &TidBitmap) {
+        self.pages.retain(|block, page| {
+            let Some(other_page) = other.pages.get(block) else {
+                return false;
+            };
+            match (&mut *page, other_page) {
+                (TidBitmapPage::Lossy, TidBitmapPage::Lossy) => true,
+                (TidBitmapPage::Lossy, TidBitmapPage::Exact(other_offsets)) => {
+                    *page = TidBitmapPage::Exact(other_offsets.clone());
+                    true
+                }
+                (TidBitmapPage::Exact(_), TidBitmapPage::Lossy) => true,
+                (TidBitmapPage::Exact(offsets), TidBitmapPage::Exact(other_offsets)) => {
+                    offsets.retain(|offset| other_offsets.contains(offset));
+                    !offsets.is_empty()
+                }
+            }
+        });
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
         self.pages.keys().copied()
     }

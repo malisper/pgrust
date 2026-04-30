@@ -2,13 +2,13 @@ use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanState, GatherState, HashJoinState,
-    HashState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MaterializeState, MemoizeState, MergeAppendState, MergeJoinState, NestedLoopJoinState,
-    NodeExecStats, OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState,
-    RecursiveWorkTable, ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState,
-    ValuesState, WindowAggState, WorkTableScanState,
+    AggregateState, AppendState, BitmapAndState, BitmapHeapScanState, BitmapIndexScanState,
+    BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanState, GatherState,
+    HashJoinState, HashState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState,
+    LockRowsState, MaterializeState, MemoizeState, MergeAppendState, MergeJoinState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
+    RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState, SetOpState,
+    SubqueryScanState, UniqueState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
@@ -266,6 +266,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
         | Plan::WorkTableScan { .. } => false,
         Plan::BitmapHeapScan {
             bitmapqual,
@@ -682,6 +683,16 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             children,
         } => Box::new(BitmapOrState {
+            children: children.into_iter().map(build_bitmap_qual_state).collect(),
+            bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
+            executed: false,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::BitmapAnd {
+            plan_info,
+            children,
+        } => Box::new(BitmapAndState {
             children: children.into_iter().map(build_bitmap_qual_state).collect(),
             bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
             executed: false,
@@ -1570,6 +1581,16 @@ fn build_bitmap_qual_state(plan: Plan) -> BitmapQualState {
             plan_info,
             children,
         } => BitmapQualState::Or(Box::new(BitmapOrState {
+            children: children.into_iter().map(build_bitmap_qual_state).collect(),
+            bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
+            executed: false,
+            plan_info,
+            stats: NodeExecStats::default(),
+        })),
+        Plan::BitmapAnd {
+            plan_info,
+            children,
+        } => BitmapQualState::And(Box::new(BitmapAndState {
             children: children.into_iter().map(build_bitmap_qual_state).collect(),
             bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
             executed: false,
