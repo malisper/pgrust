@@ -651,6 +651,13 @@ fn prepare_set_returning_call_for_locking(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::PgStatProgressCopy {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgStatProgressCopy {
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::PgSequences {
             output_columns,
             with_ordinality,
@@ -2979,6 +2986,7 @@ fn collect_set_returning_call_outer_refs(
             collect_query_outer_refs_expr(relid, levelsup, exprs);
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {

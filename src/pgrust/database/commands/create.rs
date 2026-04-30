@@ -1097,6 +1097,7 @@ fn collect_set_returning_call_rule_dependencies(
             }
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => {}
     }
@@ -1128,7 +1129,8 @@ fn set_returning_proc_oid(call: &SetReturningCall) -> Option<u32> {
         | SetReturningCall::TxidSnapshotXip { func_oid, .. } => *func_oid,
         SetReturningCall::UserDefined { proc_oid, .. } => *proc_oid,
         SetReturningCall::RowsFrom { .. } => 0,
-        SetReturningCall::PgSequences { .. }
+        SetReturningCall::PgStatProgressCopy { .. }
+        | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. }
         | SetReturningCall::TextSearchTableFunction { .. }
         | SetReturningCall::SqlJsonTable(_)
@@ -1876,7 +1878,7 @@ fn lookup_aggregate_support_proc_row(
         .zip(support.declared_arg_types.iter().copied())
         .zip(support.declared_arg_oids.iter().copied())
     {
-        if is_polymorphic_aggregate_signature_oid(declared_oid) {
+        if is_polymorphic_aggregate_signature_oid(declared_oid) && actual_type == declared_type {
             continue;
         }
         if !is_binary_coercible_type(actual_type, declared_type) {
@@ -2287,6 +2289,9 @@ fn validate_sql_function_body_on_create(
     validate_sql_function_positional_params(&body, input_args.len(), create_stmt.body_position)?;
     let statements = split_sql_function_body_for_validation(&body);
     let Some(final_statement) = statements.last() else {
+        if prorettype == VOID_TYPE_OID {
+            return Ok(());
+        }
         return Err(sql_function_final_statement_error(catalog, prorettype));
     };
     let external_param_types = input_args

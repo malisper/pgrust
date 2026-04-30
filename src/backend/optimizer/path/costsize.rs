@@ -3623,21 +3623,121 @@ fn parameterized_inner_index_path(
             toast,
             desc,
             ..
-        } => parameterized_base_index_path(
-            root,
-            catalog,
-            *source_id,
-            *rel,
-            relation_name,
-            *relation_oid,
-            *toast,
-            desc,
-            &filter,
-            required_pathtarget,
-        )?,
+        } => {
+            let filter = preserve_inner_base_index_quals(inner, filter.clone());
+            parameterized_base_index_path(
+                root,
+                catalog,
+                *source_id,
+                *rel,
+                relation_name,
+                *relation_oid,
+                *toast,
+                desc,
+                &filter,
+                required_pathtarget,
+            )?
+        }
         _ => return None,
     };
     Some((plan, remaining))
+}
+
+fn preserve_inner_base_index_quals(inner: &Path, parameterized_filter: Expr) -> Expr {
+    let mut filters = vec![parameterized_filter];
+    if let Some(base_filter) = base_index_path_filter(inner) {
+        for conjunct in flatten_and_conjuncts(&base_filter) {
+            if !filters.iter().any(|existing| existing == &conjunct) {
+                filters.push(conjunct);
+            }
+        }
+    }
+    and_exprs(filters).expect("parameterized filter is non-empty")
+}
+
+fn base_index_path_filter(inner: &Path) -> Option<Expr> {
+    match inner {
+        Path::IndexOnlyScan {
+            source_id,
+            desc,
+            index_meta,
+            keys,
+            ..
+        }
+        | Path::IndexScan {
+            source_id,
+            desc,
+            index_meta,
+            keys,
+            ..
+        } => and_exprs(
+            keys.iter()
+                .filter_map(|key| base_index_scan_key_filter(*source_id, desc, index_meta, key))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn base_index_scan_key_filter(
+    source_id: usize,
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    key: &IndexScanKey,
+) -> Option<Expr> {
+    if let Some(display_expr) = &key.display_expr
+        && !expr_contains_runtime_input(display_expr)
+    {
+        return Some(display_expr.clone());
+    }
+
+    let IndexScanKeyArgument::Const(value) = &key.argument else {
+        return None;
+    };
+    let left = index_scan_key_expr(source_id, desc, index_meta, key)?;
+    match (key.strategy, value) {
+        (0 | 3, Value::Null) => Some(Expr::IsNull(Box::new(left))),
+        (1, Value::Null) => Some(Expr::IsNotNull(Box::new(left))),
+        (3, Value::Array(_) | Value::PgArray(_)) => Some(Expr::scalar_array_op_with_collation(
+            SubqueryComparisonOp::Eq,
+            true,
+            left,
+            Expr::Const(value.clone()),
+            None,
+        )),
+        _ => {
+            let op = scan_key_op_expr_kind(index_meta.am_oid, key.strategy)?;
+            Some(Expr::op_auto(op, vec![left, Expr::Const(value.clone())]))
+        }
+    }
+}
+
+fn index_scan_key_expr(
+    source_id: usize,
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    key: &IndexScanKey,
+) -> Option<Expr> {
+    let index_pos = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
+    let heap_attno = *index_meta.indkey.get(index_pos)?;
+    let column_index = attrno_index(heap_attno.into())?;
+    let column = desc.columns.get(column_index)?;
+    Some(Expr::Var(Var {
+        varno: source_id,
+        varattno: heap_attno.into(),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+    }))
+}
+
+fn scan_key_op_expr_kind(am_oid: u32, strategy: u16) -> Option<OpExprKind> {
+    if am_oid == HASH_AM_OID {
+        return (strategy == 1).then_some(OpExprKind::Eq);
+    }
+    if am_oid == BTREE_AM_OID {
+        return btree_strategy_expr_kind(strategy);
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3691,7 +3791,8 @@ fn parameterized_base_index_path(
                 required_attrs =
                     index_only_attrs_for_parameterized_path(source_id, pathtarget, filter);
             }
-            let target_index_only = index_supports_index_only_attrs(index, &required_attrs);
+            let target_index_only = (has_target_attrs || desc.columns.len() == 1)
+                && index_supports_index_only_attrs(index, &required_attrs);
             let candidate = estimate_index_candidate(
                 source_id,
                 rel,
@@ -5538,6 +5639,7 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
             expr_uses_immediate_outer_columns(relid)
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => false,
         SetReturningCall::TxidSnapshotXip { arg, .. } => expr_uses_immediate_outer_columns(arg),

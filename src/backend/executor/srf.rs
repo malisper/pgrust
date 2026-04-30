@@ -18,7 +18,7 @@ use crate::backend::commands::partition::{partition_ancestor_oids, partition_tre
 use crate::backend::parser::{CatalogLookup, SqlTypeKind};
 use crate::backend::statistics::types::decode_pg_mcv_list_payload;
 use crate::backend::utils::cache::system_views::{
-    build_pg_get_publication_tables_rows, build_pg_stat_io_rows,
+    build_pg_get_publication_tables_rows, build_pg_stat_io_rows, current_pg_stat_progress_copy_rows,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
@@ -117,6 +117,10 @@ pub(crate) fn eval_set_returning_call(
             eval_partition_ancestors(relid, slot, ctx)
         }
         SetReturningCall::PgLockStatus { .. } => eval_pg_lock_status(ctx),
+        SetReturningCall::PgStatProgressCopy { .. } => Ok(current_pg_stat_progress_copy_rows()
+            .into_iter()
+            .map(TupleSlot::virtual_row)
+            .collect()),
         SetReturningCall::PgSequences { .. } => eval_pg_sequences(ctx),
         SetReturningCall::InformationSchemaSequences { .. } => {
             eval_information_schema_sequences(ctx)
@@ -528,6 +532,16 @@ fn execute_native_set_returning_function(
         }
         "pg_available_extensions" => Some(Vec::new()),
         "pg_available_extension_versions" => Some(Vec::new()),
+        "pg_get_shmem_allocations" => Some(Vec::new()),
+        "pg_get_shmem_allocations_numa" => {
+            return Err(ExecError::DetailedError {
+                message: "libnuma initialization failed or NUMA is not supported on this platform"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "55000",
+            });
+        }
         "pg_get_backend_memory_contexts" => Some(eval_pg_backend_memory_contexts()),
         "pg_config" => Some(eval_pg_config()),
         "show_all_settings" => Some(eval_pg_show_all_settings(output_columns)),
@@ -1488,6 +1502,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
         SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
         SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
         SetReturningCall::PgLockStatus { .. } => "pg_lock_status",
+        SetReturningCall::PgStatProgressCopy { .. } => "pg_stat_progress_copy",
         SetReturningCall::PgSequences { .. } => "pg_sequences",
         SetReturningCall::InformationSchemaSequences { .. } => "information_schema.sequences",
         SetReturningCall::TxidSnapshotXip { .. } => "txid_snapshot_xip",
