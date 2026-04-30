@@ -2778,7 +2778,8 @@ fn nonverbose_sort_items(
     ctx: &VerboseExplainContext,
 ) -> Vec<String> {
     if !context_has_relation_aliases(ctx)
-        && !plan_has_explicit_relation_alias(input)
+        && (!plan_has_explicit_relation_alias(input)
+            || sort_display_items_preserve_aliases(display_items, items))
         && !display_items.is_empty()
         && !display_items
             .iter()
@@ -2831,6 +2832,16 @@ fn nonverbose_sort_items(
             });
     }
     rendered
+}
+
+fn sort_display_items_preserve_aliases(
+    display_items: &[String],
+    items: &[crate::include::nodes::primnodes::OrderByEntry],
+) -> bool {
+    display_items.len() < items.len()
+        || display_items
+            .iter()
+            .any(|item| strip_sort_direction_suffix(item.clone()).contains('.'))
 }
 
 fn plan_has_explicit_relation_alias(plan: &Plan) -> bool {
