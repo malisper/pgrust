@@ -142,3 +142,28 @@ Result: PASS, 1 passed.
 
 Remaining:
 Push the parser fix and re-check PR #366 CI.
+
+---
+
+Goal:
+Fix PR #366 cargo-test-archive failure after latest perf-optimization merge.
+
+Key decisions:
+Rebased onto current `origin/perf-optimization`.
+Updated SQL-function dependency collection for the rebased parser AST: `SELECT
+group_by` now stores `GroupByItem` instead of bare expressions, so dependency
+and column-name collection recurse through grouping sets. Added handling for
+`CteBody::Delete` in the same collector.
+
+Files touched:
+src/pgrust/database/commands/create.rs
+
+Tests run:
+cargo fmt
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql cargo test --no-run --lib --locked
+Result: PASS with existing unreachable-pattern warnings.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/cargo_isolated.sh test --lib --quiet parse_drop_function_statement_with_multiple_names
+Result: PASS, 1 passed.
+
+Remaining:
+Force-push the rebased branch and re-check PR #366 CI.

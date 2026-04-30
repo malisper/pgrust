@@ -36,8 +36,8 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, Query, RangeTblEntryKind,
-    SelectStatement,
+    AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, GroupByItem, Query,
+    RangeTblEntryKind, SelectStatement,
 };
 use crate::include::nodes::primnodes::{
     Expr, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
@@ -2687,6 +2687,20 @@ fn collect_sql_function_statement_dependencies(
                 collect_sql_function_expr_dependencies(&target.expr, catalog, refs);
             }
         }
+        Statement::Delete(delete) => {
+            if let Some(relation) = catalog.lookup_any_relation(&delete.table_name) {
+                refs.relation_oids.insert(relation.relation_oid);
+            }
+            for cte in &delete.with {
+                collect_sql_function_cte_dependencies(&cte.body, catalog, refs);
+            }
+            if let Some(where_clause) = &delete.where_clause {
+                collect_sql_function_expr_dependencies(where_clause, catalog, refs);
+            }
+            for target in &delete.returning {
+                collect_sql_function_expr_dependencies(&target.expr, catalog, refs);
+            }
+        }
         Statement::Values(values) => {
             for row in &values.rows {
                 for expr in row {
@@ -2713,14 +2727,14 @@ fn collect_sql_function_select_dependencies(
     for target in &select.targets {
         collect_sql_function_expr_dependencies(&target.expr, catalog, refs);
     }
-    for expr in select
-        .where_clause
-        .iter()
-        .chain(select.group_by.iter())
-        .chain(select.having.iter())
-        .chain(select.order_by.iter().map(|item| &item.expr))
-    {
+    for expr in select.where_clause.iter().chain(select.having.iter()) {
         collect_sql_function_expr_dependencies(expr, catalog, refs);
+    }
+    for item in &select.group_by {
+        collect_sql_function_group_by_dependencies(item, catalog, refs);
+    }
+    for item in &select.order_by {
+        collect_sql_function_expr_dependencies(&item.expr, catalog, refs);
     }
     if let Some(set_operation) = &select.set_operation {
         for input in &set_operation.inputs {
@@ -2753,6 +2767,13 @@ fn collect_sql_function_cte_dependencies(
             )
         }
         crate::backend::parser::CteBody::Update(_) => {}
+        crate::backend::parser::CteBody::Delete(delete) => {
+            collect_sql_function_statement_dependencies(
+                &Statement::Delete((**delete).clone()),
+                catalog,
+                refs,
+            )
+        }
         crate::backend::parser::CteBody::Merge(_) => {}
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
@@ -2775,14 +2796,14 @@ fn collect_sql_function_simple_select_column_dependencies(
     for target in &select.targets {
         collect_sql_function_column_names(&target.expr, &mut column_names);
     }
-    for expr in select
-        .where_clause
-        .iter()
-        .chain(select.group_by.iter())
-        .chain(select.having.iter())
-        .chain(select.order_by.iter().map(|item| &item.expr))
-    {
+    for expr in select.where_clause.iter().chain(select.having.iter()) {
         collect_sql_function_column_names(expr, &mut column_names);
+    }
+    for item in &select.group_by {
+        collect_sql_function_group_by_column_names(item, &mut column_names);
+    }
+    for item in &select.order_by {
+        collect_sql_function_column_names(&item.expr, &mut column_names);
     }
     for column_name in column_names {
         if let Some((index, _)) =
@@ -2810,6 +2831,47 @@ fn simple_select_table_relation(
     };
     let relation = catalog.lookup_any_relation(table_name)?;
     Some((relation.relation_oid, relation.desc))
+}
+
+fn collect_sql_function_group_by_dependencies(
+    item: &GroupByItem,
+    catalog: &dyn CatalogLookup,
+    refs: &mut SqlFunctionDependencyRefs,
+) {
+    match item {
+        GroupByItem::Expr(expr) => collect_sql_function_expr_dependencies(expr, catalog, refs),
+        GroupByItem::List(exprs) => {
+            for expr in exprs {
+                collect_sql_function_expr_dependencies(expr, catalog, refs);
+            }
+        }
+        GroupByItem::Empty => {}
+        GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => {
+            for item in items {
+                collect_sql_function_group_by_dependencies(item, catalog, refs);
+            }
+        }
+    }
+}
+
+fn collect_sql_function_group_by_column_names(
+    item: &GroupByItem,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match item {
+        GroupByItem::Expr(expr) => collect_sql_function_column_names(expr, out),
+        GroupByItem::List(exprs) => {
+            for expr in exprs {
+                collect_sql_function_column_names(expr, out);
+            }
+        }
+        GroupByItem::Empty => {}
+        GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => {
+            for item in items {
+                collect_sql_function_group_by_column_names(item, out);
+            }
+        }
+    }
 }
 
 fn collect_sql_function_column_names(
