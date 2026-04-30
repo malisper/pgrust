@@ -3218,23 +3218,18 @@ fn normalize_auto_view_identity_values(
     };
     let base_column_defaults =
         bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])?;
-    let base_indexes = target_columns
-        .iter()
-        .map(|target| {
-            map_auto_view_column_index(
-                view_desc,
-                &resolved.updatable_column_map,
-                &resolved.non_updatable_column_reasons,
-                target.column_index,
-            )
-            .map_err(|err| ParseError::DetailedError {
-                message: err.detail(),
-                detail: None,
-                hint: None,
-                sqlstate: "55000",
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut base_indexes = Vec::with_capacity(target_columns.len());
+    for target in target_columns {
+        let Ok(base_index) = map_auto_view_column_index(
+            view_desc,
+            &resolved.updatable_column_map,
+            &resolved.non_updatable_column_reasons,
+            target.column_index,
+        ) else {
+            return Ok(source);
+        };
+        base_indexes.push(base_index);
+    }
 
     let normalize_row = |mut row: Vec<Expr>| -> Result<Vec<Expr>, ParseError> {
         for (expr, base_index) in row.iter_mut().zip(base_indexes.iter().copied()) {
