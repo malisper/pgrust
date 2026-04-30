@@ -246,7 +246,7 @@ impl Database {
             Some(type_name) => {
                 sequence_type_oid_for_raw_type(type_name).map_err(ExecError::Parse)?
             }
-            None => crate::include::catalog::INT8_TYPE_OID,
+            None => INT8_TYPE_OID,
         };
         let mut options = resolve_sequence_options_spec(&create_stmt.options, type_oid)
             .map_err(ExecError::Parse)?;

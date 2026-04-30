@@ -10061,7 +10061,6 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut link_symbol = None;
     let mut cost = None;
     let mut support = None;
-    let mut window = false;
     let mut strict = false;
     let mut leakproof = false;
     let mut security_definer = false;

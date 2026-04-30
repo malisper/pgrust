@@ -75,3 +75,37 @@ Result: PASS, 180/180 queries matched.
 
 Remaining:
 None for the attached CI repro set.
+
+---
+
+Goal:
+Rebase PR #366 after GitHub reported the branch as merge-conflicted.
+
+Key decisions:
+Resolved base-branch conflicts by keeping the existing parser `WINDOW` field
+rather than duplicating it.
+Preserved SQL function multi-statement execution while carrying forward the
+base branch's volatile snapshot handling.
+Changed live `proc_rows_by_name` lookup to filter directly inside the backend
+catcache; repeated regproc casts in create_function_sql were timing out when
+they cloned or scanned proc rows per evaluated tuple.
+
+Files touched:
+src/backend/parser/gram.rs
+src/backend/parser/tests.rs
+src/backend/utils/cache/lsyscache.rs
+src/include/nodes/parsenodes.rs
+src/pgrust/database/commands/create.rs
+src/pgrust/database/commands/sequence.rs
+
+Tests run:
+cargo fmt
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql cargo test --lib --quiet create_function
+Result: PASS, 25 passed.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql cargo test --lib --quiet sql_function
+Result: PASS, 24 passed.
+env -u RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER= CARGO_TARGET_DIR=/tmp/pgrust-target-create-function-sql scripts/run_regression.sh --test create_function_sql --jobs 1 --port 61344 --results-dir /tmp/pgrust_regress_create_function_sql
+Result: PASS, 180/180 queries matched after the lsyscache lookup fix.
+
+Remaining:
+Force-push rebased PR branch and re-check GitHub mergeability.

@@ -836,7 +836,6 @@ pub struct CreateFunctionStatement {
     pub security_definer: bool,
     pub volatility: FunctionVolatility,
     pub parallel: FunctionParallel,
-    pub window: bool,
     pub language: String,
     pub body: String,
     pub body_kind: CreateFunctionBodyKind,

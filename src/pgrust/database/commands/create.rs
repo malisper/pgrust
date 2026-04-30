@@ -2753,6 +2753,7 @@ fn collect_sql_function_cte_dependencies(
             )
         }
         crate::backend::parser::CteBody::Update(_) => {}
+        crate::backend::parser::CteBody::Merge(_) => {}
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -4559,7 +4560,6 @@ impl Database {
             security_definer: false,
             volatility: create_stmt.volatility,
             parallel: FunctionParallel::Unsafe,
-            window: false,
             language: create_stmt.language.clone(),
             body: create_stmt.body.clone(),
             body_kind: if create_stmt.sql_standard_body {
