@@ -37,7 +37,7 @@ use crate::backend::parser::{
     bind_referenced_by_foreign_keys, bind_relation_constraints, bind_rule_action_statement,
     bind_scalar_expr_in_scope, bind_update, parse_expr, rewrite_bound_delete_auto_view_target,
     rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
-    rewrite_local_vars_for_output_exprs,
+    rewrite_local_vars_for_output_exprs, rewrite_planned_local_vars_for_output_exprs,
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::rewrite::split_stored_rule_action_sql;
@@ -8414,7 +8414,7 @@ fn remap_partition_write_checks(
     checks
         .iter()
         .map(|check| RlsWriteCheck {
-            expr: rewrite_local_vars_for_output_exprs(
+            expr: rewrite_planned_local_vars_for_output_exprs(
                 check.expr.clone(),
                 source_varno,
                 &output_exprs,
@@ -8436,10 +8436,14 @@ fn remap_partition_conflict_expr(
     parent_desc: &RelationDesc,
     child_desc: &RelationDesc,
 ) -> Result<Expr, ExecError> {
+    let local_exprs = partition_parent_layout_exprs(parent_desc, child_desc, 1);
+    let excluded_exprs = partition_parent_layout_exprs(parent_desc, child_desc, 2);
     let outer_exprs = partition_parent_layout_exprs(parent_desc, child_desc, OUTER_VAR);
     let inner_exprs = partition_parent_layout_exprs(parent_desc, child_desc, INNER_VAR);
-    let expr = rewrite_local_vars_for_output_exprs(expr, OUTER_VAR, &outer_exprs);
-    Ok(rewrite_local_vars_for_output_exprs(
+    let expr = rewrite_planned_local_vars_for_output_exprs(expr, 1, &local_exprs);
+    let expr = rewrite_planned_local_vars_for_output_exprs(expr, 2, &excluded_exprs);
+    let expr = rewrite_planned_local_vars_for_output_exprs(expr, OUTER_VAR, &outer_exprs);
+    Ok(rewrite_planned_local_vars_for_output_exprs(
         expr,
         INNER_VAR,
         &inner_exprs,
