@@ -642,6 +642,9 @@ fn collect_direct_relation_oids_from_cte_body(
         crate::backend::parser::CteBody::Update(update) => {
             collect_direct_relation_oids_from_update(update, catalog, visible_ctes, rels);
         }
+        crate::backend::parser::CteBody::Merge(merge) => {
+            collect_direct_relation_oids_from_merge(merge, catalog, visible_ctes, rels);
+        }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -649,6 +652,59 @@ fn collect_direct_relation_oids_from_cte_body(
             collect_direct_relation_oids_from_select(recursive, catalog, visible_ctes, rels);
         }
     }
+}
+
+fn collect_direct_relation_oids_from_merge(
+    merge: &crate::backend::parser::MergeStatement,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    let cte_base = visible_ctes.len();
+    for cte in &merge.with {
+        collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
+        visible_ctes.push(cte.name.to_ascii_lowercase());
+    }
+    if let Some(entry) = catalog.lookup_any_relation(&merge.target_table) {
+        rels.insert(entry.relation_oid);
+    }
+    collect_direct_relation_oids_from_from_item(&merge.source, catalog, visible_ctes, rels);
+    collect_direct_relation_oids_from_sql_expr(&merge.join_condition, catalog, visible_ctes, rels);
+    for clause in &merge.when_clauses {
+        if let Some(condition) = &clause.condition {
+            collect_direct_relation_oids_from_sql_expr(condition, catalog, visible_ctes, rels);
+        }
+        match &clause.action {
+            crate::backend::parser::MergeAction::Update { assignments } => {
+                for assignment in assignments {
+                    collect_direct_relation_oids_from_sql_expr(
+                        &assignment.expr,
+                        catalog,
+                        visible_ctes,
+                        rels,
+                    );
+                }
+            }
+            crate::backend::parser::MergeAction::Insert { source, .. } => {
+                if let crate::backend::parser::MergeInsertSource::Values(values) = source {
+                    for expr in values {
+                        collect_direct_relation_oids_from_sql_expr(
+                            expr,
+                            catalog,
+                            visible_ctes,
+                            rels,
+                        );
+                    }
+                }
+            }
+            crate::backend::parser::MergeAction::Delete
+            | crate::backend::parser::MergeAction::DoNothing => {}
+        }
+    }
+    for item in &merge.returning {
+        collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
+    }
+    visible_ctes.truncate(cte_base);
 }
 
 fn collect_direct_relation_oids_from_insert(

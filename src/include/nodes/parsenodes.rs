@@ -1707,6 +1707,7 @@ pub enum CteBody {
     Values(ValuesStatement),
     Insert(Box<InsertStatement>),
     Update(Box<UpdateStatement>),
+    Merge(Box<MergeStatement>),
     RecursiveUnion {
         all: bool,
         anchor: Box<CteBody>,

@@ -11890,7 +11890,8 @@ fn plan_merge_uses_join_shape_for_explain() {
     ));
     assert_eq!(bound.visible_column_count, 5);
     assert_eq!(bound.target_ctid_index, 5);
-    assert_eq!(bound.source_present_index, 6);
+    assert_eq!(bound.target_tableoid_index, 6);
+    assert_eq!(bound.source_present_index, 7);
     assert_eq!(
         bound.input_plan.column_names(),
         [
@@ -11900,6 +11901,7 @@ fn plan_merge_uses_join_shape_for_explain() {
             "id",
             "owner_id",
             "__merge_target_ctid",
+            "__merge_target_tableoid",
             "__merge_source_present",
         ]
     );

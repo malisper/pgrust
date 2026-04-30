@@ -118,13 +118,29 @@ pub(crate) fn enforce_row_security_write_checks_with_tid(
                 if let crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(view_name) =
                     &check.source
                 {
-                    return Err(ExecError::DetailedError {
-                        message: format!("new row violates check option for view \"{view_name}\""),
-                        detail: Some(format_failing_row_detail_for_columns(
+                    let detail = if check.display_exprs.is_empty() {
+                        format_failing_row_detail_for_columns(
                             values,
                             &desc.columns,
                             &ctx.datetime_config,
-                        )),
+                        )
+                    } else {
+                        let mut display_values = check
+                            .display_exprs
+                            .iter()
+                            .map(|expr| {
+                                eval_expr(expr, &mut slot, ctx).map(|value| value.to_owned_value())
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Value::materialize_all(&mut display_values);
+                        crate::backend::executor::value_io::format_failing_row_detail(
+                            &display_values,
+                            &ctx.datetime_config,
+                        )
+                    };
+                    return Err(ExecError::DetailedError {
+                        message: format!("new row violates check option for view \"{view_name}\""),
+                        detail: Some(detail),
                         hint: None,
                         sqlstate: "44000",
                     });

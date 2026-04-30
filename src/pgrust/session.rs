@@ -2370,6 +2370,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_mergejoin"
         | "enable_memoize"
         | "enable_material"
+        | "enable_partition_pruning"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
@@ -3012,6 +3013,22 @@ impl Session {
                 .gucs
                 .get("enable_material")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_partition_pruning: self
+                .gucs
+                .get("enable_partition_pruning")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            constraint_exclusion_on: self
+                .gucs
+                .get("constraint_exclusion")
+                .is_some_and(|value| value.eq_ignore_ascii_case("on")),
+            constraint_exclusion_partition: self
+                .gucs
+                .get("constraint_exclusion")
+                .map(|value| {
+                    value.eq_ignore_ascii_case("partition") || value.eq_ignore_ascii_case("on")
+                })
                 .unwrap_or(true),
             retain_partial_index_filters: false,
             enable_hashagg: self
@@ -3959,7 +3976,7 @@ impl Session {
 
     fn cte_body_has_writable_insert(body: &CteBody) -> bool {
         match body {
-            CteBody::Insert(_) | CteBody::Update(_) => true,
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Merge(_) => true,
             CteBody::Select(select) => Self::select_has_writable_ctes(select),
             CteBody::Values(values) => values
                 .with
@@ -8989,6 +9006,7 @@ impl Session {
                 CteBody::Update(update) => {
                     CteBody::Update(Box::new(Self::substitute_update_statement(update, subst)?))
                 }
+                CteBody::Merge(merge) => CteBody::Merge(merge.clone()),
                 CteBody::RecursiveUnion {
                     all,
                     anchor,
@@ -9019,6 +9037,7 @@ impl Session {
             CteBody::Update(update) => {
                 CteBody::Update(Box::new(Self::substitute_update_statement(update, subst)?))
             }
+            CteBody::Merge(merge) => CteBody::Merge(merge.clone()),
             CteBody::RecursiveUnion {
                 all,
                 anchor,
@@ -13342,6 +13361,55 @@ impl Session {
                                                     &rows,
                                                 ));
                                             }
+                                            CteBody::Merge(cte_merge) => {
+                                                if cte_merge.with_recursive
+                                                    || cte_merge.with.iter().any(|nested| {
+                                                        Self::cte_body_has_writable_insert(
+                                                            &nested.body,
+                                                        )
+                                                    })
+                                                {
+                                                    return Err(ExecError::Parse(
+                                                        ParseError::FeatureNotSupported(
+                                                            "nested writable CTEs are not supported"
+                                                                .into(),
+                                                        ),
+                                                    ));
+                                                }
+                                                if cte_merge.returning.is_empty() {
+                                                    return Err(ExecError::Parse(
+                                                        ParseError::FeatureNotSupported(
+                                                            "writable CTE without RETURNING is not supported"
+                                                                .into(),
+                                                        ),
+                                                    ));
+                                                }
+
+                                                let bound = plan_merge(cte_merge, &catalog)?;
+                                                let result = execute_merge(
+                                                    bound, &catalog, &mut ctx, xid, cid,
+                                                )?;
+                                                let StatementResult::Query {
+                                                    columns, rows, ..
+                                                } = result
+                                                else {
+                                                    return Err(ExecError::Parse(
+                                                        ParseError::FeatureNotSupported(
+                                                            "writable CTE without RETURNING is not supported"
+                                                                .into(),
+                                                        ),
+                                                    ));
+                                                };
+                                                let columns =
+                                                    Self::apply_writable_cte_column_aliases(
+                                                        cte, columns,
+                                                    )?;
+                                                materialized_ctes.push(bound_cte_from_query_rows(
+                                                    cte.name.clone(),
+                                                    columns,
+                                                    &rows,
+                                                ));
+                                            }
                                             _ => {
                                                 outer_select.with.push(cte.clone());
                                             }
@@ -13417,7 +13485,7 @@ impl Session {
                         let has_writable_ctes = insert_stmt
                             .with
                             .iter()
-                            .any(|cte| matches!(cte.body, CteBody::Insert(_)));
+                            .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
                         if !has_writable_ctes {
                             let bound = bind_insert(insert_stmt, &catalog)?;
                             let prepared =
@@ -13450,60 +13518,113 @@ impl Session {
                         outer_insert.with.clear();
 
                         for cte in &insert_stmt.with {
-                            let CteBody::Insert(cte_insert) = &cte.body else {
-                                outer_insert.with.push(cte.clone());
-                                continue;
-                            };
-                            if cte_insert.with_recursive
-                                || cte_insert
-                                    .with
-                                    .iter()
-                                    .any(|nested| matches!(nested.body, CteBody::Insert(_)))
-                            {
-                                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                    "nested writable CTEs are not supported".into(),
-                                )));
-                            }
-                            if cte_insert.returning.is_empty() {
-                                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                    "writable CTE without RETURNING is not supported".into(),
-                                )));
-                            }
+                            match &cte.body {
+                                CteBody::Insert(cte_insert) => {
+                                    if cte_insert.with_recursive
+                                        || cte_insert.with.iter().any(|nested| {
+                                            Self::cte_body_has_writable_insert(&nested.body)
+                                        })
+                                    {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "nested writable CTEs are not supported".into(),
+                                            ),
+                                        ));
+                                    }
+                                    if cte_insert.returning.is_empty() {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "writable CTE without RETURNING is not supported"
+                                                    .into(),
+                                            ),
+                                        ));
+                                    }
 
-                            let bound = bind_insert_with_outer_scopes_and_ctes(
-                                cte_insert,
-                                &catalog,
-                                &[],
-                                &materialized_ctes,
-                            )?;
-                            let prepared =
-                            crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
-                                bound, &catalog,
-                            )?;
-                            let lock_requests = merge_table_lock_requests(
-                                &insert_foreign_key_lock_requests(&prepared.stmt),
-                                &prepared.extra_lock_requests,
-                            );
-                            self.lock_table_requests_if_needed(db, &lock_requests)?;
-                            let result =
-                            crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
-                                prepared.stmt,
-                                &catalog,
-                                &mut ctx,
-                                xid,
-                                cid,
-                            )?;
-                            let StatementResult::Query { columns, rows, .. } = result else {
-                                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                    "writable CTE without RETURNING is not supported".into(),
-                                )));
-                            };
-                            let columns = Self::apply_writable_cte_column_aliases(cte, columns)?;
-                            materialized_ctes.push(bound_cte_from_query_rows(
-                                cte.name.clone(),
-                                columns,
-                                &rows,
-                            ));
+                                    let bound = bind_insert_with_outer_scopes_and_ctes(
+                                        cte_insert,
+                                        &catalog,
+                                        &[],
+                                        &materialized_ctes,
+                                    )?;
+                                    let prepared =
+                                    crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                                        bound, &catalog,
+                                    )?;
+                                    let lock_requests = merge_table_lock_requests(
+                                        &insert_foreign_key_lock_requests(&prepared.stmt),
+                                        &prepared.extra_lock_requests,
+                                    );
+                                    self.lock_table_requests_if_needed(db, &lock_requests)?;
+                                    let result =
+                                    crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                                        prepared.stmt,
+                                        &catalog,
+                                        &mut ctx,
+                                        xid,
+                                        cid,
+                                    )?;
+                                    let StatementResult::Query { columns, rows, .. } = result
+                                    else {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "writable CTE without RETURNING is not supported"
+                                                    .into(),
+                                            ),
+                                        ));
+                                    };
+                                    let columns =
+                                        Self::apply_writable_cte_column_aliases(cte, columns)?;
+                                    materialized_ctes.push(bound_cte_from_query_rows(
+                                        cte.name.clone(),
+                                        columns,
+                                        &rows,
+                                    ));
+                                }
+                                CteBody::Merge(cte_merge) => {
+                                    if cte_merge.with_recursive
+                                        || cte_merge.with.iter().any(|nested| {
+                                            Self::cte_body_has_writable_insert(&nested.body)
+                                        })
+                                    {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "nested writable CTEs are not supported".into(),
+                                            ),
+                                        ));
+                                    }
+                                    if cte_merge.returning.is_empty() {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "writable CTE without RETURNING is not supported"
+                                                    .into(),
+                                            ),
+                                        ));
+                                    }
+
+                                    let bound = plan_merge(cte_merge, &catalog)?;
+                                    let result =
+                                        execute_merge(bound, &catalog, &mut ctx, xid, cid)?;
+                                    let StatementResult::Query { columns, rows, .. } = result
+                                    else {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "writable CTE without RETURNING is not supported"
+                                                    .into(),
+                                            ),
+                                        ));
+                                    };
+                                    let columns =
+                                        Self::apply_writable_cte_column_aliases(cte, columns)?;
+                                    materialized_ctes.push(bound_cte_from_query_rows(
+                                        cte.name.clone(),
+                                        columns,
+                                        &rows,
+                                    ));
+                                }
+                                _ => {
+                                    outer_insert.with.push(cte.clone());
+                                }
+                            }
                         }
 
                         let bound = bind_insert_with_outer_scopes_and_ctes(
@@ -16744,6 +16865,7 @@ fn apply_guc_value_to_state(
         | "enable_mergejoin"
         | "enable_memoize"
         | "enable_material"
+        | "enable_partition_pruning"
         | "enable_hashagg"
         | "enable_sort"
         | "debug_parallel_query" => {
