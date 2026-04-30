@@ -1182,6 +1182,13 @@ pub fn default_opclass_for_am_and_type(
                 && row.opcintype == crate::include::catalog::ANYENUMOID
         });
     }
+    if am_oid == crate::include::catalog::BRIN_AM_OID
+        && input_type_oid == crate::include::catalog::NAME_TYPE_OID
+    {
+        return opclasses
+            .into_iter()
+            .find(|row| row.oid == crate::include::catalog::TEXT_BRIN_MINMAX_OPCLASS_OID);
+    }
     if let Some(row) = opclasses
         .iter()
         .find(|row| row.opcmethod == am_oid && row.opcdefault && row.opcintype == input_type_oid)
@@ -1205,6 +1212,9 @@ pub fn default_opclass_for_am_and_type(
             crate::include::catalog::GIST_AM_OID => crate::include::catalog::RANGE_GIST_OPCLASS_OID,
             crate::include::catalog::SPGIST_AM_OID => {
                 crate::include::catalog::RANGE_SPGIST_OPCLASS_OID
+            }
+            crate::include::catalog::BRIN_AM_OID => {
+                crate::include::catalog::RANGE_BRIN_INCLUSION_OPCLASS_OID
             }
             _ => 0,
         };
@@ -1251,6 +1261,9 @@ pub fn default_opclass_for_am_and_type(
             crate::include::catalog::GIST_AM_OID => crate::include::catalog::RANGE_GIST_OPCLASS_OID,
             crate::include::catalog::SPGIST_AM_OID => {
                 crate::include::catalog::RANGE_SPGIST_OPCLASS_OID
+            }
+            crate::include::catalog::BRIN_AM_OID => {
+                crate::include::catalog::RANGE_BRIN_INCLUSION_OPCLASS_OID
             }
             _ => 0,
         };

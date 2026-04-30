@@ -87,16 +87,17 @@ use crate::include::catalog::{
     OID_TYPE_OID, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
     PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
     PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID,
-    PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_MAINTAIN_OID,
-    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_LSN_TYPE_OID,
+    PG_MAINTAIN_OID, PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
     PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PG_WRITE_ALL_DATA_OID,
     PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow, PgPublicationRow,
-    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
-    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_BRIN_MINMAX_OPCLASS_OID, TEXT_TYPE_OID, TID_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
+    bootstrap_pg_am_rows, builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -6019,7 +6020,11 @@ fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType
         || (matches!(
             opclass.opcintype,
             TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
-        ) && matches!(type_oid, TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID))
+        ) && matches!(
+            type_oid,
+            NAME_TYPE_OID | TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
+        ))
+        || (opclass.opcintype == INET_TYPE_OID && type_oid == CIDR_TYPE_OID)
         || (opclass.opcintype == ANYARRAYOID && sql_type.is_array)
         || (opclass.opcintype == ANYRANGEOID
             && (sql_type.is_range()
@@ -6045,6 +6050,7 @@ fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
         SqlTypeKind::Int4 => opcintype == INT4_TYPE_OID,
         SqlTypeKind::Int8 => opcintype == INT8_TYPE_OID,
         SqlTypeKind::Oid => opcintype == OID_TYPE_OID,
+        SqlTypeKind::Tid => opcintype == TID_TYPE_OID,
         SqlTypeKind::InternalChar => opcintype == INTERNAL_CHAR_TYPE_OID,
         SqlTypeKind::Name => opcintype == NAME_TYPE_OID,
         SqlTypeKind::Text => opcintype == TEXT_TYPE_OID,
@@ -6064,6 +6070,7 @@ fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
         SqlTypeKind::VarBit => opcintype == VARBIT_TYPE_OID,
         SqlTypeKind::Cidr => opcintype == CIDR_TYPE_OID,
         SqlTypeKind::Inet => opcintype == INET_TYPE_OID,
+        SqlTypeKind::PgLsn => opcintype == PG_LSN_TYPE_OID,
         SqlTypeKind::Composite | SqlTypeKind::Record => opcintype == RECORD_TYPE_OID,
         _ => false,
     }
@@ -6076,6 +6083,14 @@ fn default_opclass_for_catalog_type(
     type_oid: u32,
     sql_type: SqlType,
 ) -> Option<PgOpclassRow> {
+    if access_method_oid == BRIN_AM_OID
+        && (type_oid == NAME_TYPE_OID || matches!(sql_type.kind, SqlTypeKind::Name))
+    {
+        return opclass_rows
+            .iter()
+            .find(|row| row.oid == TEXT_BRIN_MINMAX_OPCLASS_OID)
+            .cloned();
+    }
     if matches!(sql_type.element_type().kind, SqlTypeKind::Enum)
         || catalog
             .enum_rows()
@@ -6178,7 +6193,7 @@ fn resolve_create_index_build_options(
         if column.descending {
             option |= 0x0001;
         }
-        if column.nulls_first.unwrap_or(false) {
+        if column.nulls_first.unwrap_or(column.descending) {
             option |= 0x0002;
         }
         indoption.push(option);

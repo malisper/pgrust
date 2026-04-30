@@ -3392,6 +3392,16 @@ fn parse_create_index_with_method_and_ordering() {
 }
 
 #[test]
+fn parse_create_index_desc_leaves_nulls_default_unspecified() {
+    let stmt = parse_statement("create index fooindex on foo (f1 desc)").unwrap();
+    let Statement::CreateIndex(stmt) = stmt else {
+        panic!("expected create index statement");
+    };
+    assert_eq!(stmt.columns[0].descending, true);
+    assert_eq!(stmt.columns[0].nulls_first, None);
+}
+
+#[test]
 fn parse_create_index_with_if_not_exists_and_opclass() {
     let stmt = parse_statement(
         "create index if not exists onek_unique1 on onek using btree(unique1 int4_ops)",
