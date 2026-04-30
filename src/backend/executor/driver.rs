@@ -326,6 +326,7 @@ fn execute_statement_with_source(
         | Statement::AlterTableSetSchema(_)
         | Statement::AlterTableSetTablespace(_)
         | Statement::AlterTableSetPersistence(_)
+        | Statement::AlterTableSetWithoutCluster(_)
         | Statement::AlterIndexRename(_)
         | Statement::AlterIndexAttachPartition(_)
         | Statement::AlterViewRename(_)

@@ -4107,10 +4107,9 @@ impl Database {
 
         let sequence_oid = match persistence {
             TablePersistence::Permanent | TablePersistence::Unlogged => {
-                let relpersistence = if persistence == TablePersistence::Unlogged {
-                    'u'
-                } else {
-                    'p'
+                let relpersistence = match persistence {
+                    TablePersistence::Unlogged => 'u',
+                    _ => 'p',
                 };
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),

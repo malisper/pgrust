@@ -441,6 +441,7 @@ pub enum Statement {
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterSchemaRename(AlterSchemaRenameStatement),
     AlterTableSetPersistence(AlterTableSetPersistenceStatement),
+    AlterTableSetWithoutCluster(AlterTableSetWithoutClusterStatement),
     AlterTableSet(AlterTableSetStatement),
     AlterTableReset(AlterTableResetStatement),
     AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
@@ -583,6 +584,7 @@ pub struct LoadStatement {
 pub struct ClusterStatement {
     pub table_name: String,
     pub index_name: String,
+    pub rewrite: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2801,6 +2803,13 @@ pub struct AlterTableSetPersistenceStatement {
     pub persistence: TablePersistence,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetWithoutClusterStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlterTableRowSecurityAction {
     Enable,
@@ -2839,7 +2848,7 @@ pub struct AlterTableAddColumnsStatement {
     pub if_exists: bool,
     pub only: bool,
     pub table_name: String,
-    pub columns: Vec<ColumnDef>,
+    pub columns: Vec<AlterTableAddColumnStatement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

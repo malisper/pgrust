@@ -224,6 +224,92 @@ fn relation_name_for_error(catalog: &dyn CatalogLookup, relation_oid: u32) -> St
         .unwrap_or_else(|| relation_oid.to_string())
 }
 
+fn sql_type_contains_relation_rowtype(
+    catalog: &dyn CatalogLookup,
+    sql_type: crate::backend::parser::SqlType,
+    relation_oid: u32,
+) -> bool {
+    sql_type_contains_relation_rowtype_inner(
+        catalog,
+        sql_type,
+        relation_oid,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+    )
+}
+
+fn sql_type_contains_relation_rowtype_inner(
+    catalog: &dyn CatalogLookup,
+    sql_type: crate::backend::parser::SqlType,
+    relation_oid: u32,
+    seen_types: &mut BTreeSet<u32>,
+    seen_relations: &mut BTreeSet<u32>,
+) -> bool {
+    if sql_type.typrelid == relation_oid {
+        return true;
+    }
+    let mut pending = Vec::new();
+    if sql_type.type_oid != 0 {
+        pending.push(sql_type.type_oid);
+    }
+    if let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type) {
+        pending.push(type_oid);
+    }
+    while let Some(type_oid) = pending.pop() {
+        if type_oid == 0 || !seen_types.insert(type_oid) {
+            continue;
+        }
+        let Some(row) = catalog.type_by_oid(type_oid) else {
+            continue;
+        };
+        if row.typrelid == relation_oid || row.sql_type.typrelid == relation_oid {
+            return true;
+        }
+        if row.typrelid != 0
+            && seen_relations.insert(row.typrelid)
+            && let Some(relation) = catalog.lookup_relation_by_oid(row.typrelid)
+            && relation.desc.columns.iter().any(|column| {
+                !column.dropped
+                    && sql_type_contains_relation_rowtype_inner(
+                        catalog,
+                        column.sql_type,
+                        relation_oid,
+                        seen_types,
+                        seen_relations,
+                    )
+            })
+        {
+            return true;
+        }
+        if row.typbasetype != 0 {
+            pending.push(row.typbasetype);
+        }
+        if row.typelem != 0 {
+            pending.push(row.typelem);
+        }
+    }
+    false
+}
+
+fn reject_recursive_composite_column_type(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    new_type: crate::backend::parser::SqlType,
+) -> Result<(), ExecError> {
+    if !sql_type_contains_relation_rowtype(catalog, new_type, relation_oid) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "composite type {} cannot be made a member of itself",
+            relation_name_for_error(catalog, relation_oid)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    })
+}
+
 fn reject_partition_key_type_change(
     relation: &crate::backend::parser::BoundRelation,
     relation_name: &str,
@@ -423,6 +509,13 @@ fn collect_alter_column_type_targets(
                 column_index,
             )?;
         }
+        let requested_type = crate::backend::parser::resolve_raw_type_name(&alter_stmt.ty, catalog)
+            .map_err(ExecError::Parse)?;
+        reject_recursive_composite_column_type(
+            catalog,
+            target_relation.relation_oid,
+            requested_type,
+        )?;
         let plan = validate_alter_table_alter_column_type(
             catalog,
             &target_relation.desc,

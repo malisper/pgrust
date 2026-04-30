@@ -1278,18 +1278,6 @@ pub(super) fn validate_alter_table_add_column(
         RawTypeName::Serial(kind) => Some(kind),
         _ => None,
     };
-    if column.primary_key() {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "ADD COLUMN without PRIMARY KEY",
-            actual: "PRIMARY KEY".into(),
-        }));
-    }
-    if column.unique() {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "ADD COLUMN without UNIQUE",
-            actual: "UNIQUE".into(),
-        }));
-    }
     if is_system_column_name(&column.name) {
         return Err(ExecError::DetailedError {
             message: format!(

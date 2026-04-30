@@ -413,6 +413,14 @@ fn resolve_parent_relations(
                 sqlstate: "42P16",
             });
         }
+        if !allow_partitioned_parent && parent.relispartition {
+            return Err(ParseError::DetailedError {
+                message: format!("cannot inherit from partition \"{parent_name}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
         if allow_partitioned_parent && parent.relkind != 'p' {
             return Err(ParseError::DetailedError {
                 message: format!("\"{parent_name}\" is not partitioned"),

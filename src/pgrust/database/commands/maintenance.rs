@@ -24,18 +24,19 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::{
     AlterTableSetPersistenceStatement, AlterTableSetTablespaceStatement, BoundRelation,
-    CatalogLookup, TablePersistence, parse_type_name, resolve_raw_type_name,
+    CatalogLookup, SqlType, TablePersistence, parse_type_name, resolve_raw_type_name,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
-    relkind_is_analyzable,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, relkind_is_analyzable,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
+    AlterTableAddColumnsStatement, AlterTableAddConstraintStatement, ColumnConstraint,
     CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
     CommentOnIndexStatement, CommentOnOperatorStatement, CommentOnSequenceStatement,
-    CommentOnViewStatement, MaintenanceTarget, VacuumStatement,
+    CommentOnViewStatement, MaintenanceTarget, TableConstraint, VacuumStatement,
 };
 use crate::include::nodes::primnodes::user_attrno;
 use crate::pgrust::auth::AuthState;
@@ -105,6 +106,208 @@ fn reject_composite_rowtype_non_null_default_dependency(
 
 fn column_default_is_non_null(default_expr: Option<&str>) -> bool {
     default_expr.is_some_and(|expr| !expr.trim().eq_ignore_ascii_case("null"))
+}
+
+fn duplicate_add_column_error(column_name: &str) -> ExecError {
+    ExecError::Parse(ParseError::UnexpectedToken {
+        expected: "new column name",
+        actual: format!("column already exists: {column_name}"),
+    })
+}
+
+fn reject_recursive_composite_column_type(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    column: &crate::include::nodes::parsenodes::ColumnDef,
+) -> Result<(), ExecError> {
+    let sql_type = match column.ty {
+        crate::backend::parser::RawTypeName::Serial(_) => return Ok(()),
+        _ => resolve_raw_type_name(&column.ty, catalog).map_err(ExecError::Parse)?,
+    };
+    if !sql_type_contains_relation_rowtype(catalog, sql_type, relation.relation_oid) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "composite type {} cannot be made a member of itself",
+            relation_name_for_alter_error(catalog, relation.relation_oid)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    })
+}
+
+fn sql_type_contains_relation_rowtype(
+    catalog: &dyn CatalogLookup,
+    sql_type: SqlType,
+    relation_oid: u32,
+) -> bool {
+    sql_type_contains_relation_rowtype_inner(
+        catalog,
+        sql_type,
+        relation_oid,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+    )
+}
+
+fn sql_type_contains_relation_rowtype_inner(
+    catalog: &dyn CatalogLookup,
+    sql_type: SqlType,
+    relation_oid: u32,
+    seen_types: &mut BTreeSet<u32>,
+    seen_relations: &mut BTreeSet<u32>,
+) -> bool {
+    if sql_type.typrelid == relation_oid {
+        return true;
+    }
+    let mut pending = Vec::new();
+    if sql_type.type_oid != 0 {
+        pending.push(sql_type.type_oid);
+    }
+    if let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type) {
+        pending.push(type_oid);
+    }
+    while let Some(type_oid) = pending.pop() {
+        if type_oid == 0 || !seen_types.insert(type_oid) {
+            continue;
+        }
+        let Some(row) = catalog.type_by_oid(type_oid) else {
+            continue;
+        };
+        if row.typrelid == relation_oid || row.sql_type.typrelid == relation_oid {
+            return true;
+        }
+        if row.typrelid != 0
+            && seen_relations.insert(row.typrelid)
+            && let Some(relation) = catalog.lookup_relation_by_oid(row.typrelid)
+            && relation.desc.columns.iter().any(|column| {
+                !column.dropped
+                    && sql_type_contains_relation_rowtype_inner(
+                        catalog,
+                        column.sql_type,
+                        relation_oid,
+                        seen_types,
+                        seen_relations,
+                    )
+            })
+        {
+            return true;
+        }
+        if row.typbasetype != 0 {
+            pending.push(row.typbasetype);
+        }
+        if row.typelem != 0 {
+            pending.push(row.typelem);
+        }
+    }
+    false
+}
+
+fn preflight_alter_table_add_columns(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    alter_stmt: &AlterTableAddColumnsStatement,
+) -> Result<(), ExecError> {
+    let table_name = relation_basename(&alter_stmt.table_name).to_string();
+    let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
+    let existing_columns = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| column.name.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut added_columns = BTreeSet::new();
+
+    for add_stmt in &alter_stmt.columns {
+        let column_name = add_stmt.column.name.to_ascii_lowercase();
+        if existing_columns.contains(&column_name) {
+            if add_stmt.missing_ok {
+                continue;
+            }
+            return Err(duplicate_add_column_error(&add_stmt.column.name));
+        }
+        if !added_columns.insert(column_name) {
+            if add_stmt.missing_ok {
+                continue;
+            }
+            return Err(duplicate_add_column_error(&add_stmt.column.name));
+        }
+        reject_recursive_composite_column_type(catalog, relation, &add_stmt.column)?;
+        reject_composite_rowtype_non_null_default_dependency(catalog, relation, &add_stmt.column)?;
+        validate_alter_table_add_column(
+            &table_name,
+            &relation.desc,
+            &add_stmt.column,
+            &existing_constraints,
+            catalog,
+        )?;
+    }
+    Ok(())
+}
+
+fn inline_added_column_table_constraints(
+    alter_stmt: &AlterTableAddColumnStatement,
+) -> Vec<AlterTableAddConstraintStatement> {
+    let mut constraints = Vec::new();
+    for constraint in &alter_stmt.column.constraints {
+        let table_constraint = match constraint {
+            ColumnConstraint::PrimaryKey { attributes } => TableConstraint::PrimaryKey {
+                attributes: attributes.clone(),
+                columns: vec![alter_stmt.column.name.clone()],
+                include_columns: Vec::new(),
+                without_overlaps: None,
+            },
+            ColumnConstraint::Unique { attributes } => TableConstraint::Unique {
+                attributes: attributes.clone(),
+                columns: vec![alter_stmt.column.name.clone()],
+                include_columns: Vec::new(),
+                without_overlaps: None,
+            },
+            ColumnConstraint::References {
+                attributes,
+                referenced_table,
+                referenced_columns,
+                match_type,
+                on_delete,
+                on_delete_set_columns,
+                on_update,
+            } => TableConstraint::ForeignKey {
+                attributes: attributes.clone(),
+                columns: vec![alter_stmt.column.name.clone()],
+                period: None,
+                referenced_table: referenced_table.clone(),
+                referenced_columns: referenced_columns.clone(),
+                referenced_period: None,
+                match_type: *match_type,
+                on_delete: *on_delete,
+                on_delete_set_columns: on_delete_set_columns.clone(),
+                on_update: *on_update,
+            },
+            ColumnConstraint::NotNull { .. } | ColumnConstraint::Check { .. } => continue,
+        };
+        constraints.push(AlterTableAddConstraintStatement {
+            if_exists: alter_stmt.if_exists,
+            only: alter_stmt.only,
+            table_name: alter_stmt.table_name.clone(),
+            constraint: table_constraint,
+        });
+    }
+    constraints
+}
+
+fn add_column_is_plain_batch_compatible(alter_stmt: &AlterTableAddColumnStatement) -> bool {
+    alter_stmt.fdw_options.is_none()
+        && !matches!(
+            alter_stmt.column.ty,
+            crate::backend::parser::RawTypeName::Serial(_)
+        )
+        && alter_stmt.column.default_expr.is_none()
+        && alter_stmt.column.generated.is_none()
+        && alter_stmt.column.identity.is_none()
+        && alter_stmt.column.constraints.is_empty()
 }
 
 #[derive(Debug, Clone)]
@@ -1082,6 +1285,95 @@ fn relation_name_for_add_column_notice(catalog: &dyn CatalogLookup, relation_oid
         .unwrap_or_else(|| relation_oid.to_string())
 }
 
+fn validate_persistence_foreign_keys(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    to_logged: bool,
+) -> Result<(), ExecError> {
+    let relation_name = relation_name_for_add_column_notice(catalog, relation_oid);
+    let rows = if to_logged {
+        catalog.constraint_rows_for_relation(relation_oid)
+    } else {
+        catalog.foreign_key_constraint_rows_referencing_relation(relation_oid)
+    };
+    for row in rows
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN)
+    {
+        let other_relation_oid = if to_logged {
+            row.confrelid
+        } else {
+            row.conrelid
+        };
+        if other_relation_oid == 0 || other_relation_oid == relation_oid {
+            continue;
+        }
+        let Some(other_relation) = catalog.relation_by_oid(other_relation_oid) else {
+            continue;
+        };
+        let should_error = if to_logged {
+            other_relation.relpersistence != 'p'
+        } else {
+            other_relation.relpersistence == 'p'
+        };
+        if should_error {
+            let other_name = relation_name_for_add_column_notice(catalog, other_relation_oid);
+            let target = if to_logged { "logged" } else { "unlogged" };
+            let other_kind = if to_logged { "unlogged" } else { "logged" };
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "could not change table \"{relation_name}\" to {target} because it references {other_kind} table \"{other_name}\""
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn collect_persistence_relation_oids(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    include_table_dependents: bool,
+) -> Vec<u32> {
+    let mut relation_oids = Vec::new();
+    push_unique_relation_oid(&mut relation_oids, relation.relation_oid);
+    if include_table_dependents {
+        for index in catalog.index_relations_for_heap(relation.relation_oid) {
+            push_unique_relation_oid(&mut relation_oids, index.relation_oid);
+        }
+        if let Some(toast) = relation.toast {
+            push_unique_relation_oid(&mut relation_oids, toast.relation_oid);
+            for index in catalog.index_relations_for_heap(toast.relation_oid) {
+                push_unique_relation_oid(&mut relation_oids, index.relation_oid);
+            }
+        }
+        for depend in
+            catalog.depend_rows_referencing(PG_CLASS_RELATION_OID, relation.relation_oid, None)
+        {
+            if depend.classid == PG_CLASS_RELATION_OID
+                && depend.objsubid == 0
+                && depend.refobjsubid > 0
+                && depend.deptype == DEPENDENCY_AUTO
+                && catalog
+                    .class_row_by_oid(depend.objid)
+                    .is_some_and(|row| row.relkind == 'S')
+            {
+                push_unique_relation_oid(&mut relation_oids, depend.objid);
+            }
+        }
+    }
+    relation_oids
+}
+
+fn push_unique_relation_oid(oids: &mut Vec<u32>, relation_oid: u32) {
+    if !oids.contains(&relation_oid) {
+        oids.push(relation_oid);
+    }
+}
+
 fn collect_add_column_targets(
     catalog: &dyn CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
@@ -1174,8 +1466,33 @@ impl Database {
         alter_stmt: &AlterTableSetPersistenceStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_table_set_persistence_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_table_set_persistence_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableSetPersistenceStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let table_name = alter_stmt.table_name.to_ascii_lowercase();
-        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let Some(relation) = catalog.lookup_any_relation(&table_name) else {
             if alter_stmt.if_exists {
                 push_notice(format!(
@@ -1201,65 +1518,63 @@ impl Database {
                 sqlstate: "42809",
             });
         }
-        if relation.relkind != 'r' {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                "ALTER TABLE SET LOGGED/UNLOGGED is only supported for ordinary tables".into(),
-            )));
+        if relation.relpersistence == 't' {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot change logged status of table \"{}\" because it is temporary",
+                    relation_name_for_add_column_notice(&catalog, relation.relation_oid)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
         }
-        let relpersistence = match alter_stmt.persistence {
+        let new_relpersistence = match alter_stmt.persistence {
             TablePersistence::Permanent => 'p',
             TablePersistence::Unlogged => 'u',
-            TablePersistence::Temporary => relation.relpersistence,
+            TablePersistence::Temporary => {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                    "ALTER TABLE SET TEMPORARY".into(),
+                )));
+            }
         };
-        if relpersistence == relation.relpersistence {
+        if relation.relpersistence == new_relpersistence {
             return Ok(StatementResult::AffectedRows(0));
         }
-        self.table_locks.lock_table_interruptible(
-            relation.rel,
-            TableLockMode::AccessExclusive,
-            client_id,
-            self.interrupt_state(client_id).as_ref(),
-        )?;
-        let xid = self.txns.write().begin();
-        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        if !matches!(relation.relkind, 'r' | 'S') {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: table_name,
+                expected: "table or sequence",
+            }));
+        }
+        if relation.relkind == 'r' {
+            validate_persistence_foreign_keys(
+                &catalog,
+                relation.relation_oid,
+                new_relpersistence == 'p',
+            )?;
+        }
+        let relation_oids =
+            collect_persistence_relation_oids(&catalog, &relation, relation.relkind == 'r');
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid: 0,
+            cid,
             client_id,
-            waiter: None,
+            waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
         };
-        let mut catalog_effects = Vec::new();
-        let result = (|| {
+        for relation_oid in relation_oids {
             let effect = self
                 .catalog
                 .write()
-                .alter_relation_persistence_mvcc(relation.relation_oid, relpersistence, &ctx)
+                .alter_relation_persistence_mvcc(relation_oid, new_relpersistence, &ctx)
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
-            for sequence_oid in relation
-                .desc
-                .columns
-                .iter()
-                .filter_map(|column| column.default_sequence_oid)
-            {
-                let effect = self
-                    .catalog
-                    .write()
-                    .alter_relation_persistence_mvcc(sequence_oid, relpersistence, &ctx)
-                    .map_err(map_catalog_error)?;
-                self.apply_catalog_mutation_effect_immediate(&effect)?;
-                catalog_effects.push(effect);
-            }
-            Ok(StatementResult::AffectedRows(0))
-        })();
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
-        guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
-        result
+        }
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_alter_table_set_tablespace_stmt_with_search_path(
@@ -2342,6 +2657,65 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_alter_table_add_columns_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableAddColumnsStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        let lock_queue = build_alter_table_work_queue(&catalog, &relation, alter_stmt.only)?;
+        let lock_requests = lock_queue
+            .iter()
+            .map(|item| (item.relation.rel, TableLockMode::AccessExclusive))
+            .collect::<Vec<_>>();
+        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+            &self.table_locks,
+            client_id,
+            &lock_requests,
+            interrupts.as_ref(),
+        )?;
+        let locked_rels =
+            crate::pgrust::database::foreign_keys::table_lock_relations(&lock_requests);
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
+        let mut sequence_effects = Vec::new();
+        let result = self.execute_alter_table_add_columns_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+            &mut temp_effects,
+            &mut sequence_effects,
+        );
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &temp_effects,
+            &sequence_effects,
+        );
+        guard.disarm();
+        for rel in locked_rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
+        result
+    }
+
     pub(crate) fn execute_analyze_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -3180,6 +3554,215 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    fn execute_plain_alter_table_add_columns_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableAddColumnsStatement,
+        relation: &BoundRelation,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        reject_typed_table_ddl(relation, "add column to")?;
+        ensure_relation_owner(self, client_id, relation, &alter_stmt.table_name)?;
+        if relation.relispartition {
+            return Err(ExecError::DetailedError {
+                message: "cannot add column to a partition".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        let _ = dependent_view_rewrites_for_relation(
+            self,
+            client_id,
+            Some((xid, cid)),
+            relation.relation_oid,
+        )?;
+
+        let relation_display_name = relation_basename(&alter_stmt.table_name);
+        let mut planned_names = BTreeSet::new();
+        let mut active_adds = Vec::new();
+        for add_stmt in &alter_stmt.columns {
+            let column_name = add_stmt.column.name.to_ascii_lowercase();
+            let already_exists = relation.desc.columns.iter().any(|existing| {
+                !existing.dropped && existing.name.eq_ignore_ascii_case(&add_stmt.column.name)
+            }) || planned_names.contains(&column_name);
+            if already_exists && add_stmt.missing_ok {
+                push_notice(format!(
+                    "column \"{}\" of relation \"{}\" already exists, skipping",
+                    add_stmt.column.name, relation_display_name
+                ));
+                continue;
+            }
+            planned_names.insert(column_name);
+            active_adds.push(add_stmt);
+        }
+        if active_adds.is_empty() {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
+        let work_queue = build_alter_table_work_queue(&catalog, relation, alter_stmt.only)?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        for item in work_queue {
+            let mut target_relation = item.relation;
+            let mut target_desc = target_relation.desc.clone();
+            let mut target_columns = Vec::new();
+            let table_name =
+                relation_name_for_add_column_notice(&catalog, target_relation.relation_oid);
+            let existing_constraints =
+                catalog.constraint_rows_for_relation(target_relation.relation_oid);
+            for add_stmt in &active_adds {
+                let plan = validate_alter_table_add_column(
+                    &table_name,
+                    &target_desc,
+                    &add_stmt.column,
+                    &existing_constraints,
+                    &catalog,
+                )?;
+                let crate::pgrust::database::ddl::AlterTableAddColumnPlan {
+                    mut column,
+                    owned_sequence,
+                    not_null_action,
+                    check_actions,
+                } = plan;
+                debug_assert!(owned_sequence.is_none());
+                debug_assert!(not_null_action.is_none());
+                debug_assert!(check_actions.is_empty());
+                if item.expected_parents > 0 {
+                    column.attinhcount = item.expected_parents;
+                    column.attislocal = false;
+                }
+                target_desc.columns.push(column.clone());
+                target_columns.push(column);
+            }
+
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_add_columns_mvcc(target_relation.relation_oid, target_columns, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            target_relation.desc = target_desc.clone();
+            for column_index in target_relation
+                .desc
+                .columns
+                .len()
+                .saturating_sub(active_adds.len())
+                ..target_relation.desc.columns.len()
+            {
+                validate_added_column_domain_constraints(
+                    self,
+                    &target_relation,
+                    column_index,
+                    catalog.clone(),
+                    client_id,
+                    xid,
+                    cid,
+                    Arc::clone(&interrupts),
+                )?;
+            }
+            let (toast_namespace_oid, toast_namespace_name) =
+                if target_relation.relpersistence == 't' {
+                    let temp_backend_id = self.temp_backend_id(client_id);
+                    (
+                        Self::temp_toast_namespace_oid(temp_backend_id),
+                        Self::temp_toast_namespace_name(temp_backend_id),
+                    )
+                } else {
+                    (
+                        PG_TOAST_NAMESPACE_OID,
+                        crate::backend::catalog::toasting::PG_TOAST_NAMESPACE.to_string(),
+                    )
+                };
+            if target_relation.relkind != 'f'
+                && let Some(effect) = self
+                    .catalog
+                    .write()
+                    .ensure_relation_toast_table_mvcc(
+                        target_relation.relation_oid,
+                        toast_namespace_oid,
+                        &toast_namespace_name,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?
+            {
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
+            if target_relation.relpersistence == 't' {
+                self.replace_temp_entry_desc(client_id, target_relation.relation_oid, target_desc)?;
+            }
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_alter_table_add_columns_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableAddColumnsStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+            &catalog,
+            &alter_stmt.table_name,
+            alter_stmt.if_exists,
+        )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        preflight_alter_table_add_columns(&catalog, &relation, alter_stmt)?;
+        if alter_stmt
+            .columns
+            .iter()
+            .all(|add_stmt| add_column_is_plain_batch_compatible(add_stmt))
+            && (relation.relkind == 'p'
+                || has_inheritance_children(&catalog, relation.relation_oid))
+        {
+            return self
+                .execute_plain_alter_table_add_columns_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    &relation,
+                    xid,
+                    cid,
+                    configured_search_path,
+                    catalog_effects,
+                );
+        }
+        for add_stmt in &alter_stmt.columns {
+            self.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
+                client_id,
+                add_stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+                temp_effects,
+                sequence_effects,
+            )?;
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_alter_table_add_column_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -3222,10 +3805,7 @@ impl Database {
                 ));
                 return Ok(StatementResult::AffectedRows(0));
             }
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "new column name",
-                actual: format!("column already exists: {}", alter_stmt.column.name),
-            }));
+            return Err(duplicate_add_column_error(&alter_stmt.column.name));
         }
         let _ = dependent_view_rewrites_for_relation(
             self,
@@ -3233,6 +3813,7 @@ impl Database {
             Some((xid, cid)),
             relation.relation_oid,
         )?;
+        reject_recursive_composite_column_type(&catalog, &relation, &alter_stmt.column)?;
         reject_composite_rowtype_non_null_default_dependency(
             &catalog,
             &relation,
@@ -3691,6 +4272,22 @@ impl Database {
             if target.relation.relpersistence == 't' {
                 self.replace_temp_entry_desc(client_id, target.relation.relation_oid, target_desc)?;
             }
+        }
+        for (index, constraint_stmt) in inline_added_column_table_constraints(alter_stmt)
+            .into_iter()
+            .enumerate()
+        {
+            self.execute_alter_table_add_constraint_stmt_in_transaction_with_search_path(
+                client_id,
+                &constraint_stmt,
+                xid,
+                cid.saturating_add(50)
+                    .saturating_add(catalog_effects.len() as u32)
+                    .saturating_add(index as u32),
+                configured_search_path,
+                None,
+                catalog_effects,
+            )?;
         }
         Ok(StatementResult::AffectedRows(0))
     }

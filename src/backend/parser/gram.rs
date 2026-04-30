@@ -229,6 +229,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_alter_table_add_unnamed_constraint_statement(&sql, options)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_table_set_without_cluster_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_cluster_on_statement(&sql)? {
         return Ok(stmt);
     }
@@ -942,7 +945,7 @@ fn try_parse_alter_table_multi_action_statement(
                 only = add_column.only;
                 table_name = Some(add_column.table_name.clone());
             }
-            columns.push(add_column.column);
+            columns.push(add_column);
         }
         return Ok(Some(Statement::AlterTableAddColumns(
             AlterTableAddColumnsStatement {
@@ -1141,7 +1144,36 @@ fn try_parse_alter_table_cluster_on_statement(sql: &str) -> Result<Option<Statem
         index_name: schema_name
             .map(|schema| format!("{schema}.{index_name}"))
             .unwrap_or(index_name),
+        rewrite: false,
     })))
+}
+
+fn try_parse_alter_table_set_without_cluster_statement(
+    sql: &str,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter table") {
+        return Ok(None);
+    }
+    let rest = consume_keyword(trimmed, "alter table").trim_start();
+    let (if_exists, only, table_name, rest) = parse_alter_table_target_sql(rest)?;
+    let rest = rest.trim_start();
+    let Some(rest) = consume_keywords(rest, &["set", "without", "cluster"]) else {
+        return Ok(None);
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE SET WITHOUT CLUSTER statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(Some(Statement::AlterTableSetWithoutCluster(
+        AlterTableSetWithoutClusterStatement {
+            if_exists,
+            only,
+            table_name,
+        },
+    )))
 }
 
 fn try_parse_alter_table_add_column_with_fdw_options(
@@ -18005,6 +18037,7 @@ fn build_cluster(pair: Pair<'_, Rule>) -> Result<ClusterStatement, ParseError> {
     Ok(ClusterStatement {
         table_name: table_name.clone(),
         index_name: index_name.clone(),
+        rewrite: true,
     })
 }
 

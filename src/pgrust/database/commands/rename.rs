@@ -107,7 +107,7 @@ fn lookup_relation_for_rename(
     match catalog.lookup_any_relation(relation_name) {
         Some(relation)
             if relation.relkind == expected_relkind
-                || (expected_relkind == 'r' && relation.relkind == 'f') =>
+                || (expected_relkind == 'r' && matches!(relation.relkind, 'f' | 'v')) =>
         {
             Ok(Some(relation))
         }
@@ -140,6 +140,25 @@ fn lookup_any_relation_for_rename(
             relation_name.to_string(),
         ))),
     }
+}
+
+fn ensure_index_backed_constraints_can_rename(
+    catalog: &dyn CatalogLookup,
+    constraints: &[crate::include::catalog::PgConstraintRow],
+    new_name: &str,
+) -> Result<(), ExecError> {
+    for constraint in constraints {
+        if catalog
+            .constraint_rows_for_relation(constraint.conrelid)
+            .into_iter()
+            .any(|row| row.oid != constraint.oid && row.conname.eq_ignore_ascii_case(new_name))
+        {
+            return Err(ExecError::Parse(ParseError::TableAlreadyExists(
+                new_name.to_string(),
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn normalize_schema_name(name: &str) -> String {
@@ -314,6 +333,12 @@ impl Database {
         };
         let new_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;
         let visible_type_rows = catalog.type_rows();
+        let index_constraints = if matches!(relation.relkind, 'i' | 'I') {
+            catalog.constraint_rows_for_index(relation.relation_oid)
+        } else {
+            Vec::new()
+        };
+        ensure_index_backed_constraints_can_rename(&catalog, &index_constraints, &new_name)?;
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -322,7 +347,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
-            interrupts,
+            interrupts: std::sync::Arc::clone(&interrupts),
         };
         let effect = self
             .catalog
@@ -331,6 +356,24 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
+        for (index, constraint) in index_constraints.iter().enumerate() {
+            let constraint_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(1).saturating_add(index as u32),
+                client_id,
+                waiter: None,
+                interrupts: std::sync::Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .rename_index_backed_constraint_mvcc(constraint.oid, &new_name, &constraint_ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 

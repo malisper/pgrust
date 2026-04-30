@@ -6832,6 +6832,56 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn rename_index_backed_constraint_mvcc(
+        &mut self,
+        constraint_oid: u32,
+        new_constraint_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let new_constraint_name = new_constraint_name.to_ascii_lowercase();
+        let old_constraint = relation_constraint_row_by_oid_mvcc(self, ctx, constraint_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_oid.to_string()))?;
+        if relation_constraints_mvcc(self, ctx, old_constraint.conrelid)?
+            .into_iter()
+            .any(|row| {
+                row.oid != old_constraint.oid
+                    && row.conname.eq_ignore_ascii_case(&new_constraint_name)
+            })
+        {
+            return Err(CatalogError::TableAlreadyExists(new_constraint_name));
+        }
+
+        let mut new_constraint = old_constraint.clone();
+        new_constraint.conname = new_constraint_name;
+        let kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![old_constraint.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![new_constraint.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, old_constraint.conrelid);
+        if old_constraint.conindid != 0 {
+            effect_record_oid(&mut effect.relation_oids, old_constraint.conindid);
+        }
+        Ok(effect)
+    }
+
     pub fn drop_relation_constraint_mvcc(
         &mut self,
         relation_oid: u32,
@@ -7182,6 +7232,54 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn clear_index_clustered_mvcc(
+        &mut self,
+        relation_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_indexes = index_rows_for_relation_mvcc(self, ctx, relation_oid)?;
+        let changed = old_indexes.iter().any(|row| row.indisclustered);
+        let mut new_indexes = old_indexes.clone();
+        for row in &mut new_indexes {
+            row.indisclustered = false;
+        }
+
+        if changed {
+            let control = self.control_state()?;
+            self.persist_control_values(control.next_oid, control.next_rel_number)?;
+            let kinds = vec![BootstrapCatalogKind::PgIndex];
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    indexes: old_indexes,
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &kinds,
+            )?;
+            insert_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    indexes: new_indexes.clone(),
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &kinds,
+            )?;
+            self.control = control;
+        }
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if !new_indexes.is_empty() {
+            effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgIndex]);
+        }
+        for row in new_indexes {
+            effect_record_oid(&mut effect.relation_oids, row.indexrelid);
+        }
+        Ok(effect)
+    }
+
     pub fn set_index_entry_ready_valid_mvcc(
         &mut self,
         old_entry: &CatalogEntry,
@@ -7420,6 +7518,48 @@ impl CatalogStore {
                     return Err(CatalogError::TableAlreadyExists(column.name.clone()));
                 }
                 entry.desc.columns.push(column);
+                allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgDepend,
+                        BootstrapCatalogKind::PgAttrdef,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_table_add_columns_mvcc(
+        &mut self,
+        relation_oid: u32,
+        columns: Vec<ColumnDesc>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let mut new_names = BTreeSet::new();
+                for column in &columns {
+                    if entry
+                        .desc
+                        .columns
+                        .iter()
+                        .any(|existing| existing.name.eq_ignore_ascii_case(&column.name))
+                        || !new_names.insert(column.name.to_ascii_lowercase())
+                    {
+                        return Err(CatalogError::TableAlreadyExists(column.name.clone()));
+                    }
+                }
+                entry.desc.columns.extend(columns);
                 allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
                 Ok((
                     (),

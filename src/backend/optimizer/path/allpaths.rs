@@ -13,6 +13,8 @@ use crate::backend::parser::{
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp,
     deserialize_partition_bound, is_binary_coercible_type, partition_value_to_value,
 };
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::date::parse_date_text;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::catalog::{BTREE_AM_OID, HASH_AM_OID};
 use crate::include::nodes::datum::Value;
@@ -670,11 +672,12 @@ fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
 }
 
 fn exprs_have_contradictory_equalities(left: &Expr, right: &Expr) -> bool {
-    expr_list_has_contradictory_equalities(
-        flatten_and_conjuncts(left)
-            .into_iter()
-            .chain(flatten_and_conjuncts(right)),
-    )
+    let clauses = flatten_and_conjuncts(left)
+        .into_iter()
+        .chain(flatten_and_conjuncts(right))
+        .collect::<Vec<_>>();
+    expr_list_has_contradictory_equalities(clauses.iter().cloned())
+        || expr_list_has_disjoint_ranges(clauses)
 }
 
 fn expr_list_has_contradictory_equalities(clauses: impl IntoIterator<Item = Expr>) -> bool {
@@ -728,6 +731,208 @@ fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value, Option<u32>)> 
         }
         _ => None,
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RangeBoundKind {
+    Lower,
+    Upper,
+}
+
+#[derive(Clone)]
+struct RangeBound {
+    value: Value,
+    inclusive: bool,
+}
+
+struct RangeRestriction {
+    expr: Expr,
+    collation_oid: Option<u32>,
+    lower: Option<RangeBound>,
+    upper: Option<RangeBound>,
+}
+
+impl RangeRestriction {
+    fn new(expr: Expr, collation_oid: Option<u32>) -> Self {
+        Self {
+            expr,
+            collation_oid,
+            lower: None,
+            upper: None,
+        }
+    }
+
+    fn add_bound(&mut self, kind: RangeBoundKind, bound: RangeBound) {
+        match kind {
+            RangeBoundKind::Lower => merge_lower_bound(&mut self.lower, bound, self.collation_oid),
+            RangeBoundKind::Upper => merge_upper_bound(&mut self.upper, bound, self.collation_oid),
+        }
+    }
+
+    fn is_contradictory(&self) -> bool {
+        let (Some(lower), Some(upper)) = (&self.lower, &self.upper) else {
+            return false;
+        };
+        match compare_range_values(&lower.value, &upper.value, self.collation_oid) {
+            Some(Ordering::Greater) => true,
+            Some(Ordering::Equal) => !(lower.inclusive && upper.inclusive),
+            _ => false,
+        }
+    }
+}
+
+fn merge_lower_bound(
+    existing: &mut Option<RangeBound>,
+    incoming: RangeBound,
+    collation_oid: Option<u32>,
+) {
+    let Some(current) = existing else {
+        *existing = Some(incoming);
+        return;
+    };
+    match compare_range_values(&incoming.value, &current.value, collation_oid) {
+        Some(Ordering::Greater) => *current = incoming,
+        Some(Ordering::Equal) => current.inclusive &= incoming.inclusive,
+        _ => {}
+    }
+}
+
+fn merge_upper_bound(
+    existing: &mut Option<RangeBound>,
+    incoming: RangeBound,
+    collation_oid: Option<u32>,
+) {
+    let Some(current) = existing else {
+        *existing = Some(incoming);
+        return;
+    };
+    match compare_range_values(&incoming.value, &current.value, collation_oid) {
+        Some(Ordering::Less) => *current = incoming,
+        Some(Ordering::Equal) => current.inclusive &= incoming.inclusive,
+        _ => {}
+    }
+}
+
+fn compare_range_values(
+    left: &Value,
+    right: &Value,
+    collation_oid: Option<u32>,
+) -> Option<Ordering> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return None;
+    }
+    compare_order_values(left, right, collation_oid, Some(false), false).ok()
+}
+
+fn expr_list_has_disjoint_ranges(clauses: impl IntoIterator<Item = Expr>) -> bool {
+    let mut ranges = Vec::<RangeRestriction>::new();
+    for clause in clauses {
+        for (expr, kind, value, inclusive, collation_oid) in range_bounds_to_nonnull_const(&clause)
+        {
+            let expr = strip_binary_coercible_casts(&expr);
+            let bound = RangeBound { value, inclusive };
+            if let Some(existing) = ranges.iter_mut().find(|range| {
+                range.collation_oid == collation_oid
+                    && equality_exprs_match_for_contradiction(&range.expr, &expr)
+            }) {
+                existing.add_bound(kind, bound);
+                if existing.is_contradictory() {
+                    return true;
+                }
+            } else {
+                let mut range = RangeRestriction::new(expr, collation_oid);
+                range.add_bound(kind, bound);
+                ranges.push(range);
+            }
+        }
+    }
+    false
+}
+
+fn range_bounds_to_nonnull_const(
+    expr: &Expr,
+) -> Vec<(Expr, RangeBoundKind, Value, bool, Option<u32>)> {
+    let Expr::Op(op) = expr else {
+        return Vec::new();
+    };
+    if op.args.len() != 2 {
+        return Vec::new();
+    }
+    let collation_oid = op
+        .collation_oid
+        .or_else(|| op.args.iter().find_map(top_level_explicit_collation));
+    let mut bounds = Vec::new();
+    match (
+        range_const_value(&op.args[0]),
+        range_const_value(&op.args[1]),
+    ) {
+        (None, Some(value)) => {
+            push_range_bounds_for_operator(
+                &mut bounds,
+                op.args[0].clone(),
+                op.op,
+                value,
+                false,
+                collation_oid,
+            );
+        }
+        (Some(value), None) => {
+            push_range_bounds_for_operator(
+                &mut bounds,
+                op.args[1].clone(),
+                op.op,
+                value,
+                true,
+                collation_oid,
+            );
+        }
+        _ => {}
+    }
+    bounds
+}
+
+fn range_const_value(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Const(value) if !matches!(value, Value::Null) => Some(value.clone()),
+        Expr::Cast(inner, ty) if matches!(ty.kind, SqlTypeKind::Date) => {
+            let text = match inner.as_ref() {
+                Expr::Const(value) => value.as_text()?,
+                _ => return None,
+            };
+            parse_date_text(text, &DateTimeConfig::default())
+                .ok()
+                .map(Value::Date)
+        }
+        _ => None,
+    }
+}
+
+fn push_range_bounds_for_operator(
+    out: &mut Vec<(Expr, RangeBoundKind, Value, bool, Option<u32>)>,
+    expr: Expr,
+    op: OpExprKind,
+    value: Value,
+    const_on_left: bool,
+    collation_oid: Option<u32>,
+) {
+    let (kind, inclusive) = match (op, const_on_left) {
+        (OpExprKind::Eq, _) => {
+            out.push((
+                expr.clone(),
+                RangeBoundKind::Lower,
+                value.clone(),
+                true,
+                collation_oid,
+            ));
+            (RangeBoundKind::Upper, true)
+        }
+        (OpExprKind::Gt, false) | (OpExprKind::Lt, true) => (RangeBoundKind::Lower, false),
+        (OpExprKind::GtEq, false) | (OpExprKind::LtEq, true) => (RangeBoundKind::Lower, true),
+        (OpExprKind::Lt, false) | (OpExprKind::Gt, true) => (RangeBoundKind::Upper, false),
+        (OpExprKind::LtEq, false) | (OpExprKind::GtEq, true) => (RangeBoundKind::Upper, true),
+        _ => return,
+    };
+    out.push((expr, kind, value, inclusive, collation_oid));
 }
 
 fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
@@ -4540,7 +4745,7 @@ fn relation_may_satisfy_check_constraints(
     constraints
         .checks
         .iter()
-        .filter(|check| check.enforced)
+        .filter(|check| check.enforced && check.validated)
         .all(|check| !exprs_have_contradictory_equalities(filter, &check.expr))
 }
 

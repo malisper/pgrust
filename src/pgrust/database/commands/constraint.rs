@@ -450,6 +450,7 @@ pub(super) fn validate_check_rows<C: CatalogLookup + Clone + 'static>(
         constraint_name: constraint_name.to_string(),
         expr,
         enforced: true,
+        validated: true,
     };
     let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
     let mut ctx = ddl_executor_context(
