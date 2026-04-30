@@ -1,6 +1,7 @@
 use super::super::*;
 use super::privilege::{acl_grants_privilege, type_owner_default_acl};
 use super::reloptions::normalize_create_table_reloptions;
+use super::tablespace::resolve_relation_tablespace_oid;
 use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::analyze::{
@@ -3613,6 +3614,7 @@ impl Database {
         relation: &crate::backend::parser::BoundRelation,
         lowered: &crate::backend::parser::LoweredCreateTable,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
         let interrupts = self.interrupt_state(client_id);
@@ -3626,6 +3628,7 @@ impl Database {
                 &lowered.constraint_actions,
                 true,
                 configured_search_path,
+                gucs,
                 catalog_effects,
             )?;
         } else {
@@ -3686,6 +3689,17 @@ impl Database {
                     indisexclusion: action.exclusion || build_options.indisexclusion,
                     ..build_options
                 };
+                let index_tablespace_oid = if relation.relpersistence == 't' {
+                    None
+                } else {
+                    Some(resolve_relation_tablespace_oid(
+                        self,
+                        client_id,
+                        Some((xid, action_cid)),
+                        action.tablespace.as_deref(),
+                        gucs,
+                    )?)
+                };
                 let index_entry = self.build_simple_index_in_transaction(
                     client_id,
                     relation,
@@ -3696,6 +3710,7 @@ impl Database {
                     !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,
+                    index_tablespace_oid,
                     xid,
                     action_cid,
                     access_method_oid,
@@ -5190,7 +5205,10 @@ impl Database {
                 sqlstate: "42501",
             });
         }
-        if language_row.oid == PG_LANGUAGE_SQL_OID && check_function_bodies_enabled(gucs) {
+        if proc_kind != 'p'
+            && language_row.oid == PG_LANGUAGE_SQL_OID
+            && check_function_bodies_enabled(gucs)
+        {
             let validation_result = validate_sql_function_body_on_create(
                 create_stmt,
                 &catalog,
@@ -5870,17 +5888,33 @@ impl Database {
         create_stmt: &CreateTableStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_create_table_stmt_with_search_path_and_gucs(
+            client_id,
+            create_stmt,
+            configured_search_path,
+            None,
+        )
+    }
+
+    pub(crate) fn execute_create_table_stmt_with_search_path_and_gucs(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateTableStatement,
+        configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
+    ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
         let mut temp_effects = Vec::new();
         let mut sequence_effects = Vec::new();
-        let result = self.execute_create_table_stmt_in_transaction_with_search_path(
+        let result = self.execute_create_table_stmt_in_transaction_with_search_path_and_gucs(
             client_id,
             create_stmt,
             xid,
             0,
             configured_search_path,
+            gucs,
             &mut catalog_effects,
             &mut temp_effects,
             &mut sequence_effects,
@@ -5963,6 +5997,31 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_create_table_stmt_in_transaction_with_search_path_and_gucs(
+            client_id,
+            create_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            None,
+            catalog_effects,
+            temp_effects,
+            sequence_effects,
+        )
+    }
+
+    pub(crate) fn execute_create_table_stmt_in_transaction_with_search_path_and_gucs(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateTableStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
         sequence_effects: &mut Vec<SequenceMutationEffect>,
@@ -6068,6 +6127,63 @@ impl Database {
             TablePersistence::Unlogged => 'u',
             TablePersistence::Temporary => 't',
         };
+        let explicit_tablespace = create_stmt
+            .tablespace
+            .as_deref()
+            .filter(|name| !name.trim().is_empty());
+        let default_tablespace = gucs
+            .and_then(|gucs| gucs.get("default_tablespace"))
+            .map(String::as_str)
+            .filter(|name| !name.trim().is_empty());
+        let relation_tablespace_oid = if persistence == TablePersistence::Temporary {
+            0
+        } else if let Some(name) = explicit_tablespace {
+            resolve_relation_tablespace_oid(
+                self,
+                client_id,
+                Some((xid, table_cid)),
+                Some(name),
+                None,
+            )?
+        } else if let Some(parent_oid) = lowered.partition_parent_oid {
+            let parent_tablespace_oid = self
+                .backend_catcache(client_id, Some((xid, table_cid)))
+                .map_err(map_catalog_error)?
+                .class_by_oid(parent_oid)
+                .map(|row| row.reltablespace)
+                .or_else(|| {
+                    catalog
+                        .relation_by_oid(parent_oid)
+                        .map(|parent| parent.rel.spc_oid)
+                })
+                .unwrap_or(0);
+            if parent_tablespace_oid != 0 {
+                parent_tablespace_oid
+            } else {
+                resolve_relation_tablespace_oid(
+                    self,
+                    client_id,
+                    Some((xid, table_cid)),
+                    None,
+                    gucs,
+                )?
+            }
+        } else {
+            resolve_relation_tablespace_oid(self, client_id, Some((xid, table_cid)), None, gucs)?
+        };
+        if relation_relkind == 'p'
+            && (explicit_tablespace.is_some_and(|name| name.eq_ignore_ascii_case("pg_default"))
+                || (explicit_tablespace.is_none()
+                    && default_tablespace
+                        .is_some_and(|name| name.eq_ignore_ascii_case("pg_default"))))
+        {
+            return Err(ExecError::DetailedError {
+                message: "cannot specify default tablespace for partitioned relations".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         match persistence {
             TablePersistence::Permanent | TablePersistence::Unlogged => {
                 let mut catalog_guard = self.catalog.write();
@@ -6125,28 +6241,61 @@ impl Database {
                         Ok(StatementResult::AffectedRows(0))
                     }
                     Err(err) => Err(map_catalog_error(err)),
-                    Ok((created, effect)) => {
+                    Ok((mut created, effect)) => {
                         drop(catalog_guard);
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
+                        let mut next_metadata_cid = table_cid.saturating_add(1);
+                        if relation_tablespace_oid != created.entry.rel.spc_oid {
+                            let ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: next_metadata_cid,
+                                client_id,
+                                waiter: None,
+                                interrupts: Arc::clone(&interrupts),
+                            };
+                            next_metadata_cid = next_metadata_cid.saturating_add(1);
+                            let effect = self
+                                .catalog
+                                .write()
+                                .set_relation_tablespace_mvcc(
+                                    created.entry.relation_oid,
+                                    relation_tablespace_oid,
+                                    false,
+                                    &ctx,
+                                )
+                                .map_err(map_catalog_error)?;
+                            created.entry.rel =
+                                effect.created_rels.first().copied().unwrap_or_else(|| {
+                                    let mut rel = created.entry.rel;
+                                    rel.spc_oid = relation_tablespace_oid;
+                                    rel
+                                });
+                            self.apply_catalog_mutation_effect_immediate(&effect)?;
+                            catalog_effects.push(effect);
+                        }
                         self.apply_created_toast_reloptions_in_transaction(
                             client_id,
                             xid,
-                            table_cid.saturating_add(1),
+                            next_metadata_cid,
                             created.toast.as_ref(),
                             reloptions.toast.as_ref(),
                             catalog_effects,
                         )?;
+                        next_metadata_cid = next_metadata_cid.saturating_add(1);
                         if !lowered.parent_oids.is_empty() {
                             let inherit_ctx = CatalogWriteContext {
                                 pool: self.pool.clone(),
                                 txns: self.txns.clone(),
                                 xid,
-                                cid: table_cid.saturating_add(1),
+                                cid: next_metadata_cid,
                                 client_id,
                                 waiter: None,
                                 interrupts: Arc::clone(&interrupts),
                             };
+                            next_metadata_cid = next_metadata_cid.saturating_add(1);
                             let inherit_effect = self
                                 .catalog
                                 .write()
@@ -6179,10 +6328,11 @@ impl Database {
                                     relpartbound,
                                     partitioned_table,
                                     xid,
-                                    table_cid.saturating_add(2),
+                                    next_metadata_cid,
                                     configured_search_path,
                                     catalog_effects,
                                 )?;
+                            next_metadata_cid = next_metadata_cid.saturating_add(1);
                             if lowered
                                 .partition_bound
                                 .as_ref()
@@ -6194,10 +6344,11 @@ impl Database {
                                     parent_oid,
                                     created.entry.relation_oid,
                                     xid,
-                                    table_cid.saturating_add(3),
+                                    next_metadata_cid,
                                     configured_search_path,
                                     catalog_effects,
                                 )?;
+                                next_metadata_cid = next_metadata_cid.saturating_add(1);
                             }
                             relation
                         } else {
@@ -6224,30 +6375,16 @@ impl Database {
                             }
                         };
                         for created_sequence in &created_sequences {
-                            let mut sequence_dependency_cid = table_cid.saturating_add(1);
-                            if lowered.partition_spec.is_some()
-                                || lowered.partition_parent_oid.is_some()
-                            {
-                                sequence_dependency_cid =
-                                    sequence_dependency_cid.max(table_cid.saturating_add(3));
-                            }
-                            if lowered
-                                .partition_bound
-                                .as_ref()
-                                .is_some_and(PartitionBoundSpec::is_default)
-                            {
-                                sequence_dependency_cid =
-                                    sequence_dependency_cid.max(table_cid.saturating_add(4));
-                            }
                             let ctx = CatalogWriteContext {
                                 pool: self.pool.clone(),
                                 txns: self.txns.clone(),
                                 xid,
-                                cid: sequence_dependency_cid,
+                                cid: next_metadata_cid,
                                 client_id,
                                 waiter: None,
                                 interrupts: Arc::clone(&interrupts),
                             };
+                            next_metadata_cid = next_metadata_cid.saturating_add(1);
                             let effect = self
                                 .catalog
                                 .write()
@@ -6264,25 +6401,7 @@ impl Database {
                             self.apply_catalog_mutation_effect_immediate(&effect)?;
                             catalog_effects.push(effect);
                         }
-                        let mut constraint_cid_base = table_cid.saturating_add(1);
-                        if !lowered.parent_oids.is_empty() {
-                            constraint_cid_base =
-                                constraint_cid_base.max(table_cid.saturating_add(2));
-                        }
-                        if lowered.partition_spec.is_some()
-                            || lowered.partition_parent_oid.is_some()
-                        {
-                            constraint_cid_base =
-                                constraint_cid_base.max(table_cid.saturating_add(3));
-                        }
-                        if lowered
-                            .partition_bound
-                            .as_ref()
-                            .is_some_and(PartitionBoundSpec::is_default)
-                        {
-                            constraint_cid_base =
-                                constraint_cid_base.max(table_cid.saturating_add(4));
-                        }
+                        let constraint_cid_base = next_metadata_cid;
                         let next_cid = self.install_create_table_constraints_in_transaction(
                             client_id,
                             xid,
@@ -6291,6 +6410,7 @@ impl Database {
                             &relation,
                             &lowered,
                             configured_search_path,
+                            gucs,
                             catalog_effects,
                         )?;
                         let next_cid = self.apply_create_table_like_post_create_actions(
@@ -6515,6 +6635,7 @@ impl Database {
                     &relation,
                     &lowered,
                     configured_search_path,
+                    gucs,
                     catalog_effects,
                 )?;
                 if let Some(parent_oid) = lowered.partition_parent_oid {
@@ -6966,6 +7087,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         planner_config: crate::include::nodes::pathnodes::PlannerConfig,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
@@ -6978,6 +7100,7 @@ impl Database {
                 xid,
                 cid,
                 configured_search_path,
+                gucs,
                 catalog_effects,
             );
         }
@@ -7125,6 +7248,17 @@ impl Database {
                 })
                 .collect(),
         };
+        let relation_tablespace_oid = if persistence == TablePersistence::Temporary {
+            0
+        } else {
+            resolve_relation_tablespace_oid(
+                self,
+                client_id,
+                Some((xid, table_cid)),
+                create_stmt.tablespace.as_deref(),
+                gucs,
+            )?
+        };
 
         let (relation_oid, rel, toast, toast_index) = match persistence {
             TablePersistence::Permanent | TablePersistence::Unlogged => {
@@ -7167,6 +7301,7 @@ impl Database {
                     partition_of: None,
                     partition_bound: None,
                     if_not_exists: create_stmt.if_not_exists,
+                    tablespace: create_stmt.tablespace.clone(),
                 };
                 let mut catalog_guard = self.catalog.write();
                 let write_ctx = CatalogWriteContext {
@@ -7178,7 +7313,7 @@ impl Database {
                     waiter: None,
                     interrupts: Arc::clone(&interrupts),
                 };
-                let (created, effect) = catalog_guard
+                let (mut created, effect) = catalog_guard
                     .create_table_mvcc_with_options(
                         table_name.clone(),
                         create_relation_desc(&stmt, &catalog)?,
@@ -7195,6 +7330,34 @@ impl Database {
                 drop(catalog_guard);
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                if relation_tablespace_oid != created.entry.rel.spc_oid {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: table_cid.saturating_add(1),
+                        client_id,
+                        waiter: None,
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    let effect = self
+                        .catalog
+                        .write()
+                        .set_relation_tablespace_mvcc(
+                            created.entry.relation_oid,
+                            relation_tablespace_oid,
+                            false,
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    created.entry.rel = effect.created_rels.first().copied().unwrap_or_else(|| {
+                        let mut rel = created.entry.rel;
+                        rel.spc_oid = relation_tablespace_oid;
+                        rel
+                    });
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                }
                 let (toast, toast_index) = toast_bindings_from_create_result(&created);
                 (
                     created.entry.relation_oid,
@@ -7331,6 +7494,7 @@ impl Database {
         cid: u32,
         configured_search_path: Option<&[String]>,
         planner_config: crate::include::nodes::pathnodes::PlannerConfig,
+        gucs: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<StatementResult, ExecError> {
         if let Some(xid) = xid {
             let mut catalog_effects = Vec::new();
@@ -7342,6 +7506,7 @@ impl Database {
                 cid,
                 configured_search_path,
                 planner_config,
+                gucs,
                 &mut catalog_effects,
                 &mut temp_effects,
             );
@@ -7357,6 +7522,7 @@ impl Database {
             cid,
             configured_search_path,
             planner_config,
+            gucs,
             &mut catalog_effects,
             &mut temp_effects,
         );

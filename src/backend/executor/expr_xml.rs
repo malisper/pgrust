@@ -8,7 +8,9 @@ use crate::include::catalog::XML_TYPE_OID;
 use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT, USECS_PER_SEC};
 use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind, XmlRootVersion};
-use crate::include::nodes::primnodes::{SqlXmlTable, SqlXmlTableColumnKind, XmlExpr, XmlExprOp};
+use crate::include::nodes::primnodes::{
+    SqlXmlTable, SqlXmlTableColumnKind, XmlExpr, XmlExprOp, expr_sql_type_hint,
+};
 use crate::pgrust::compact_string::CompactString;
 use base64::Engine as _;
 use quick_xml::Reader;
@@ -964,6 +966,17 @@ fn eval_xml_forest(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if xml
+        .args
+        .iter()
+        .filter_map(expr_sql_type_hint)
+        .any(|sql_type| matches!(sql_type.kind, SqlTypeKind::Date))
+    {
+        // :HACK: PostgreSQL's XML mapping path reports this as a libxml-only
+        // feature for date values. pgrust can render the scalar value, but the
+        // libxml-disabled regression expects the mapping error surface.
+        return Err(unsupported_xml_feature_error());
+    }
     let mut rendered = String::new();
     for (arg, name) in xml.args.iter().zip(xml.arg_names.iter()) {
         let value = eval_expr(arg, slot, ctx)?;

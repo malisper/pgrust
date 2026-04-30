@@ -2981,6 +2981,7 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         "block_size" => return Ok(Value::Text("8192".into())),
         "fsync" => return Ok(Value::Text("on".into())),
         "max_prepared_transactions" => return Ok(Value::Text("64".into())),
+        "lo_compat_privileges" => return Ok(Value::Text("off".into())),
         "synchronous_commit" => return Ok(Value::Text("on".into())),
         "wal_sync_method" => return Ok(Value::Text("fsync".into())),
         _ => {}
@@ -3023,6 +3024,7 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
         "block_size" => return Ok(Value::Text("8192".into())),
         "fsync" => return Ok(Value::Text("on".into())),
         "max_prepared_transactions" => return Ok(Value::Text("64".into())),
+        "lo_compat_privileges" => return Ok(Value::Text("off".into())),
         "server_encoding" => return Ok(Value::Text("UTF8".into())),
         "synchronous_commit" => return Ok(Value::Text("on".into())),
         "wal_sync_method" => return Ok(Value::Text("fsync".into())),
@@ -3622,7 +3624,7 @@ fn foreign_privilege_object_acl(
     }
 }
 
-fn ensure_builtin_side_effects_allowed(
+pub(crate) fn ensure_builtin_side_effects_allowed(
     func: BuiltinScalarFunction,
     ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
@@ -3635,6 +3637,13 @@ fn ensure_builtin_side_effects_allowed(
             | BuiltinScalarFunction::PgNotify
             | BuiltinScalarFunction::LoCreate
             | BuiltinScalarFunction::LoUnlink
+            | BuiltinScalarFunction::LoWrite
+            | BuiltinScalarFunction::LoTruncate
+            | BuiltinScalarFunction::LoTruncate64
+            | BuiltinScalarFunction::LoCreat
+            | BuiltinScalarFunction::LoFromBytea
+            | BuiltinScalarFunction::LoPut
+            | BuiltinScalarFunction::LoImport
             | BuiltinScalarFunction::PgAdvisoryLock
             | BuiltinScalarFunction::PgAdvisoryXactLock
             | BuiltinScalarFunction::PgAdvisoryLockShared
@@ -3664,6 +3673,13 @@ fn ensure_builtin_side_effects_allowed(
                     BuiltinScalarFunction::PgNotify => "pg_notify",
                     BuiltinScalarFunction::LoCreate => "lo_create",
                     BuiltinScalarFunction::LoUnlink => "lo_unlink",
+                    BuiltinScalarFunction::LoWrite => "lowrite",
+                    BuiltinScalarFunction::LoTruncate => "lo_truncate",
+                    BuiltinScalarFunction::LoTruncate64 => "lo_truncate64",
+                    BuiltinScalarFunction::LoCreat => "lo_creat",
+                    BuiltinScalarFunction::LoFromBytea => "lo_from_bytea",
+                    BuiltinScalarFunction::LoPut => "lo_put",
+                    BuiltinScalarFunction::LoImport => "lo_import",
                     BuiltinScalarFunction::PgAdvisoryLock => "pg_advisory_lock",
                     BuiltinScalarFunction::PgAdvisoryXactLock => "pg_advisory_xact_lock",
                     BuiltinScalarFunction::PgAdvisoryLockShared => "pg_advisory_lock_shared",
@@ -7474,7 +7490,6 @@ fn eval_has_largeobject_privilege(
         return Ok(Value::Null);
     }
     let function_name = "has_largeobject_privilege";
-    let catalog = privilege_catalog(ctx, function_name)?;
     let (role_oid, object_value, privilege_value) = match values {
         [object_value, privilege_value] => (ctx.current_user_oid, object_value, privilege_value),
         [role_value, object_value, privilege_value] => (
@@ -7495,25 +7510,28 @@ fn eval_has_largeobject_privilege(
         ],
     )?;
     let oid = oid_arg_to_u32(object_value, function_name)?;
-    let Some(row) = large_object_runtime(ctx)?.metadata_row(oid) else {
-        return Ok(Value::Null);
-    };
-    let authid_rows = catalog.authid_rows();
-    let auth_members_rows = catalog.auth_members_rows();
-    Ok(Value::Bool(specs.into_iter().any(|spec| {
-        role_is_superuser(&authid_rows, role_oid)
-            || role_has_effective_membership(
-                role_oid,
-                row.lomowner,
-                &authid_rows,
-                &auth_members_rows,
-            )
-            || acl_grants_privilege_to_names(
-                &row.lomacl,
-                &effective_role_names_for_oid(catalog, role_oid),
-                spec,
-            )
-    })))
+    let db = ctx
+        .database
+        .clone()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "has_largeobject_privilege requires database context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let mut saw_object = false;
+    for spec in specs {
+        match db.large_object_has_privilege(ctx, role_oid, oid, spec.acl_char, spec.grant_option)? {
+            Some(true) => return Ok(Value::Bool(true)),
+            Some(false) => saw_object = true,
+            None => {}
+        }
+    }
+    if saw_object {
+        Ok(Value::Bool(false))
+    } else {
+        Ok(Value::Null)
+    }
 }
 
 fn membership_path_with(
@@ -8179,6 +8197,9 @@ fn eval_pg_tablespace_location(
         && let Ok(target) = std::fs::read_link(&source_path)
     {
         return Ok(Value::Text(target.display().to_string().into()));
+    }
+    if metadata.is_dir() {
+        return Ok(Value::Text(format!("pg_tblspc/{tablespace_oid}").into()));
     }
     Ok(Value::Text(source_path.display().to_string().into()))
 }
@@ -9020,17 +9041,317 @@ fn eval_large_object_builtin_function(
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    fn int64_arg(value: &Value, op: &'static str) -> Result<i64, ExecError> {
+        match value {
+            Value::Int16(v) => Ok(i64::from(*v)),
+            Value::Int32(v) => Ok(i64::from(*v)),
+            Value::Int64(v) => Ok(*v),
+            _ => Err(ExecError::TypeMismatch {
+                op,
+                left: value.clone(),
+                right: Value::Int64(0),
+            }),
+        }
+    }
+
+    fn bytea_arg(value: &Value, op: &'static str) -> Result<Vec<u8>, ExecError> {
+        match value {
+            Value::Bytea(bytes) => Ok(bytes.clone()),
+            _ => Err(ExecError::TypeMismatch {
+                op,
+                left: value.clone(),
+                right: Value::Bytea(Vec::new()),
+            }),
+        }
+    }
+
+    fn text_arg(value: &Value, op: &'static str) -> Result<String, ExecError> {
+        value
+            .as_text()
+            .map(|text| text.to_string())
+            .ok_or_else(|| ExecError::TypeMismatch {
+                op,
+                left: value.clone(),
+                right: Value::Text("".into()),
+            })
+    }
+
+    fn large_object_database(
+        ctx: &ExecutorContext,
+    ) -> Result<crate::pgrust::database::Database, ExecError> {
+        ctx.database
+            .clone()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "large object functions require database context".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+    }
+
+    fn ensure_lo_file_function_allowed(
+        ctx: &ExecutorContext,
+        function_name: &'static str,
+    ) -> Result<(), ExecError> {
+        let is_superuser = ctx
+            .catalog
+            .as_ref()
+            .map(|catalog| {
+                catalog
+                    .authid_rows()
+                    .into_iter()
+                    .any(|row| row.oid == ctx.current_user_oid && row.rolsuper)
+            })
+            .unwrap_or(ctx.current_user_oid == crate::include::catalog::BOOTSTRAP_SUPERUSER_OID);
+        if is_superuser {
+            Ok(())
+        } else {
+            Err(ExecError::DetailedError {
+                message: format!("permission denied for function {function_name}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            })
+        }
+    }
+
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let db = large_object_database(ctx)?;
     match (func, values) {
-        (_, [Value::Null]) => Ok(Value::Null),
         (BuiltinScalarFunction::LoCreate, [value]) => {
             let oid = oid_arg_to_u32(value, "lo_create")?;
-            Ok(Value::Int64(i64::from(
-                large_object_runtime(ctx)?.create(oid, ctx.current_user_oid)?,
-            )))
+            Ok(Value::Int64(i64::from(db.large_object_create(
+                ctx,
+                oid,
+                ctx.current_user_oid,
+                None,
+            )?)))
         }
         (BuiltinScalarFunction::LoUnlink, [value]) => {
             let oid = oid_arg_to_u32(value, "lo_unlink")?;
-            Ok(Value::Int32(large_object_runtime(ctx)?.unlink(oid)?))
+            Ok(Value::Int32(db.large_object_unlink(ctx, oid)?))
+        }
+        (BuiltinScalarFunction::LoCreat, [_mode]) => {
+            crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_creat")?;
+            Ok(Value::Int64(i64::from(db.large_object_create(
+                ctx,
+                0,
+                ctx.current_user_oid,
+                None,
+            )?)))
+        }
+        (BuiltinScalarFunction::LoOpen, [oid, mode]) => {
+            let oid = oid_arg_to_u32(oid, "lo_open")?;
+            let mode = int32_arg(mode, "lo_open")?;
+            Ok(Value::Int32(db.large_object_open(ctx, oid, mode)?))
+        }
+        (BuiltinScalarFunction::LoClose, [fd]) => {
+            let fd = int32_arg(fd, "lo_close")?;
+            Ok(Value::Int32(
+                large_object_runtime(ctx)?.close_descriptor(ctx.client_id, fd)?,
+            ))
+        }
+        (BuiltinScalarFunction::LoRead, [fd, len]) => {
+            let fd = int32_arg(fd, "loread")?;
+            let len = int32_arg(len, "loread")?;
+            let desc = large_object_runtime(ctx)?.descriptor(ctx.client_id, fd)?;
+            if !desc.can_read {
+                return Err(ExecError::DetailedError {
+                    message: "large object descriptor was not opened for reading".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
+            let bytes = db.large_object_read(ctx, desc.loid, desc.offset, len)?;
+            large_object_runtime(ctx)?.set_descriptor_offset(
+                ctx.client_id,
+                fd,
+                desc.offset.saturating_add(bytes.len() as i64),
+            )?;
+            Ok(Value::Bytea(bytes))
+        }
+        (BuiltinScalarFunction::LoWrite, [fd, data]) => {
+            crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lowrite")?;
+            let fd = int32_arg(fd, "lowrite")?;
+            let data = bytea_arg(data, "lowrite")?;
+            let desc = large_object_runtime(ctx)?.descriptor(ctx.client_id, fd)?;
+            if !desc.can_write {
+                return Err(ExecError::DetailedError {
+                    message: "large object descriptor was not opened for writing".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
+            let written = db.large_object_write(ctx, desc.loid, desc.offset, &data)?;
+            large_object_runtime(ctx)?.set_descriptor_offset(
+                ctx.client_id,
+                fd,
+                desc.offset.saturating_add(i64::from(written)),
+            )?;
+            Ok(Value::Int32(written))
+        }
+        (BuiltinScalarFunction::LoLseek, [fd, offset, whence]) => {
+            let fd = int32_arg(fd, "lo_lseek")?;
+            let offset = i64::from(int32_arg(offset, "lo_lseek")?);
+            let whence = int32_arg(whence, "lo_lseek")?;
+            let desc = large_object_runtime(ctx)?.descriptor(ctx.client_id, fd)?;
+            let new_offset = db.large_object_seek(ctx, desc, offset, whence)?;
+            large_object_runtime(ctx)?.set_descriptor_offset(ctx.client_id, fd, new_offset)?;
+            Ok(Value::Int32(i32::try_from(new_offset).map_err(|_| {
+                ExecError::DetailedError {
+                    message: "large object position exceeds integer range".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22003",
+                }
+            })?))
+        }
+        (BuiltinScalarFunction::LoLseek64, [fd, offset, whence]) => {
+            let fd = int32_arg(fd, "lo_lseek64")?;
+            let offset = int64_arg(offset, "lo_lseek64")?;
+            let whence = int32_arg(whence, "lo_lseek64")?;
+            let desc = large_object_runtime(ctx)?.descriptor(ctx.client_id, fd)?;
+            let new_offset = db.large_object_seek(ctx, desc, offset, whence)?;
+            large_object_runtime(ctx)?.set_descriptor_offset(ctx.client_id, fd, new_offset)?;
+            Ok(Value::Int64(new_offset))
+        }
+        (BuiltinScalarFunction::LoTell, [fd]) => {
+            let fd = int32_arg(fd, "lo_tell")?;
+            let desc = large_object_runtime(ctx)?.descriptor(ctx.client_id, fd)?;
+            Ok(Value::Int32(i32::try_from(desc.offset).map_err(|_| {
+                ExecError::DetailedError {
+                    message: "large object position exceeds integer range".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22003",
+                }
+            })?))
+        }
+        (BuiltinScalarFunction::LoTell64, [fd]) => {
+            let fd = int32_arg(fd, "lo_tell64")?;
+            Ok(Value::Int64(
+                large_object_runtime(ctx)?
+                    .descriptor(ctx.client_id, fd)?
+                    .offset,
+            ))
+        }
+        (BuiltinScalarFunction::LoTruncate, [fd, len]) => {
+            crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_truncate")?;
+            let fd = int32_arg(fd, "lo_truncate")?;
+            let len = i64::from(int32_arg(len, "lo_truncate")?);
+            let desc = large_object_runtime(ctx)?.descriptor(ctx.client_id, fd)?;
+            if !desc.can_write {
+                return Err(ExecError::DetailedError {
+                    message: "large object descriptor was not opened for writing".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
+            db.large_object_truncate(ctx, desc.loid, len)?;
+            Ok(Value::Int32(0))
+        }
+        (BuiltinScalarFunction::LoTruncate64, [fd, len]) => {
+            crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_truncate64")?;
+            let fd = int32_arg(fd, "lo_truncate64")?;
+            let len = int64_arg(len, "lo_truncate64")?;
+            let desc = large_object_runtime(ctx)?.descriptor(ctx.client_id, fd)?;
+            if !desc.can_write {
+                return Err(ExecError::DetailedError {
+                    message: "large object descriptor was not opened for writing".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
+            db.large_object_truncate(ctx, desc.loid, len)?;
+            Ok(Value::Int32(0))
+        }
+        (BuiltinScalarFunction::LoFromBytea, [oid, data]) => {
+            crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_from_bytea")?;
+            let oid = oid_arg_to_u32(oid, "lo_from_bytea")?;
+            let data = bytea_arg(data, "lo_from_bytea")?;
+            Ok(Value::Int64(i64::from(db.large_object_create(
+                ctx,
+                oid,
+                ctx.current_user_oid,
+                Some(&data),
+            )?)))
+        }
+        (BuiltinScalarFunction::LoGet, [oid]) => {
+            let oid = oid_arg_to_u32(oid, "lo_get")?;
+            Ok(Value::Bytea(db.large_object_get(ctx, oid, None, None)?))
+        }
+        (BuiltinScalarFunction::LoGet, [oid, offset, len]) => {
+            let oid = oid_arg_to_u32(oid, "lo_get")?;
+            let offset = int64_arg(offset, "lo_get")?;
+            let len = int32_arg(len, "lo_get")?;
+            Ok(Value::Bytea(db.large_object_get(
+                ctx,
+                oid,
+                Some(offset),
+                Some(len),
+            )?))
+        }
+        (BuiltinScalarFunction::LoPut, [oid, offset, data]) => {
+            crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_put")?;
+            let oid = oid_arg_to_u32(oid, "lo_put")?;
+            let offset = int64_arg(offset, "lo_put")?;
+            let data = bytea_arg(data, "lo_put")?;
+            db.large_object_put(ctx, oid, offset, &data)?;
+            Ok(Value::Null)
+        }
+        (BuiltinScalarFunction::LoImport, [path]) => {
+            crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_import")?;
+            ensure_lo_file_function_allowed(ctx, "lo_import")?;
+            let path = text_arg(path, "lo_import")?;
+            let data = std::fs::read(&path).map_err(|err| ExecError::DetailedError {
+                message: format!("could not open server file \"{path}\": {err}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58P01",
+            })?;
+            Ok(Value::Int64(i64::from(db.large_object_create(
+                ctx,
+                0,
+                ctx.current_user_oid,
+                Some(&data),
+            )?)))
+        }
+        (BuiltinScalarFunction::LoImport, [path, oid]) => {
+            crate::pgrust::database::ensure_large_object_write_allowed(ctx, "lo_import")?;
+            ensure_lo_file_function_allowed(ctx, "lo_import")?;
+            let path = text_arg(path, "lo_import")?;
+            let oid = oid_arg_to_u32(oid, "lo_import")?;
+            let data = std::fs::read(&path).map_err(|err| ExecError::DetailedError {
+                message: format!("could not open server file \"{path}\": {err}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58P01",
+            })?;
+            Ok(Value::Int64(i64::from(db.large_object_create(
+                ctx,
+                oid,
+                ctx.current_user_oid,
+                Some(&data),
+            )?)))
+        }
+        (BuiltinScalarFunction::LoExport, [oid, path]) => {
+            ensure_lo_file_function_allowed(ctx, "lo_export")?;
+            let oid = oid_arg_to_u32(oid, "lo_export")?;
+            let path = text_arg(path, "lo_export")?;
+            let data = db.large_object_get(ctx, oid, None, None)?;
+            std::fs::write(&path, data).map_err(|err| ExecError::DetailedError {
+                message: format!("could not create server file \"{path}\": {err}"),
+                detail: None,
+                hint: None,
+                sqlstate: "58P01",
+            })?;
+            Ok(Value::Int32(1))
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "valid large object builtin call",
@@ -12830,7 +13151,23 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
     func_variadic: bool,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    eval_native_builtin_scalar_typed_value_call(func, values, None, func_variadic, ctx)
+}
+
+pub(crate) fn eval_native_builtin_scalar_typed_value_call(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    arg_types: Option<&[Option<SqlType>]>,
+    func_variadic: bool,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     match func {
+        BuiltinScalarFunction::PgRestoreRelationStats
+        | BuiltinScalarFunction::PgClearRelationStats
+        | BuiltinScalarFunction::PgRestoreAttributeStats
+        | BuiltinScalarFunction::PgClearAttributeStats => {
+            eval_stats_import_builtin_value_call(func, values, arg_types, ctx)
+        }
         BuiltinScalarFunction::PgColumnToastChunkId => eval_pg_column_toast_chunk_id_values(values),
         BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(values, func_variadic, true)),
         BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(values, func_variadic, false)),
@@ -12895,6 +13232,69 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
             eval_text_search_builtin_function(func, values, Some(ctx))
         }
         _ => execute_builtin_scalar_function_value_call(func, values),
+    }
+}
+
+fn eval_stats_import_builtin_value_call(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    arg_types: Option<&[Option<SqlType>]>,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    ensure_builtin_side_effects_allowed(func, ctx)?;
+    let runtime = ctx
+        .stats_import_runtime
+        .clone()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("{func:?} requires database executor context"),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let typed_args = values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| TypedFunctionArg {
+            value: value.clone(),
+            sql_type: arg_types
+                .and_then(|types| types.get(idx))
+                .copied()
+                .flatten()
+                .or_else(|| value.sql_type_hint()),
+        })
+        .collect::<Vec<_>>();
+    match func {
+        BuiltinScalarFunction::PgRestoreRelationStats => {
+            runtime.pg_restore_relation_stats(ctx, typed_args)
+        }
+        BuiltinScalarFunction::PgClearRelationStats => {
+            if values.len() != 2 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "pg_clear_relation_stats(schemaname, relname)",
+                    actual: format!("{} args", values.len()),
+                }));
+            }
+            runtime.pg_clear_relation_stats(ctx, values[0].clone(), values[1].clone())
+        }
+        BuiltinScalarFunction::PgRestoreAttributeStats => {
+            runtime.pg_restore_attribute_stats(ctx, typed_args)
+        }
+        BuiltinScalarFunction::PgClearAttributeStats => {
+            if values.len() != 4 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "pg_clear_attribute_stats(schemaname, relname, attname, inherited)",
+                    actual: format!("{} args", values.len()),
+                }));
+            }
+            runtime.pg_clear_attribute_stats(
+                ctx,
+                values[0].clone(),
+                values[1].clone(),
+                values[2].clone(),
+                values[3].clone(),
+            )
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -13116,7 +13516,24 @@ pub(crate) fn eval_builtin_function(
     }
     if matches!(
         func,
-        BuiltinScalarFunction::LoCreate | BuiltinScalarFunction::LoUnlink
+        BuiltinScalarFunction::LoCreate
+            | BuiltinScalarFunction::LoUnlink
+            | BuiltinScalarFunction::LoOpen
+            | BuiltinScalarFunction::LoClose
+            | BuiltinScalarFunction::LoRead
+            | BuiltinScalarFunction::LoWrite
+            | BuiltinScalarFunction::LoLseek
+            | BuiltinScalarFunction::LoLseek64
+            | BuiltinScalarFunction::LoTell
+            | BuiltinScalarFunction::LoTell64
+            | BuiltinScalarFunction::LoTruncate
+            | BuiltinScalarFunction::LoTruncate64
+            | BuiltinScalarFunction::LoCreat
+            | BuiltinScalarFunction::LoFromBytea
+            | BuiltinScalarFunction::LoGet
+            | BuiltinScalarFunction::LoPut
+            | BuiltinScalarFunction::LoImport
+            | BuiltinScalarFunction::LoExport
     ) {
         return eval_large_object_builtin_function(func, &values, ctx);
     }

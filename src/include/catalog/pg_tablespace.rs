@@ -11,6 +11,8 @@ pub struct PgTablespaceRow {
     pub oid: u32,
     pub spcname: String,
     pub spcowner: u32,
+    pub spcacl: Option<Vec<String>>,
+    pub spcoptions: Option<Vec<String>>,
 }
 
 pub fn pg_tablespace_desc() -> RelationDesc {
@@ -19,6 +21,16 @@ pub fn pg_tablespace_desc() -> RelationDesc {
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("spcname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("spcowner", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc(
+                "spcacl",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
+            column_desc(
+                "spcoptions",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
         ],
     }
 }
@@ -29,11 +41,15 @@ pub fn bootstrap_pg_tablespace_rows() -> [PgTablespaceRow; 2] {
             oid: DEFAULT_TABLESPACE_OID,
             spcname: "pg_default".into(),
             spcowner: BOOTSTRAP_SUPERUSER_OID,
+            spcacl: None,
+            spcoptions: None,
         },
         PgTablespaceRow {
             oid: GLOBAL_TABLESPACE_OID,
             spcname: "pg_global".into(),
             spcowner: BOOTSTRAP_SUPERUSER_OID,
+            spcacl: None,
+            spcoptions: None,
         },
     ]
 }
@@ -50,6 +66,9 @@ mod tests {
             .iter()
             .map(|column| column.name.as_str())
             .collect();
-        assert_eq!(names, vec!["oid", "spcname", "spcowner"]);
+        assert_eq!(
+            names,
+            vec!["oid", "spcname", "spcowner", "spcacl", "spcoptions"]
+        );
     }
 }

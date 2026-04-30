@@ -2934,6 +2934,7 @@ fn parse_create_unique_index_statement() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3443,6 +3444,7 @@ fn parse_create_index_with_method_and_ordering() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3488,6 +3490,7 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3569,6 +3572,7 @@ fn parse_create_index_without_name() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3870,6 +3874,7 @@ fn parse_create_index_with_expression_item() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3903,6 +3908,7 @@ fn parse_create_index_with_function_expression_item() {
             predicate: None,
             predicate_sql: None,
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -3938,6 +3944,7 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
             predicate: Some(parse_expr("unique1 < 20 or unique1 > 980").unwrap()),
             predicate_sql: Some("unique1 < 20 or unique1 > 980".into()),
             options: Vec::new(),
+            tablespace: None,
         })
     );
 }
@@ -4212,6 +4219,7 @@ fn parse_alter_table_constraint_statements() {
                     ..attrs()
                 },
                 index_name: "items_idx".into(),
+                tablespace: None,
             },
         })
     );
@@ -4227,6 +4235,7 @@ fn parse_alter_table_constraint_statements() {
             constraint: TableConstraint::PrimaryKeyUsingIndex {
                 attributes: attrs(),
                 index_name: "items_pkey_idx".into(),
+                tablespace: None,
             },
         })
     );
@@ -5576,6 +5585,7 @@ fn parse_alter_role_rename_statement() {
                 columns: vec!["id".into()],
                 include_columns: Vec::new(),
                 without_overlaps: None,
+                tablespace: None,
             },
         })
     );
@@ -5593,6 +5603,7 @@ fn parse_alter_role_rename_statement() {
                 columns: vec!["id".into(), "valid_at".into()],
                 include_columns: Vec::new(),
                 without_overlaps: Some("valid_at".into()),
+                tablespace: None,
             },
         })
     );
@@ -5609,6 +5620,7 @@ fn parse_alter_role_rename_statement() {
                 columns: vec!["note".into()],
                 include_columns: Vec::new(),
                 without_overlaps: None,
+                tablespace: None,
             },
         })
     );
@@ -6187,7 +6199,9 @@ fn parse_create_tablespace_statement() {
         stmt,
         Statement::CreateTablespace(CreateTablespaceStatement {
             tablespace_name: "regress_tblspace".into(),
+            owner: None,
             location: "".into(),
+            options: Vec::new(),
         })
     );
 }
@@ -13280,6 +13294,7 @@ fn create_table_temp_name_validation() {
             of_type_name: None,
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
+            tablespace: None,
             elements: vec![],
             options: Vec::new(),
             inherits: Vec::new(),
@@ -13298,6 +13313,7 @@ fn create_table_temp_name_validation() {
         of_type_name: None,
         persistence: TablePersistence::Temporary,
         on_commit: OnCommitAction::PreserveRows,
+        tablespace: None,
         elements: vec![],
         options: Vec::new(),
         inherits: Vec::new(),
@@ -13315,6 +13331,7 @@ fn create_table_temp_name_validation() {
         of_type_name: None,
         persistence: TablePersistence::Permanent,
         on_commit: OnCommitAction::DeleteRows,
+        tablespace: None,
         elements: vec![],
         options: Vec::new(),
         inherits: Vec::new(),
@@ -14565,12 +14582,14 @@ fn parse_create_table_primary_key_and_unique_constraints() {
                 columns: vec!["id".into(), "note".into()],
                 include_columns: Vec::new(),
                 without_overlaps: None,
+                tablespace: None,
             },
             TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["note".into(), "id".into()],
                 include_columns: Vec::new(),
                 without_overlaps: None,
+                tablespace: None,
             },
         ]
     );
@@ -14590,12 +14609,14 @@ fn parse_create_table_primary_key_and_unique_constraints() {
                 columns: vec!["id".into(), "note".into()],
                 include_columns: vec!["payload".into()],
                 without_overlaps: None,
+                tablespace: None,
             },
             TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["note".into()],
                 include_columns: vec!["id".into(), "payload".into()],
                 without_overlaps: None,
+                tablespace: None,
             },
         ]
     );
@@ -14616,6 +14637,7 @@ fn parse_create_table_primary_key_and_unique_constraints() {
             columns: vec!["id".into()],
             include_columns: Vec::new(),
             without_overlaps: None,
+            tablespace: None,
         }]
     );
 
@@ -14637,12 +14659,14 @@ fn parse_create_table_primary_key_and_unique_constraints() {
                 columns: vec!["id".into(), "valid_at".into()],
                 include_columns: Vec::new(),
                 without_overlaps: Some("valid_at".into()),
+                tablespace: None,
             },
             TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["id".into(), "valid_at".into()],
                 include_columns: Vec::new(),
                 without_overlaps: Some("valid_at".into()),
+                tablespace: None,
             },
         ]
     );
@@ -14659,7 +14683,8 @@ fn parse_create_table_primary_key_and_unique_constraints() {
             attributes: ConstraintAttributes {
                 nulls_not_distinct: true,
                 ..attrs()
-            }
+            },
+            tablespace: None,
         }]
     );
 }
@@ -14686,7 +14711,8 @@ fn parse_create_table_deferrable_key_constraints() {
                 deferrable: Some(true),
                 initially_deferred: Some(true),
                 ..attrs()
-            }
+            },
+            tablespace: None,
         }]
     );
     assert_eq!(
@@ -14701,6 +14727,7 @@ fn parse_create_table_deferrable_key_constraints() {
             columns: vec!["code".into()],
             include_columns: Vec::new(),
             without_overlaps: None,
+            tablespace: None,
         }]
     );
 }

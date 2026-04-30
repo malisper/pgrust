@@ -283,18 +283,11 @@ pub(crate) fn resolve_regclass_oid(
         .ok_or_else(|| regclass_lookup_error(input, Some(lookup)))
 }
 
-pub(crate) fn regclass_lookup_error(input: &str, catalog: Option<&dyn CatalogLookup>) -> ExecError {
+pub(crate) fn regclass_lookup_error(
+    input: &str,
+    _catalog: Option<&dyn CatalogLookup>,
+) -> ExecError {
     let trimmed = input.trim();
-    if let Some(catalog) = catalog
-        && let Ok(parts) = parse_sql_name_parts(trimmed)
-        && let [schema, _name] = parts.as_slice()
-        && !catalog
-            .namespace_rows()
-            .into_iter()
-            .any(|row| row.nspname == *schema)
-    {
-        return detailed_error(format!("schema \"{schema}\" does not exist"), "3F000");
-    }
     detailed_error(format!("relation \"{trimmed}\" does not exist"), "42P01")
 }
 

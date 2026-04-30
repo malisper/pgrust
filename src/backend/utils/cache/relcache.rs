@@ -596,7 +596,12 @@ impl RelCache {
                 Err(err) => return Err(err),
             };
             let entry = RelCacheEntry {
-                rel: relation_locator_for_class_row(class.oid, class.relfilenode, current_db_oid),
+                rel: relation_locator_for_class_row(
+                    class.oid,
+                    class.relfilenode,
+                    class.reltablespace,
+                    current_db_oid,
+                ),
                 relation_oid: class.oid,
                 namespace_oid: class.relnamespace,
                 owner_oid: class.relowner,
@@ -859,6 +864,7 @@ fn bootstrap_toast_relcache_entry(parent: &RelCacheEntry) -> RelCacheEntry {
 pub(crate) fn relation_locator_for_class_row(
     relation_oid: u32,
     relfilenode: u32,
+    reltablespace: u32,
     current_db_oid: u32,
 ) -> RelFileLocator {
     if let Some(kind) = bootstrap_catalog_kinds()
@@ -876,7 +882,7 @@ pub(crate) fn relation_locator_for_class_row(
         };
     }
     RelFileLocator {
-        spc_oid: 0,
+        spc_oid: reltablespace,
         db_oid: current_db_oid,
         rel_number: relfilenode,
     }

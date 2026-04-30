@@ -367,14 +367,25 @@ transform_psql_fixture() {
 prepare_setup_fixture() {
     local input_path="$1"
     local output_path="$2"
+    local in_place_tablespace=false
 
-    perl -0pe '
+    if [[ "${PGRUST_REGRESS_IN_PLACE_TABLESPACE:-}" == true || "$SINGLE_TEST" == "tablespace" ]]; then
+        in_place_tablespace=true
+    fi
+
+    PGRUST_REGRESS_IN_PLACE_TABLESPACE_EFFECTIVE="$in_place_tablespace" perl -0pe '
         my $tablespace_dir = $ENV{"PGRUST_REGRESS_TABLESPACE_DIR"};
-        my $version_dir = $tablespace_dir . "/" . $ENV{"PGRUST_TABLESPACE_VERSION_DIRECTORY"};
-        s{CREATE TABLESPACE regress_tblspace LOCATION '\''/tmp/pgrust_regress_tblspace'\'';}
-         {"CREATE TABLESPACE regress_tblspace LOCATION '\''$tablespace_dir'\'';"}ge;
+        my $in_place = ($ENV{"PGRUST_REGRESS_IN_PLACE_TABLESPACE_EFFECTIVE"} // q{}) eq q{true};
+        if ($in_place) {
+            my $create = "SET allow_in_place_tablespaces = on;\nCREATE TABLESPACE regress_tblspace LOCATION '\'''\'';\nRESET allow_in_place_tablespaces;";
+            s{CREATE TABLESPACE regress_tblspace LOCATION :'\''regress_tblspace_dir'\'';}{$create}ge;
+            s{CREATE TABLESPACE regress_tblspace LOCATION '\''/tmp/pgrust_regress_tblspace'\'';}{$create}ge;
+        } else {
+            s{CREATE TABLESPACE regress_tblspace LOCATION '\''/tmp/pgrust_regress_tblspace'\'';}
+             {"CREATE TABLESPACE regress_tblspace LOCATION '\''$tablespace_dir'\'';"}ge;
+        }
         END {
-            if ($tablespace_dir eq q{}) {
+            if (!$in_place && $tablespace_dir eq q{}) {
                 die "PGRUST_REGRESS_TABLESPACE_DIR must be set\n";
             }
         }
@@ -895,7 +906,7 @@ SERVER_PROFILE=release
 SERVER_PROFILE_DIR=release
 BUILD_ENV=()
 BUILD_ARGS=(--release --bin pgrust_server)
-if [[ -n "$SINGLE_TEST" && "$SINGLE_TEST" != "alter_table" && "$SINGLE_TEST" != "triggers" ]]; then
+if [[ -n "$SINGLE_TEST" && "$SINGLE_TEST" != "alter_table" && "$SINGLE_TEST" != "tablespace" && "$SINGLE_TEST" != "triggers" ]]; then
     SERVER_PROFILE="dev, opt-level 0"
     SERVER_PROFILE_DIR=debug
     BUILD_ENV=(CARGO_PROFILE_DEV_OPT_LEVEL=0)
@@ -922,6 +933,11 @@ fi
 REGRESS_TABLESPACE_DIR="$RESULTS_DIR/tablespaces/regress_tblspace"
 export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
 export PGRUST_TABLESPACE_VERSION_DIRECTORY="$TABLESPACE_VERSION_DIRECTORY"
+if [[ "$SINGLE_TEST" == "tablespace" ]]; then
+    export PGRUST_REGRESS_IN_PLACE_TABLESPACE=true
+else
+    unset PGRUST_REGRESS_IN_PLACE_TABLESPACE
+fi
 PREPARED_SETUP_SQL="$RESULTS_DIR/fixtures/test_setup_pgrust.sql"
 
 stop_server() {
@@ -1267,6 +1283,9 @@ copy_regression_base_data() {
         for tblspc_entry in "$target_data_dir"/pg_tblspc/*; do
             [[ -e "$tblspc_entry" || -L "$tblspc_entry" ]] || continue
             tblspc_name="$(basename "$tblspc_entry")"
+            if [[ ! -L "$source_data_dir/pg_tblspc/$tblspc_name" ]]; then
+                continue
+            fi
             rm -rf "$tblspc_entry"
             ln -s "$target_tablespace_dir" "$target_data_dir/pg_tblspc/$tblspc_name"
         done

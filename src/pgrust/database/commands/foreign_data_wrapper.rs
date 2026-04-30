@@ -1038,6 +1038,7 @@ impl Database {
             &relation,
             &lowered,
             configured_search_path,
+            None,
             catalog_effects,
         )?;
         Ok(StatementResult::AffectedRows(0))

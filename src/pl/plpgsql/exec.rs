@@ -1989,12 +1989,18 @@ fn exec_function_block(
     } else {
         None
     };
-    if let Some((_, subxid)) = &subxact {
-        ctx.snapshot = ctx
+    if let Some((parent_snapshot, subxid)) = &subxact {
+        let mut sub_snapshot = ctx
             .txns
             .read()
             .snapshot_for_command(*subxid, CommandId::MAX)
             .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+        sub_snapshot
+            .own_xids
+            .extend(parent_snapshot.own_xids.iter().copied());
+        sub_snapshot.own_xids.insert(*subxid);
+        ctx.snapshot = sub_snapshot;
+        sync_plpgsql_catalog_snapshot_override(ctx);
     }
 
     for local in &block.local_slots {
@@ -2036,6 +2042,7 @@ fn exec_function_block(
                         .abort(subxid)
                         .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
                     ctx.snapshot = parent_snapshot;
+                    sync_plpgsql_catalog_snapshot_override(ctx);
                 }
                 return match exec_function_exception_handlers(
                     &block.exception_handlers,
@@ -2078,7 +2085,27 @@ fn finish_function_block_subxact(
             .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
     }
     ctx.snapshot = parent_snapshot;
+    sync_plpgsql_catalog_snapshot_override(ctx);
     Ok(())
+}
+
+fn sync_plpgsql_catalog_snapshot_override(ctx: &ExecutorContext) {
+    let Some(db) = ctx.database.clone() else {
+        return;
+    };
+    if ctx.snapshot.current_xid != INVALID_TRANSACTION_ID {
+        crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+            &db,
+            ctx.client_id,
+            ctx.snapshot.current_xid,
+            ctx.snapshot.clone(),
+        );
+    } else {
+        crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
+            &db,
+            ctx.client_id,
+        );
+    }
 }
 
 fn exec_function_exception_handlers(
@@ -3664,6 +3691,7 @@ fn exec_dynamic_create_table_as(
         cid,
         None,
         planner_config_from_executor_gucs(&ctx.gucs),
+        Some(&ctx.gucs),
         &mut ctx.catalog_effects,
         &mut ctx.temp_effects,
     );
@@ -3695,12 +3723,13 @@ fn exec_dynamic_create_table(
     let cid = ctx.next_command_id;
     let effect_start = ctx.catalog_effects.len();
     let mut sequence_effects = Vec::new();
-    let result = db.execute_create_table_stmt_in_transaction_with_search_path(
+    let result = db.execute_create_table_stmt_in_transaction_with_search_path_and_gucs(
         ctx.client_id,
         stmt,
         xid,
         cid,
         None,
+        Some(&ctx.gucs),
         &mut ctx.catalog_effects,
         &mut ctx.temp_effects,
         &mut sequence_effects,
@@ -6832,6 +6861,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
         "not_null_violation" => Some("23502"),
         "check_violation" => Some("23514"),
         "foreign_key_violation" => Some("23503"),
+        "undefined_file" => Some("58P01"),
         "invalid_parameter_value" => Some("22023"),
         "null_value_not_allowed" => Some("22004"),
         "syntax_error" => Some("42601"),

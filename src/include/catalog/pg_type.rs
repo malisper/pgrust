@@ -1262,6 +1262,11 @@ pub fn bootstrap_composite_type_rows() -> Vec<PgTypeRow> {
 
 fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
     let storage = column_desc("datum", sql_type, true).storage;
+    let typelem = if sql_type.is_array {
+        sql_type.element_type().type_oid
+    } else {
+        0
+    };
     PgTypeRow {
         oid,
         typname: name.to_string(),
@@ -1276,7 +1281,7 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
         typstorage: storage.attstorage,
         typrelid: 0,
         typsubscript: 0,
-        typelem: 0,
+        typelem,
         typarray: 0,
         typinput: 0,
         typoutput: 0,

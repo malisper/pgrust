@@ -563,7 +563,7 @@ impl CatalogStore {
         Ok(oid)
     }
 
-    pub(super) fn allocate_next_oid(&mut self, requested_oid: u32) -> Result<u32, CatalogError> {
+    pub(crate) fn allocate_next_oid(&mut self, requested_oid: u32) -> Result<u32, CatalogError> {
         let mut control = self.control_state()?;
         let oid = if requested_oid == 0 {
             control.next_oid

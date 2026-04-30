@@ -768,6 +768,31 @@ fn lookup_function_row_by_signature(
 }
 
 impl Database {
+    fn execute_tablespace_acl_stmt(
+        &self,
+        client_id: ClientId,
+        object_names: &[String],
+    ) -> Result<StatementResult, ExecError> {
+        let cache = self
+            .backend_catcache(client_id, None)
+            .map_err(map_catalog_error)?;
+        for name in object_names {
+            if !cache
+                .tablespace_rows()
+                .into_iter()
+                .any(|row| row.spcname.eq_ignore_ascii_case(name))
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("tablespace \"{name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                });
+            }
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_grant_object_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -802,6 +827,10 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
+            GrantObjectPrivilege::AllPrivilegesOnTablespace
+            | GrantObjectPrivilege::CreateOnTablespace => {
+                self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
+            }
             GrantObjectPrivilege::UsageOnType => self.execute_grant_type_acl_stmt_with_search_path(
                 client_id,
                 stmt,
@@ -818,6 +847,15 @@ impl Database {
             | GrantObjectPrivilege::ExecuteOnProcedure
             | GrantObjectPrivilege::ExecuteOnRoutine => self
                 .execute_grant_function_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
+            GrantObjectPrivilege::AllPrivilegesOnLargeObject
+            | GrantObjectPrivilege::SelectOnLargeObject
+            | GrantObjectPrivilege::UpdateOnLargeObject
+            | GrantObjectPrivilege::LargeObjectPrivileges(_) => self
+                .execute_grant_large_object_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,
@@ -877,6 +915,10 @@ impl Database {
                     catalog_effects,
                     true,
                 ),
+            GrantObjectPrivilege::AllPrivilegesOnTablespace
+            | GrantObjectPrivilege::CreateOnTablespace => {
+                self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
+            }
             GrantObjectPrivilege::UsageOnType => self
                 .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
@@ -907,6 +949,21 @@ impl Database {
                     xid,
                     cid,
                     configured_search_path,
+                    catalog_effects,
+                    true,
+                ),
+            GrantObjectPrivilege::AllPrivilegesOnLargeObject
+            | GrantObjectPrivilege::SelectOnLargeObject
+            | GrantObjectPrivilege::UpdateOnLargeObject
+            | GrantObjectPrivilege::LargeObjectPrivileges(_) => self
+                .execute_large_object_acl_stmt_in_transaction(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    false,
+                    xid,
+                    cid,
                     catalog_effects,
                     true,
                 ),
@@ -975,6 +1032,10 @@ impl Database {
                     catalog_effects,
                     false,
                 ),
+            GrantObjectPrivilege::AllPrivilegesOnTablespace
+            | GrantObjectPrivilege::CreateOnTablespace => {
+                self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
+            }
             GrantObjectPrivilege::UsageOnType => self
                 .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
@@ -1005,6 +1066,21 @@ impl Database {
                     xid,
                     cid,
                     configured_search_path,
+                    catalog_effects,
+                    false,
+                ),
+            GrantObjectPrivilege::AllPrivilegesOnLargeObject
+            | GrantObjectPrivilege::SelectOnLargeObject
+            | GrantObjectPrivilege::UpdateOnLargeObject
+            | GrantObjectPrivilege::LargeObjectPrivileges(_) => self
+                .execute_large_object_acl_stmt_in_transaction(
+                    client_id,
+                    stmt.privilege.clone(),
+                    &stmt.object_names,
+                    &stmt.grantee_names,
+                    stmt.with_grant_option,
+                    xid,
+                    cid,
                     catalog_effects,
                     false,
                 ),
@@ -1061,6 +1137,10 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
+            GrantObjectPrivilege::AllPrivilegesOnTablespace
+            | GrantObjectPrivilege::CreateOnTablespace => {
+                self.execute_tablespace_acl_stmt(client_id, &stmt.object_names)
+            }
             GrantObjectPrivilege::UsageOnType => self
                 .execute_revoke_type_acl_stmt_with_search_path(
                     client_id,
@@ -1078,6 +1158,15 @@ impl Database {
             | GrantObjectPrivilege::ExecuteOnProcedure
             | GrantObjectPrivilege::ExecuteOnRoutine => self
                 .execute_revoke_function_acl_stmt_with_search_path(
+                    client_id,
+                    stmt,
+                    configured_search_path,
+                ),
+            GrantObjectPrivilege::AllPrivilegesOnLargeObject
+            | GrantObjectPrivilege::SelectOnLargeObject
+            | GrantObjectPrivilege::UpdateOnLargeObject
+            | GrantObjectPrivilege::LargeObjectPrivileges(_) => self
+                .execute_revoke_large_object_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,

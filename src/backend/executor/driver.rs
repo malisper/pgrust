@@ -325,6 +325,8 @@ fn execute_statement_with_source(
         Statement::AlterTableRename(_)
         | Statement::AlterTableSetSchema(_)
         | Statement::AlterTableSetTablespace(_)
+        | Statement::AlterIndexSetTablespace(_)
+        | Statement::AlterMoveAllTablespace(_)
         | Statement::AlterTableSetPersistence(_)
         | Statement::AlterIndexRename(_)
         | Statement::AlterIndexAttachPartition(_)
@@ -343,6 +345,10 @@ fn execute_statement_with_source(
         Statement::AlterTableOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE OWNER handled by database/session layer",
             actual: "ALTER TABLE OWNER".into(),
+        })),
+        Statement::AlterLargeObjectOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER LARGE OBJECT handled by database/session layer",
+            actual: "ALTER LARGE OBJECT".into(),
         })),
         Statement::AlterTableRenameColumn(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -420,6 +426,10 @@ fn execute_statement_with_source(
         Statement::CommentOnOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON OPERATOR handled by database/session layer",
             actual: "COMMENT ON OPERATOR".into(),
+        })),
+        Statement::CommentOnLargeObject(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON LARGE OBJECT handled by database/session layer",
+            actual: "COMMENT ON LARGE OBJECT".into(),
         })),
         Statement::CommentOnType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TYPE handled by database/session layer",
@@ -609,6 +619,14 @@ fn execute_statement_with_source(
         Statement::CreateTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE TABLESPACE handled by database/session layer",
             actual: "CREATE TABLESPACE".into(),
+        })),
+        Statement::DropTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP TABLESPACE handled by database/session layer",
+            actual: "DROP TABLESPACE".into(),
+        })),
+        Statement::AlterTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TABLESPACE handled by database/session layer",
+            actual: "ALTER TABLESPACE".into(),
         })),
         Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE DOMAIN handled by database/session layer",
@@ -852,6 +870,8 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableReset(_)
         | Statement::AlterTableSetSchema(_)
         | Statement::AlterTableSetTablespace(_)
+        | Statement::AlterIndexSetTablespace(_)
+        | Statement::AlterMoveAllTablespace(_)
         | Statement::AlterTableRenameColumn(_)
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
@@ -867,6 +887,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableAlterColumnExpression(_)
         | Statement::AlterTableOf(_)
         | Statement::AlterTableNotOf(_)
+        | Statement::AlterLargeObjectOwner(_)
         | Statement::AlterTableAlterColumnIdentity(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => Ok(StatementResult::AffectedRows(0)),
@@ -912,6 +933,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CommentOnOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON OPERATOR".into(),
+        })),
+        Statement::CommentOnLargeObject(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON LARGE OBJECT".into(),
         })),
         Statement::CommentOnType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
@@ -1094,6 +1119,14 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE TABLESPACE".into(),
+        })),
+        Statement::DropTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP TABLESPACE".into(),
+        })),
+        Statement::AlterTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER TABLESPACE".into(),
         })),
         Statement::AlterSchemaOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

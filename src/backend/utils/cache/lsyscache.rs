@@ -39,8 +39,8 @@ use crate::include::catalog::{
     PgEnumRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgPublicationNamespaceRow,
     PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -1902,6 +1902,12 @@ impl CatalogLookup for LazyCatalogLookup {
         self.db
             .auth_catalog(self.client_id, self.txn_ctx)
             .map(|catalog| catalog.memberships().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.tablespace_rows())
             .unwrap_or_default()
     }
 

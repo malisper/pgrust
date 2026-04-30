@@ -59,6 +59,7 @@ pub mod pg_ts_parser;
 pub mod pg_ts_template;
 pub mod pg_type;
 pub mod pg_user_mapping;
+pub mod system_fk;
 pub mod toasting;
 
 pub use bootstrap::*;
@@ -122,4 +123,5 @@ pub use pg_ts_parser::*;
 pub use pg_ts_template::*;
 pub use pg_type::*;
 pub use pg_user_mapping::*;
+pub use system_fk::*;
 pub use toasting::*;

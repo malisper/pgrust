@@ -2320,6 +2320,12 @@ pub(super) fn estimate_index_candidate(
             base_cost = index_pages * SEQ_PAGE_COST
                 + index_rows * CPU_INDEX_TUPLE_COST
                 + unused_btree_column_cost;
+            if config.enable_seqscan && order_items.is_none() && !spec.removes_order {
+                let seq_cost = seq_scan_estimate(stats).total_cost.as_f64();
+                if base_cost <= seq_cost {
+                    base_cost = seq_cost + CPU_OPERATOR_COST;
+                }
+            }
         } else {
             base_cost -= index_rows * CPU_TUPLE_COST;
         }

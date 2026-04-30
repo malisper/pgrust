@@ -2555,7 +2555,24 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgTryAdvisoryXactLockShared
             | BuiltinScalarFunction::PgAdvisoryUnlock
             | BuiltinScalarFunction::PgAdvisoryUnlockShared => matches!(args.len(), 1 | 2),
-            BuiltinScalarFunction::LoCreate | BuiltinScalarFunction::LoUnlink => args.len() == 1,
+            BuiltinScalarFunction::LoCreate
+            | BuiltinScalarFunction::LoUnlink
+            | BuiltinScalarFunction::LoClose
+            | BuiltinScalarFunction::LoTell
+            | BuiltinScalarFunction::LoTell64
+            | BuiltinScalarFunction::LoCreat => args.len() == 1,
+            BuiltinScalarFunction::LoOpen
+            | BuiltinScalarFunction::LoRead
+            | BuiltinScalarFunction::LoWrite
+            | BuiltinScalarFunction::LoTruncate
+            | BuiltinScalarFunction::LoTruncate64
+            | BuiltinScalarFunction::LoFromBytea
+            | BuiltinScalarFunction::LoExport => args.len() == 2,
+            BuiltinScalarFunction::LoLseek
+            | BuiltinScalarFunction::LoLseek64
+            | BuiltinScalarFunction::LoPut => args.len() == 3,
+            BuiltinScalarFunction::LoGet => matches!(args.len(), 1 | 3),
+            BuiltinScalarFunction::LoImport => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
             | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed
@@ -4452,6 +4469,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("lo_create", BuiltinScalarFunction::LoCreate),
         ("lo_unlink", BuiltinScalarFunction::LoUnlink),
+        ("lo_open", BuiltinScalarFunction::LoOpen),
+        ("lo_close", BuiltinScalarFunction::LoClose),
+        ("loread", BuiltinScalarFunction::LoRead),
+        ("lowrite", BuiltinScalarFunction::LoWrite),
+        ("lo_lseek", BuiltinScalarFunction::LoLseek),
+        ("lo_lseek64", BuiltinScalarFunction::LoLseek64),
+        ("lo_tell", BuiltinScalarFunction::LoTell),
+        ("lo_tell64", BuiltinScalarFunction::LoTell64),
+        ("lo_truncate", BuiltinScalarFunction::LoTruncate),
+        ("lo_truncate64", BuiltinScalarFunction::LoTruncate64),
+        ("lo_creat", BuiltinScalarFunction::LoCreat),
+        ("lo_from_bytea", BuiltinScalarFunction::LoFromBytea),
+        ("lo_get", BuiltinScalarFunction::LoGet),
+        ("lo_put", BuiltinScalarFunction::LoPut),
+        ("lo_import", BuiltinScalarFunction::LoImport),
+        ("lo_export", BuiltinScalarFunction::LoExport),
         ("pg_typeof", BuiltinScalarFunction::PgTypeof),
         ("pg_basetype", BuiltinScalarFunction::PgBaseType),
         (

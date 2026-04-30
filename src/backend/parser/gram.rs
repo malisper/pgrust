@@ -166,6 +166,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_constraint_comment_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_large_object_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_type_statement(&sql)? {
         return Ok(stmt);
     }
@@ -182,6 +185,15 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_drop_tablespace_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_tablespace_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_move_all_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_create_schema_statement(&sql, options)? {
@@ -2632,7 +2644,12 @@ fn build_partition_create_table_statement(
             return Err(PartitionStatementParseError::Unsupported);
         };
         let (partition_spec, rest) = parse_partition_spec_clause(partition_clause)?;
-        let rest = rest.trim();
+        let mut rest = rest.trim();
+        if keyword_at_start(rest, "tablespace") {
+            let (tablespace_name, next) = parse_partition_tablespace_clause(rest)?;
+            create_stmt.tablespace = Some(tablespace_name);
+            rest = next.trim();
+        }
         if !rest.is_empty() {
             if partitioned_table_storage_clause_is_unsupported(rest)? {
                 return Err(PartitionStatementParseError::Parse(
@@ -2656,7 +2673,7 @@ fn build_partition_create_table_statement(
         return Err(PartitionStatementParseError::Unsupported);
     };
     create_stmt.inherits.clear();
-    let (parent_name, elements, partition_bound, partition_spec, rest) =
+    let (parent_name, elements, partition_bound, partition_spec, tablespace, rest) =
         parse_partition_of_clause(partition_clause, options)?;
     if !rest.trim().is_empty() {
         return Err(PartitionStatementParseError::Unsupported);
@@ -2665,6 +2682,7 @@ fn build_partition_create_table_statement(
     create_stmt.partition_of = Some(parent_name);
     create_stmt.partition_bound = Some(partition_bound);
     create_stmt.partition_spec = partition_spec;
+    create_stmt.tablespace = tablespace;
     Ok(Statement::CreateTable(create_stmt))
 }
 
@@ -2677,6 +2695,7 @@ fn parse_partition_of_clause(
         Vec<CreateTableElement>,
         RawPartitionBoundSpec,
         Option<RawPartitionSpec>,
+        Option<String>,
         &str,
     ),
     PartitionStatementParseError,
@@ -2707,7 +2726,30 @@ fn parse_partition_of_clause(
     if !rest.is_empty() && (keyword_at_start(rest, "with") || keyword_at_start(rest, "without")) {
         rest = parse_partition_of_table_storage_clause(rest)?;
     }
-    Ok((parts.join("."), elements, bound, partition_spec, rest))
+    let tablespace = if keyword_at_start(rest, "tablespace") {
+        let (tablespace_name, next) = parse_partition_tablespace_clause(rest)?;
+        rest = next.trim_start();
+        Some(tablespace_name)
+    } else {
+        None
+    };
+    Ok((
+        parts.join("."),
+        elements,
+        bound,
+        partition_spec,
+        tablespace,
+        rest,
+    ))
+}
+
+fn parse_partition_tablespace_clause(
+    input: &str,
+) -> Result<(String, &str), PartitionStatementParseError> {
+    let rest = consume_keyword(input.trim_start(), "tablespace").trim_start();
+    let (tablespace_name, tail) =
+        parse_sql_identifier(rest).map_err(PartitionStatementParseError::Parse)?;
+    Ok((tablespace_name, tail))
 }
 
 fn parse_partition_of_table_storage_clause(
@@ -2845,11 +2887,13 @@ fn parse_partition_column_override(
             rest = consume_keyword(rest, "key").trim_start();
             constraints.push(ColumnConstraint::PrimaryKey {
                 attributes: ConstraintAttributes::default(),
+                tablespace: None,
             });
         } else if keyword_at_start(rest, "unique") {
             rest = consume_keyword(rest, "unique").trim_start();
             constraints.push(ColumnConstraint::Unique {
                 attributes: ConstraintAttributes::default(),
+                tablespace: None,
             });
         } else if keyword_at_start(rest, "default") {
             rest = consume_keyword(rest, "default").trim_start();
@@ -5217,7 +5261,14 @@ fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatem
         .ok_or(ParseError::UnexpectedEof)?
         .trim_start();
     let (tablespace_name, rest) = parse_sql_identifier(rest)?;
-    let rest = rest.trim_start();
+    let mut rest = rest.trim_start();
+    let mut owner = None;
+    if keyword_at_start(rest, "owner") {
+        rest = consume_keyword(rest, "owner").trim_start();
+        let (owner_name, after_owner) = parse_sql_identifier(rest)?;
+        owner = Some(RoleSpec::RoleName(owner_name));
+        rest = after_owner.trim_start();
+    }
     if !keyword_at_start(rest, "location") {
         return Err(ParseError::UnexpectedToken {
             expected: "LOCATION string literal",
@@ -5230,17 +5281,205 @@ fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatem
         actual: rest.into(),
     })?;
     let location = decode_string_literal(&rest[..token_len])?;
-    let trailing = rest[token_len..].trim();
-    if !trailing.is_empty() {
+    let mut trailing = rest[token_len..].trim();
+    let options = if trailing.is_empty() {
+        Vec::new()
+    } else if keyword_at_start(trailing, "with") {
+        trailing = consume_keyword(trailing, "with").trim_start();
+        let (options_sql, tail) = take_parenthesized_segment(trailing)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of CREATE TABLESPACE statement",
+                actual: tail.trim().into(),
+            });
+        }
+        parse_reloption_assignments(&options_sql)?
+    } else {
         return Err(ParseError::FeatureNotSupported(format!(
             "unsupported CREATE TABLESPACE clause: {}",
             trailing.split_whitespace().next().unwrap_or(trailing)
         )));
-    }
+    };
     Ok(CreateTablespaceStatement {
         tablespace_name,
+        owner,
         location,
+        options,
     })
+}
+
+fn try_parse_drop_tablespace_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("drop tablespace ") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "drop").trim_start();
+    rest = consume_keyword(rest, "tablespace").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (tablespace_name, tail) = parse_sql_identifier(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of DROP TABLESPACE statement",
+            actual: tail.trim().into(),
+        });
+    }
+    Ok(Some(Statement::DropTablespace(DropTablespaceStatement {
+        tablespace_name,
+        if_exists,
+    })))
+}
+
+fn try_parse_alter_tablespace_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("alter tablespace ") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    rest = consume_keyword(rest, "tablespace").trim_start();
+    let (tablespace_name, after_name) = parse_sql_identifier(rest)?;
+    rest = after_name.trim_start();
+    let action = if keyword_at_start(rest, "set") {
+        rest = consume_keyword(rest, "set").trim_start();
+        let (options_sql, tail) = take_parenthesized_segment(rest)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TABLESPACE SET statement",
+                actual: tail.trim().into(),
+            });
+        }
+        AlterTablespaceAction::SetOptions(parse_reloption_assignments(&options_sql)?)
+    } else if keyword_at_start(rest, "reset") {
+        rest = consume_keyword(rest, "reset").trim_start();
+        let (options_sql, tail) = take_parenthesized_segment(rest)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TABLESPACE RESET statement",
+                actual: tail.trim().into(),
+            });
+        }
+        let options = split_comma_separated_sql(&options_sql)?
+            .into_iter()
+            .map(|part| {
+                if part.contains('=') {
+                    return Err(ParseError::DetailedError {
+                        message: "RESET must not include values for parameters".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                let (name, tail) = parse_sql_identifier(&part)?;
+                if !tail.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "tablespace option name",
+                        actual: tail.trim().into(),
+                    });
+                }
+                Ok(name)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        AlterTablespaceAction::ResetOptions(options)
+    } else if keyword_at_start(rest, "rename") {
+        rest = consume_keyword(rest, "rename").trim_start();
+        rest = consume_keyword(rest, "to").trim_start();
+        let (new_name, tail) = parse_sql_identifier(rest)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TABLESPACE RENAME statement",
+                actual: tail.trim().into(),
+            });
+        }
+        AlterTablespaceAction::Rename { new_name }
+    } else if keyword_at_start(rest, "owner") {
+        rest = consume_keyword(rest, "owner").trim_start();
+        rest = consume_keyword(rest, "to").trim_start();
+        let (new_owner, tail) = parse_sql_identifier(rest)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER TABLESPACE OWNER statement",
+                actual: tail.trim().into(),
+            });
+        }
+        AlterTablespaceAction::OwnerTo {
+            new_owner: RoleSpec::RoleName(new_owner),
+        }
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER TABLESPACE action",
+            actual: rest.into(),
+        });
+    };
+    Ok(Some(Statement::AlterTablespace(AlterTablespaceStatement {
+        tablespace_name,
+        action,
+    })))
+}
+
+fn try_parse_move_all_tablespace_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    let (object_kind, mut rest) = if lowered.starts_with("alter table all in tablespace ") {
+        (
+            MoveAllTablespaceObjectKind::Table,
+            trimmed["alter table all in tablespace ".len()..].trim_start(),
+        )
+    } else if lowered.starts_with("alter index all in tablespace ") {
+        (
+            MoveAllTablespaceObjectKind::Index,
+            trimmed["alter index all in tablespace ".len()..].trim_start(),
+        )
+    } else if lowered.starts_with("alter materialized view all in tablespace ") {
+        (
+            MoveAllTablespaceObjectKind::MaterializedView,
+            trimmed["alter materialized view all in tablespace ".len()..].trim_start(),
+        )
+    } else {
+        return Ok(None);
+    };
+    let (source_tablespace, after_source) = parse_sql_identifier(rest)?;
+    rest = after_source.trim_start();
+    if !keyword_at_start(rest, "set") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SET TABLESPACE",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "set").trim_start();
+    if !keyword_at_start(rest, "tablespace") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TABLESPACE",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "tablespace").trim_start();
+    let (target_tablespace, tail) = parse_sql_identifier(rest)?;
+    let tail = tail.trim();
+    if !tail.is_empty() && !tail.eq_ignore_ascii_case("nowait") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER ... ALL IN TABLESPACE statement",
+            actual: tail.into(),
+        });
+    }
+    Ok(Some(Statement::AlterMoveAllTablespace(
+        AlterMoveAllTablespaceStatement {
+            object_kind,
+            source_tablespace,
+            target_tablespace,
+        },
+    )))
 }
 
 pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
@@ -6169,6 +6408,10 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
         return build_alter_index_alter_column_statistics_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexAlterColumnStatistics(stmt)));
     }
+    if lowered.contains(" set tablespace ") {
+        return build_alter_index_set_tablespace_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexSetTablespace(stmt)));
+    }
     if lowered.contains(" set ") {
         return build_alter_index_set_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexSet(stmt)));
@@ -6186,6 +6429,7 @@ fn try_parse_reindex_statement(sql: &str) -> Result<Option<Statement>, ParseErro
     let mut rest = consume_keyword(trimmed, "reindex").trim_start();
     let mut verbose = false;
     let mut concurrently = false;
+    let mut tablespace = None;
     if rest.starts_with('(') {
         let close = rest.find(')').ok_or_else(|| ParseError::UnexpectedToken {
             expected: "REINDEX option list",
@@ -6198,6 +6442,16 @@ fn try_parse_reindex_statement(sql: &str) -> Result<Option<Statement>, ParseErro
                 verbose = true;
             } else if option.eq_ignore_ascii_case("concurrently") {
                 concurrently = true;
+            } else if keyword_at_start(option, "tablespace") {
+                let after_tablespace = consume_keyword(option, "tablespace").trim_start();
+                let (name, tail) = parse_sql_identifier(after_tablespace)?;
+                if !tail.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "REINDEX TABLESPACE option",
+                        actual: option.to_string(),
+                    });
+                }
+                tablespace = Some(name);
             } else {
                 return Err(ParseError::UnexpectedToken {
                     expected: "REINDEX option",
@@ -6256,6 +6510,7 @@ fn try_parse_reindex_statement(sql: &str) -> Result<Option<Statement>, ParseErro
     Ok(Some(Statement::ReindexIndex(ReindexIndexStatement {
         concurrently,
         verbose,
+        tablespace,
         kind,
         index_name,
     })))
@@ -6319,6 +6574,24 @@ fn try_parse_materialized_view_access_method_statement(
         return Ok(None);
     }
     tail = consume_keyword(tail, "set").trim_start();
+    if keyword_at_start(tail, "tablespace") {
+        tail = consume_keyword(tail, "tablespace").trim_start();
+        let (tablespace_name, tail) = parse_sql_identifier(tail)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER MATERIALIZED VIEW SET TABLESPACE",
+                actual: tail.trim().into(),
+            });
+        }
+        return Ok(Some(Statement::AlterTableSetTablespace(
+            AlterTableSetTablespaceStatement {
+                if_exists: false,
+                only: false,
+                table_name: parts.join("."),
+                tablespace_name,
+            },
+        )));
+    }
     if !keyword_at_start(tail, "access") {
         return Ok(None);
     }
@@ -8169,6 +8442,231 @@ fn try_parse_grant_revoke_statement(sql: &str) -> Result<Option<Statement>, Pars
     Ok(None)
 }
 
+fn try_parse_large_object_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("alter large object ") {
+        return build_alter_large_object_owner_statement(trimmed).map(Some);
+    }
+    if lowered.starts_with("comment on large object ") {
+        return build_comment_on_large_object_statement(trimmed).map(Some);
+    }
+    Ok(None)
+}
+
+fn build_alter_large_object_owner_statement(sql: &str) -> Result<Statement, ParseError> {
+    let rest =
+        sql.get("alter large object ".len()..)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "ALTER LARGE OBJECT oid OWNER TO role",
+                actual: sql.into(),
+            })?;
+    let (oid_text, rest) = rest
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "large object oid",
+            actual: rest.into(),
+        })?;
+    let oid = oid_text
+        .parse::<u32>()
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected: "large object oid",
+            actual: oid_text.into(),
+        })?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "owner") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OWNER TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "owner").trim_start();
+    if !keyword_at_start(rest, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        });
+    }
+    let new_owner = consume_keyword(rest, "to").trim();
+    if new_owner.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(Statement::AlterLargeObjectOwner(
+        AlterLargeObjectOwnerStatement {
+            oid,
+            new_owner: normalize_grantee_identifier(new_owner)?,
+        },
+    ))
+}
+
+fn build_comment_on_large_object_statement(sql: &str) -> Result<Statement, ParseError> {
+    let rest =
+        sql.get("comment on large object ".len()..)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "COMMENT ON LARGE OBJECT oid IS ...",
+                actual: sql.into(),
+            })?;
+    let Some(is_index) = find_top_level_keyword(rest, "is") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.trim().into(),
+        });
+    };
+    let oid_text = rest[..is_index].trim();
+    let oid = oid_text
+        .parse::<u32>()
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected: "large object oid",
+            actual: oid_text.into(),
+        })?;
+    let comment = parse_comment_value(&rest[is_index..], "end of COMMENT ON LARGE OBJECT")?;
+    Ok(Statement::CommentOnLargeObject(
+        CommentOnLargeObjectStatement { oid, comment },
+    ))
+}
+
+fn parse_large_object_privilege_spec(privileges: &str) -> Result<GrantObjectPrivilege, ParseError> {
+    let mut chars = String::new();
+    for part in privileges.split(',') {
+        let privilege = part.trim().to_ascii_lowercase();
+        match privilege.as_str() {
+            "all" | "all privileges" => {
+                if !chars.contains('r') {
+                    chars.push('r');
+                }
+                if !chars.contains('w') {
+                    chars.push('w');
+                }
+            }
+            "select" => {
+                if !chars.contains('r') {
+                    chars.push('r');
+                }
+            }
+            "update" => {
+                if !chars.contains('w') {
+                    chars.push('w');
+                }
+            }
+            "insert" | "delete" | "truncate" | "references" | "trigger" | "usage" => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "valid large object privilege",
+                    actual: format!(
+                        "invalid privilege type {} for large object",
+                        privilege.to_ascii_uppercase()
+                    ),
+                });
+            }
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "large object privilege",
+                    actual: part.trim().into(),
+                });
+            }
+        }
+    }
+    Ok(match chars.as_str() {
+        "rw" => GrantObjectPrivilege::AllPrivilegesOnLargeObject,
+        "r" => GrantObjectPrivilege::SelectOnLargeObject,
+        "w" => GrantObjectPrivilege::UpdateOnLargeObject,
+        _ => GrantObjectPrivilege::LargeObjectPrivileges(chars),
+    })
+}
+
+fn parse_large_object_oid_list(input: &str) -> Result<Vec<String>, ParseError> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<u32>()
+                .map(|_| part.to_string())
+                .map_err(|_| ParseError::UnexpectedToken {
+                    expected: "large object oid",
+                    actual: part.into(),
+                })
+        })
+        .collect()
+}
+
+fn build_grant_large_object_acl(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let rest = sql
+        .get("grant ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON LARGE OBJECT",
+            actual: rest.into(),
+        });
+    };
+    let privilege = parse_large_object_privilege_spec(privileges)?;
+    let after_on = after_on.ok_or(ParseError::UnexpectedEof)?.trim_start();
+    if !keyword_at_start(after_on, "large") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "LARGE OBJECT",
+            actual: after_on.into(),
+        });
+    }
+    let after_large = consume_keyword(after_on, "large").trim_start();
+    if !keyword_at_start(after_large, "object") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OBJECT",
+            actual: after_large.into(),
+        });
+    }
+    let after_object = consume_keyword(after_large, "object").trim_start();
+    let (object_names, rest) = split_once_keyword(after_object, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege,
+        columns: Vec::new(),
+        object_names: parse_large_object_oid_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_revoke_large_object_acl(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let rest = sql
+        .get("revoke ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let rest = rest.strip_prefix("grant option for ").unwrap_or(rest);
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON LARGE OBJECT",
+            actual: rest.into(),
+        });
+    };
+    let privilege = parse_large_object_privilege_spec(privileges)?;
+    let after_on = after_on.ok_or(ParseError::UnexpectedEof)?.trim_start();
+    if !keyword_at_start(after_on, "large") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "LARGE OBJECT",
+            actual: after_on.into(),
+        });
+    }
+    let after_large = consume_keyword(after_on, "large").trim_start();
+    if !keyword_at_start(after_large, "object") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OBJECT",
+            actual: after_large.into(),
+        });
+    }
+    let after_object = consume_keyword(after_large, "object").trim_start();
+    let (object_names, rest) = split_once_keyword(after_object, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege,
+        columns: Vec::new(),
+        object_names: parse_large_object_oid_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
 fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     let lowered = sql.to_ascii_lowercase();
     if lowered.starts_with("grant create on database ") {
@@ -8185,6 +8683,14 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if lowered.starts_with("grant usage on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_usage(sql)?));
+    }
+    if lowered.starts_with("grant all on tablespace ")
+        || lowered.starts_with("grant all privileges on tablespace ")
+    {
+        return Ok(Statement::GrantObject(build_grant_tablespace_all(sql)?));
+    }
+    if lowered.starts_with("grant create on tablespace ") {
+        return Ok(Statement::GrantObject(build_grant_tablespace_create(sql)?));
     }
     if is_type_usage_grant(&lowered) {
         return Ok(Statement::GrantObject(build_grant_type_usage(sql)?));
@@ -8223,6 +8729,9 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if let Some(kind) = invalid_routine_usage_object(&lowered, "grant") {
         return Err(invalid_routine_usage_privilege(kind));
     }
+    if lowered.contains(" on large object ") {
+        return Ok(Statement::GrantObject(build_grant_large_object_acl(sql)?));
+    }
     if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
         return Ok(Statement::GrantObject(stmt));
     }
@@ -8247,6 +8756,16 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if lowered.starts_with("revoke usage on schema ") {
         return Ok(Statement::RevokeObject(build_revoke_schema_usage(sql)?));
+    }
+    if lowered.starts_with("revoke all on tablespace ")
+        || lowered.starts_with("revoke all privileges on tablespace ")
+    {
+        return Ok(Statement::RevokeObject(build_revoke_tablespace_all(sql)?));
+    }
+    if lowered.starts_with("revoke create on tablespace ") {
+        return Ok(Statement::RevokeObject(build_revoke_tablespace_create(
+            sql,
+        )?));
     }
     if is_type_usage_revoke(&lowered) {
         return Ok(Statement::RevokeObject(build_revoke_type_usage(sql)?));
@@ -8286,6 +8805,9 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if let Some(kind) = invalid_routine_usage_object(&lowered, "revoke") {
         return Err(invalid_routine_usage_privilege(kind));
+    }
+    if lowered.contains(" on large object ") {
+        return Ok(Statement::RevokeObject(build_revoke_large_object_acl(sql)?));
     }
     if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
         return Ok(Statement::RevokeObject(stmt));
@@ -8676,6 +9198,45 @@ fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseErro
     })
 }
 
+fn build_grant_tablespace_all(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let prefix = if lower.starts_with("grant all privileges on tablespace ") {
+        "grant all privileges on tablespace "
+    } else {
+        "grant all on tablespace "
+    };
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::AllPrivilegesOnTablespace,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_grant_tablespace_create(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant create on tablespace ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::CreateOnTablespace,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
 fn build_grant_schema_create(sql: &str) -> Result<GrantObjectStatement, ParseError> {
     let prefix = "grant create on schema ";
     let rest = sql
@@ -8995,6 +9556,45 @@ fn build_revoke_schema_all(sql: &str) -> Result<RevokeObjectStatement, ParseErro
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_tablespace_all(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let prefix = if lower.starts_with("revoke all privileges on tablespace ") {
+        "revoke all privileges on tablespace "
+    } else {
+        "revoke all on tablespace "
+    };
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::AllPrivilegesOnTablespace,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_tablespace_create(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke create on tablespace ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::CreateOnTablespace,
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
@@ -10339,6 +10939,55 @@ fn build_alter_index_set_statement(sql: &str) -> Result<AlterIndexSetStatement, 
         if_exists,
         index_name,
         options,
+    })
+}
+
+fn build_alter_index_set_tablespace_statement(
+    sql: &str,
+) -> Result<AlterTableSetTablespaceStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (parts, rest_after_index) = parse_qualified_identifier_parts(rest)?;
+    let index_name = parts.join(".");
+    let mut rest = rest_after_index.trim_start();
+    if !keyword_at_start(rest, "set") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER INDEX SET TABLESPACE",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "set").trim_start();
+    if !keyword_at_start(rest, "tablespace") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TABLESPACE",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "tablespace").trim_start();
+    let (tablespace_name, tail) = parse_sql_identifier(rest)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER INDEX SET TABLESPACE statement",
+            actual: tail.trim().into(),
+        });
+    }
+    Ok(AlterTableSetTablespaceStatement {
+        if_exists,
+        only: false,
+        table_name: index_name,
+        tablespace_name,
     })
 }
 
@@ -19340,6 +19989,7 @@ fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, Par
         if_not_exists: false,
         object_type: TableAsObjectType::Table,
         skip_data: false,
+        tablespace: None,
     })
 }
 
@@ -21524,6 +22174,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut is_ctas = false;
     let mut if_not_exists = false;
     let mut skip_data = false;
+    let mut tablespace = None;
     for part in pair.into_inner() {
         let part = if part.as_rule() == Rule::create_table_tail {
             part.into_inner().next().ok_or(ParseError::UnexpectedEof)?
@@ -21586,6 +22237,9 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                         }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
                         Rule::table_storage_clause => validate_table_storage_clause(inner)?,
+                        Rule::table_tablespace_clause => {
+                            tablespace = Some(build_tablespace_clause(inner)?)
+                        }
                         Rule::ctas_query
                         | Rule::select_stmt
                         | Rule::parenthesized_values_stmt
@@ -21612,6 +22266,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Rule::table_storage_clause => {
                 options.extend(build_table_storage_options(part)?);
             }
+            Rule::table_tablespace_clause => tablespace = Some(build_tablespace_clause(part)?),
             _ => {}
         }
     }
@@ -21633,6 +22288,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             if_not_exists,
             object_type: TableAsObjectType::Table,
             skip_data,
+            tablespace,
         }))
     } else {
         Ok(Statement::CreateTable(CreateTableStatement {
@@ -21648,8 +22304,16 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             partition_of: None,
             partition_bound: None,
             if_not_exists,
+            tablespace,
         }))
     }
+}
+
+fn build_tablespace_clause(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    pair.into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)
 }
 
 fn build_ctas_query(
@@ -21742,6 +22406,7 @@ fn build_create_materialized_view(
     let mut query_sql = None;
     let mut if_not_exists = false;
     let mut skip_data = false;
+    let mut tablespace = None;
 
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -21769,6 +22434,7 @@ fn build_create_materialized_view(
             Rule::matview_data_clause => {
                 skip_data = part.as_str().to_ascii_lowercase().contains("no");
             }
+            Rule::table_tablespace_clause => tablespace = Some(build_tablespace_clause(part)?),
             _ => {}
         }
     }
@@ -21785,6 +22451,7 @@ fn build_create_materialized_view(
         if_not_exists,
         object_type: TableAsObjectType::MaterializedView,
         skip_data,
+        tablespace,
     })
 }
 
@@ -22427,12 +23094,14 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::primary_key_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
-            let (columns, include_columns, without_overlaps) = build_key_constraint_body(body)?;
+            let (columns, include_columns, without_overlaps, tablespace) =
+                build_key_constraint_body(body)?;
             Ok(TableConstraint::PrimaryKey {
                 attributes,
                 columns,
                 include_columns,
                 without_overlaps,
+                tablespace,
             })
         }
         Rule::unique_table_constraint => {
@@ -22447,12 +23116,14 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .is_some_and(unique_nulls_clause_is_not_distinct);
             let mut attributes = attributes;
             attributes.nulls_not_distinct = nulls_not_distinct;
-            let (columns, include_columns, without_overlaps) = build_key_constraint_body(body)?;
+            let (columns, include_columns, without_overlaps, tablespace) =
+                build_key_constraint_body(body)?;
             Ok(TableConstraint::Unique {
                 attributes,
                 columns,
                 include_columns,
                 without_overlaps,
+                tablespace,
             })
         }
         Rule::exclusion_table_constraint => {
@@ -22641,19 +23312,26 @@ fn build_key_column_list(
 
 fn build_key_constraint_body(
     pair: Pair<'_, Rule>,
-) -> Result<(Vec<String>, Vec<String>, Option<String>), ParseError> {
+) -> Result<(Vec<String>, Vec<String>, Option<String>, Option<String>), ParseError> {
     let mut include_columns = Vec::new();
+    let mut tablespace = None;
     for part in pair.clone().into_inner() {
-        if part.as_rule() == Rule::create_index_include_clause {
-            include_columns.extend(
-                part.into_inner()
-                    .filter(|inner| inner.as_rule() == Rule::ident_list)
-                    .flat_map(|inner| inner.into_inner().map(build_identifier)),
-            );
+        match part.as_rule() {
+            Rule::create_index_include_clause => {
+                include_columns.extend(
+                    part.into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::ident_list)
+                        .flat_map(|inner| inner.into_inner().map(build_identifier)),
+                );
+            }
+            Rule::key_constraint_tablespace_clause => {
+                tablespace = Some(build_tablespace_clause(part)?);
+            }
+            _ => {}
         }
     }
     let (columns, without_overlaps) = build_key_column_list(pair)?;
-    Ok((columns, include_columns, without_overlaps))
+    Ok((columns, include_columns, without_overlaps, tablespace))
 }
 
 fn set_enforced_attribute(enforced: &mut Option<bool>, value: bool) -> Result<(), ParseError> {
@@ -22822,18 +23500,43 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
                 expr_sql,
             })
         }
-        Rule::primary_key_column_constraint => Ok(ColumnConstraint::PrimaryKey { attributes }),
+        Rule::primary_key_column_constraint => {
+            let tablespace = pair
+                .clone()
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::primary_key_column_constraint_body)
+                .and_then(|body| {
+                    body.into_inner()
+                        .find(|part| part.as_rule() == Rule::key_constraint_tablespace_clause)
+                })
+                .map(build_tablespace_clause)
+                .transpose()?;
+            Ok(ColumnConstraint::PrimaryKey {
+                attributes,
+                tablespace,
+            })
+        }
         Rule::unique_column_constraint => {
             let body = pair
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::unique_column_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
             let mut attributes = attributes;
+            let mut tablespace = None;
             attributes.nulls_not_distinct = body
+                .clone()
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::unique_nulls_distinct_clause)
                 .is_some_and(unique_nulls_clause_is_not_distinct);
-            Ok(ColumnConstraint::Unique { attributes })
+            for part in body.into_inner() {
+                if part.as_rule() == Rule::key_constraint_tablespace_clause {
+                    tablespace = Some(build_tablespace_clause(part)?);
+                }
+            }
+            Ok(ColumnConstraint::Unique {
+                attributes,
+                tablespace,
+            })
         }
         Rule::references_column_constraint => {
             let body = pair
@@ -23050,8 +23753,8 @@ fn set_column_constraint_name(constraint: &mut ColumnConstraint, name: String) {
     match constraint {
         ColumnConstraint::NotNull { attributes }
         | ColumnConstraint::Check { attributes, .. }
-        | ColumnConstraint::PrimaryKey { attributes }
-        | ColumnConstraint::Unique { attributes }
+        | ColumnConstraint::PrimaryKey { attributes, .. }
+        | ColumnConstraint::Unique { attributes, .. }
         | ColumnConstraint::References { attributes, .. } => attributes.name = Some(name),
     }
 }
@@ -23073,6 +23776,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     let mut predicate = None;
     let mut predicate_sql = None;
     let mut options = Vec::new();
+    let mut tablespace = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_not_exists_clause => if_not_exists = true,
@@ -23116,6 +23820,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
             Rule::unique_nulls_distinct_clause => {
                 nulls_not_distinct = unique_nulls_clause_is_not_distinct(part)
             }
+            Rule::table_tablespace_clause => tablespace = Some(build_tablespace_clause(part)?),
             _ => {}
         }
     }
@@ -23142,6 +23847,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
         predicate,
         predicate_sql,
         options,
+        tablespace,
     })
 }
 
@@ -25883,11 +26589,13 @@ fn build_alter_table_add_using_index_constraint(
         Ok(TableConstraint::PrimaryKeyUsingIndex {
             attributes,
             index_name,
+            tablespace: None,
         })
     } else {
         Ok(TableConstraint::UniqueUsingIndex {
             attributes,
             index_name,
+            tablespace: None,
         })
     }
 }

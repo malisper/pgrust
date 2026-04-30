@@ -3521,7 +3521,11 @@ impl Database {
                     .into_iter()
                     .map(|row| (row.oid, row.amname))
                     .collect::<BTreeMap<_, _>>();
+                let mut opfamily_notices = Vec::new();
                 let mut tail_notices = Vec::new();
+                let mut function_notices = Vec::new();
+                let mut text_search_notices = Vec::new();
+                let mut has_relation_or_type_notice = false;
                 let mut noticed_opfamily_oids = BTreeSet::new();
                 let mut opfamily_rows = catcache
                     .opfamily_rows()
@@ -3531,7 +3535,7 @@ impl Database {
                 opfamily_rows.sort_by_key(|row| row.oid);
                 for row in opfamily_rows {
                     noticed_opfamily_oids.insert(row.oid);
-                    tail_notices.push((
+                    opfamily_notices.push((
                         row.oid,
                         format!(
                             "drop cascades to operator family {} for access method {}",
@@ -3556,13 +3560,18 @@ impl Database {
                     if !noticed_opfamily_oids.insert(row.opcfamily) {
                         continue;
                     }
-                    let (family_namespace, family_name, family_method) = catcache
+                    let Some((family_namespace, family_name, family_method)) = catcache
                         .opfamily_rows()
                         .into_iter()
                         .find(|family| family.oid == row.opcfamily)
                         .map(|family| (family.opfnamespace, family.opfname, family.opfmethod))
-                        .unwrap_or((row.opcnamespace, row.opcname, row.opcmethod));
-                    tail_notices.push((
+                    else {
+                        continue;
+                    };
+                    if family_namespace != schema.oid {
+                        continue;
+                    }
+                    opfamily_notices.push((
                         row.opcfamily,
                         format!(
                             "drop cascades to operator family {} for access method {}",
@@ -3579,6 +3588,9 @@ impl Database {
                         ),
                     ));
                 }
+                opfamily_notices.sort_by_key(|(oid, _)| *oid);
+                notices.extend(opfamily_notices.into_iter().map(|(_, notice)| notice));
+                let has_generic_object_notices = !notices.is_empty();
 
                 let mut relation_notice_rows = relation_rows
                     .iter()
@@ -3609,6 +3621,7 @@ impl Database {
                 relation_notice_rows
                     .sort_by_key(|row| (!inheritance_parent_oids.contains(&row.oid), row.oid));
                 for relation in relation_notice_rows {
+                    has_relation_or_type_notice = true;
                     tail_notices.push((
                         relation.oid,
                         format!(
@@ -3631,7 +3644,7 @@ impl Database {
                     .collect::<Vec<_>>();
                 ts_dict_rows.sort_by_key(|row| row.oid);
                 for row in ts_dict_rows {
-                    notices.push(format!(
+                    text_search_notices.push(format!(
                         "drop cascades to text search dictionary {}",
                         drop_schema_display_object_name(
                             &catcache,
@@ -3649,7 +3662,7 @@ impl Database {
                     .collect::<Vec<_>>();
                 ts_config_rows.sort_by_key(|row| row.oid);
                 for row in ts_config_rows {
-                    notices.push(format!(
+                    text_search_notices.push(format!(
                         "drop cascades to text search configuration {}",
                         drop_schema_display_object_name(
                             &catcache,
@@ -3667,7 +3680,7 @@ impl Database {
                     .collect::<Vec<_>>();
                 ts_template_rows.sort_by_key(|row| row.oid);
                 for row in ts_template_rows {
-                    notices.push(format!(
+                    text_search_notices.push(format!(
                         "drop cascades to text search template {}",
                         drop_schema_display_object_name(
                             &catcache,
@@ -3685,7 +3698,7 @@ impl Database {
                     .collect::<Vec<_>>();
                 ts_parser_rows.sort_by_key(|row| row.oid);
                 for row in ts_parser_rows {
-                    notices.push(format!(
+                    text_search_notices.push(format!(
                         "drop cascades to text search parser {}",
                         drop_schema_display_object_name(
                             &catcache,
@@ -3699,6 +3712,7 @@ impl Database {
                 for row in catcache.type_rows().into_iter().filter(|row| {
                     row.typnamespace == schema.oid && matches!(row.typtype, 'd' | 'e')
                 }) {
+                    has_relation_or_type_notice = true;
                     tail_notices.push((
                         row.oid,
                         format!(
@@ -3718,7 +3732,7 @@ impl Database {
                     .filter(|row| row.pronamespace == schema.oid)
                 {
                     let signature = drop_proc_signature_text(&proc_row, &catalog);
-                    tail_notices.push((
+                    function_notices.push((
                         proc_row.oid,
                         format!(
                             "drop cascades to function {}",
@@ -3731,8 +3745,22 @@ impl Database {
                         ),
                     ));
                 }
+                if has_generic_object_notices {
+                    function_notices.sort_by_key(|(oid, _)| *oid);
+                    notices.splice(0..0, function_notices.into_iter().map(|(_, notice)| notice));
+                } else if has_relation_or_type_notice {
+                    notices.append(&mut text_search_notices);
+                    tail_notices.extend(function_notices);
+                } else {
+                    function_notices.sort_by_key(|(oid, _)| *oid);
+                    notices.splice(0..0, function_notices.into_iter().map(|(_, notice)| notice));
+                    notices.append(&mut text_search_notices);
+                }
                 tail_notices.sort_by_key(|(oid, _)| *oid);
                 notices.extend(tail_notices.into_iter().map(|(_, notice)| notice));
+                if has_generic_object_notices {
+                    notices.append(&mut text_search_notices);
+                }
 
                 if !notices.is_empty() {
                     cascade_notice_groups.push(notices);

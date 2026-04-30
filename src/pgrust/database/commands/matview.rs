@@ -1,5 +1,6 @@
 use super::super::*;
 use super::create::describe_select_query_without_planning;
+use super::tablespace::resolve_relation_tablespace_oid;
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::commands::tablecmds::{execute_insert_values, reinitialize_index_relation};
 use crate::backend::parser::{BoundIndexRelation, BoundRelation};
@@ -96,6 +97,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         if create_stmt.object_type != TableAsObjectType::MaterializedView {
@@ -200,7 +202,14 @@ impl Database {
             waiter: None,
             interrupts: Arc::clone(&interrupts),
         };
-        let (created, create_effect) = self
+        let relation_tablespace_oid = resolve_relation_tablespace_oid(
+            self,
+            client_id,
+            Some((xid, create_cid)),
+            create_stmt.tablespace.as_deref(),
+            gucs,
+        )?;
+        let (mut created, create_effect) = self
             .catalog
             .write()
             .create_materialized_view_mvcc_with_options(
@@ -218,6 +227,34 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&create_effect)?;
         catalog_effects.push(create_effect);
+        if relation_tablespace_oid != created.entry.rel.spc_oid {
+            let set_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: create_cid.saturating_add(1),
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .set_relation_tablespace_mvcc(
+                    created.entry.relation_oid,
+                    relation_tablespace_oid,
+                    false,
+                    &set_ctx,
+                )
+                .map_err(map_catalog_error)?;
+            created.entry.rel = effect.created_rels.first().copied().unwrap_or_else(|| {
+                let mut rel = created.entry.rel;
+                rel.spc_oid = relation_tablespace_oid;
+                rel
+            });
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
         let (toast, toast_index) = toast_bindings_from_create_result(&created);
 
         let mut referenced_relation_oids = std::collections::BTreeSet::new();

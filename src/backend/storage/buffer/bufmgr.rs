@@ -1020,7 +1020,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             if !matches {
                 continue;
             }
-            self.flush_buffer(buffer_id)?;
+            if let FlushResult::WriteIssued = self.flush_buffer(buffer_id)? {
+                self.complete_write(buffer_id)?;
+            }
             flushed += 1;
         }
         Ok(flushed)
