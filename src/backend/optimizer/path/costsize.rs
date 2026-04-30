@@ -2333,7 +2333,10 @@ pub(super) fn estimate_index_candidate(
         index_scan_rows = index_scan_rows.min(1.0);
         index_rows = index_rows.min(1.0);
     }
+    let index_only = can_index_only;
     let unordered_probe = order_items.is_none();
+    let unordered_btree_range_heap_fetch =
+        !index_only && unordered_btree_range_probe_fetches_heap(&spec, unique_eq_lookup);
     let broad_unordered_btree_range =
         unordered_btree_range_probe_needs_heap_penalty(&spec, stats, scan_sel);
     let (startup_cost, mut base_cost) = if is_gist_like_am(spec.index.index_meta.am_oid) {
@@ -2351,6 +2354,9 @@ pub(super) fn estimate_index_candidate(
             + index_rows * CPU_TUPLE_COST;
         (CPU_OPERATOR_COST, total)
     };
+    if unordered_btree_range_heap_fetch && !broad_unordered_btree_range {
+        base_cost += stats.relpages.min(index_rows.max(1.0)) * RANDOM_PAGE_COST;
+    }
     if spec.row_prefix && unordered_probe {
         base_cost += stats.relpages * RANDOM_PAGE_COST + stats.reltuples * CPU_TUPLE_COST;
     }
@@ -2375,7 +2381,6 @@ pub(super) fn estimate_index_candidate(
         0.0
     };
     base_cost += unused_btree_column_cost;
-    let index_only = can_index_only;
     if index_only {
         if spec.keys.is_empty() {
             base_cost = index_pages * SEQ_PAGE_COST
@@ -2501,6 +2506,18 @@ pub(super) fn estimate_index_candidate(
     }
 
     AccessCandidate { total_cost, plan }
+}
+
+fn unordered_btree_range_probe_fetches_heap(spec: &IndexPathSpec, unique_eq_lookup: bool) -> bool {
+    spec.index.index_meta.am_oid == BTREE_AM_OID
+        && !spec.removes_order
+        && !unique_eq_lookup
+        && !spec.filter_quals.iter().any(expr_is_regex_match_filter)
+        && btree_ordering_equality_prefix(&spec.keys) == 0
+        && spec
+            .keys
+            .iter()
+            .any(|key| key.attribute_number > 0 && key.strategy != 3)
 }
 
 fn unique_equality_index_lookup(spec: &IndexPathSpec) -> bool {

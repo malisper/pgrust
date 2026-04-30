@@ -4200,6 +4200,28 @@ fn planner_keeps_index_scan_when_index_is_not_covering() {
 }
 
 #[test]
+fn planner_prefers_bitmap_heap_for_unordered_btree_range_window_input() {
+    let catalog = catalog_with_noncovering_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select sum(id) over (order by payload range between current row and unbounded following), id, payload from items where id < 42",
+        &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::BitmapHeapScan { .. }
+    )));
+    assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexScan { .. }
+    )));
+}
+
+#[test]
 fn planner_renders_inet_btree_subnet_range_keys() {
     let catalog = catalog_with_indexed_inet_tbl();
     let planned = planned_stmt_for_sql_with_catalog_and_config(
