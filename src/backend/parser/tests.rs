@@ -16636,6 +16636,75 @@ fn parse_rollup_group_by_items() {
 }
 
 #[test]
+fn parse_grouping_sets_query_shapes_do_not_fallback() {
+    let queries = [
+        "select sum(c) from gstest2
+          group by grouping sets((), grouping sets((), grouping sets(())))
+          order by 1 desc",
+        "select sum(c) from gstest2
+          group by grouping sets(grouping sets(rollup(c), grouping sets(cube(c))))
+          order by 1 desc",
+        "select sum(c) from gstest2
+          group by grouping sets(grouping sets(a, grouping sets(a, grouping sets(a), ((a)), a, grouping sets(a), (a)), a))
+          order by 1 desc",
+        "select a, b, sum(v), count(*) from gstest_empty
+          group by grouping sets ((a,b),a)",
+        "select four, x
+          from (select four, ten, 'foo'::text as x from tenk1) as t
+          group by grouping sets (four, x)
+          having x = 'foo'",
+        "select a, b, c, d from gstest2
+          group by rollup(a,b),grouping sets(c,d)",
+        "select distinct on (a, b) a, b
+          from gstest2
+          group by grouping sets ((a, b), (a))
+          order by a, b",
+        "select v.c, (select count(*) from gstest2 group by () having v.c)
+          from (values (false),(true)) v(c) order by v.c",
+        "select ten, sum(distinct four) from onek a
+          group by grouping sets((ten,four),(ten))
+          having exists (select 1 from onek b where sum(distinct a.four) = b.four)",
+        "select *
+          from (values (1),(2)) v(x),
+               lateral (select a, b, sum(v.x) from gstest_data(v.x) group by grouping sets (a,b)) s",
+        "select * from (values (1),(2)) v(a)
+          left join lateral
+            (select v.a, four, ten, count(*) from onek group by grouping sets(four,ten)) s
+          on true order by v.a,four,ten",
+        "select array(select row(v.a,s1.*)
+          from (select two,four, count(*) from onek group by grouping sets(two,four) order by two,four) s1)
+          from (values (1),(2)) v(a)",
+        "select a, b, c
+          from (values (1, 2, 3), (4, null, 6), (7, 8, 9)) as t (a, b, c)
+          group by all rollup(a, b), rollup(a, c)
+          order by a, b, c",
+        "select a, b, c
+          from (values (1, 2, 3), (4, null, 6), (7, 8, 9)) as t (a, b, c)
+          group by distinct rollup(a, b), rollup(a, c)
+          order by a, b, c",
+        "select grouping((select t1.v from gstest5 t2 where id = t1.id)),
+                 (select t1.v from gstest5 t2 where id = t1.id) as s
+          from gstest5 t1
+          group by grouping sets(v, s)
+          order by case when grouping((select t1.v from gstest5 t2 where id = t1.id)) = 0
+                        then (select t1.v from gstest5 t2 where id = t1.id)
+                        else null end
+                   nulls first",
+        "select distinct on (a, b+1) a, b+1
+          from (values (1, 0), (2, 1)) as t (a, b) where a = b+1
+          group by grouping sets((a, b+1), (a))
+          order by a, b+1",
+        "select a, b, row_number() over (order by a, b nulls first)
+          from (values (1, 1), (2, 2)) as t (a, b) where a = b
+          group by grouping sets((a, b), (a))",
+    ];
+
+    for sql in queries {
+        parse_select(sql).unwrap_or_else(|err| panic!("{sql}\n{err:?}"));
+    }
+}
+
+#[test]
 fn parse_window_calls_capture_over_clause() {
     let stmt = parse_select(
         "select row_number() over (), sum(id) over (partition by name order by id) from people",
