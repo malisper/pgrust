@@ -1,5 +1,5 @@
 use super::exec_expr::{
-    eval_native_builtin_scalar_value_call, eval_string_to_table_rows, normalize_array_value,
+    eval_native_builtin_scalar_typed_value_call, eval_string_to_table_rows, normalize_array_value,
 };
 use super::expr_date::add_interval_to_local_timestamp;
 use super::expr_json::{
@@ -556,7 +556,14 @@ fn execute_native_set_returning_function(
         "pg_stats_ext_mcvlist_items" => Some(eval_pg_mcv_list_items(&values)?),
         _ => {
             if let Some(func) = builtin_scalar_function_for_proc_row(row) {
-                let value = eval_native_builtin_scalar_value_call(func, &values, false, ctx)?;
+                let arg_types = args.iter().map(expr_sql_type_hint).collect::<Vec<_>>();
+                let value = eval_native_builtin_scalar_typed_value_call(
+                    func,
+                    &values,
+                    Some(&arg_types),
+                    false,
+                    ctx,
+                )?;
                 Some(match value {
                     Value::Record(record) => vec![TupleSlot::virtual_row(record.fields)],
                     other => vec![TupleSlot::virtual_row(vec![other])],

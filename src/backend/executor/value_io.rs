@@ -1724,6 +1724,7 @@ fn array_storage_element_type(sql_type: SqlType) -> SqlType {
             SqlTypeKind::Composite
                 | SqlTypeKind::Record
                 | SqlTypeKind::Enum
+                | SqlTypeKind::Range
                 | SqlTypeKind::Multirange
         )
     {

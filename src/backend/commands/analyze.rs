@@ -3,6 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, row_matches_index_predicate,
 };
+use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::value_io::decode_value_with_toast;
 use crate::backend::executor::{ExecError, ExecutorContext, TupleSlot, Value, eval_expr};
@@ -14,10 +15,9 @@ use crate::backend::storage::page::bufpage::ItemIdFlags;
 use crate::backend::storage::page::bufpage::{
     page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
 };
-use crate::backend::storage::smgr::ForkNumber;
-use crate::backend::storage::smgr::StorageManager;
+use crate::backend::storage::smgr::{ForkNumber, SmgrError, StorageManager};
 use crate::include::access::htup::HeapTuple;
-use crate::include::catalog::{PgStatisticExtDataRow, PgStatisticRow};
+use crate::include::catalog::{PgStatisticExtDataRow, PgStatisticRow, relkind_has_storage};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -283,16 +283,27 @@ fn selected_columns(
     Ok(out)
 }
 
+fn relation_nblocks_or_zero(
+    ctx: &mut ExecutorContext,
+    rel: RelFileLocator,
+) -> Result<u32, ExecError> {
+    ctx.pool
+        .with_storage_mut(|s| match s.smgr.nblocks(rel, ForkNumber::Main) {
+            Ok(nblocks) => Ok(nblocks),
+            Err(SmgrError::RelationNotFound { .. }) => Ok(0),
+            Err(err) => Err(err),
+        })
+        .map_err(crate::backend::access::heap::heapam::HeapError::Storage)
+        .map_err(ExecError::from)
+}
+
 fn sample_relation(
     relation: &BoundRelation,
     selected_columns: &[usize],
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<AnalyzeRelationStats, ExecError> {
-    let nblocks = ctx
-        .pool
-        .with_storage_mut(|s| s.smgr.nblocks(relation.rel, ForkNumber::Main))
-        .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+    let nblocks = relation_nblocks_or_zero(ctx, relation.rel)?;
     let relpages = nblocks as i32;
 
     let stats_target = selected_columns
@@ -446,10 +457,7 @@ fn sample_expression_indexes(
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?;
     let mut out = Vec::with_capacity(expression_indexes.len());
     for index in expression_indexes {
-        let nblocks = ctx
-            .pool
-            .with_storage_mut(|s| s.smgr.nblocks(index.rel, ForkNumber::Main))
-            .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+        let nblocks = relation_nblocks_or_zero(ctx, index.rel)?;
         let mut sample_rows = Vec::new();
         for (physical_ordinal, (heap_tid, values)) in heap_rows.iter().enumerate() {
             if !row_matches_index_predicate(
@@ -518,6 +526,9 @@ fn sample_inheritance_tree(
         let Some(member) = catalog.relation_by_oid(*member_oid) else {
             continue;
         };
+        if !relkind_has_storage(member.relkind) {
+            continue;
+        }
         let mapping = inherited_selected_column_mapping(relation, &member, selected_columns)?;
         let toast_ctx = member.toast.map(|toast| ToastFetchContext {
             relation: toast,
@@ -526,10 +537,7 @@ fn sample_inheritance_tree(
             snapshot: ctx.snapshot.clone(),
             client_id: ctx.client_id,
         });
-        let nblocks = ctx
-            .pool
-            .with_storage_mut(|s| s.smgr.nblocks(member.rel, ForkNumber::Main))
-            .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+        let nblocks = relation_nblocks_or_zero(ctx, member.rel)?;
         for block in 0..nblocks {
             ctx.check_for_interrupts()?;
             let pin = ctx

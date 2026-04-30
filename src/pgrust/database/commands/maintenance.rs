@@ -774,7 +774,20 @@ fn collect_catalog_vacuum_targets(
 fn relation_display_name_for_target(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
     catalog
         .class_row_by_oid(relation_oid)
-        .map(|row| row.relname)
+        .map(|row| {
+            catalog
+                .namespace_row_by_oid(row.relnamespace)
+                .map(|namespace| {
+                    if matches!(namespace.nspname.as_str(), "public" | "pg_catalog")
+                        || namespace.nspname.starts_with("pg_temp_")
+                    {
+                        row.relname.clone()
+                    } else {
+                        format!("{}.{}", namespace.nspname, row.relname)
+                    }
+                })
+                .unwrap_or(row.relname)
+        })
         .unwrap_or_else(|| relation_oid.to_string())
 }
 

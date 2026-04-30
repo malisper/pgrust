@@ -1213,7 +1213,9 @@ fn relation_display_name(
             catalog
                 .namespace_row_by_oid(row.relnamespace)
                 .map(|namespace| {
-                    if matches!(namespace.nspname.as_str(), "public" | "pg_catalog") {
+                    if matches!(namespace.nspname.as_str(), "public" | "pg_catalog")
+                        || namespace.nspname.starts_with("pg_temp_")
+                    {
                         row.relname.clone()
                     } else {
                         format!("{}.{}", namespace.nspname, row.relname)

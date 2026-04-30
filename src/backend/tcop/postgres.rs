@@ -616,6 +616,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
             if message == "invalid NUMERIC type modifier" {
+                if is_pg_input_error_info_surface(sql) {
+                    return None;
+                }
                 return find_type_name_before_typmod_position(sql);
             }
             if suppress_missing_function_position(sql) && is_missing_function_message(message) {
@@ -895,6 +898,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
             if message == "invalid NUMERIC type modifier" {
+                if is_pg_input_error_info_surface(sql) {
+                    return None;
+                }
                 return find_type_name_before_typmod_position(sql);
             }
             if suppress_missing_function_position(sql) && is_missing_function_message(message) {
@@ -1393,6 +1399,7 @@ fn suppress_sql_json_table_runtime_position(sql: &str, e: &ExecError) -> bool {
 fn suppress_legacy_json_runtime_position(sql: &str, e: &ExecError) -> bool {
     match e {
         ExecError::WithContext { source, .. } => suppress_legacy_json_runtime_position(sql, source),
+        ExecError::JsonInput { .. } => is_legacy_json_operator_surface(sql),
         ExecError::DetailedError { message, .. } => {
             (is_legacy_json_record_function_surface(sql)
                 && message.starts_with("invalid input syntax for type "))
@@ -1420,6 +1427,17 @@ fn suppress_legacy_json_runtime_position(sql: &str, e: &ExecError) -> bool {
         | ExecError::FloatOutOfRange { .. } => is_legacy_json_record_function_surface(sql),
         _ => false,
     }
+}
+
+fn is_pg_input_error_info_surface(sql: &str) -> bool {
+    find_case_insensitive_token_position(sql, "pg_input_error_info").is_some()
+}
+
+fn is_legacy_json_operator_surface(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    (lower.contains("->") || lower.contains("#>"))
+        && (lower.contains(" json ") || lower.contains("::json"))
+        && !lower.contains("jsonb")
 }
 
 fn is_legacy_json_record_function_surface(sql: &str) -> bool {
@@ -16692,6 +16710,33 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             sqlstate: "22030",
         };
         assert_eq!(exec_error_position(sql, &err), None);
+
+        let sql = "select json '{ \"a\": \"\\ud83dX\" }' -> 'a'";
+        let err = ExecError::JsonInput {
+            raw_input: "{ \"a\": \"\\ud83dX\" }".into(),
+            message: "invalid input syntax for type json".into(),
+            detail: Some("Unicode low surrogate must follow a high surrogate.".into()),
+            context: Some("JSON data, line 1: { \"a\": \"\\ud83dX...".into()),
+            sqlstate: "22P02",
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_omits_pg_input_error_info_numeric_typmod() {
+        let err = ExecError::DetailedError {
+            message: "invalid NUMERIC type modifier".into(),
+            detail: Some("NUMERIC precision 1 must be between 1 and 1000.".into()),
+            hint: None,
+            sqlstate: "42601",
+        };
+        assert_eq!(
+            exec_error_position(
+                "SELECT * FROM pg_input_error_info('numeric(1,2,3)', 'regtype')",
+                &err,
+            ),
+            None
+        );
     }
 
     #[test]

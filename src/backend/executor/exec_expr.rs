@@ -3621,7 +3621,7 @@ fn foreign_privilege_object_acl(
     }
 }
 
-fn ensure_builtin_side_effects_allowed(
+pub(crate) fn ensure_builtin_side_effects_allowed(
     func: BuiltinScalarFunction,
     ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
@@ -12826,7 +12826,23 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
     func_variadic: bool,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    eval_native_builtin_scalar_typed_value_call(func, values, None, func_variadic, ctx)
+}
+
+pub(crate) fn eval_native_builtin_scalar_typed_value_call(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    arg_types: Option<&[Option<SqlType>]>,
+    func_variadic: bool,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     match func {
+        BuiltinScalarFunction::PgRestoreRelationStats
+        | BuiltinScalarFunction::PgClearRelationStats
+        | BuiltinScalarFunction::PgRestoreAttributeStats
+        | BuiltinScalarFunction::PgClearAttributeStats => {
+            eval_stats_import_builtin_value_call(func, values, arg_types, ctx)
+        }
         BuiltinScalarFunction::PgColumnToastChunkId => eval_pg_column_toast_chunk_id_values(values),
         BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(values, func_variadic, true)),
         BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(values, func_variadic, false)),
@@ -12890,6 +12906,69 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
             eval_text_search_builtin_function(func, values, Some(ctx))
         }
         _ => execute_builtin_scalar_function_value_call(func, values),
+    }
+}
+
+fn eval_stats_import_builtin_value_call(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    arg_types: Option<&[Option<SqlType>]>,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    ensure_builtin_side_effects_allowed(func, ctx)?;
+    let runtime = ctx
+        .stats_import_runtime
+        .clone()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("{func:?} requires database executor context"),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let typed_args = values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| TypedFunctionArg {
+            value: value.clone(),
+            sql_type: arg_types
+                .and_then(|types| types.get(idx))
+                .copied()
+                .flatten()
+                .or_else(|| value.sql_type_hint()),
+        })
+        .collect::<Vec<_>>();
+    match func {
+        BuiltinScalarFunction::PgRestoreRelationStats => {
+            runtime.pg_restore_relation_stats(ctx, typed_args)
+        }
+        BuiltinScalarFunction::PgClearRelationStats => {
+            if values.len() != 2 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "pg_clear_relation_stats(schemaname, relname)",
+                    actual: format!("{} args", values.len()),
+                }));
+            }
+            runtime.pg_clear_relation_stats(ctx, values[0].clone(), values[1].clone())
+        }
+        BuiltinScalarFunction::PgRestoreAttributeStats => {
+            runtime.pg_restore_attribute_stats(ctx, typed_args)
+        }
+        BuiltinScalarFunction::PgClearAttributeStats => {
+            if values.len() != 4 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "pg_clear_attribute_stats(schemaname, relname, attname, inherited)",
+                    actual: format!("{} args", values.len()),
+                }));
+            }
+            runtime.pg_clear_attribute_stats(
+                ctx,
+                values[0].clone(),
+                values[1].clone(),
+                values[2].clone(),
+                values[3].clone(),
+            )
+        }
+        _ => unreachable!(),
     }
 }
 

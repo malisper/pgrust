@@ -7179,22 +7179,7 @@ fn bind_regclass_literal_cast(
     )))
 }
 
-fn missing_regclass_literal_error(name: &str, catalog: &dyn CatalogLookup) -> ParseError {
-    if let Some((schema, _relation)) = name.rsplit_once('.') {
-        let schema = schema.trim_matches('"').to_ascii_lowercase();
-        if !catalog
-            .namespace_rows()
-            .into_iter()
-            .any(|row| row.nspname == schema)
-        {
-            return ParseError::DetailedError {
-                message: format!("schema \"{schema}\" does not exist"),
-                detail: None,
-                hint: None,
-                sqlstate: "3F000",
-            };
-        }
-    }
+fn missing_regclass_literal_error(name: &str, _catalog: &dyn CatalogLookup) -> ParseError {
     ParseError::UnknownTable(name.to_string())
 }
 
