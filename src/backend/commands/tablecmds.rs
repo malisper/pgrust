@@ -13335,23 +13335,6 @@ pub fn execute_delete_with_waiter(
                 let mut current_tid = *tid;
                 let mut current_values = values.clone();
                 loop {
-                    if let Some(catalog) = ctx.catalog.as_deref() {
-                        let namespace_oid = catalog
-                            .class_row_by_oid(target.relation_oid)
-                            .map(|row| row.relnamespace)
-                            .unwrap_or(0);
-                        let indexes = catalog.index_relations_for_heap(target.relation_oid);
-                        enforce_publication_replica_identity(
-                            &target.relation_name,
-                            target.relation_oid,
-                            namespace_oid,
-                            &target.desc,
-                            &indexes,
-                            catalog,
-                            PublicationDmlAction::Delete,
-                            true,
-                        )?;
-                    }
                     if let Some(triggers) = &triggers {
                         if !triggers.before_row_delete(&current_values, ctx)? {
                             break;
