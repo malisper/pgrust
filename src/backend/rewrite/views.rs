@@ -152,6 +152,14 @@ fn return_rule_row(
     }
 }
 
+fn return_rule_sql(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    display_name: &str,
+) -> Result<String, ParseError> {
+    Ok(return_rule_row(catalog, relation_oid, display_name)?.ev_action)
+}
+
 pub(crate) fn split_stored_view_definition_sql(sql: &str) -> (&str, ViewCheckOption) {
     let normalized = sql.trim().trim_end_matches(';').trim();
     let lowered = normalized.to_ascii_lowercase();
