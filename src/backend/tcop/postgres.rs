@@ -4432,15 +4432,32 @@ where
         },
     )?;
     send_backend_key_data(&mut writer, client_id as i32, client_id as i32)?;
-    send_ready_for_query(&mut writer, b'I')?;
-    writer.flush()?;
 
-    db.register_session_activity(client_id);
     let cleanup = ConnectionCleanupGuard {
         db: &db,
         cluster,
         state: &mut state,
     };
+    clear_backend_notices();
+    clear_notices();
+    if let Err(err) = cleanup.state.session.fire_login_event_triggers(&db) {
+        send_queued_notices(&mut writer)?;
+        send_error(
+            &mut writer,
+            exec_error_sqlstate(&err),
+            &format_exec_error(&err),
+            exec_error_detail(&err),
+            exec_error_hint(&err),
+            None,
+        )?;
+        writer.flush()?;
+        return Ok(());
+    }
+    send_queued_notices(&mut writer)?;
+    send_ready_for_query(&mut writer, b'I')?;
+    writer.flush()?;
+
+    db.register_session_activity(client_id);
 
     let result = {
         let state = &mut *cleanup.state;
@@ -12921,6 +12938,52 @@ mod tests {
             parameter_status_value(&output, "server_version").as_deref(),
             Some("18.3")
         );
+    }
+
+    #[test]
+    fn login_event_trigger_fires_before_startup_ready() {
+        let cluster = Cluster::open(temp_dir("login_event_trigger_startup"), 16).unwrap();
+        let db = cluster.connect_database("postgres").unwrap();
+        db.execute(1, "create table user_logins(id serial, who text)")
+            .unwrap();
+        db.execute(
+            1,
+            "create function on_login_proc() returns event_trigger as $$ \
+             begin \
+               insert into user_logins (who) values (session_user); \
+               raise notice 'You are welcome!'; \
+             end; \
+             $$ language plpgsql",
+        )
+        .unwrap();
+        db.execute(
+            1,
+            "create event trigger on_login_trigger on login execute procedure on_login_proc()",
+        )
+        .unwrap();
+        db.execute(1, "alter event trigger on_login_trigger enable always")
+            .unwrap();
+
+        let mut input = startup_packet("postgres", "postgres");
+        input.extend(terminate_message());
+
+        let mut output = Vec::new();
+        handle_connection_with_io(Cursor::new(input), &mut output, &cluster, 41).unwrap();
+
+        assert!(
+            output
+                .windows("You are welcome!".len())
+                .any(|window| window == b"You are welcome!")
+        );
+        match db
+            .execute(2, "select who from user_logins order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]
