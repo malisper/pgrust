@@ -1306,7 +1306,15 @@ fn create_table_error_position(sql: &str, message: &str) -> Option<usize> {
         _ => None,
     }
     .or_else(|| {
-        if message.starts_with("column \"") && message.contains("named in partition key") {
+        if message.starts_with("multiple identity specifications for column ") {
+            find_second_option_occurrence(sql, "generated")
+        } else if message.starts_with("both default and identity specified for column ") {
+            let default_position = find_case_insensitive_token_position(sql, "default")?;
+            let generated_position = find_case_insensitive_token_position(sql, "generated")?;
+            (default_position < generated_position).then_some(default_position)
+        } else if message.starts_with("conflicting NULL/NOT NULL declarations for column ") {
+            find_case_insensitive_token_position(sql, "null")
+        } else if message.starts_with("column \"") && message.contains("named in partition key") {
             find_partition_key_expr_position(sql)
         } else if message.starts_with("cannot use system column ") {
             find_partition_key_expr_position(sql)

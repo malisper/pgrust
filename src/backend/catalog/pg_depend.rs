@@ -103,6 +103,7 @@ pub fn sequence_owned_by_depend_row(
     sequence_oid: u32,
     relation_oid: u32,
     attnum: i32,
+    deptype: char,
 ) -> PgDependRow {
     PgDependRow {
         classid: PG_CLASS_RELATION_OID,
@@ -111,7 +112,7 @@ pub fn sequence_owned_by_depend_row(
         refclassid: PG_CLASS_RELATION_OID,
         refobjid: relation_oid,
         refobjsubid: attnum,
-        deptype: DEPENDENCY_AUTO,
+        deptype,
     }
 }
 

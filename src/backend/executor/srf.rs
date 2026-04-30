@@ -26,8 +26,9 @@ use crate::backend::utils::time::datetime::{
 };
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, REGTYPE_TYPE_OID, TEXT_TYPE_OID,
-    VOID_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_scalar_function_for_proc_row,
+    BOOL_TYPE_OID, DEPENDENCY_INTERNAL, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID,
+    PG_CLASS_RELATION_OID, REGTYPE_TYPE_OID, TEXT_TYPE_OID, VOID_TYPE_OID,
+    builtin_scalar_function_for_proc_oid, builtin_scalar_function_for_proc_row,
 };
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
@@ -1941,6 +1942,7 @@ fn sequence_type_display(type_oid: u32) -> (&'static str, i32) {
 }
 
 struct SequenceViewRow {
+    oid: u32,
     schema: String,
     name: String,
     owner: String,
@@ -1985,6 +1987,7 @@ fn sequence_rows(ctx: &ExecutorContext) -> Result<Vec<SequenceViewRow>, ExecErro
             .map(|role| role.rolname.clone())
             .unwrap_or_else(|| class.relowner.to_string());
         rows.push(SequenceViewRow {
+            oid: class.oid,
             schema,
             name: class.relname,
             owner,
@@ -2006,9 +2009,30 @@ fn sequence_rows(ctx: &ExecutorContext) -> Result<Vec<SequenceViewRow>, ExecErro
     Ok(rows)
 }
 
+fn is_identity_owned_sequence(catalog: &dyn CatalogLookup, sequence_oid: u32) -> bool {
+    catalog.depend_rows().into_iter().any(|row| {
+        row.classid == PG_CLASS_RELATION_OID
+            && row.objid == sequence_oid
+            && row.objsubid == 0
+            && row.refclassid == PG_CLASS_RELATION_OID
+            && row.refobjsubid > 0
+            && row.deptype == DEPENDENCY_INTERNAL
+    })
+}
+
 fn eval_pg_sequences(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError> {
     Ok(sequence_rows(ctx)?
         .into_iter()
+        .filter(|row| {
+            let Ok(catalog) = sequence_catalog(ctx) else {
+                return false;
+            };
+            catalog
+                .class_rows()
+                .into_iter()
+                .find(|class| class.relkind == 'S' && class.relname == row.name)
+                .is_none_or(|class| !is_identity_owned_sequence(catalog, class.oid))
+        })
         .map(|row| {
             let (type_name, _) = sequence_type_display(row.type_oid);
             let last_value = row.last_value.map(Value::Int64).unwrap_or(Value::Null);
@@ -2030,17 +2054,19 @@ fn eval_pg_sequences(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError>
 }
 
 fn eval_information_schema_sequences(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError> {
-    let sequence_catalog = if ctx.current_database_name.eq_ignore_ascii_case("postgres") {
+    let sequence_catalog_name = if ctx.current_database_name.eq_ignore_ascii_case("postgres") {
         "regression".to_string()
     } else {
         ctx.current_database_name.clone()
     };
+    let catalog = sequence_catalog(ctx)?;
     Ok(sequence_rows(ctx)?
         .into_iter()
+        .filter(|row| !is_identity_owned_sequence(catalog, row.oid))
         .map(|row| {
             let (type_name, precision) = sequence_type_display(row.type_oid);
             TupleSlot::virtual_row(vec![
-                Value::Text(sequence_catalog.clone().into()),
+                Value::Text(sequence_catalog_name.clone().into()),
                 Value::Text(row.schema.into()),
                 Value::Text(row.name.into()),
                 Value::Text(type_name.into()),

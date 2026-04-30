@@ -11748,6 +11748,9 @@ pub fn builtin_scalar_function_for_proc_oid(oid: u32) -> Option<BuiltinScalarFun
 }
 
 pub fn proc_oid_for_builtin_scalar_function(func: BuiltinScalarFunction) -> Option<u32> {
+    if func == BuiltinScalarFunction::IdentityNextVal {
+        return proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::NextVal);
+    }
     bootstrap_scalar_proc_oids()
         .iter()
         .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))

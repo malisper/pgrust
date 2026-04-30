@@ -44,17 +44,18 @@ use crate::include::catalog::{
     PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
     PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
     PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_am_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
-    bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
-    bootstrap_pg_tablespace_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
-    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
-    builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
+    PgPublicationRow, PgRangeRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow,
+    PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_conversion_rows, bootstrap_pg_database_rows, bootstrap_pg_enum_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows, bootstrap_pg_proc_row_by_oid,
+    bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name, bootstrap_pg_tablespace_rows,
+    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
+    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
+    builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
     proc_oid_for_builtin_ordered_set_aggregate_function, range_type_ref_for_sql_type,
@@ -1063,6 +1064,10 @@ pub trait CatalogLookup {
     }
 
     fn depend_rows(&self) -> Vec<PgDependRow> {
+        Vec::new()
+    }
+
+    fn sequence_rows(&self) -> Vec<PgSequenceRow> {
         Vec::new()
     }
 
