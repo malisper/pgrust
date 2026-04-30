@@ -11625,6 +11625,124 @@ fn attach_partition_creates_missing_keys_and_fk_to_partitioned_key_stays_rejecte
 }
 
 #[test]
+fn partitioned_primary_key_propagates_to_nested_and_attached_partitions() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table nested_pk_parent (
+                id int4 not null,
+                bucket int4 not null,
+                primary key (id, bucket)
+             ) partition by range (bucket)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table nested_pk_mid partition of nested_pk_parent
+             for values from (0) to (100) partition by range (bucket)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table nested_pk_leaf partition of nested_pk_mid
+             for values from (0) to (50)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table nested_pk_attached (
+                id int4 not null,
+                bucket int4 not null
+             )",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table nested_pk_parent attach partition nested_pk_attached
+             for values from (100) to (200)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, con.conparentid <> 0, con.conislocal, con.coninhcount::int4
+               from pg_constraint con
+               join pg_class c on c.oid = con.conrelid
+              where c.relname in (
+                    'nested_pk_parent',
+                    'nested_pk_mid',
+                    'nested_pk_leaf',
+                    'nested_pk_attached'
+                )
+                and con.contype::text = 'p'
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nested_pk_attached".into()),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("nested_pk_leaf".into()),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("nested_pk_mid".into()),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("nested_pk_parent".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int32(0),
+            ],
+        ]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname
+               from pg_inherits i
+               join pg_class child on child.oid = i.inhrelid
+               join pg_class parent on parent.oid = i.inhparent
+              where parent.relname in ('nested_pk_parent_pkey', 'nested_pk_mid_pkey')
+              order by parent.relname, child.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nested_pk_leaf_pkey".into()),
+                Value::Text("nested_pk_mid_pkey".into()),
+            ],
+            vec![
+                Value::Text("nested_pk_attached_pkey".into()),
+                Value::Text("nested_pk_parent_pkey".into()),
+            ],
+            vec![
+                Value::Text("nested_pk_mid_pkey".into()),
+                Value::Text("nested_pk_parent_pkey".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn drop_table_still_rejects_legacy_inheritance_parents() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);

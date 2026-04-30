@@ -3041,6 +3041,7 @@ impl Database {
                     &build_options,
                     65_536,
                     false,
+                    false,
                     catalog_effects,
                 )?;
                 let constraint_ctx = CatalogWriteContext {

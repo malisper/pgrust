@@ -276,6 +276,12 @@ pub enum WalRecord {
         tag: BufferTag,
         page: Box<[u8; PAGE_SIZE]>,
     },
+    BtreeInsert {
+        xid: u32,
+        tag: BufferTag,
+        offset_number: u16,
+        tuple_data: Vec<u8>,
+    },
     GistPageImage {
         xid: u32,
         tag: BufferTag,
@@ -809,9 +815,35 @@ impl WalReader {
                     page,
                 }
             }
+            (RM_BTREE_ID, XLOG_BTREE_INSERT_LEAF) | (RM_BTREE_ID, XLOG_BTREE_INSERT_UPPER) => {
+                let block = decoded
+                    .blocks
+                    .first()
+                    .ok_or_else(|| WalError::Corrupt("btree record missing block ref".into()))?;
+                if let Some(page) = block.image.as_ref() {
+                    WalRecord::BtreePageImage {
+                        xid: decoded.xid,
+                        tag: block.tag,
+                        page: page.clone(),
+                    }
+                } else {
+                    if decoded.main_data.len() != 2 {
+                        return Err(WalError::Corrupt(
+                            "btree insert record missing offset".into(),
+                        ));
+                    }
+                    WalRecord::BtreeInsert {
+                        xid: decoded.xid,
+                        tag: block.tag,
+                        offset_number: u16::from_le_bytes([
+                            decoded.main_data[0],
+                            decoded.main_data[1],
+                        ]),
+                        tuple_data: block.data.clone(),
+                    }
+                }
+            }
             (RM_BTREE_ID, XLOG_FPI)
-            | (RM_BTREE_ID, XLOG_BTREE_INSERT_LEAF)
-            | (RM_BTREE_ID, XLOG_BTREE_INSERT_UPPER)
             | (RM_BTREE_ID, XLOG_BTREE_INSERT_META)
             | (RM_BTREE_ID, XLOG_BTREE_SPLIT_L)
             | (RM_BTREE_ID, XLOG_BTREE_SPLIT_R)

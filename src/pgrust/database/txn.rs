@@ -69,17 +69,7 @@ impl Database {
         &self,
         effect: &CatalogMutationEffect,
     ) -> Result<(), ExecError> {
-        for rel in &effect.created_rels {
-            self.pool
-                .with_storage_mut(|s| {
-                    let _ = s.smgr.open(*rel);
-                    s.smgr
-                        .create(*rel, crate::backend::storage::smgr::ForkNumber::Main, true)
-                })
-                .map_err(|e| {
-                    ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(e))
-                })?;
-        }
+        self.apply_catalog_mutation_effect_storage_only(effect)?;
         let invalidation = catalog_invalidation_from_effect(effect);
         if !invalidation.is_empty() {
             let client_ids = self
@@ -95,6 +85,24 @@ impl Database {
                     &invalidation,
                 );
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn apply_catalog_mutation_effect_storage_only(
+        &self,
+        effect: &CatalogMutationEffect,
+    ) -> Result<(), ExecError> {
+        for rel in &effect.created_rels {
+            self.pool
+                .with_storage_mut(|s| {
+                    let _ = s.smgr.open(*rel);
+                    s.smgr
+                        .create(*rel, crate::backend::storage::smgr::ForkNumber::Main, true)
+                })
+                .map_err(|e| {
+                    ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(e))
+                })?;
         }
         Ok(())
     }

@@ -927,6 +927,15 @@ fn relation_cache_context(cache_ctx: BackendCacheContext) -> BackendCacheContext
     }
 }
 
+fn shared_catcache_context(cache_ctx: BackendCacheContext) -> BackendCacheContext {
+    match cache_ctx {
+        BackendCacheContext::Autocommit => BackendCacheContext::Autocommit,
+        BackendCacheContext::Transaction { xid, .. } => {
+            BackendCacheContext::Transaction { xid, cid: 0 }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SysCacheKeyPart {
     Int16(i16),
@@ -2440,11 +2449,12 @@ fn load_backend_catcache(
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
     let cache_ctx = BackendCacheContext::from(txn_ctx);
+    let shared_cache_ctx = shared_catcache_context(cache_ctx);
     let shared = if let Some(cache) = db
         .backend_cache_states
         .read()
         .get(&client_id)
-        .filter(|state| state.shared_catcache_ctx == Some(cache_ctx))
+        .filter(|state| state.shared_catcache_ctx == Some(shared_cache_ctx))
         .and_then(|state| state.shared_catcache.clone())
     {
         cache
@@ -2458,7 +2468,7 @@ fn load_backend_catcache(
 
         let mut states = db.backend_cache_states.write();
         let state = states.entry(client_id).or_default();
-        state.shared_catcache_ctx = Some(cache_ctx);
+        state.shared_catcache_ctx = Some(shared_cache_ctx);
         state.shared_catcache = Some(shared.clone());
         shared
     };
