@@ -1178,6 +1178,7 @@ struct CopyInsertOptions<'a> {
     null_marker: &'a str,
     default_marker: Option<&'a str>,
     on_error: CopyOnError,
+    where_clause: Option<&'a str>,
     where_filter: Option<CopyWhereFilter>,
     progress: Option<CopyProgressOptions>,
 }
@@ -1228,6 +1229,163 @@ impl CopyWhereFilter {
             literal: self.literal.clone(),
         })
     }
+}
+
+fn visible_non_generated_column_indexes(desc: &RelationDesc) -> Vec<usize> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, column)| (!column.dropped && column.generated.is_none()).then_some(idx))
+        .collect()
+}
+
+fn copy_target_column_indexes(
+    desc: &RelationDesc,
+    target_columns: Option<&[String]>,
+) -> Result<Vec<usize>, ExecError> {
+    let Some(columns) = target_columns else {
+        return Ok(visible_non_generated_column_indexes(desc));
+    };
+    let mut indexes = Vec::with_capacity(columns.len());
+    for name in columns {
+        let Some(index) = desc
+            .columns
+            .iter()
+            .position(|column| !column.dropped && column.name == *name)
+        else {
+            return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+        };
+        if desc.columns[index].generated.is_some() {
+            return Err(copy_generated_column_error(&desc.columns[index].name));
+        }
+        indexes.push(index);
+    }
+    Ok(indexes)
+}
+
+fn copy_target_column_names(
+    desc: &RelationDesc,
+    target_columns: Option<&[String]>,
+) -> Result<Vec<String>, ExecError> {
+    copy_target_column_indexes(desc, target_columns).map(|indexes| {
+        indexes
+            .into_iter()
+            .map(|index| desc.columns[index].name.clone())
+            .collect()
+    })
+}
+
+fn copy_generated_column_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("column \"{column_name}\" is a generated column"),
+        detail: Some("Generated columns cannot be used in COPY.".into()),
+        hint: None,
+        sqlstate: "428C9",
+    }
+}
+
+fn copy_generated_where_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: "generated columns are not supported in COPY FROM WHERE conditions".into(),
+        detail: Some(format!("Column \"{column_name}\" is a generated column.")),
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn validate_copy_where_generated_references(
+    table_name: &str,
+    desc: &RelationDesc,
+    clause: &str,
+) -> Result<(), ExecError> {
+    let generated_columns = desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped && column.generated.is_some())
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    let Some(first_generated) = generated_columns.first().copied() else {
+        return Ok(());
+    };
+    let identifiers = copy_where_identifiers(clause);
+    for generated in generated_columns {
+        if identifiers
+            .iter()
+            .any(|identifier| identifier.eq_ignore_ascii_case(generated))
+        {
+            return Err(copy_generated_where_error(generated));
+        }
+    }
+    let relation_name = table_name.rsplit('.').next().unwrap_or(table_name);
+    if identifiers
+        .iter()
+        .any(|identifier| identifier.eq_ignore_ascii_case(relation_name))
+    {
+        return Err(copy_generated_where_error(first_generated));
+    }
+    Ok(())
+}
+
+fn copy_where_identifiers(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        if ch == '\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] as char == '\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '"' {
+            i += 1;
+            let mut ident = String::new();
+            while i < bytes.len() {
+                let quoted = bytes[i] as char;
+                if quoted == '"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] as char == '"' {
+                        ident.push('"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                ident.push(quoted);
+                i += 1;
+            }
+            if !ident.is_empty() {
+                out.push(ident);
+            }
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                let next = bytes[i] as char;
+                if next == '_' || next.is_ascii_alphanumeric() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(input[start..i].to_string());
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 fn bind_copy_column_defaults(
@@ -18211,6 +18369,7 @@ impl Session {
                 } else {
                     CopyOnError::Stop
                 },
+                where_clause: copy.options.where_clause.as_deref(),
                 where_filter,
                 progress,
             },
@@ -18240,22 +18399,10 @@ impl Session {
             .read()
             .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
         let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
-        let target_indexes = if let Some(columns) = columns {
-            let mut indexes = Vec::with_capacity(columns.len());
-            for name in columns {
-                let Some(index) = desc
-                    .columns
-                    .iter()
-                    .position(|column| !column.dropped && column.name == *name)
-                else {
-                    return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
-                };
-                indexes.push(index);
-            }
-            indexes
-        } else {
-            desc.visible_column_indexes()
-        };
+        let target_indexes = copy_target_column_indexes(&desc, columns.as_deref())?;
+        if let Some(clause) = copy.options.where_clause.as_deref() {
+            validate_copy_where_generated_references(name, &desc, clause)?;
+        }
         check_relation_column_privileges(&ctx, relation_oid, 'a', target_indexes.iter().copied())?;
         if relation_row_security_is_enabled_for_user(
             relation_oid,
@@ -18269,10 +18416,11 @@ impl Session {
                 sqlstate: "0A000",
             });
         }
+        let visible_default_indexes = visible_non_generated_column_indexes(&desc);
         let validation_default_indexes = if copy.options.default_marker.is_some() {
-            desc.visible_column_indexes()
+            visible_default_indexes
         } else {
-            desc.visible_column_indexes()
+            visible_default_indexes
                 .into_iter()
                 .filter(|column_index| !target_indexes.contains(column_index))
                 .collect::<Vec<_>>()
@@ -18351,20 +18499,11 @@ impl Session {
         table_name: &str,
         target_columns: Option<&[String]>,
     ) -> Result<Vec<String>, ExecError> {
-        if let Some(columns) = target_columns {
-            return Ok(columns.to_vec());
-        }
         let catalog = self.catalog_lookup(db);
         let entry = catalog
             .lookup_any_relation(table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.to_string())))?;
-        Ok(entry
-            .desc
-            .columns
-            .iter()
-            .filter(|column| !column.dropped)
-            .map(|column| column.name.clone())
-            .collect())
+        copy_target_column_names(&entry.desc, target_columns)
     }
 
     fn copy_query_rows(
@@ -18395,9 +18534,13 @@ impl Session {
                     }
                 }
                 self.ensure_copy_to_relation_source(db, name, columns.as_deref())?;
+                let target_columns = relation
+                    .as_ref()
+                    .map(|entry| copy_target_column_names(&entry.desc, columns.as_deref()))
+                    .transpose()?;
                 relation_copy_to_query_sql(
                     name,
-                    columns.as_deref(),
+                    target_columns.as_deref(),
                     relation.is_some_and(|entry| entry.relkind == 'r'),
                 )
             }
@@ -18448,6 +18591,7 @@ impl Session {
                 null_marker,
                 default_marker: None,
                 on_error: CopyOnError::Stop,
+                where_clause: None,
                 where_filter: None,
                 progress: None,
             },
@@ -18519,28 +18663,10 @@ impl Session {
                             catalog.index_relations_for_heap(entry.relation_oid),
                         )
                     };
-                    let target_indexes = if let Some(columns) = target_columns {
-                        let mut indexes = Vec::with_capacity(columns.len());
-                        for name in columns {
-                            let Some(index) = desc
-                                .columns
-                                .iter()
-                                .position(|column| !column.dropped && column.name == *name)
-                            else {
-                                return Err(ExecError::Parse(ParseError::UnknownColumn(
-                                    name.clone(),
-                                )));
-                            };
-                            indexes.push(index);
-                        }
-                        indexes
-                    } else {
-                        desc.columns
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(idx, column)| (!column.dropped).then_some(idx))
-                            .collect()
-                    };
+                    let target_indexes = copy_target_column_indexes(&desc, target_columns)?;
+                    if let Some(clause) = options.where_clause {
+                        validate_copy_where_generated_references(table_name, &desc, clause)?;
+                    }
                     let where_filter = options
                         .where_filter
                         .as_ref()
@@ -18581,14 +18707,15 @@ impl Session {
                         target_indexes.iter().copied(),
                     )?;
                     let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
-                    let omitted_default_indexes = desc
-                        .visible_column_indexes()
-                        .into_iter()
+                    let visible_default_indexes = visible_non_generated_column_indexes(&desc);
+                    let omitted_default_indexes = visible_default_indexes
+                        .iter()
+                        .copied()
                         .filter(|column_index| !target_indexes.contains(column_index))
                         .collect::<Vec<_>>();
                     if rows.is_empty() {
                         let validation_default_indexes = if options.default_marker.is_some() {
-                            desc.visible_column_indexes()
+                            visible_default_indexes
                         } else {
                             omitted_default_indexes.clone()
                         };
@@ -19564,7 +19691,6 @@ impl Session {
 
 fn relation_copy_to_query_sql(table_name: &str, columns: Option<&[String]>, only: bool) -> String {
     let target = columns
-        .filter(|columns| !columns.is_empty())
         .map(|columns| {
             columns
                 .iter()
