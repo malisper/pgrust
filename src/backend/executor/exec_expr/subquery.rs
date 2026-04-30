@@ -201,6 +201,7 @@ fn plan_is_exists_membership_safe(plan: &Plan) -> bool {
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }

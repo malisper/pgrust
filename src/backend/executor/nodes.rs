@@ -4,13 +4,16 @@ use super::{
 };
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end, heap_scan_next_visible,
-    heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+    heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_scan_prepare_page_at,
 };
 use crate::backend::access::index::indexam;
 use crate::backend::access::nbtree::nbtcompare::compare_bt_values;
 use crate::backend::access::nbtree::nbtree::decode_key_payload;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
-use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
+use crate::backend::executor::exec_expr::{
+    compare_order_by_keys, eval_expr, hashfloat8_for_tablesample, pg_hash_three_u32,
+    pg_hash_two_u32,
+};
 use crate::backend::executor::expr_casts::cast_value;
 use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::expr_ops::compare_order_values;
@@ -55,16 +58,19 @@ use crate::include::nodes::execnodes::{
     LockRowsState, MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState,
     MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
     ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
-    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState,
-    ValuesState, WindowAggState, WorkTableScanState,
+    SlotKind, SubqueryScanState, SystemVarBinding, TableSampleMethod, TableSampleState,
+    TidScanState, ToastRelationRef, TupleSlot, UniqueState, ValuesState, WindowAggState,
+    WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{
-    AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan, Plan,
+    AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan,
+    Plan, TidScanSource,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, CaseExpr, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType,
-    OUTER_VAR, OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall,
-    SubLinkType, Var, attrno_index, is_special_varno,
+    OUTER_VAR, OrderByEntry, ParamKind, RelationDesc, SELF_ITEM_POINTER_ATTR_NO,
+    ScalarFunctionImpl, SetReturningCall, SubLinkType, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO,
+    XMIN_ATTR_NO, attrno_index, is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -546,6 +552,10 @@ fn begin_node(stats: &mut NodeExecStats, ctx: &ExecutorContext) -> Result<(), Ex
 
 fn note_filtered_row(stats: &mut NodeExecStats) {
     stats.rows_removed_by_filter += 1;
+}
+
+fn note_index_recheck_filtered_row(stats: &mut NodeExecStats) {
+    stats.rows_removed_by_index_recheck += 1;
 }
 
 fn relation_io_object(ctx: &ExecutorContext, relation_oid: u32) -> &'static str {
@@ -1951,6 +1961,206 @@ impl PlanNode for UniqueState {
     }
 }
 
+fn table_sample_method(method: &str) -> Result<TableSampleMethod, ExecError> {
+    match method.to_ascii_lowercase().as_str() {
+        "bernoulli" => Ok(TableSampleMethod::Bernoulli),
+        "system" => Ok(TableSampleMethod::System),
+        normalized => Err(ExecError::DetailedError {
+            message: format!("tablesample method {normalized} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        }),
+    }
+}
+
+fn table_sample_cutoff(percent: f64) -> Result<u64, ExecError> {
+    if !(0.0..=100.0).contains(&percent) || percent.is_nan() {
+        return Err(ExecError::DetailedError {
+            message: "sample percentage must be between 0 and 100".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "2202H",
+        });
+    }
+    Ok(((u64::from(u32::MAX) + 1) as f64 * percent / 100.0).round() as u64)
+}
+
+fn eval_tablesample_float_arg(
+    expr: &Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+    null_message: &'static str,
+) -> Result<f64, ExecError> {
+    match eval_expr(expr, slot, ctx)? {
+        Value::Null => Err(ExecError::DetailedError {
+            message: null_message.into(),
+            detail: None,
+            hint: None,
+            sqlstate: "2202H",
+        }),
+        Value::Int16(value) => Ok(f64::from(value)),
+        Value::Int32(value) => Ok(f64::from(value)),
+        Value::Int64(value) => Ok(value as f64),
+        Value::Float64(value) => Ok(value),
+        _ => Err(ExecError::DetailedError {
+            message: "malformed TABLESAMPLE argument".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+    }
+}
+
+fn ensure_tablesample_initialized(
+    sample: &mut TableSampleState,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if sample.initialized {
+        return Ok(());
+    }
+    let method = table_sample_method(&sample.clause.method)?;
+    let [percent_arg] = sample.clause.args.as_slice() else {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "tablesample method {} requires 1 argument, not {}",
+                sample.clause.method,
+                sample.clause.args.len()
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "2202H",
+        });
+    };
+    let percent = eval_tablesample_float_arg(
+        percent_arg,
+        slot,
+        ctx,
+        "TABLESAMPLE parameter cannot be null",
+    )?;
+    let seed = match sample.clause.repeatable.as_ref() {
+        Some(repeatable) => {
+            let repeatable = eval_tablesample_float_arg(
+                repeatable,
+                slot,
+                ctx,
+                "TABLESAMPLE REPEATABLE parameter cannot be null",
+            )?;
+            hashfloat8_for_tablesample(repeatable)
+        }
+        None => *sample.random_seed.get_or_insert_with(|| {
+            ctx.random_state.lock().int64_range(0, i64::from(u32::MAX)) as u32
+        }),
+    };
+
+    sample.method = Some(method);
+    sample.cutoff = table_sample_cutoff(percent)?;
+    sample.seed = seed;
+    sample.next_block = 0;
+    sample.initialized = true;
+    Ok(())
+}
+
+fn next_system_sample_block(sample: &mut TableSampleState, nblocks: u32) -> Option<u32> {
+    while sample.next_block < nblocks {
+        let block = sample.next_block;
+        sample.next_block += 1;
+        if u64::from(pg_hash_two_u32(block, sample.seed)) < sample.cutoff {
+            return Some(block);
+        }
+    }
+    None
+}
+
+fn prepare_next_sampled_page(
+    sample: Option<&mut TableSampleState>,
+    ctx: &mut ExecutorContext,
+    scan: &mut crate::backend::access::heap::heapam::VisibleHeapScan,
+) -> Result<Option<usize>, ExecError> {
+    match sample.and_then(|sample| {
+        matches!(sample.method, Some(TableSampleMethod::System)).then_some(sample)
+    }) {
+        Some(sample) => {
+            while let Some(block) = next_system_sample_block(sample, scan.nblocks()) {
+                if let Some(buffer_id) = heap_scan_prepare_page_at::<ExecError>(
+                    &*ctx.pool,
+                    ctx.client_id,
+                    &ctx.txns,
+                    scan,
+                    block,
+                )? {
+                    return Ok(Some(buffer_id));
+                }
+            }
+            Ok(None)
+        }
+        None => heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, scan),
+    }
+}
+
+fn tablesample_accepts_tuple(
+    sample: Option<&TableSampleState>,
+    tid: crate::include::access::itemptr::ItemPointerData,
+) -> bool {
+    match sample {
+        Some(sample) if matches!(sample.method, Some(TableSampleMethod::Bernoulli)) => {
+            let hash =
+                pg_hash_three_u32(tid.block_number, u32::from(tid.offset_number), sample.seed);
+            u64::from(hash) < sample.cutoff
+        }
+        _ => true,
+    }
+}
+
+fn strip_explain_outer_parens(value: &str) -> &str {
+    value
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(value)
+}
+
+fn render_tablesample_sampling(sample: &TableSampleState, column_names: &[String]) -> String {
+    let args = sample
+        .clause
+        .args
+        .iter()
+        .map(|expr| render_tablesample_explain_arg(expr, column_names, "real"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rendered = format!("{} ({args})", sample.clause.method);
+    if let Some(repeatable) = &sample.clause.repeatable {
+        rendered.push_str(" REPEATABLE (");
+        rendered.push_str(&render_tablesample_explain_arg(
+            repeatable,
+            column_names,
+            "double precision",
+        ));
+        rendered.push(')');
+    }
+    rendered
+}
+
+fn render_tablesample_explain_arg(
+    expr: &Expr,
+    column_names: &[String],
+    type_name: &'static str,
+) -> String {
+    match expr {
+        Expr::Const(value) => format!("'{}'::{type_name}", render_explain_literal(value)),
+        Expr::Cast(inner, ty)
+            if matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
+                && matches!(inner.as_ref(), Expr::Const(_)) =>
+        {
+            strip_explain_outer_parens(&render_explain_expr(expr, column_names)).to_string()
+        }
+        Expr::Cast(inner, ty) if matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) => {
+            strip_explain_outer_parens(&render_explain_expr(inner, column_names)).to_string()
+        }
+        _ => strip_explain_outer_parens(&render_explain_expr(expr, column_names)).to_string(),
+    }
+}
+
 impl PlanNode for SeqScanState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -2168,6 +2378,9 @@ impl PlanNode for SeqScanState {
             None
         };
         begin_node(&mut self.stats, ctx)?;
+        if let Some(sample) = self.tablesample.as_mut() {
+            ensure_tablesample_initialized(sample, &mut self.slot, ctx)?;
+        }
 
         loop {
             ctx.check_for_interrupts()?;
@@ -2206,6 +2419,10 @@ impl PlanNode for SeqScanState {
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
 
+                    if !tablesample_accepts_tuple(self.tablesample.as_ref(), tid) {
+                        continue;
+                    }
+
                     if let Some(qual) = &self.qual {
                         let outer_values = materialize_slot_values(&mut self.slot)?;
                         let current_bindings = self.current_bindings.clone();
@@ -2226,7 +2443,7 @@ impl PlanNode for SeqScanState {
             }
 
             let next: Result<Option<usize>, ExecError> =
-                heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, scan);
+                prepare_next_sampled_page(self.tablesample.as_mut(), ctx, scan);
             if next?.is_none() {
                 heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
                 finish_eof(&mut self.stats, start, ctx);
@@ -2239,6 +2456,22 @@ impl PlanNode for SeqScanState {
                 session_stats.note_io_hit("client backend", object, "normal");
             }
         }
+    }
+    fn rescan(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if let Some(mut scan) = self.scan.take() {
+            heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
+        }
+        if let Some(sample) = self.tablesample.as_mut() {
+            sample.initialized = false;
+            sample.method = None;
+            sample.next_block = 0;
+        }
+        self.scan_rows.clear();
+        self.scan_index = 0;
+        self.sequence_emitted = false;
+        self.current_bindings.clear();
+        self.slot = TupleSlot::empty(self.column_names.len());
+        Ok(())
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
         Some(&mut self.slot)
@@ -2259,7 +2492,12 @@ impl PlanNode for SeqScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        format!("Seq Scan on {}", explain_relation_name(&self.relation_name))
+        let relation_name = explain_relation_name(&self.relation_name);
+        if self.tablesample.is_some() {
+            format!("Sample Scan on {relation_name}")
+        } else {
+            format!("Seq Scan on {relation_name}")
+        }
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
         self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
@@ -2274,6 +2512,12 @@ impl PlanNode for SeqScanState {
         let prefix = explain_detail_prefix(indent);
         if self.disabled {
             lines.push(format!("{prefix}Disabled: true"));
+        }
+        if let Some(sample) = &self.tablesample {
+            lines.push(format!(
+                "{prefix}Sampling: {}",
+                render_tablesample_sampling(sample, &self.column_names)
+            ));
         }
         if let Some(qual_expr) = &self.qual_expr
             && !matches!(qual_expr, Expr::Const(Value::Bool(true)))
@@ -2622,6 +2866,239 @@ impl PlanNode for IndexOnlyScanState {
         _lines: &mut Vec<String>,
     ) {
     }
+}
+
+impl PlanNode for TidScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.relkind == 'm' && !self.relispopulated {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "materialized view \"{}\" has not been populated",
+                    self.relation_name
+                ),
+                detail: None,
+                hint: Some("Use the REFRESH MATERIALIZED VIEW command.".into()),
+                sqlstate: "55000",
+            });
+        }
+
+        if !self.candidates_initialized {
+            self.candidates = tid_scan_candidates(&self.tid_cond.sources, ctx)?;
+            self.candidates_initialized = true;
+            ctx.session_stats
+                .write()
+                .note_relation_scan(self.relation_oid);
+        }
+
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+
+        while let Some(tid) = self.candidates.get(self.candidate_index).copied() {
+            self.candidate_index += 1;
+            ctx.check_for_interrupts()?;
+            let Some(tuple) = heap_fetch_visible_with_txns(
+                &ctx.pool,
+                ctx.client_id,
+                self.rel,
+                tid,
+                &ctx.txns,
+                &ctx.snapshot,
+            )?
+            else {
+                continue;
+            };
+            if tid_scan_should_record_serializable_lock(ctx) {
+                let _ = ctx.try_acquire_row_lock(self.relation_oid, tid, RowLockMode::SIRead);
+            }
+            {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_tuple_fetched(self.relation_oid);
+                session_stats.note_relation_block_fetched(self.relation_oid);
+                let object = relation_io_object(ctx, self.relation_oid);
+                session_stats.note_io_read("client backend", object, "normal", 8192);
+                session_stats.note_io_hit("client backend", object, "normal");
+            }
+            self.slot.kind = SlotKind::HeapTuple {
+                desc: self.desc.clone(),
+                attr_descs: self.attr_descs.clone(),
+                tid,
+                tuple,
+            };
+            self.slot.toast = slot_toast_context(self.toast_relation, ctx);
+            self.slot.tts_nvalid = 0;
+            self.slot.tts_values.clear();
+            self.slot.decode_offset = 0;
+            self.slot.table_oid = Some(self.relation_oid);
+            let xmin = self.slot.xmin();
+            let xmax = self.slot.xmax();
+            self.current_bindings = vec![SystemVarBinding {
+                varno: self.source_id,
+                table_oid: self.relation_oid,
+                tid: Some(tid),
+                xmin,
+                xmax,
+            }];
+            set_active_system_bindings(ctx, &self.current_bindings);
+
+            if let Some(qual) = &self.qual {
+                let outer_values = materialize_slot_values(&mut self.slot)?;
+                let current_bindings = self.current_bindings.clone();
+                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                clear_inner_expr_bindings(ctx);
+                if !qual(&mut self.slot, ctx)? {
+                    note_filtered_row(&mut self.stats);
+                    continue;
+                }
+            }
+
+            ctx.session_stats
+                .write()
+                .note_relation_tuple_returned(self.relation_oid);
+            finish_row(&mut self.stats, start);
+            return Ok(Some(&mut self.slot));
+        }
+
+        finish_eof(&mut self.stats, start, ctx);
+        Ok(None)
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        format!("Tid Scan on {}", self.relation_name)
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = explain_detail_prefix(indent);
+        lines.push(format!(
+            "{prefix}TID Cond: {}",
+            render_explain_expr(&self.tid_cond.display_expr, &self.column_names)
+        ));
+        if let Some(filter) = &self.qual_expr {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(filter, &self.column_names)
+            ));
+        }
+    }
+
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _timing: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
+}
+
+fn tid_scan_should_record_serializable_lock(ctx: &ExecutorContext) -> bool {
+    ctx.gucs
+        .get("transaction_isolation")
+        .is_some_and(|value| value.eq_ignore_ascii_case("serializable"))
+}
+
+fn tid_scan_candidates(
+    sources: &[TidScanSource],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<crate::include::access::itemptr::ItemPointerData>, ExecError> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut slot = TupleSlot::empty(0);
+    for source in sources {
+        let value = match source {
+            TidScanSource::Scalar(expr) | TidScanSource::Array(expr) => {
+                eval_expr(expr, &mut slot, ctx)?
+            }
+        };
+        append_tid_candidates_from_value(&value, &mut seen, &mut out);
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn append_tid_candidates_from_value(
+    value: &Value,
+    seen: &mut BTreeSet<crate::include::access::itemptr::ItemPointerData>,
+    out: &mut Vec<crate::include::access::itemptr::ItemPointerData>,
+) {
+    match value {
+        Value::Tid(tid) => push_tid_candidate(*tid, seen, out),
+        Value::Text(text) => {
+            if let Some(tid) = parse_tid_candidate_text(text) {
+                push_tid_candidate(tid, seen, out);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                append_tid_candidates_from_value(value, seen, out);
+            }
+        }
+        Value::PgArray(array) => {
+            for value in &array.elements {
+                append_tid_candidates_from_value(value, seen, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_tid_candidate(
+    tid: crate::include::access::itemptr::ItemPointerData,
+    seen: &mut BTreeSet<crate::include::access::itemptr::ItemPointerData>,
+    out: &mut Vec<crate::include::access::itemptr::ItemPointerData>,
+) {
+    if seen.insert(tid) {
+        out.push(tid);
+    }
+}
+
+fn parse_tid_candidate_text(
+    text: &str,
+) -> Option<crate::include::access::itemptr::ItemPointerData> {
+    let text = text.trim().trim_matches('"');
+    let inner = text.strip_prefix('(')?.strip_suffix(')')?;
+    let (block, offset) = inner.split_once(',')?;
+    Some(crate::include::access::itemptr::ItemPointerData {
+        block_number: block.trim().parse().ok()?,
+        offset_number: offset.trim().parse().ok()?,
+    })
 }
 
 impl PlanNode for IndexScanState {
@@ -3359,6 +3836,14 @@ impl BitmapQualState {
         }
     }
 
+    fn explain_json(&self, analyze: bool, indent: usize) -> String {
+        match self {
+            BitmapQualState::Index(state) => state.explain_json(analyze, indent),
+            BitmapQualState::Or(state) => state.explain_json(analyze, indent),
+            BitmapQualState::And(state) => state.explain_json(analyze, indent),
+        }
+    }
+
     fn explain(
         &self,
         indent: usize,
@@ -3596,6 +4081,13 @@ impl PlanNode for BitmapOrState {
             child.explain(indent + 1, analyze, show_costs, timing, lines);
         }
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        self.children
+            .iter()
+            .map(|child| child.explain_json(analyze, indent))
+            .collect()
+    }
 }
 
 impl PlanNode for BitmapAndState {
@@ -3647,6 +4139,13 @@ impl PlanNode for BitmapAndState {
         for child in &self.children {
             child.explain(indent + 1, analyze, show_costs, timing, lines);
         }
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        self.children
+            .iter()
+            .map(|child| child.explain_json(analyze, indent))
+            .collect()
     }
 }
 
@@ -3774,7 +4273,7 @@ impl PlanNode for BitmapHeapScanState {
                 set_outer_expr_bindings(ctx, outer_values, &current_bindings);
                 clear_inner_expr_bindings(ctx);
                 if !recheck(&mut self.slot, ctx)? {
-                    note_filtered_row(&mut self.stats);
+                    note_index_recheck_filtered_row(&mut self.stats);
                     continue;
                 }
             }
@@ -3857,14 +4356,15 @@ impl PlanNode for BitmapHeapScanState {
             ));
         }
         let prefix = explain_detail_prefix(indent);
-        if analyze && self.stats.rows_removed_by_filter > 0 && self.filter_qual.is_some() {
+        if analyze && self.stats.rows_removed_by_index_recheck > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Index Recheck: {}",
+                self.stats.rows_removed_by_index_recheck
+            ));
+        }
+        if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
-                self.stats.rows_removed_by_filter
-            ));
-        } else if analyze && self.stats.rows_removed_by_filter > 0 {
-            lines.push(format!(
-                "{prefix}Rows Removed by Recheck: {}",
                 self.stats.rows_removed_by_filter
             ));
         }
@@ -3890,6 +4390,10 @@ impl PlanNode for BitmapHeapScanState {
     ) {
         self.bitmapqual
             .explain(indent + 1, analyze, show_costs, timing, lines);
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.bitmapqual.explain_json(analyze, indent)]
     }
 }
 
@@ -3975,6 +4479,31 @@ fn render_explain_var_name(var: &Var, column_names: &[String]) -> Option<String>
     attrno_index(var.varattno)
         .and_then(|index| column_names.get(index).cloned())
         .map(normalize_explain_var_name)
+        .or_else(|| render_explain_system_var_name(var.varattno, column_names))
+}
+
+fn render_explain_system_var_name(
+    attno: crate::include::nodes::primnodes::AttrNumber,
+    column_names: &[String],
+) -> Option<String> {
+    let name = match attno {
+        TABLE_OID_ATTR_NO => "tableoid",
+        SELF_ITEM_POINTER_ATTR_NO => "ctid",
+        XMIN_ATTR_NO => "xmin",
+        XMAX_ATTR_NO => "xmax",
+        _ => return None,
+    };
+    relation_qualifier_from_column_names(column_names)
+        .map(|qualifier| format!("{qualifier}.{name}"))
+        .or_else(|| Some(name.into()))
+}
+
+fn relation_qualifier_from_column_names(column_names: &[String]) -> Option<String> {
+    column_names
+        .iter()
+        .filter_map(|name| name.split_once('.').map(|(qualifier, _)| qualifier))
+        .find(|qualifier| !qualifier.is_empty())
+        .map(str::to_string)
 }
 
 fn normalize_explain_var_name(name: String) -> String {
@@ -4710,7 +5239,11 @@ fn render_explain_scalar_array_op(
         _ => return format!("{saop:?}"),
     };
     let quantifier = if saop.use_or { "ANY" } else { "ALL" };
-    let display_type = if expr_has_bpchar_display_type(&saop.left) {
+    let display_type = if expr_is_ctid_system_var(&saop.left)
+        || expr_renders_as_ctid(&saop.left, qualifier, column_names)
+    {
+        Some(SqlType::array_of(SqlType::new(SqlTypeKind::Tid)))
+    } else if expr_has_bpchar_display_type(&saop.left) {
         Some(SqlType::array_of(SqlType::new(SqlTypeKind::Char)))
     } else if expr_has_varchar_display_type(&saop.left) {
         Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)))
@@ -4759,21 +5292,37 @@ fn render_explain_scalar_array_op(
             )
         );
     }
-    format!(
-        "{} {op} {quantifier} ({})",
-        render_explain_infix_operand_with_display_type(
-            &saop.left,
-            if expr_is_text_cast_from_varchar(&saop.left) {
-                None
-            } else {
-                display_type.map(|ty| ty.element_type())
-            },
-            None,
-            qualifier,
-            column_names
-        ),
-        right_sql
-    )
+    let left_sql = render_explain_infix_operand_with_display_type(
+        &saop.left,
+        if expr_is_text_cast_from_varchar(&saop.left) {
+            None
+        } else {
+            display_type.map(|ty| ty.element_type())
+        },
+        None,
+        qualifier,
+        column_names,
+    );
+    let right_sql =
+        if (left_sql == "ctid" || left_sql.ends_with(".ctid")) && right_sql.ends_with("::text[]") {
+            format!("{}::tid[]", right_sql.trim_end_matches("::text[]"))
+        } else {
+            right_sql
+        };
+    format!("{left_sql} {op} {quantifier} ({right_sql})")
+}
+
+fn expr_is_ctid_system_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varattno == SELF_ITEM_POINTER_ATTR_NO,
+        Expr::Cast(inner, _) => expr_is_ctid_system_var(inner),
+        _ => false,
+    }
+}
+
+fn expr_renders_as_ctid(expr: &Expr, qualifier: Option<&str>, column_names: &[String]) -> bool {
+    let rendered = render_explain_infix_operand(expr, qualifier, column_names);
+    rendered == "ctid" || rendered.ends_with(".ctid")
 }
 
 fn scalar_array_singleton_element(expr: &Expr) -> Option<&Expr> {
@@ -5623,6 +6172,17 @@ fn render_explain_infix_operand_with_display_type(
                 column_names,
             )
         }
+        (Some(sql_type), Expr::Cast(inner, _))
+            if sql_type.is_array && matches!(inner.as_ref(), Expr::ArrayLiteral { .. }) =>
+        {
+            render_explain_infix_operand_with_display_type(
+                inner,
+                Some(sql_type),
+                None,
+                qualifier,
+                column_names,
+            )
+        }
         (Some(sql_type), Expr::ArrayLiteral { elements, .. }) if sql_type.is_array => {
             render_explain_array_literal(elements, sql_type, qualifier, column_names)
         }
@@ -6221,6 +6781,12 @@ fn render_explain_const(value: &Value) -> String {
                 None => render_explain_literal(value),
             }
         }
+        Value::Tid(tid) => {
+            format!(
+                "'{}'::tid",
+                crate::backend::executor::value_io::render_tid_text(tid)
+            )
+        }
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -6536,6 +7102,12 @@ fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> S
                 .replace('"', "\\\"")
                 .replace('\'', "''");
             format!("\"{rendered}\"")
+        }
+        Value::Tid(tid) => {
+            format!(
+                "\"{}\"",
+                crate::backend::executor::value_io::render_tid_text(tid)
+            )
         }
         Value::Null => "NULL".into(),
         _ => render_explain_literal(&value),
@@ -9812,10 +10384,13 @@ impl PlanNode for CteScanState {
             None
         };
         begin_node(&mut self.stats, ctx)?;
+        let pinned_table = ctx.pinned_cte_tables.get(&self.cte_id).cloned();
         let table = ctx
             .cte_tables
             .entry(self.cte_id)
-            .or_insert_with(|| Rc::new(RefCell::new(Default::default())))
+            .or_insert_with(|| {
+                pinned_table.unwrap_or_else(|| Rc::new(RefCell::new(Default::default())))
+            })
             .clone();
         loop {
             ctx.check_for_interrupts()?;
@@ -9878,6 +10453,16 @@ impl PlanNode for CteScanState {
     }
 }
 
+fn reset_recursive_union_iteration_ctes(state: &RecursiveUnionState, ctx: &mut ExecutorContext) {
+    for cte_id in &state.recursive_iteration_cte_ids {
+        if ctx.pinned_cte_tables.contains_key(cte_id) {
+            continue;
+        }
+        ctx.cte_tables.remove(cte_id);
+        ctx.cte_producers.remove(cte_id);
+    }
+}
+
 impl PlanNode for RecursiveUnionState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -9918,6 +10503,7 @@ impl PlanNode for RecursiveUnionState {
                     return Ok(Some(&mut self.slot));
                 } else {
                     self.anchor_done = true;
+                    reset_recursive_union_iteration_ctes(self, ctx);
                     self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
                     continue;
                 }
@@ -9950,6 +10536,7 @@ impl PlanNode for RecursiveUnionState {
                     return Ok(None);
                 }
                 self.worktable.borrow_mut().rows = std::mem::take(&mut self.intermediate_rows);
+                reset_recursive_union_iteration_ctes(self, ctx);
                 self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
             }
         }

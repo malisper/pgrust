@@ -9,6 +9,7 @@ The final regression-only mismatch was the SELECT header for top-level ~*/!~* ex
 CI exposed setrefs panics where intermediate path tlists dropped Var collation metadata. Matched PostgreSQL setrefs behavior more closely: Var lookup uses varno/varattno identity rather than collation, and replacement slot Vars preserve collation from the expression being lowered when available.
 After origin/perf-optimization advanced to f609345, the GitHub synthetic merge found two new Var initializers without collation_oid. Merged the new base and set JSONB test Vars to no collation plus subquery pathkey display Vars to the pathkey collation.
 Later CI exposed stale test expectations after expression collation metadata started appearing in analyzed text Vars and physical catalog rows included the new builtin pg_collation entries. Updated the parser and catcache tests to expect those PostgreSQL-compatible rows/metadata.
+Merged origin/perf-optimization after it added newer TABLESAMPLE planning/execution support. Resolved the single scope.rs conflict by keeping the remote TableSampleClause path while preserving this branch's collation-aware scope Var construction.
 
 Files touched:
 Parser/catalog/planner/executor collation paths, plus focused parser/catalog/database/executor tests.
@@ -33,6 +34,8 @@ scripts/cargo_isolated.sh test --lib --quiet catcache_loads_rows_from_physical_c
 scripts/cargo_isolated.sh test --lib --quiet analyze_group_by_prefers_input_column_over_select_alias
 scripts/cargo_isolated.sh test --lib --quiet analyze_grouped_query_keeps_semantic_group_refs
 scripts/cargo_isolated.sh check
+scripts/cargo_isolated.sh test --lib --quiet tablesample
+scripts/run_regression.sh --test collate.utf8 --jobs 1 --timeout 120 --port 55434
 
 Remaining:
 No remaining collate.utf8 failures; regression passed 59/59 queries.

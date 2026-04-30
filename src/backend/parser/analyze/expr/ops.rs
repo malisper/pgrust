@@ -687,6 +687,13 @@ pub(super) fn bind_arithmetic_expr(
             ),
         ));
     }
+    if !is_numeric_family(left_type) || !is_numeric_family(right_type) {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,

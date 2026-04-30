@@ -1944,6 +1944,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         } => append_with_join_children(left).or_else(|| append_with_join_children(right)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -1970,6 +1971,7 @@ fn child_relation_names(plan: &Plan) -> Vec<String> {
 fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
     match plan {
         Plan::SeqScan { relation_name, .. }
+        | Plan::TidScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. } => names.push(
             relation_name
@@ -2388,6 +2390,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -2579,6 +2582,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         } => find_aggregate_plan(left).or_else(|| find_aggregate_plan(right)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -2864,6 +2868,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         }
         Plan::Result { .. }
         | Plan::IndexOnlyScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
@@ -2879,6 +2884,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
     here + match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -3732,6 +3738,43 @@ fn planner_keeps_recursive_cte_filter_semantic_until_setrefs() {
         },
         _ => false,
     }));
+}
+
+#[test]
+fn planner_handles_recursive_cte_non_output_filter_column() {
+    for set_op in ["union all", "union"] {
+        let sql = format!(
+            "with recursive \
+             tab(id_key, link) as (values (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)), \
+             iter(id_key, row_type, link) as ( \
+               select 0, 'base', 17 \
+               {set_op} ( \
+                 with remaining(id_key, row_type, link, min) as ( \
+                   select tab.id_key, 'true'::text, iter.link, min(tab.id_key) over () \
+                   from tab inner join iter using (link) \
+                   where tab.id_key > iter.id_key \
+                 ), \
+                 first_remaining as ( \
+                   select id_key, row_type, link from remaining where id_key = min \
+                 ), \
+                 effect as ( \
+                   select tab.id_key, 'new'::text, tab.link \
+                   from first_remaining e inner join tab on e.id_key = tab.id_key \
+                   where e.row_type = 'false' \
+                 ) \
+                 select * from first_remaining \
+                 {set_op} select * from effect \
+               ) \
+             ) \
+             select * from iter"
+        );
+        let planned = planned_stmt_for_sql(&sql);
+
+        assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::RecursiveUnion { .. }
+        )));
+    }
 }
 
 #[test]
@@ -4897,6 +4940,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             }
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::TidScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }
@@ -4982,6 +5026,7 @@ fn grouped_target_srf_uses_project_set_before_aggregate() {
             } => aggregate_reads_project_set(left) || aggregate_reads_project_set(right),
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::TidScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }

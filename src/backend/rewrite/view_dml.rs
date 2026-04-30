@@ -24,6 +24,7 @@ const AGGREGATE_DETAIL: &str =
 const WINDOW_DETAIL: &str = "Views that return window functions are not automatically updatable.";
 const PROJECT_SET_DETAIL: &str =
     "Views that return set-returning functions are not automatically updatable.";
+const TABLESAMPLE_DETAIL: &str = "Views containing TABLESAMPLE are not automatically updatable.";
 const TARGET_LIST_DETAIL: &str =
     "Views that do not select simple base table columns are not automatically updatable.";
 const RECURSIVE_DETAIL: &str =
@@ -472,11 +473,15 @@ fn analyze_simple_view_query(
     let RangeTblEntryKind::Relation {
         relation_oid,
         relkind,
+        tablesample,
         ..
     } = &base_rte.kind
     else {
         return Err(unsupported(SINGLE_RELATION_DETAIL));
     };
+    if tablesample.is_some() {
+        return Err(unsupported(TABLESAMPLE_DETAIL));
+    }
 
     if query.target_list.len() != relation_desc.columns.len() {
         return Err(unsupported(TARGET_LIST_DETAIL));
