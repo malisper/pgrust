@@ -88,6 +88,8 @@ pub struct BoundUpdateTarget {
     pub assignments: Vec<BoundAssignment>,
     pub parent_visible_exprs: Vec<Expr>,
     pub predicate: Option<Expr>,
+    pub parent_desc: Option<RelationDesc>,
+    pub(crate) parent_rls_write_checks: Vec<RlsWriteCheck>,
     pub(crate) rls_write_checks: Vec<RlsWriteCheck>,
 }
 
@@ -470,6 +472,31 @@ fn update_explain_target_name(stmt: &UpdateStatement) -> String {
         .as_ref()
         .map(|alias| format!("{} {}", stmt.table_name, alias))
         .unwrap_or_else(|| stmt.table_name.clone())
+}
+
+fn resolve_update_assignment_column(
+    scope: &BoundScope,
+    target: &crate::include::nodes::parsenodes::AssignmentTarget,
+    relation_name: &str,
+    visible_target_name: &str,
+) -> Result<usize, ParseError> {
+    match resolve_column(scope, &target.column) {
+        Ok(column_index) => Ok(column_index),
+        Err(ParseError::UnknownColumn(name))
+            if !target.indirection.is_empty() && name.eq_ignore_ascii_case(visible_target_name) =>
+        {
+            Err(ParseError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    target.column, relation_name
+                ),
+                detail: None,
+                hint: Some("SET target columns cannot be qualified with the relation name.".into()),
+                sqlstate: "42703",
+            })
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn assignment_navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
@@ -1010,6 +1037,32 @@ fn scope_with_hidden_invalid_relation(
         system_varno: None,
         relation_oid: None,
     });
+    scope
+}
+
+fn mark_scope_hidden_invalid_relation(mut scope: BoundScope, relation_name: &str) -> BoundScope {
+    for column in &mut scope.columns {
+        if !column
+            .hidden_invalid_relation_names
+            .iter()
+            .any(|hidden| hidden.eq_ignore_ascii_case(relation_name))
+        {
+            column
+                .hidden_invalid_relation_names
+                .push(relation_name.to_string());
+        }
+    }
+    for relation in &mut scope.relations {
+        if !relation
+            .hidden_invalid_relation_names
+            .iter()
+            .any(|hidden| hidden.eq_ignore_ascii_case(relation_name))
+        {
+            relation
+                .hidden_invalid_relation_names
+                .push(relation_name.to_string());
+        }
+    }
     scope
 }
 
@@ -1974,21 +2027,155 @@ fn partitioned_update_target_oids(
         if only {
             return Vec::new();
         }
-        return catalog
-            .find_all_inheritors(entry.relation_oid)
-            .into_iter()
-            .filter(|oid| {
-                catalog
-                    .relation_by_oid(*oid)
-                    .is_some_and(|child| child.relkind == 'r')
-            })
-            .collect();
+        return ordered_partition_leaf_oids(catalog, entry.relation_oid);
     }
     if only {
         vec![entry.relation_oid]
     } else {
         catalog.find_all_inheritors(entry.relation_oid)
     }
+}
+
+fn ordered_partition_leaf_oids(catalog: &dyn CatalogLookup, relation_oid: u32) -> Vec<u32> {
+    let mut children = catalog
+        .inheritance_children(relation_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .filter_map(|row| catalog.relation_by_oid(row.inhrelid))
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| {
+        partition_relation_order_key(left)
+            .cmp(&partition_relation_order_key(right))
+            .then_with(|| left.relation_oid.cmp(&right.relation_oid))
+    });
+
+    let mut leaves = Vec::new();
+    for child in children {
+        if child.relkind == 'p' {
+            leaves.extend(ordered_partition_leaf_oids(catalog, child.relation_oid));
+        } else if child.relkind == 'r' {
+            leaves.push(child.relation_oid);
+        }
+    }
+    leaves
+}
+
+fn partition_relation_order_key(relation: &BoundRelation) -> (bool, String) {
+    let Some(bound_text) = relation.relpartbound.as_deref() else {
+        return (false, format!("rel:{:020}", relation.relation_oid));
+    };
+    match deserialize_partition_bound(bound_text) {
+        Ok(bound) => (bound.is_default(), partition_bound_order_key(&bound)),
+        Err(_) => (
+            partition_bound_text_is_default(bound_text),
+            bound_text.to_string(),
+        ),
+    }
+}
+
+fn partition_bound_text_is_default(bound: &str) -> bool {
+    let lower_bound = bound.to_ascii_lowercase();
+    lower_bound.contains("\"is_default\":true")
+        || lower_bound.contains("\"is_default\": true")
+        || lower_bound.contains("default")
+}
+
+fn partition_bound_order_key(bound: &PartitionBoundSpec) -> String {
+    match bound {
+        PartitionBoundSpec::List { values, .. } => {
+            let mut keys = values
+                .iter()
+                .map(serialized_partition_value_order_key)
+                .collect::<Vec<_>>();
+            keys.sort();
+            format!("list:{}", keys.join(","))
+        }
+        PartitionBoundSpec::Range { from, to, .. } => {
+            let from = from
+                .iter()
+                .map(partition_range_value_order_key)
+                .collect::<Vec<_>>()
+                .join(",");
+            let to = to
+                .iter()
+                .map(partition_range_value_order_key)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("range:{from}:{to}")
+        }
+        PartitionBoundSpec::Hash { modulus, remainder } => {
+            format!("hash:{modulus:020}:{remainder:020}")
+        }
+    }
+}
+
+fn partition_range_value_order_key(value: &PartitionRangeDatumValue) -> String {
+    match value {
+        PartitionRangeDatumValue::MinValue => "0:min".into(),
+        PartitionRangeDatumValue::Value(value) => {
+            format!("1:{}", serialized_partition_value_order_key(value))
+        }
+        PartitionRangeDatumValue::MaxValue => "2:max".into(),
+    }
+}
+
+fn serialized_partition_value_order_key(value: &SerializedPartitionValue) -> String {
+    match value {
+        SerializedPartitionValue::Null => "00:null".into(),
+        SerializedPartitionValue::Bool(value) => format!("01:{}", u8::from(*value)),
+        SerializedPartitionValue::Int16(value) => signed_i128_order_key(*value as i128),
+        SerializedPartitionValue::Int32(value) => signed_i128_order_key(*value as i128),
+        SerializedPartitionValue::Int64(value) => signed_i128_order_key(*value as i128),
+        SerializedPartitionValue::Money(value) => signed_i128_order_key(*value as i128),
+        SerializedPartitionValue::Numeric(value) => numeric_text_order_key(value),
+        SerializedPartitionValue::Text(value)
+        | SerializedPartitionValue::Json(value)
+        | SerializedPartitionValue::JsonPath(value)
+        | SerializedPartitionValue::Xml(value)
+        | SerializedPartitionValue::Float64(value) => format!("20:{value}"),
+        SerializedPartitionValue::Date(value) => signed_i128_order_key(*value as i128),
+        SerializedPartitionValue::Time(value)
+        | SerializedPartitionValue::Timestamp(value)
+        | SerializedPartitionValue::TimestampTz(value) => signed_i128_order_key(*value as i128),
+        SerializedPartitionValue::TimeTz {
+            time,
+            offset_seconds,
+        } => format!(
+            "12:{}:{}",
+            signed_i128_order_key(*time as i128),
+            signed_i128_order_key(*offset_seconds as i128)
+        ),
+        SerializedPartitionValue::InternalChar(value) => format!("13:{value:03}"),
+        SerializedPartitionValue::EnumOid(value) => format!("14:{value:020}"),
+        SerializedPartitionValue::Bytea(value) | SerializedPartitionValue::Jsonb(value) => {
+            format!("21:{value:?}")
+        }
+        SerializedPartitionValue::Array(_)
+        | SerializedPartitionValue::Record(_)
+        | SerializedPartitionValue::Range(_)
+        | SerializedPartitionValue::Multirange(_) => format!("99:{value:?}"),
+    }
+}
+
+fn signed_i128_order_key(value: i128) -> String {
+    if value < 0 {
+        format!("10:0:{:039}", i128::MAX + value)
+    } else {
+        format!("10:1:{value:039}")
+    }
+}
+
+fn numeric_text_order_key(value: &str) -> String {
+    let trimmed = value.trim();
+    let (sign, unsigned) = trimmed
+        .strip_prefix('-')
+        .map(|rest| ("0", rest))
+        .unwrap_or(("1", trimmed.strip_prefix('+').unwrap_or(trimmed)));
+    let integer_len = unsigned
+        .split_once('.')
+        .map(|(integer, _)| integer.len())
+        .unwrap_or(unsigned.len());
+    format!("11:{sign}:{integer_len:020}:{unsigned}")
 }
 
 fn inheritance_translation_indexes(
@@ -2137,6 +2324,12 @@ fn build_update_target(
         assignments,
         parent_visible_exprs: translation_exprs,
         predicate,
+        parent_desc: partition_update_root_oid.map(|_| parent_desc.clone()),
+        parent_rls_write_checks: if partition_update_root_oid.is_some() {
+            parent_rls_write_checks.to_vec()
+        } else {
+            Vec::new()
+        },
         rls_write_checks,
     })
 }
@@ -2215,6 +2408,12 @@ fn build_update_target_from_joined_input(
         assignments,
         parent_visible_exprs,
         predicate: parent_predicate.cloned(),
+        parent_desc: partition_update_root_oid.map(|_| parent_desc.clone()),
+        parent_rls_write_checks: if partition_update_root_oid.is_some() {
+            parent_rls_write_checks.to_vec()
+        } else {
+            Vec::new()
+        },
         rls_write_checks,
     })
 }
@@ -2309,6 +2508,33 @@ fn reject_duplicate_auto_view_targets(
                 .map(|column| column.name.clone())
                 .unwrap_or_else(|| "<unknown>".into());
             return Err(ViewDmlRewriteError::MultipleAssignments(column_name));
+        }
+    }
+    Ok(())
+}
+
+fn reject_duplicate_whole_column_assignments(
+    desc: &RelationDesc,
+    assignments: &[BoundAssignment],
+) -> Result<(), ParseError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for assignment in assignments {
+        if !assignment.subscripts.is_empty()
+            || !assignment.field_path.is_empty()
+            || !assignment.indirection.is_empty()
+        {
+            continue;
+        }
+        if !seen.insert(assignment.column_index) {
+            let column_name = desc
+                .columns
+                .get(assignment.column_index)
+                .map(|column| column.name.clone())
+                .unwrap_or_else(|| "<unknown>".into());
+            return Err(ParseError::UnexpectedToken {
+                expected: "single assignment per column",
+                actual: format!("multiple assignments to same column \"{}\"", column_name),
+            });
         }
     }
     Ok(())
@@ -3352,6 +3578,20 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                             ),
                         }
                     }));
+                target.parent_rls_write_checks.extend(
+                    resolved
+                        .view_check_options
+                        .iter()
+                        .cloned()
+                        .map(|check| RlsWriteCheck {
+                            expr: check.expr,
+                            display_exprs: Vec::new(),
+                            policy_name: None,
+                            source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
+                                check.view_name,
+                            ),
+                        }),
+                );
                 target
             })
             .collect();
@@ -4412,12 +4652,15 @@ fn bind_simple_update(
 ) -> Result<BoundUpdateStatement, ParseError> {
     let target_relation_name = update_target_relation_name(stmt);
     let explain_target_name = update_explain_target_name(stmt);
-    let scope = scope_for_base_relation_with_generated(
+    let mut scope = scope_for_base_relation_with_generated(
         &target_relation_name,
         &entry.desc,
         Some(entry.relation_oid),
         catalog,
     )?;
+    if stmt.target_alias.is_some() {
+        scope = mark_scope_hidden_invalid_relation(scope, &stmt.table_name);
+    }
     let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let predicate = stmt
@@ -4450,7 +4693,12 @@ fn bind_simple_update(
         .assignments
         .iter()
         .map(|assignment| {
-            let column_index = resolve_column(&scope, &assignment.target.column)?;
+            let column_index = resolve_update_assignment_column(
+                &scope,
+                &assignment.target,
+                &stmt.table_name,
+                &target_relation_name,
+            )?;
             let subscripts = bind_assignment_subscripts(
                 &assignment.target.subscripts,
                 &scope,
@@ -4499,6 +4747,7 @@ fn bind_simple_update(
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+    reject_duplicate_whole_column_assignments(&entry.desc, &assignments)?;
 
     let partition_update_root_oid =
         (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
@@ -4552,12 +4801,15 @@ fn bind_update_from(
 ) -> Result<BoundUpdateStatement, ParseError> {
     let target_relation_name = update_target_relation_name(stmt);
     let explain_target_name = update_explain_target_name(stmt);
-    let target_scope = scope_for_base_relation_with_generated(
+    let mut target_scope = scope_for_base_relation_with_generated(
         &target_relation_name,
         &entry.desc,
         Some(entry.relation_oid),
         catalog,
     )?;
+    if stmt.target_alias.is_some() {
+        target_scope = mark_scope_hidden_invalid_relation(target_scope, &stmt.table_name);
+    }
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let source_stmt = stmt.from.as_ref().expect("checked above");
     let (source_from, source_scope_raw) =
@@ -4630,7 +4882,12 @@ fn bind_update_from(
         .assignments
         .iter()
         .map(|assignment| {
-            let column_index = resolve_column(&target_scope, &assignment.target.column)?;
+            let column_index = resolve_update_assignment_column(
+                &target_scope,
+                &assignment.target,
+                &stmt.table_name,
+                &target_relation_name,
+            )?;
             let subscripts = bind_assignment_subscripts(
                 &assignment.target.subscripts,
                 &eval_scope,
@@ -4679,6 +4936,7 @@ fn bind_update_from(
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+    reject_duplicate_whole_column_assignments(&entry.desc, &assignments)?;
     let returning = bind_returning_targets(
         &stmt.returning,
         &returning_scope,

@@ -4,9 +4,7 @@ use crate::backend::parser::{
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
 };
-use crate::include::nodes::primnodes::{
-    Expr, RelationDesc, attrno_index, is_system_attr, set_returning_call_exprs,
-};
+use crate::include::nodes::primnodes::{Expr, RelationDesc, attrno_index, is_system_attr};
 
 use super::views::{load_view_return_query, load_view_return_select};
 
@@ -470,10 +468,6 @@ fn analyze_simple_view_query(
         }
     }
 
-    if query.where_qual.as_ref().is_some_and(expr_contains_sublink) {
-        return Err(unsupported(SINGLE_RELATION_DETAIL));
-    }
-
     Ok(SimpleViewAnalysis {
         base_rtindex: *base_rtindex,
         base_relation_oid: *relation_oid,
@@ -483,96 +477,6 @@ fn analyze_simple_view_query(
         updatable_column_map,
         non_updatable_column_reasons,
     })
-}
-
-fn expr_contains_sublink(expr: &Expr) -> bool {
-    match expr {
-        Expr::SubLink(_) | Expr::SubPlan(_) => true,
-        Expr::GroupingKey(grouping_key) => expr_contains_sublink(&grouping_key.expr),
-        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_contains_sublink),
-        Expr::Op(op) => op.args.iter().any(expr_contains_sublink),
-        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_sublink),
-        Expr::Func(func) => func.args.iter().any(expr_contains_sublink),
-        Expr::SqlJsonQueryFunction(func) => {
-            func.child_exprs().into_iter().any(expr_contains_sublink)
-        }
-        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
-            .into_iter()
-            .any(expr_contains_sublink),
-        Expr::Aggref(aggref) => {
-            aggref.args.iter().any(expr_contains_sublink)
-                || aggref
-                    .aggorder
-                    .iter()
-                    .any(|item| expr_contains_sublink(&item.expr))
-                || aggref.aggfilter.as_ref().is_some_and(expr_contains_sublink)
-        }
-        Expr::WindowFunc(window) => window.args.iter().any(expr_contains_sublink),
-        Expr::ScalarArrayOp(saop) => {
-            expr_contains_sublink(&saop.left) || expr_contains_sublink(&saop.right)
-        }
-        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_sublink),
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_contains_sublink(inner),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            expr_contains_sublink(expr)
-                || expr_contains_sublink(pattern)
-                || escape
-                    .as_ref()
-                    .is_some_and(|expr| expr_contains_sublink(expr))
-        }
-        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_sublink(inner),
-        Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right)
-        | Expr::Coalesce(left, right) => {
-            expr_contains_sublink(left) || expr_contains_sublink(right)
-        }
-        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_sublink),
-        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_sublink(expr)),
-        Expr::FieldSelect { expr, .. } => expr_contains_sublink(expr),
-        Expr::ArraySubscript { array, subscripts } => {
-            expr_contains_sublink(array)
-                || subscripts.iter().any(|subscript| {
-                    subscript.lower.as_ref().is_some_and(expr_contains_sublink)
-                        || subscript.upper.as_ref().is_some_and(expr_contains_sublink)
-                })
-        }
-        Expr::Case(case_expr) => {
-            case_expr
-                .arg
-                .as_ref()
-                .is_some_and(|expr| expr_contains_sublink(expr))
-                || case_expr.args.iter().any(|arm| {
-                    expr_contains_sublink(&arm.expr) || expr_contains_sublink(&arm.result)
-                })
-                || expr_contains_sublink(&case_expr.defresult)
-        }
-        Expr::Param(_)
-        | Expr::Var(_)
-        | Expr::Const(_)
-        | Expr::CaseTest(_)
-        | Expr::Random
-        | Expr::CurrentDate
-        | Expr::CurrentCatalog
-        | Expr::CurrentSchema
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
-        | Expr::CurrentTime { .. }
-        | Expr::CurrentTimestamp { .. }
-        | Expr::LocalTime { .. }
-        | Expr::LocalTimestamp { .. } => false,
-    }
 }
 
 fn has_user_dml_rules(relation_oid: u32, event: ViewDmlEvent, catalog: &dyn CatalogLookup) -> bool {
