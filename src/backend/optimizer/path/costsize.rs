@@ -7063,6 +7063,8 @@ fn clause_selectivity_internal(
                     | OpExprKind::JsonbExists
                     | OpExprKind::JsonbExistsAny
                     | OpExprKind::JsonbExistsAll
+                    | OpExprKind::JsonbPathExists
+                    | OpExprKind::JsonbPathMatch
             ) =>
         {
             // :HACK: PostgreSQL has JSONB-specific selectivity estimators.

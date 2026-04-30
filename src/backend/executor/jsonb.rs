@@ -1272,6 +1272,12 @@ pub(crate) fn render_jsonb_value_text(value: &JsonbValue) -> String {
     value.render()
 }
 
+pub(crate) fn render_jsonb_pretty(value: &JsonbValue) -> String {
+    let mut out = String::new();
+    render_jsonb_pretty_value(&mut out, value, 0);
+    out
+}
+
 pub(crate) fn decode_jsonb(bytes: &[u8]) -> Result<JsonbValue, ExecError> {
     let header = read_u32(bytes, 0)?;
     if header & JB_FARRAY == 0 && header & JB_FOBJECT == 0 {
@@ -2279,6 +2285,54 @@ fn render_jsonb_value(out: &mut String, value: &JsonbValue) {
             }
             out.push('}');
         }
+    }
+}
+
+fn render_jsonb_pretty_value(out: &mut String, value: &JsonbValue, level: usize) {
+    match value {
+        JsonbValue::Array(items) => {
+            if items.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+            out.push_str("[\n");
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(",\n");
+                }
+                render_jsonb_pretty_indent(out, level + 1);
+                render_jsonb_pretty_value(out, item, level + 1);
+            }
+            out.push('\n');
+            render_jsonb_pretty_indent(out, level);
+            out.push(']');
+        }
+        JsonbValue::Object(items) => {
+            if items.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            out.push_str("{\n");
+            for (idx, (key, value)) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(",\n");
+                }
+                render_jsonb_pretty_indent(out, level + 1);
+                render_jsonb_string(out, key);
+                out.push_str(": ");
+                render_jsonb_pretty_value(out, value, level + 1);
+            }
+            out.push('\n');
+            render_jsonb_pretty_indent(out, level);
+            out.push('}');
+        }
+        _ => render_jsonb_value(out, value),
+    }
+}
+
+fn render_jsonb_pretty_indent(out: &mut String, level: usize) {
+    for _ in 0..level {
+        out.push_str("    ");
     }
 }
 

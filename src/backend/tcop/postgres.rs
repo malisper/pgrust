@@ -362,6 +362,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     if suppress_legacy_json_runtime_position(sql, e) {
         return None;
     }
+    if suppress_jsonb_runtime_path_position(sql, e) {
+        return None;
+    }
     if matches!(e, ExecError::Regex(_))
         && is_jsonpath_sql_surface(sql)
         && let Some(position) = find_jsonpath_literal_position(sql)
@@ -664,6 +667,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("cannot subscript type ") {
                 return find_subscript_expression_position(sql);
             }
+            if message == "jsonb subscript does not support slices" {
+                return find_jsonb_subscript_slice_position(sql);
+            }
+            if message.starts_with("subscript type ") && message.ends_with(" is not supported") {
+                return find_jsonb_subscript_type_position(sql);
+            }
             if let Some(position) = find_detailed_operator_position(sql, message) {
                 return Some(position);
             }
@@ -936,6 +945,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
+            }
+            if message == "jsonb subscript does not support slices" {
+                return find_jsonb_subscript_slice_position(sql);
+            }
+            if message.starts_with("subscript type ") && message.ends_with(" is not supported") {
+                return find_jsonb_subscript_type_position(sql);
             }
             if is_reg_object_direct_input_error(message)
                 && let Some(position) = find_reg_object_literal_position(sql)
@@ -1462,6 +1477,27 @@ fn is_legacy_json_operator_surface(sql: &str) -> bool {
     (lower.contains("->") || lower.contains("#>"))
         && (lower.contains(" json ") || lower.contains("::json"))
         && !lower.contains("jsonb")
+}
+
+fn suppress_jsonb_runtime_path_position(sql: &str, e: &ExecError) -> bool {
+    match e {
+        ExecError::WithContext { source, .. } => suppress_jsonb_runtime_path_position(sql, source),
+        ExecError::InvalidStorageValue { column, details } => {
+            column == "jsonb"
+                && details.starts_with("path element at position ")
+                && is_jsonb_runtime_path_surface(sql)
+        }
+        _ => false,
+    }
+}
+
+fn is_jsonb_runtime_path_surface(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    lower.contains("#-")
+        || lower.contains("jsonb_set(")
+        || lower.contains("jsonb_set_lax(")
+        || lower.contains("jsonb_insert(")
+        || lower.contains("jsonb_delete_path(")
 }
 
 fn is_legacy_json_record_function_surface(sql: &str) -> bool {
@@ -3000,6 +3036,99 @@ fn find_subscript_expression_position(sql: &str) -> Option<usize> {
     let bracket = bytes.iter().position(|byte| *byte == b'[')?;
     let start = find_subscript_base_start(bytes, bracket)?;
     Some(start + 1)
+}
+
+fn find_jsonb_subscript_slice_position(sql: &str) -> Option<usize> {
+    for (open, close) in subscript_brackets_outside_string_literals(sql) {
+        let Some(colon) = find_colon_outside_string_literals(sql, open + 1, close) else {
+            continue;
+        };
+        let upper_start = skip_ascii_whitespace(sql, colon + 1, close);
+        if upper_start < close {
+            return Some(upper_start + 1);
+        }
+        let lower_start = skip_ascii_whitespace(sql, open + 1, colon);
+        if lower_start < colon {
+            return Some(lower_start + 1);
+        }
+    }
+    None
+}
+
+fn find_jsonb_subscript_type_position(sql: &str) -> Option<usize> {
+    for (open, close) in subscript_brackets_outside_string_literals(sql) {
+        let start = skip_ascii_whitespace(sql, open + 1, close);
+        if start >= close {
+            continue;
+        }
+        if sql.as_bytes()[start].is_ascii_digit() || matches!(sql.as_bytes()[start], b'+' | b'-') {
+            return Some(start + 1);
+        }
+    }
+    None
+}
+
+fn subscript_brackets_outside_string_literals(sql: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b'[' => {
+                if let Some(close) = find_subscript_close_outside_string_literals(sql, index) {
+                    ranges.push((index, close));
+                    index = close + 1;
+                } else {
+                    index += 1;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    ranges
+}
+
+fn find_subscript_close_outside_string_literals(sql: &str, open: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b']' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn find_colon_outside_string_literals(sql: &str, start: usize, end: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = start;
+    while index < end {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b':' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_sql_string_literal(bytes: &[u8], quote: usize) -> usize {
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+            } else {
+                return index + 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
 }
 
 fn find_routine_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -17562,6 +17691,23 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
     }
 
     #[test]
+    fn exec_error_position_omits_jsonb_runtime_path_errors() {
+        for sql in [
+            "select '{\"b\":[1,2]}'::jsonb #- '{b,-1e}';",
+            "select jsonb_set('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_set_lax('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_insert('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_delete_path('{\"a\":[1,2,3]}', array['a','non_integer']);",
+        ] {
+            let err = ExecError::InvalidStorageValue {
+                column: "jsonb".into(),
+                details: "path element at position 2 is not an integer: \"non_integer\"".into(),
+            };
+            assert_eq!(exec_error_position(sql, &err), None);
+        }
+    }
+
+    #[test]
     fn exec_error_position_points_at_sql_json_validation_nodes() {
         let cases = [
             (
@@ -17728,6 +17874,27 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(22));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_jsonb_subscript_errors() {
+        let numeric_sql = "select ('[1, \"2\", null]'::jsonb)[1.0];";
+        let numeric_err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "subscript type numeric is not supported".into(),
+            detail: None,
+            hint: Some("jsonb subscript must be coercible to either integer or text.".into()),
+            sqlstate: "42804",
+        });
+        assert_eq!(exec_error_position(numeric_sql, &numeric_err), Some(34));
+
+        let slice_sql = "select ('[1, \"2\", null]'::jsonb)[1:2];";
+        let slice_err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "jsonb subscript does not support slices".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+        assert_eq!(exec_error_position(slice_sql, &slice_err), Some(36));
     }
 
     #[test]

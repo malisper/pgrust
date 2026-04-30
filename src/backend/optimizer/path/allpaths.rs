@@ -5809,7 +5809,7 @@ fn path_tie_breaker_prefers(
         cross_function_join_left_relid(right),
     ) && left_relid != right_relid
     {
-        return left_relid > right_relid;
+        return left_relid < right_relid;
     }
     if let (Some(left_relids), Some(right_relids)) = (
         cross_join_left_relid_count(left),

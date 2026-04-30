@@ -69,6 +69,7 @@ pub const MULTIRANGE_GIST_OPCLASS_OID: u32 = 76018;
 pub const QUAD_POINT_SPGIST_OPCLASS_OID: u32 = 76019;
 pub const KD_POINT_SPGIST_OPCLASS_OID: u32 = 76020;
 pub const JSONB_GIN_OPCLASS_OID: u32 = 10064;
+pub const JSONB_GIN_PATH_OPCLASS_OID: u32 = 10066;
 pub const BYTEA_BRIN_MINMAX_OPCLASS_OID: u32 = 76120;
 pub const CHAR_BRIN_MINMAX_OPCLASS_OID: u32 = 76121;
 pub const INT2_BRIN_MINMAX_OPCLASS_OID: u32 = 76122;
@@ -605,6 +606,17 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             opcintype: JSONB_TYPE_OID,
             opcdefault: true,
             opckeytype: TEXT_TYPE_OID,
+        },
+        PgOpclassRow {
+            oid: JSONB_GIN_PATH_OPCLASS_OID,
+            opcmethod: GIN_AM_OID,
+            opcname: "jsonb_path_ops".into(),
+            opcnamespace: PG_CATALOG_NAMESPACE_OID,
+            opcowner: BOOTSTRAP_SUPERUSER_OID,
+            opcfamily: GIN_JSONB_PATH_FAMILY_OID,
+            opcintype: JSONB_TYPE_OID,
+            opcdefault: false,
+            opckeytype: INT4_TYPE_OID,
         },
         brin_row(
             BYTEA_BRIN_MINMAX_OPCLASS_OID,
@@ -1161,6 +1173,8 @@ fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
         SqlTypeKind::Float4 => opcintype == FLOAT4_TYPE_OID,
         SqlTypeKind::Float8 => opcintype == FLOAT8_TYPE_OID,
         SqlTypeKind::Numeric => opcintype == NUMERIC_TYPE_OID,
+        SqlTypeKind::Jsonb => opcintype == JSONB_TYPE_OID,
+        SqlTypeKind::JsonPath => opcintype == JSONPATH_TYPE_OID,
         SqlTypeKind::Money => opcintype == MONEY_TYPE_OID,
         SqlTypeKind::Interval => opcintype == INTERVAL_TYPE_OID,
         SqlTypeKind::Date => opcintype == DATE_TYPE_OID,

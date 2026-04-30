@@ -5,7 +5,8 @@ fn jsonb_operator_metadata(op: crate::include::nodes::primnodes::OpExprKind) -> 
         JSONB_CONTAINED_OPERATOR_OID, JSONB_CONTAINED_PROC_OID, JSONB_CONTAINS_OPERATOR_OID,
         JSONB_CONTAINS_PROC_OID, JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ALL_PROC_OID,
         JSONB_EXISTS_ANY_OPERATOR_OID, JSONB_EXISTS_ANY_PROC_OID, JSONB_EXISTS_OPERATOR_OID,
-        JSONB_EXISTS_PROC_OID,
+        JSONB_EXISTS_PROC_OID, JSONB_PATH_EXISTS_OPERATOR_OID, JSONB_PATH_EXISTS_PROC_OID,
+        JSONB_PATH_MATCH_OPERATOR_OID, JSONB_PATH_MATCH_PROC_OID,
     };
     Some(match op {
         crate::include::nodes::primnodes::OpExprKind::JsonbContains => {
@@ -22,6 +23,12 @@ fn jsonb_operator_metadata(op: crate::include::nodes::primnodes::OpExprKind) -> 
         }
         crate::include::nodes::primnodes::OpExprKind::JsonbExistsAll => {
             (JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ALL_PROC_OID)
+        }
+        crate::include::nodes::primnodes::OpExprKind::JsonbPathExists => {
+            (JSONB_PATH_EXISTS_OPERATOR_OID, JSONB_PATH_EXISTS_PROC_OID)
+        }
+        crate::include::nodes::primnodes::OpExprKind::JsonbPathMatch => {
+            (JSONB_PATH_MATCH_OPERATOR_OID, JSONB_PATH_MATCH_PROC_OID)
         }
         _ => return None,
     })
@@ -79,6 +86,15 @@ pub(super) fn bind_jsonb_subscript_expr(
         bind_expr_with_outer_and_ctes(array, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     for subscript in subscripts {
         let key = if let Some(lower) = &subscript.lower {
+            let raw_key_type = infer_sql_expr_type_with_ctes(
+                lower,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            validate_jsonb_subscript_type(raw_key_type)?;
             bind_expr_with_outer_and_ctes(lower, scope, catalog, outer_scopes, grouped_outer, ctes)?
         } else {
             Expr::Const(Value::Int64(1))
@@ -89,6 +105,21 @@ pub(super) fn bind_jsonb_subscript_expr(
         );
     }
     Ok(bound)
+}
+
+fn validate_jsonb_subscript_type(sql_type: SqlType) -> Result<(), ParseError> {
+    if !sql_type.is_array && (is_integer_family(sql_type) || is_text_like_type(sql_type)) {
+        return Ok(());
+    }
+    Err(ParseError::DetailedError {
+        message: format!(
+            "subscript type {} is not supported",
+            sql_type_name(sql_type)
+        ),
+        detail: None,
+        hint: Some("jsonb subscript must be coercible to either integer or text.".into()),
+        sqlstate: "42804",
+    })
 }
 
 pub(super) fn bind_maybe_jsonb_delete(
@@ -457,8 +488,27 @@ pub(super) fn bind_jsonb_path_binary_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    bind_json_binary_expr(
-        op,
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let jsonb_type = SqlType::new(SqlTypeKind::Jsonb);
+    let jsonpath_type = SqlType::new(SqlTypeKind::JsonPath);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, jsonb_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, jsonpath_type);
+    if left_type != jsonb_type || right_type != jsonpath_type {
+        let op_name = match op {
+            crate::include::nodes::primnodes::OpExprKind::JsonbPathExists => "@?",
+            crate::include::nodes::primnodes::OpExprKind::JsonbPathMatch => "@@",
+            _ => "?",
+        };
+        return Err(ParseError::UndefinedOperator {
+            op: op_name.into(),
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    let (left_bound, right_bound) = bind_json_binary_operands(
         left,
         right,
         scope,
@@ -466,5 +516,12 @@ pub(super) fn bind_jsonb_path_binary_expr(
         outer_scopes,
         grouped_outer,
         ctes,
-    )
+    )?;
+    Ok(jsonb_op_expr(
+        op,
+        vec![
+            coerce_bound_expr(left_bound, raw_left_type, jsonb_type),
+            coerce_bound_expr(right_bound, raw_right_type, jsonpath_type),
+        ],
+    ))
 }
