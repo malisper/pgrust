@@ -3,7 +3,9 @@ use super::alter_table_work_queue::{build_alter_table_work_queue, has_inheritanc
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::misc::notices::push_notice;
-use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
+use crate::include::catalog::{
+    CONSTRAINT_CHECK, DEPENDENCY_AUTO, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+};
 use crate::include::nodes::parsenodes::AlterRelationSetSchemaStatement;
 use crate::pgrust::database::ddl::{
     dependent_view_rewrites_for_relation, lookup_heap_relation_for_alter_table, relation_kind_name,
@@ -82,6 +84,184 @@ fn relation_name_for_error(catalog: &dyn CatalogLookup, relation: &BoundRelation
         .class_row_by_oid(relation.relation_oid)
         .map(|row| row.relname)
         .unwrap_or_else(|| relation.relation_oid.to_string())
+}
+
+fn renamed_check_constraint_exprs(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    column_name: &str,
+    new_column_name: &str,
+) -> Vec<(u32, String)> {
+    let mut updates = Vec::new();
+    for row in catalog.constraint_rows_for_relation(relation.relation_oid) {
+        if row.contype != CONSTRAINT_CHECK {
+            continue;
+        }
+        let Some(expr_sql) = row.conbin.as_deref() else {
+            continue;
+        };
+        let renamed = rename_identifier_in_sql(expr_sql, column_name, new_column_name);
+        if renamed != expr_sql {
+            updates.push((row.oid, renamed));
+        }
+    }
+    updates
+}
+
+fn rename_identifier_in_sql(sql: &str, old_name: &str, new_name: &str) -> String {
+    let chars = sql.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(sql.len());
+    let mut index = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_single_quote {
+            out.push(ch);
+            if ch == '\'' {
+                if chars.get(index + 1) == Some(&'\'') {
+                    index += 1;
+                    out.push(chars[index]);
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if in_double_quote {
+            out.push(ch);
+            if ch == '"' {
+                in_double_quote = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\'' {
+            in_single_quote = true;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_double_quote = true;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            let token = chars[start..index].iter().collect::<String>();
+            if token.eq_ignore_ascii_case(old_name) {
+                out.push_str(new_name);
+            } else {
+                out.push_str(&token);
+            }
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+
+    out
+}
+
+fn sequence_owner_from_column_defaults(
+    catalog: &dyn CatalogLookup,
+    sequence_oid: u32,
+) -> Option<(u32, i32)> {
+    for class in catalog.class_rows() {
+        if !matches!(class.relkind, 'r' | 'p' | 'f') {
+            continue;
+        }
+        let Some(relation) = catalog
+            .lookup_relation_by_oid(class.oid)
+            .or_else(|| catalog.relation_by_oid(class.oid))
+        else {
+            continue;
+        };
+        for (index, column) in relation.desc.columns.iter().enumerate() {
+            if !column.dropped && column.default_sequence_oid == Some(sequence_oid) {
+                return Some((relation.relation_oid, index.saturating_add(1) as i32));
+            }
+        }
+    }
+    None
+}
+
+fn reject_owned_sequence_set_schema(
+    catalog: &dyn CatalogLookup,
+    sequence: &BoundRelation,
+) -> Result<(), ExecError> {
+    let dependency_owner = catalog.depend_rows().into_iter().find_map(|row| {
+        (row.classid == PG_CLASS_RELATION_OID
+            && row.objid == sequence.relation_oid
+            && row.objsubid == 0
+            && row.refclassid == PG_CLASS_RELATION_OID
+            && row.refobjsubid > 0
+            && row.deptype == DEPENDENCY_AUTO)
+            .then_some((row.refobjid, row.refobjsubid))
+    });
+    let Some((table_oid, _attnum)) = dependency_owner
+        .or_else(|| sequence_owner_from_column_defaults(catalog, sequence.relation_oid))
+    else {
+        return Ok(());
+    };
+    let table_name = catalog
+        .class_row_by_oid(table_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| table_oid.to_string());
+    Err(ExecError::DetailedError {
+        message: "cannot move an owned sequence into another schema".into(),
+        detail: Some(format!(
+            "Sequence \"{}\" is linked to table \"{}\".",
+            relation_name_for_error(catalog, sequence),
+            table_name
+        )),
+        hint: None,
+        sqlstate: "0A000",
+    })
+}
+
+fn owned_sequence_oids_for_relation(catalog: &dyn CatalogLookup, relation_oid: u32) -> Vec<u32> {
+    let mut sequence_oids = catalog
+        .depend_rows()
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_CLASS_RELATION_OID
+                && row.objsubid == 0
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == relation_oid
+                && row.refobjsubid > 0
+                && row.deptype == DEPENDENCY_AUTO
+        })
+        .filter_map(|row| {
+            catalog
+                .class_row_by_oid(row.objid)
+                .filter(|class| class.relkind == 'S')
+                .map(|_| row.objid)
+        })
+        .collect::<Vec<_>>();
+    if let Some(relation) = catalog
+        .lookup_relation_by_oid(relation_oid)
+        .or_else(|| catalog.relation_by_oid(relation_oid))
+    {
+        sequence_oids.extend(relation.desc.columns.iter().filter_map(|column| {
+            (!column.dropped)
+                .then_some(column.default_sequence_oid)
+                .flatten()
+        }));
+    }
+    sequence_oids.sort_unstable();
+    sequence_oids.dedup();
+    sequence_oids
 }
 
 fn map_relation_rename_error(err: crate::backend::catalog::catalog::CatalogError) -> ExecError {
@@ -596,6 +776,12 @@ impl Database {
             interrupts,
         };
         for target in targets {
+            let check_expr_updates = renamed_check_constraint_exprs(
+                &catalog,
+                &target,
+                &rename_stmt.column_name,
+                &new_column_name,
+            );
             let effect = self
                 .catalog
                 .write()
@@ -608,6 +794,28 @@ impl Database {
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
+            if !check_expr_updates.is_empty() {
+                let constraint_ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: cid.saturating_add(1),
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .update_check_constraint_exprs_mvcc(
+                        target.relation_oid,
+                        &check_expr_updates,
+                        &constraint_ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
         }
         rewrite_dependent_views(
             self,
@@ -801,6 +1009,20 @@ impl Database {
         )
     }
 
+    pub(crate) fn execute_alter_sequence_set_schema_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRelationSetSchemaStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_alter_relation_set_schema_stmt_with_search_path(
+            client_id,
+            alter_stmt,
+            configured_search_path,
+            'S',
+        )
+    }
+
     fn execute_alter_relation_set_schema_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -912,6 +1134,28 @@ impl Database {
         )
     }
 
+    pub(crate) fn execute_alter_sequence_set_schema_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRelationSetSchemaStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_alter_relation_set_schema_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            'S',
+            catalog_effects,
+            temp_effects,
+        )
+    }
+
     fn execute_alter_relation_set_schema_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -957,6 +1201,14 @@ impl Database {
                 relation_kind_name(relkind)
             ))));
         }
+        if relkind == 'S' {
+            reject_owned_sequence_set_schema(&catalog, &relation)?;
+        }
+        let owned_sequence_oids = if matches!(relation.relkind, 'r' | 'p' | 'f') {
+            owned_sequence_oids_for_relation(&catalog, relation.relation_oid)
+        } else {
+            Vec::new()
+        };
         let visible_type_rows = catalog.type_rows();
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -979,6 +1231,20 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
+        for sequence_oid in owned_sequence_oids {
+            let effect = self
+                .catalog
+                .write()
+                .move_relation_to_namespace_mvcc(
+                    sequence_oid,
+                    namespace_oid,
+                    &visible_type_rows,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
         rewrite_dependent_views(
             self,
             client_id,

@@ -15,7 +15,8 @@ use crate::include::catalog::{
 };
 use crate::pgrust::database::ddl::{
     lookup_table_or_partitioned_table_for_alter_table,
-    reject_column_type_change_with_rule_dependencies, validate_alter_table_alter_column_type,
+    reject_column_type_change_with_rule_dependencies, relation_kind_name,
+    validate_alter_table_alter_column_type,
 };
 use crate::pgrust::database::sequences::{
     apply_sequence_option_patch, pg_sequence_row, sequence_type_oid_for_sql_type,
@@ -224,6 +225,55 @@ fn relation_name_for_error(catalog: &dyn CatalogLookup, relation_oid: u32) -> St
         .unwrap_or_else(|| relation_oid.to_string())
 }
 
+fn reject_row_type_dependents_for_column_type_change(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+) -> Result<(), ExecError> {
+    let row_type_oid = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.reltype)
+        .or_else(|| {
+            catalog
+                .type_rows()
+                .into_iter()
+                .find_map(|row| (row.typrelid == relation.relation_oid).then_some(row.oid))
+        })
+        .unwrap_or(0);
+    if row_type_oid == 0 {
+        return Ok(());
+    }
+
+    for class_row in catalog.class_rows() {
+        if class_row.oid == relation.relation_oid {
+            continue;
+        }
+        let Some(dependent_relation) = catalog.lookup_relation_by_oid(class_row.oid) else {
+            continue;
+        };
+        let Some(dependent_column) = dependent_relation.desc.columns.iter().find(|column| {
+            !column.dropped
+                && (catalog.type_oid_for_sql_type(column.sql_type) == Some(row_type_oid)
+                    || column.sql_type.type_oid == row_type_oid
+                    || column.sql_type.typrelid == relation.relation_oid)
+        }) else {
+            continue;
+        };
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot alter {} \"{}\" because column \"{}.{}\" uses its row type",
+                relation_kind_name(relation.relkind),
+                relation_name_for_error(catalog, relation.relation_oid),
+                class_row.relname,
+                dependent_column.name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
+}
+
 fn reject_partition_key_type_change(
     relation: &crate::backend::parser::BoundRelation,
     relation_name: &str,
@@ -399,6 +449,12 @@ fn collect_alter_column_type_targets(
                 actual: "system catalog".into(),
             }));
         }
+        if target_relation.relkind == 'f' && alter_stmt.using_expr.is_some() {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: relation_name_for_error(catalog, target_relation.relation_oid),
+                expected: "table",
+            }));
+        }
         reject_typed_table_ddl(&target_relation, "alter column type of")?;
         if let Some(column_index) =
             target_relation
@@ -423,6 +479,7 @@ fn collect_alter_column_type_targets(
                 column_index,
             )?;
         }
+        reject_row_type_dependents_for_column_type_change(catalog, &target_relation)?;
         let plan = validate_alter_table_alter_column_type(
             catalog,
             &target_relation.desc,
@@ -430,6 +487,7 @@ fn collect_alter_column_type_targets(
             &alter_stmt.ty,
             alter_stmt.collation.as_deref(),
             alter_stmt.using_expr.as_ref(),
+            target_relation.relkind == 'f',
         )?;
         reject_column_type_change_with_rule_dependencies(
             db,

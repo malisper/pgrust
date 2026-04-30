@@ -4,6 +4,10 @@ use super::ExecutorContext;
 use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::catalog::roles::has_bypassrls_privilege;
 use crate::backend::parser::CatalogLookup;
+use crate::include::catalog::bootstrap::{
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID,
+    PG_FOREIGN_TABLE_RELATION_OID, PG_USER_MAPPING_RELATION_OID,
+};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID,
     PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
@@ -117,6 +121,17 @@ pub(crate) fn relation_has_table_privilege(
     current_user_oid: u32,
     privilege: char,
 ) -> bool {
+    if privilege == 'r'
+        && matches!(
+            class_row.oid,
+            PG_FOREIGN_DATA_WRAPPER_RELATION_OID
+                | PG_FOREIGN_SERVER_RELATION_OID
+                | PG_USER_MAPPING_RELATION_OID
+                | PG_FOREIGN_TABLE_RELATION_OID
+        )
+    {
+        return true;
+    }
     if has_effective_membership(
         current_user_oid,
         class_row.relowner,

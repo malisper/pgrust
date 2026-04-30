@@ -512,6 +512,7 @@ pub(super) fn unknown_string_literal_peer_type(peer_type: SqlType) -> Option<Sql
         SqlTypeKind::TimestampTz => return Some(SqlType::new(SqlTypeKind::TimestampTz)),
         SqlTypeKind::Interval => return Some(SqlType::new(SqlTypeKind::Interval)),
         SqlTypeKind::Jsonb => return Some(SqlType::new(SqlTypeKind::Jsonb)),
+        SqlTypeKind::JsonPath => return Some(SqlType::new(SqlTypeKind::JsonPath)),
         SqlTypeKind::Bytea => return Some(SqlType::new(SqlTypeKind::Bytea)),
         SqlTypeKind::Uuid => return Some(SqlType::new(SqlTypeKind::Uuid)),
         SqlTypeKind::Enum if peer_type.type_oid != 0 => return Some(peer_type),

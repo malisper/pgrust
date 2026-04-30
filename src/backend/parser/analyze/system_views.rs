@@ -280,6 +280,17 @@ pub(super) fn bind_builtin_system_view(
                 ]
             })
             .collect(),
+        SyntheticSystemViewKind::PgInitPrivs => {
+            // :HACK: Model the initdb-populated catalog just enough for pg_dump
+            // and regression visibility checks until bootstrap records initial ACLs.
+            vec![vec![
+                Value::Int64(i64::from(PG_PROC_RELATION_OID)),
+                Value::Int64(i64::from(PG_CLASS_RELATION_OID)),
+                Value::Int32(0),
+                Value::InternalChar(b'i'),
+                Value::Array(vec![Value::Text("postgres=arwdDxt/postgres".into())]),
+            ]]
+        }
         SyntheticSystemViewKind::PgRange => catalog
             .range_rows()
             .into_iter()
@@ -419,36 +430,49 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::InformationSchemaForeignDataWrappers => {
             crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrappers_rows(
                 catalog.authid_rows(),
+                catalog.auth_members_rows(),
                 catalog.foreign_data_wrapper_rows(),
+                catalog.current_user_oid(),
             )
         }
         SyntheticSystemViewKind::InformationSchemaForeignDataWrapperOptions => {
             crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrapper_options_rows(
+                catalog.authid_rows(),
+                catalog.auth_members_rows(),
                 catalog.foreign_data_wrapper_rows(),
+                catalog.current_user_oid(),
             )
         }
         SyntheticSystemViewKind::InformationSchemaForeignServers => {
             crate::backend::utils::cache::system_views::build_information_schema_foreign_servers_rows(
                 catalog.authid_rows(),
+                catalog.auth_members_rows(),
                 catalog.foreign_data_wrapper_rows(),
                 catalog.foreign_server_rows(),
+                catalog.current_user_oid(),
             )
         }
         SyntheticSystemViewKind::InformationSchemaForeignServerOptions => {
             crate::backend::utils::cache::system_views::build_information_schema_foreign_server_options_rows(
+                catalog.authid_rows(),
+                catalog.auth_members_rows(),
                 catalog.foreign_server_rows(),
+                catalog.current_user_oid(),
             )
         }
         SyntheticSystemViewKind::InformationSchemaUserMappings => {
             crate::backend::utils::cache::system_views::build_information_schema_user_mappings_rows(
                 catalog.authid_rows(),
+                catalog.auth_members_rows(),
                 catalog.foreign_server_rows(),
                 catalog.user_mapping_rows(),
+                catalog.current_user_oid(),
             )
         }
         SyntheticSystemViewKind::InformationSchemaUserMappingOptions => {
             crate::backend::utils::cache::system_views::build_information_schema_user_mapping_options_rows(
                 catalog.authid_rows(),
+                catalog.auth_members_rows(),
                 catalog.foreign_server_rows(),
                 catalog.user_mapping_rows(),
                 catalog.current_user_oid(),
@@ -458,8 +482,10 @@ pub(super) fn bind_builtin_system_view(
         | SyntheticSystemViewKind::InformationSchemaRoleUsageGrants => {
             crate::backend::utils::cache::system_views::build_information_schema_usage_privileges_rows(
                 catalog.authid_rows(),
+                catalog.auth_members_rows(),
                 catalog.foreign_data_wrapper_rows(),
                 catalog.foreign_server_rows(),
+                catalog.current_user_oid(),
             )
         }
         SyntheticSystemViewKind::InformationSchemaForeignTables => {

@@ -3241,6 +3241,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TextStartsWith => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
+        BuiltinScalarFunction::Repeat => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
         BuiltinScalarFunction::ParseIdent => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
         }

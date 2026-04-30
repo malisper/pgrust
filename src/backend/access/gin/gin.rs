@@ -484,7 +484,11 @@ pub(crate) fn gingetbitmap(
                 GinTsvectorQuery::Any(entries) => union_entry_tids(&image, &entries),
             }
         } else {
-            let query = jsonb_ops::extract_query(attnum, key.strategy, &key.argument)?;
+            let opfamily = attnum
+                .checked_sub(1)
+                .and_then(|idx| scan.index_meta.opfamily_oids.get(idx as usize))
+                .copied();
+            let query = jsonb_ops::extract_query(attnum, key.strategy, opfamily, &key.argument)?;
             let _search_mode = jsonb_ops::query_search_mode(&query);
             match query {
                 GinJsonbQuery::All => all_tids(&image),

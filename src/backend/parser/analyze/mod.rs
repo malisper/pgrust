@@ -125,8 +125,9 @@ pub(crate) use modify::{
     bind_delete_with_outer_scopes, bind_delete_with_outer_scopes_and_ctes,
     bind_insert_with_outer_scopes, bind_insert_with_outer_scopes_and_ctes,
     bind_update_with_outer_scopes, bind_update_with_outer_scopes_and_ctes,
-    plan_merge_with_outer_ctes, rewrite_bound_delete_auto_view_target,
-    rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
+    plan_merge_with_outer_ctes, plan_merge_with_outer_scopes_and_ctes,
+    rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
+    rewrite_bound_update_auto_view_target,
 };
 pub use on_conflict::{BoundOnConflictAction, BoundOnConflictClause};
 pub(crate) use partition::*;
@@ -1712,6 +1713,7 @@ pub trait CatalogLookup {
     fn pg_user_mappings_rows(&self) -> Vec<Vec<Value>> {
         build_pg_user_mappings_rows(
             self.authid_rows(),
+            self.auth_members_rows(),
             self.foreign_server_rows(),
             self.user_mapping_rows(),
             self.current_user_oid(),
