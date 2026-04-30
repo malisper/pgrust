@@ -519,6 +519,10 @@ fn note_filtered_row(stats: &mut NodeExecStats) {
     stats.rows_removed_by_filter += 1;
 }
 
+fn note_index_recheck_filtered_row(stats: &mut NodeExecStats) {
+    stats.rows_removed_by_index_recheck += 1;
+}
+
 fn relation_io_object(ctx: &ExecutorContext, relation_oid: u32) -> &'static str {
     if ctx
         .catalog
@@ -3306,6 +3310,14 @@ impl BitmapQualState {
         }
     }
 
+    fn explain_json(&self, analyze: bool, indent: usize) -> String {
+        match self {
+            BitmapQualState::Index(state) => state.explain_json(analyze, indent),
+            BitmapQualState::Or(state) => state.explain_json(analyze, indent),
+            BitmapQualState::And(state) => state.explain_json(analyze, indent),
+        }
+    }
+
     fn explain(
         &self,
         indent: usize,
@@ -3543,6 +3555,13 @@ impl PlanNode for BitmapOrState {
             child.explain(indent + 1, analyze, show_costs, timing, lines);
         }
     }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        self.children
+            .iter()
+            .map(|child| child.explain_json(analyze, indent))
+            .collect()
+    }
 }
 
 impl PlanNode for BitmapAndState {
@@ -3594,6 +3613,13 @@ impl PlanNode for BitmapAndState {
         for child in &self.children {
             child.explain(indent + 1, analyze, show_costs, timing, lines);
         }
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        self.children
+            .iter()
+            .map(|child| child.explain_json(analyze, indent))
+            .collect()
     }
 }
 
@@ -3721,7 +3747,7 @@ impl PlanNode for BitmapHeapScanState {
                 set_outer_expr_bindings(ctx, outer_values, &current_bindings);
                 clear_inner_expr_bindings(ctx);
                 if !recheck(&mut self.slot, ctx)? {
-                    note_filtered_row(&mut self.stats);
+                    note_index_recheck_filtered_row(&mut self.stats);
                     continue;
                 }
             }
@@ -3801,14 +3827,15 @@ impl PlanNode for BitmapHeapScanState {
             ));
         }
         let prefix = explain_detail_prefix(indent);
-        if analyze && self.stats.rows_removed_by_filter > 0 && self.filter_qual.is_some() {
+        if analyze && self.stats.rows_removed_by_index_recheck > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Index Recheck: {}",
+                self.stats.rows_removed_by_index_recheck
+            ));
+        }
+        if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
-                self.stats.rows_removed_by_filter
-            ));
-        } else if analyze && self.stats.rows_removed_by_filter > 0 {
-            lines.push(format!(
-                "{prefix}Rows Removed by Recheck: {}",
                 self.stats.rows_removed_by_filter
             ));
         }
@@ -3834,6 +3861,10 @@ impl PlanNode for BitmapHeapScanState {
     ) {
         self.bitmapqual
             .explain(indent + 1, analyze, show_costs, timing, lines);
+    }
+
+    fn explain_json_children(&self, analyze: bool, indent: usize) -> Vec<String> {
+        vec![self.bitmapqual.explain_json(analyze, indent)]
     }
 }
 

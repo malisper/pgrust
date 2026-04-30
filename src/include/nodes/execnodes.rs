@@ -205,6 +205,7 @@ pub struct NodeExecStats {
     pub total_time: Duration,
     pub first_tuple_time: Option<Duration>,
     pub rows_removed_by_filter: u64,
+    pub rows_removed_by_index_recheck: u64,
     pub index_searches: u64,
     pub heap_fetches: u64,
     pub stack_depth_checked: bool,
@@ -287,6 +288,62 @@ pub trait PlanNode: std::fmt::Debug {
         timing: bool,
         lines: &mut Vec<String>,
     );
+
+    fn explain_json(&self, analyze: bool, indent: usize) -> String {
+        if let Some(child) = self.explain_passthrough() {
+            return child.explain_json(analyze, indent);
+        }
+
+        let pad = " ".repeat(indent);
+        let field_pad = " ".repeat(indent + 2);
+        let stats = self.node_stats();
+        let mut lines = vec![format!("{pad}{{")];
+        lines.push(format!(
+            "{field_pad}\"Node Type\": {},",
+            serde_json::to_string(&self.node_label()).unwrap_or_else(|_| "\"\"".into())
+        ));
+        if analyze {
+            lines.push(format!(
+                "{field_pad}\"Actual Rows\": {:.2},",
+                stats.rows as f64
+            ));
+            if stats.rows_removed_by_index_recheck > 0 {
+                lines.push(format!(
+                    "{field_pad}\"Rows Removed by Index Recheck\": {},",
+                    stats.rows_removed_by_index_recheck
+                ));
+            } else {
+                lines.push(format!("{field_pad}\"Rows Removed by Index Recheck\": 0,"));
+            }
+            if stats.rows_removed_by_filter > 0 {
+                lines.push(format!(
+                    "{field_pad}\"Rows Removed by Filter\": {},",
+                    stats.rows_removed_by_filter
+                ));
+            }
+        }
+        let children = self.explain_json_children(analyze, indent + 2);
+        if !children.is_empty() {
+            lines.push(format!("{field_pad}\"Plans\": ["));
+            let child_count = children.len();
+            for (idx, child) in children.into_iter().enumerate() {
+                let suffix = if idx + 1 == child_count { "" } else { "," };
+                lines.push(format!("{child}{suffix}"));
+            }
+            lines.push(format!("{field_pad}],"));
+        }
+        if let Some(last) = lines.last_mut()
+            && last.ends_with(',')
+        {
+            last.pop();
+        }
+        lines.push(format!("{pad}}}"));
+        lines.join("\n")
+    }
+
+    fn explain_json_children(&self, _analyze: bool, _indent: usize) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Executor plan state — a trait object for dynamic dispatch.

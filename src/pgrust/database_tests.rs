@@ -25689,6 +25689,384 @@ fn create_gin_array_index_uses_bitmap_scan_and_rechecks() {
 }
 
 #[test]
+fn gin_array_commuted_contained_by_uses_bitmap_scan() {
+    let base = temp_dir("gin_array_commuted_contained_by");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table docs (id int4 not null, tags int4[])")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into docs values \
+             (1, ARRAY[0,1]::int4[]), \
+             (2, ARRAY[1,2]::int4[]), \
+             (3, ARRAY[]::int4[])",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index docs_tags_gin on docs using gin (tags)")
+        .unwrap();
+    session.execute(&db, "analyze docs").unwrap();
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select id from docs where ARRAY[0]::int4[] <@ tags",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on docs")),
+        "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Cond:") && line.contains("tags @> '{0}'::integer[]")),
+        "expected commuted array GIN Index Cond in EXPLAIN, got {lines:?}"
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from docs where ARRAY[0]::int4[] <@ tags order by id",
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn temp_gin_nonverbose_explain_omits_temp_schema() {
+    let base = temp_dir("gin_temp_explain_label");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table docs (id int4 not null, tags int4[])",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into docs values (1, ARRAY[1]::int4[])")
+        .unwrap();
+    session
+        .execute(&db, "create index docs_tags_gin on docs using gin (tags)")
+        .unwrap();
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select id from docs where tags @> ARRAY[]::int4[]",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on docs")),
+        "expected unqualified temp table label, got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("pg_temp_")),
+        "non-verbose EXPLAIN should not show temp schema, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_analyze_json_reports_gin_bitmap_stats() {
+    let base = temp_dir("gin_explain_analyze_json");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table docs (id int4 not null, tags int4[])")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into docs values \
+             (1, ARRAY[1]::int4[]), \
+             (2, ARRAY[1,2]::int4[]), \
+             (3, ARRAY[]::int4[])",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index docs_tags_gin on docs using gin (tags)")
+        .unwrap();
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+
+    let result = session
+        .execute(
+            &db,
+            "explain (analyze, format json) \
+             select * from docs where tags @> ARRAY[]::int4[]",
+        )
+        .unwrap();
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected EXPLAIN query result");
+    };
+    let Some(Value::Text(json)) = rows.first().and_then(|row| row.first()) else {
+        panic!("expected JSON EXPLAIN text row, got {rows:?}");
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(json.as_str()).expect("EXPLAIN JSON must parse");
+    assert_eq!(parsed[0]["Plan"]["Actual Rows"].as_f64(), Some(3.0));
+    assert_eq!(
+        parsed[0]["Plan"]["Rows Removed by Index Recheck"],
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        parsed[0]["Plan"]["Plans"][0]["Actual Rows"].as_f64(),
+        Some(3.0)
+    );
+}
+
+#[test]
+fn vacuum_preserves_live_temp_rows_after_large_delete() {
+    let base = temp_dir("vacuum_temp_large_delete_survivors");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table docs (i int4[], j int4[])")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into docs values \
+              (null,    null), \
+              ('{}',    null), \
+              ('{1}',   null), \
+              ('{1,2}', null), \
+              (null,    '{}'), \
+              (null,    '{10}'), \
+              ('{1,2}', '{10}'), \
+              ('{2}',   '{10}'), \
+              ('{1,3}', '{}'), \
+              ('{1,1}', '{10}')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into docs select ARRAY[1, g, g/10]::int4[], ARRAY[2, g, g/10]::int4[] \
+             from generate_series(1, 20000) g",
+        )
+        .unwrap();
+    session
+        .execute(&db, "delete from docs where j @> ARRAY[2]::int4[]")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from docs"),
+        vec![vec![Value::Int64(10)]]
+    );
+
+    session.execute(&db, "vacuum docs").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from docs"),
+        vec![vec![Value::Int64(10)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where j @> '{}'::int4[]",
+        ),
+        vec![vec![Value::Int64(6)]]
+    );
+}
+
+#[test]
+fn gin_vacuum_preserves_empty_query_survivors() {
+    let base = temp_dir("gin_empty_query_vacuum_survivors");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table docs (i int4[], j int4[])")
+        .unwrap();
+    session
+        .execute(&db, "create index docs_gin_idx on docs using gin (i, j)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into docs values \
+              (null,    null), \
+              ('{}',    null), \
+              ('{1}',   null), \
+              ('{1,2}', null), \
+              (null,    '{}'), \
+              (null,    '{10}'), \
+              ('{1,2}', '{10}'), \
+              ('{2}',   '{10}'), \
+              ('{1,3}', '{}'), \
+              ('{1,1}', '{10}')",
+        )
+        .unwrap();
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+    let _ = session_query_rows(
+        &mut session,
+        &db,
+        "select * from docs where ARRAY[0]::int4[] <@ i",
+    );
+    let _ = session_query_rows(
+        &mut session,
+        &db,
+        "select * from docs where ARRAY[0]::int4[] <@ i and '{}'::int4[] <@ j",
+    );
+    let _ = session_query_rows(&mut session, &db, "select * from docs where i @> '{}'");
+    session
+        .execute(
+            &db,
+            "create function explain_query_json(query_sql text) \
+             returns table (explain_line json) language plpgsql as $$ \
+             begin \
+               set enable_seqscan = off; \
+               set enable_bitmapscan = on; \
+               return query execute 'EXPLAIN (ANALYZE, FORMAT json) ' || query_sql; \
+             end; \
+             $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function execute_text_query_index(query_sql text) \
+             returns setof text language plpgsql as $$ \
+             begin \
+               set enable_seqscan = off; \
+               set enable_bitmapscan = on; \
+               return query execute query_sql; \
+             end; \
+             $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function execute_text_query_heap(query_sql text) \
+             returns setof text language plpgsql as $$ \
+             begin \
+               set enable_seqscan = on; \
+               set enable_bitmapscan = off; \
+               return query execute query_sql; \
+             end; \
+             $$",
+        )
+        .unwrap();
+    let _ = session_query_rows(
+        &mut session,
+        &db,
+        "select query, \
+                js->0->'Plan'->'Plans'->0->'Actual Rows', \
+                js->0->'Plan'->'Rows Removed by Index Recheck', \
+                (res_index = res_heap) \
+         from \
+           (values \
+             ($$ i @> '{}' $$), \
+             ($$ j @> '{}' $$), \
+             ($$ i @> '{}' and j @> '{}' $$), \
+             ($$ i @> '{1}' $$), \
+             ($$ i @> '{1}' and j @> '{}' $$), \
+             ($$ i @> '{1}' and i @> '{}' and j @> '{}' $$), \
+             ($$ j @> '{10}' $$), \
+             ($$ j @> '{10}' and i @> '{}' $$), \
+             ($$ j @> '{10}' and j @> '{}' and i @> '{}' $$), \
+             ($$ i @> '{1}' and j @> '{10}' $$) \
+           ) q(query), \
+           lateral explain_query_json($$select * from docs where $$ || query) js, \
+           lateral execute_text_query_index($$select string_agg((i, j)::text, ' ') from docs where $$ || query) res_index, \
+           lateral execute_text_query_heap($$select string_agg((i, j)::text, ' ') from docs where $$ || query) res_heap",
+    );
+    session.execute(&db, "reset enable_seqscan").unwrap();
+    session.execute(&db, "reset enable_bitmapscan").unwrap();
+    session
+        .execute(
+            &db,
+            "insert into docs select ARRAY[1, g, g/10]::int4[], ARRAY[2, g, g/10]::int4[] \
+             from generate_series(1, 20000) g",
+        )
+        .unwrap();
+    session
+        .execute(&db, "select gin_clean_pending_list('docs_gin_idx')")
+        .unwrap();
+    session.execute(&db, "analyze docs").unwrap();
+
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+    session.execute(&db, "set enable_bitmapscan = on").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where j @> ARRAY[50]::int4[]",
+        ),
+        vec![vec![Value::Int64(11)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where j @> ARRAY[2]::int4[]",
+        ),
+        vec![vec![Value::Int64(20000)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where j @> '{}'::int4[]",
+        ),
+        vec![vec![Value::Int64(20006)]]
+    );
+
+    session
+        .execute(&db, "delete from docs where j @> ARRAY[2]::int4[]")
+        .unwrap();
+    session.execute(&db, "vacuum docs").unwrap();
+
+    session.execute(&db, "set enable_seqscan = on").unwrap();
+    session.execute(&db, "set enable_bitmapscan = off").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where j @> '{}'::int4[]",
+        ),
+        vec![vec![Value::Int64(6)]],
+        "heap path should retain the six non-null j rows"
+    );
+
+    session.execute(&db, "set enable_seqscan = off").unwrap();
+    session.execute(&db, "set enable_bitmapscan = on").unwrap();
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select count(*) from docs where j @> '{}'::int4[]",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on docs")),
+        "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from docs where j @> '{}'::int4[]",
+        ),
+        vec![vec![Value::Int64(6)]],
+        "GIN bitmap path should retain empty-query survivor TIDs after vacuum"
+    );
+}
+
+#[test]
 fn reopen_brin_index_preserves_pages_per_range_in_catalog() {
     let base = temp_dir("brin_reopen_catalog_options");
 

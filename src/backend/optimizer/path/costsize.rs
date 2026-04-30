@@ -1958,7 +1958,11 @@ fn estimate_gin_bitmap_candidate(
         .class_row_by_oid(spec.index.relation_oid)
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
-    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
+    let qual_selectivity = gin_bitmap_selectivity(
+        &spec,
+        stats,
+        clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples),
+    );
     let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
     let index_startup_cost = spec
         .used_quals
@@ -1993,7 +1997,10 @@ fn estimate_gin_bitmap_candidate(
     let rows = recheck_expr
         .as_ref()
         .map(|expr| {
-            clamp_rows(stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples))
+            let rechecked_rows = clamp_rows(
+                stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples),
+            );
+            rechecked_rows.min(index_rows)
         })
         .unwrap_or(index_rows);
     let heap_pages = stats.relpages.max(1.0).min(rows.max(1.0));
@@ -2037,6 +2044,59 @@ fn estimate_gin_bitmap_candidate(
     }
 
     AccessCandidate { total_cost, plan }
+}
+
+fn gin_bitmap_selectivity(spec: &IndexPathSpec, stats: &RelationStats, fallback: f64) -> f64 {
+    let mut selectivity = fallback;
+    let mut saw_array_key = false;
+    for key in &spec.keys {
+        let Some(value) = key.argument.as_const() else {
+            continue;
+        };
+        let Some(array) = value.as_array_value() else {
+            continue;
+        };
+        saw_array_key = true;
+        let element_count = array.elements.len();
+        let key_selectivity = match key.strategy {
+            // overlap
+            1 => {
+                if element_count == 0 {
+                    0.0
+                } else {
+                    (element_count as f64 * 0.05).min(0.25)
+                }
+            }
+            // contains: GIN array probes are usually much cheaper than the
+            // generic expression selectivity fallback, especially for
+            // rare+frequent searches in PostgreSQL's gin regression.
+            2 => {
+                if element_count == 0 {
+                    1.0
+                } else {
+                    let per_element = 0.02_f64.powi(element_count as i32);
+                    per_element.max(1.0 / stats.reltuples.max(1.0))
+                }
+            }
+            // contained-by is broad for GIN array_ops and relies on recheck.
+            3 => 0.5,
+            // equality
+            4 => {
+                if element_count == 0 {
+                    0.01
+                } else {
+                    0.02_f64.powi(element_count as i32)
+                }
+            }
+            _ => fallback,
+        };
+        selectivity = selectivity.min(key_selectivity);
+    }
+    if saw_array_key {
+        selectivity.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
 }
 
 pub(super) fn estimate_bitmap_candidate(
@@ -9398,6 +9458,9 @@ fn commuted_op_expr_kind(kind: OpExprKind) -> Option<OpExprKind> {
         OpExprKind::LtEq => OpExprKind::GtEq,
         OpExprKind::Gt => OpExprKind::Lt,
         OpExprKind::GtEq => OpExprKind::LtEq,
+        OpExprKind::ArrayOverlap => OpExprKind::ArrayOverlap,
+        OpExprKind::ArrayContains => OpExprKind::ArrayContained,
+        OpExprKind::ArrayContained => OpExprKind::ArrayContains,
         _ => return None,
     })
 }
@@ -10711,16 +10774,29 @@ fn indexable_qual_with_argument(
                 );
             }
             if let Some(argument) = argument_for(&op.args[0]) {
-                return mk(
+                let commuted_kind = commuted_op_expr_kind(op.op)?;
+                let mut qual = mk(
                     strip_casts(&op.args[1]),
                     super::super::IndexStrategyLookup::Operator {
                         oid: operator_commutator_oid(op.opno).unwrap_or(0),
-                        kind: commuted_op_expr_kind(op.op)?,
+                        kind: commuted_kind,
                     },
                     argument,
                     expr,
                     false,
-                );
+                )?;
+                if matches!(
+                    commuted_kind,
+                    OpExprKind::ArrayOverlap
+                        | OpExprKind::ArrayContains
+                        | OpExprKind::ArrayContained
+                ) {
+                    qual.index_expr = Expr::op_auto(
+                        commuted_kind,
+                        vec![strip_casts(&op.args[1]).clone(), op.args[0].clone()],
+                    );
+                }
+                return Some(qual);
             }
             None
         }

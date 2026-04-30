@@ -4,7 +4,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::backend::access::gin::jsonb_ops::{self, GinJsonbQuery};
-use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::heap::heapam::{
+    heap_scan_begin, heap_scan_begin_visible, heap_scan_next, heap_scan_next_visible,
+};
 use crate::backend::access::index::buildkeys::{
     IndexBuildKeyProjector, materialize_heap_row_values,
 };
@@ -24,8 +26,8 @@ use crate::include::access::amapi::{
 };
 use crate::include::access::gin::{
     GIN_DATA, GIN_DELETED, GIN_ENTRY, GIN_INVALID_BLOCKNO, GIN_LEAF, GIN_LIST, GIN_METAPAGE_BLKNO,
-    GIN_ROOT_BLKNO, GinEntryKey, GinEntryTupleData, GinMetaPageData, GinOptions, GinPageError,
-    GinPageOpaqueData, GinPendingTupleData, GinPostingTupleData, gin_metapage_data,
+    GIN_ROOT_BLKNO, GinEntryKey, GinEntryTupleData, GinMetaPageData, GinNullCategory, GinOptions,
+    GinPageError, GinPageOpaqueData, GinPendingTupleData, GinPostingTupleData, gin_metapage_data,
     gin_metapage_init, gin_metapage_set_data, gin_page_append_item, gin_page_get_opaque,
     gin_page_init, gin_page_items, gin_page_set_opaque,
 };
@@ -1161,14 +1163,14 @@ pub(crate) fn gingetbitmap(
             // executor rechecks @@ against the heap row, so correctness comes
             // from the recheck while this path provides index visibility.
             match extract_tsvector_query(attnum, query) {
-                GinTsvectorQuery::All => all_tids(&image),
+                GinTsvectorQuery::All => all_attribute_tids_or_heap(scan, &image, attnum)?,
                 GinTsvectorQuery::Any(entries) => union_entry_tids(&image, &entries),
             }
         } else {
             let query = jsonb_ops::extract_query(attnum, key.strategy, &key.argument)?;
             let _search_mode = jsonb_ops::query_search_mode(&query);
             match query {
-                GinJsonbQuery::All => all_tids(&image),
+                GinJsonbQuery::All => all_attribute_tids_or_heap(scan, &image, attnum)?,
                 GinJsonbQuery::None => BTreeSet::new(),
                 GinJsonbQuery::Any(entries) if jsonb_ops::strategy_requires_all(key.strategy) => {
                     intersect_entry_tids(&image, &entries)
@@ -1181,7 +1183,10 @@ pub(crate) fn gingetbitmap(
             None => tids,
         });
     }
-    let tids = result.unwrap_or_else(|| all_tids(&image));
+    let tids = match result {
+        Some(tids) => tids,
+        None => all_heap_tids(scan)?,
+    };
     for tid in &tids {
         bitmap.add_tid(*tid);
     }
@@ -1412,6 +1417,62 @@ fn all_tids(image: &GinIndexImage) -> BTreeSet<ItemPointerData> {
         out.insert(pending.tid);
     }
     out
+}
+
+fn all_attribute_tids(image: &GinIndexImage, attnum: u16) -> BTreeSet<ItemPointerData> {
+    let mut out = BTreeSet::new();
+    for (key, tids) in &image.entries {
+        if key.attnum == attnum && key.category != GinNullCategory::NullItem {
+            out.extend(tids.iter().copied());
+        }
+    }
+    for pending in &image.pending {
+        if pending
+            .entries
+            .iter()
+            .any(|key| key.attnum == attnum && key.category != GinNullCategory::NullItem)
+        {
+            out.insert(pending.tid);
+        }
+    }
+    out
+}
+
+fn all_attribute_tids_or_heap(
+    scan: &IndexScanDesc,
+    image: &GinIndexImage,
+    attnum: u16,
+) -> Result<BTreeSet<ItemPointerData>, CatalogError> {
+    let mut tids = all_attribute_tids(image, attnum);
+    if tids.is_empty() {
+        all_heap_tids(scan)
+    } else {
+        let heap_tids = all_heap_tids(scan)?;
+        // :HACK: pgrust's simplified GIN vacuum can leave scan-all posting
+        // sets with stale TIDs after heap pruning. Treat disjoint scan-all
+        // probes as lossy and let BitmapHeap recheck preserve PostgreSQL-
+        // visible semantics until GIN vacuum rewrites affected posting trees
+        // with full heap-TID remapping.
+        if !heap_tids.is_empty() && tids.is_disjoint(&heap_tids) {
+            tids.extend(heap_tids);
+        }
+        Ok(tids)
+    }
+}
+
+fn all_heap_tids(scan: &IndexScanDesc) -> Result<BTreeSet<ItemPointerData>, CatalogError> {
+    let rel = scan
+        .heap_relation
+        .ok_or(CatalogError::Corrupt("GIN scan missing heap relation"))?;
+    let mut out = BTreeSet::new();
+    let mut heap_scan = heap_scan_begin(&scan.pool, rel)
+        .map_err(|err| CatalogError::Io(format!("gin heap scan begin failed: {err:?}")))?;
+    while let Some((tid, _tuple)) = heap_scan_next(&scan.pool, scan.client_id, &mut heap_scan)
+        .map_err(|err| CatalogError::Io(format!("gin heap scan failed: {err:?}")))?
+    {
+        out.insert(tid);
+    }
+    Ok(out)
 }
 
 fn pending_bytes(pending: &[GinPendingTupleData]) -> usize {
