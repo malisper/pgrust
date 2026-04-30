@@ -9078,6 +9078,7 @@ pub fn execute_truncate_table(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
+    let mut seen_targets = BTreeSet::new();
     for table_name in stmt.table_names {
         let entry = match catalog.lookup_any_relation(&table_name) {
             Some(entry) if entry.relkind == 'r' || entry.relkind == 'p' => entry,
@@ -9096,13 +9097,14 @@ pub fn execute_truncate_table(
         let truncate_targets = if entry.relkind == 'p' {
             partitioned_truncate_targets(catalog, entry.relation_oid)
         } else if catalog.has_subclass(entry.relation_oid) {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "TRUNCATE on inherited parents is not supported yet".into(),
-            )));
+            inherited_truncate_targets(catalog, entry.relation_oid)
         } else {
             vec![entry]
         };
         for target in truncate_targets {
+            if !seen_targets.insert(target.relation_oid) {
+                continue;
+            }
             check_relation_privilege(ctx, target.relation_oid, 'D')?;
             let indexes = catalog.index_relations_for_heap(target.relation_oid);
             let _ = ctx.pool.invalidate_relation(target.rel);
@@ -9127,6 +9129,15 @@ pub fn execute_truncate_table(
         }
     }
     Ok(StatementResult::AffectedRows(0))
+}
+
+fn inherited_truncate_targets(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<BoundRelation> {
+    catalog
+        .find_all_inheritors(root_oid)
+        .into_iter()
+        .filter_map(|oid| catalog.relation_by_oid(oid))
+        .filter(|entry| entry.relkind == 'r')
+        .collect()
 }
 
 fn partitioned_truncate_targets(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<BoundRelation> {

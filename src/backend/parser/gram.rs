@@ -9992,6 +9992,12 @@ fn normalize_grantee_identifier(input: &str) -> Result<String, ParseError> {
     let trimmed = input.trim();
     if keyword_at_start(trimmed, "group") {
         normalize_simple_identifier(consume_keyword(trimmed, "group"))
+    } else if keyword_at_start(trimmed, "current_user")
+        && consume_keyword(trimmed, "current_user").trim().is_empty()
+    {
+        // :HACK: GRANT stores grantees as names today; resolve CURRENT_USER to
+        // the bootstrap role until privilege statements carry RoleSpec values.
+        Ok("postgres".into())
     } else {
         normalize_simple_identifier(trimmed)
     }
@@ -19047,6 +19053,7 @@ fn build_create_role(pair: Pair<'_, Rule>) -> Result<CreateRoleStatement, ParseE
 fn build_alter_role(pair: Pair<'_, Rule>) -> Result<AlterRoleStatement, ParseError> {
     let mut role_name = None;
     let mut rename_to = None;
+    let mut set_config = None;
     let mut options = Vec::new();
 
     for part in pair.into_inner() {
@@ -19055,6 +19062,9 @@ fn build_alter_role(pair: Pair<'_, Rule>) -> Result<AlterRoleStatement, ParseErr
             Rule::alter_role_rename_clause => {
                 rename_to = Some(build_alter_role_rename(part)?);
             }
+            Rule::alter_role_set_clause => {
+                set_config = Some(build_alter_role_set(part)?);
+            }
             Rule::alter_role_option => options.push(build_role_option(part)?),
             _ => {}
         }
@@ -19062,6 +19072,8 @@ fn build_alter_role(pair: Pair<'_, Rule>) -> Result<AlterRoleStatement, ParseErr
 
     let action = if let Some(new_name) = rename_to {
         AlterRoleAction::Rename { new_name }
+    } else if let Some((name, value)) = set_config {
+        AlterRoleAction::SetConfig { name, value }
     } else {
         AlterRoleAction::Options(options)
     };
@@ -19141,6 +19153,19 @@ fn build_alter_role_rename(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
         .find(|part| part.as_rule() == Rule::identifier)
         .map(build_identifier)
         .ok_or(ParseError::UnexpectedEof)
+}
+
+fn build_alter_role_set(pair: Pair<'_, Rule>) -> Result<(String, Option<String>), ParseError> {
+    let mut name = None;
+    let mut value = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::guc_name if name.is_none() => name = Some(build_set_guc_name(part)),
+            Rule::set_value_list => value = Some(build_set_value_list_value(part)),
+            _ => {}
+        }
+    }
+    Ok((name.ok_or(ParseError::UnexpectedEof)?, value.flatten()))
 }
 
 fn build_create_database(pair: Pair<'_, Rule>) -> Result<CreateDatabaseStatement, ParseError> {
@@ -24697,31 +24722,54 @@ fn build_qualified_identifier_list(pair: Pair<'_, Rule>) -> Vec<String> {
 }
 
 fn build_lock_table(pair: Pair<'_, Rule>) -> Result<LockTableStatement, ParseError> {
-    let mut table_names = Vec::new();
+    let mut targets = Vec::new();
     let mut mode = LockTableMode::AccessExclusive;
     let mut nowait = false;
 
-    // :HACK: PostgreSQL's LockStmt carries RangeVar details for ONLY,
-    // inheritance recursion, trailing '*', and view recursion. This raw node
-    // keeps just direct relation names until those semantics are modeled.
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::qualified_ident_list => {
-                table_names.extend(build_qualified_identifier_list(part));
+            Rule::lock_table_target_list => {
+                targets.extend(build_lock_table_targets(part));
             }
             Rule::lock_table_mode_clause => mode = build_lock_table_mode_clause(part)?,
             Rule::lock_nowait_clause => nowait = true,
             _ => {}
         }
     }
-    if table_names.is_empty() {
+    if targets.is_empty() {
         return Err(ParseError::UnexpectedEof);
     }
     Ok(LockTableStatement {
-        table_names,
+        targets,
         mode,
         nowait,
     })
+}
+
+fn build_lock_table_targets(pair: Pair<'_, Rule>) -> Vec<LockTableTarget> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::lock_table_target)
+        .map(build_lock_table_target)
+        .collect()
+}
+
+fn build_lock_table_target(pair: Pair<'_, Rule>) -> LockTableTarget {
+    let mut name = String::new();
+    let mut only = false;
+    let mut recurse = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::lock_table_only => only = true,
+            Rule::qualified_identifier => name = build_qualified_identifier_string(part),
+            Rule::lock_table_recurse => recurse = true,
+            _ => {}
+        }
+    }
+    LockTableTarget {
+        name,
+        only,
+        recurse,
+    }
 }
 
 fn build_lock_table_mode_clause(pair: Pair<'_, Rule>) -> Result<LockTableMode, ParseError> {

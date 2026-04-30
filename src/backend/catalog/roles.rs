@@ -14,6 +14,7 @@ pub struct RoleAttributes {
     pub rolreplication: bool,
     pub rolbypassrls: bool,
     pub rolconnlimit: i32,
+    pub rolpassword: Option<String>,
 }
 
 impl Default for RoleAttributes {
@@ -27,6 +28,7 @@ impl Default for RoleAttributes {
             rolreplication: false,
             rolbypassrls: false,
             rolconnlimit: -1,
+            rolpassword: None,
         }
     }
 }
@@ -86,7 +88,7 @@ pub fn create_role(
         rolreplication: attrs.rolreplication,
         rolbypassrls: attrs.rolbypassrls,
         rolconnlimit: attrs.rolconnlimit,
-        rolpassword: None,
+        rolpassword: attrs.rolpassword.clone(),
         rolvaliduntil: None,
     };
     *next_oid = next_oid.saturating_add(1);
@@ -112,6 +114,7 @@ pub fn alter_role_attributes(
     row.rolreplication = attrs.rolreplication;
     row.rolbypassrls = attrs.rolbypassrls;
     row.rolconnlimit = attrs.rolconnlimit;
+    row.rolpassword = attrs.rolpassword.clone();
     Ok(row.clone())
 }
 
@@ -132,7 +135,21 @@ pub fn rename_role(
         .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
         .ok_or_else(|| CatalogError::UnknownTable(role_name.to_string()))?;
     row.rolname = new_name.to_string();
+    if row
+        .rolpassword
+        .as_deref()
+        .is_some_and(is_md5_encrypted_password)
+    {
+        row.rolpassword = None;
+    }
     Ok(row.clone())
+}
+
+fn is_md5_encrypted_password(value: &str) -> bool {
+    value.len() == 35
+        && value
+            .strip_prefix("md5")
+            .is_some_and(|digest| digest.chars().all(|ch| ch.is_ascii_hexdigit()))
 }
 
 pub fn drop_roles(

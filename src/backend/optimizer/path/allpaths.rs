@@ -2201,6 +2201,7 @@ fn collect_relation_access_paths(
     if relkind != 'r' || relation_uses_virtual_scan(relation_oid) {
         return paths;
     }
+    let visible_user_attrs = visible_user_attr_indexes(&desc);
     for index in catalog
         .index_relations_for_heap_with_cache(relation_oid, index_expr_cache)
         .iter()
@@ -2211,10 +2212,9 @@ fn collect_relation_access_paths(
         })
     {
         let target_index_only = index_supports_index_only_attrs(index, required_index_only_attrs);
-        let full_index_only_scan = target_index_only
-            || (!config.enable_seqscan
-                && filter.is_none()
-                && index_supports_index_only_attrs(index, &visible_user_attr_indexes(&desc)));
+        let visible_index_only = index_supports_index_only_attrs(index, &visible_user_attrs);
+        let full_index_only_scan =
+            target_index_only || (!config.enable_seqscan && filter.is_none() && visible_index_only);
         let order_removing_index_scan_available = config.enable_indexscan
             && access_method_supports_index_scan_for_index(index)
             && query_order_items.as_ref().is_some_and(|order_items| {
@@ -2260,6 +2260,10 @@ fn collect_relation_access_paths(
                 && brin_partial_bitmap_allowed(index, config)
                 && !order_removing_index_scan_available
                 && !target_index_only_unique_btree(index, target_index_only)
+                && !(!config.enable_seqscan
+                    && config.enable_indexonlyscan
+                    && spec.row_prefix
+                    && (target_index_only || visible_index_only))
             {
                 paths.push(
                     estimate_bitmap_candidate(
@@ -5774,6 +5778,12 @@ fn path_dominates(left: &Path, right: &Path) -> bool {
     if bestpath::preferred_unqualified_left_join_above_nulltest(left, right) {
         return true;
     }
+    if preferred_plain_values_join_order(right, left) {
+        return false;
+    }
+    if preferred_plain_values_join_order(left, right) {
+        return true;
+    }
     if bestpath::non_nested_join_nearly_as_cheap(right, left) {
         return false;
     }
@@ -5807,11 +5817,18 @@ fn path_tie_breaker_prefers(
     right_pathkeys: &[PathKey],
 ) -> bool {
     if let (Some(left_relid), Some(right_relid)) = (
+        plain_values_join_left_relid(left),
+        plain_values_join_left_relid(right),
+    ) && left_relid != right_relid
+    {
+        return left_relid < right_relid;
+    }
+    if let (Some(left_relid), Some(right_relid)) = (
         cross_function_join_left_relid(left),
         cross_function_join_left_relid(right),
     ) && left_relid != right_relid
     {
-        return left_relid > right_relid;
+        return left_relid < right_relid;
     }
     if let (Some(left_relids), Some(right_relids)) = (
         cross_join_left_relid_count(left),
@@ -5821,6 +5838,54 @@ fn path_tie_breaker_prefers(
         return left_relids > right_relids;
     }
     left_pathkeys.len() > right_pathkeys.len()
+}
+
+fn preferred_plain_values_join_order(left: &Path, right: &Path) -> bool {
+    let (Some(left_relid), Some(right_relid)) = (
+        plain_values_join_left_relid(left),
+        plain_values_join_left_relid(right),
+    ) else {
+        return false;
+    };
+    left_relid != right_relid && left_relid < right_relid
+}
+
+fn plain_values_join_left_relid(path: &Path) -> Option<usize> {
+    match path {
+        Path::NestedLoopJoin {
+            left, right, kind, ..
+        } if matches!(kind, JoinType::Cross | JoinType::Inner)
+            && path_is_plain_values_relation(left)
+            && path_is_plain_values_relation(right) =>
+        {
+            path_relids(left).first().copied()
+        }
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => plain_values_join_left_relid(input),
+        _ => None,
+    }
+}
+
+fn path_is_plain_values_relation(path: &Path) -> bool {
+    match path {
+        Path::Values { .. } => true,
+        Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => path_is_plain_values_relation(input),
+        Path::Filter { .. } => false,
+        _ => false,
+    }
 }
 
 fn cross_function_join_left_relid(path: &Path) -> Option<usize> {

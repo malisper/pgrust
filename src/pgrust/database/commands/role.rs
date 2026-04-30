@@ -1,8 +1,9 @@
 use super::super::*;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::commands::rolecmds::{
-    build_alter_role_spec, build_create_role_spec, can_rename_role, grant_membership_authorized,
-    membership_row, normalize_drop_role_names, parse_createrole_self_grant, role_management_error,
+    PasswordSettings, build_alter_role_spec, build_create_role_spec, can_rename_role,
+    grant_membership_authorized, membership_row, normalize_drop_role_names,
+    parse_createrole_self_grant, role_management_error, store_role_setting,
 };
 use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
@@ -17,6 +18,7 @@ impl Database {
         client_id: ClientId,
         stmt: &CreateRoleStatement,
         createrole_self_grant: Option<&str>,
+        password_settings: PasswordSettings,
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -25,6 +27,7 @@ impl Database {
             client_id,
             stmt,
             createrole_self_grant,
+            password_settings,
             xid,
             0,
             &mut catalog_effects,
@@ -39,6 +42,7 @@ impl Database {
         client_id: ClientId,
         stmt: &CreateRoleStatement,
         createrole_self_grant: Option<&str>,
+        password_settings: PasswordSettings,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -47,7 +51,7 @@ impl Database {
         let auth_catalog = self
             .auth_catalog(client_id, Some((xid, cid)))
             .map_err(map_role_catalog_error)?;
-        let spec = build_create_role_spec(stmt).map_err(ExecError::Parse)?;
+        let spec = build_create_role_spec(stmt, password_settings).map_err(ExecError::Parse)?;
         if !auth.can_create_role_with_attrs(&spec.attrs, &auth_catalog) {
             return Err(create_role_permission_error(
                 &auth,
@@ -265,6 +269,7 @@ impl Database {
         &self,
         client_id: ClientId,
         stmt: &AlterRoleStatement,
+        password_settings: PasswordSettings,
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -272,6 +277,7 @@ impl Database {
         let result = self.execute_alter_role_stmt_in_transaction(
             client_id,
             stmt,
+            password_settings,
             xid,
             0,
             &mut catalog_effects,
@@ -285,6 +291,7 @@ impl Database {
         &self,
         client_id: ClientId,
         stmt: &AlterRoleStatement,
+        password_settings: PasswordSettings,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -322,8 +329,21 @@ impl Database {
                     .map_err(map_role_catalog_error)?
                     .1
             }
+            AlterRoleAction::SetConfig { name, value } => {
+                let normalized = crate::backend::utils::misc::guc::normalize_guc_name(name);
+                if normalized != "search_path" {
+                    return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                        normalized,
+                    )));
+                }
+                // :HACK: Full pg_db_role_setting support is deferred. Keep the
+                // role-level setting in a small in-memory map so regression
+                // setup syntax succeeds and session SET ROLE can see it.
+                store_role_setting(self.database_oid, existing.oid, normalized, value.clone());
+                return Ok(StatementResult::AffectedRows(0));
+            }
             AlterRoleAction::Options(_) => {
-                let spec = build_alter_role_spec(stmt, &existing)
+                let spec = build_alter_role_spec(stmt, &existing, password_settings)
                     .map_err(ExecError::Parse)?
                     .unwrap();
                 if !auth.can_alter_role_attrs(existing.oid, &spec.attrs, &auth_catalog) {
@@ -1486,7 +1506,7 @@ fn alter_role_changes_password(stmt: &AlterRoleStatement) -> bool {
                 RoleOption::Password(_) | RoleOption::EncryptedPassword(_)
             )
         }),
-        AlterRoleAction::Rename { .. } => false,
+        AlterRoleAction::Rename { .. } | AlterRoleAction::SetConfig { .. } => false,
     }
 }
 

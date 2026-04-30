@@ -99,6 +99,8 @@ pub const JSONB_EXISTS_PROC_OID: u32 = 4047;
 pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4048;
 pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4049;
 pub const JSONB_CONTAINED_PROC_OID: u32 = 4050;
+pub const JSONB_PATH_EXISTS_PROC_OID: u32 = 4010;
+pub const JSONB_PATH_MATCH_PROC_OID: u32 = 4011;
 pub const JSONB_CONCAT_PROC_OID: u32 = 3301;
 pub const GIN_COMPARE_JSONB_PROC_OID: u32 = 3480;
 pub const GIN_EXTRACT_JSONB_PROC_OID: u32 = 3482;
@@ -12012,6 +12014,9 @@ pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Opti
 
 pub fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
     let builtin_by_src = builtin_scalar_function_for_proc_src(&row.prosrc);
+    if row.prosrc.eq_ignore_ascii_case("test_atomic_ops") {
+        return Some(BuiltinScalarFunction::PgRustTestAtomicOps);
+    }
     if row.pronamespace != PG_CATALOG_NAMESPACE_OID {
         return builtin_by_src.filter(|func| is_dynamic_range_scalar_function(*func));
     }
@@ -12047,6 +12052,7 @@ fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RangeDifference
             | BuiltinScalarFunction::RangeMerge
             | BuiltinScalarFunction::PgRustInternalBinaryCoercible
+            | BuiltinScalarFunction::PgRustTestAtomicOps
             | BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid
     )
 }
@@ -12576,6 +12582,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
+        ),
+        (
+            "test_atomic_ops",
+            BuiltinScalarFunction::PgRustTestAtomicOps,
         ),
         (
             "pg_rust_is_catalog_text_unique_index_oid",

@@ -1967,7 +1967,7 @@ run_one_regression_test() {
         fi
     fi
 
-    if [[ "$test_name" == "select_distinct" ]] && ! run_select_distinct_index_setup; then
+    if select_distinct_needs_index_setup "$test_name" && ! run_select_distinct_index_setup; then
         {
             echo "ERROR: select_distinct index dependency setup failed"
         } > "$output_file"
@@ -2147,6 +2147,13 @@ SQL
     return 1
 }
 
+select_distinct_needs_index_setup() {
+    case "$1" in
+        select_distinct | select_distinct_on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 run_stats_helper_setup() {
     local output_file="$RESULTS_DIR/output/test_setup_dependency_stats_helper.out"
     local setup_file="$RESULTS_DIR/output/test_setup_dependency_stats_helper.sql"
@@ -2289,7 +2296,7 @@ run_one_regression_test_isolated() (
         return 1
     fi
 
-    if [[ "$test_name" == "select_distinct" ]] && ! run_select_distinct_index_setup; then
+    if select_distinct_needs_index_setup "$test_name" && ! run_select_distinct_index_setup; then
         {
             echo "ERROR: isolated worker $worker_name failed select_distinct index dependency setup"
             echo "port: $PORT"
