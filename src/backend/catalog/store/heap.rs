@@ -9573,6 +9573,81 @@ impl CatalogStore {
         }
         Ok(effect)
     }
+
+    pub fn replace_type_rows_and_support_dependencies_mvcc(
+        &mut self,
+        rows: Vec<PgTypeRow>,
+        type_oid: u32,
+        support_proc_oids: &[u32],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut old_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            old_rows.push(
+                type_row_by_oid_mvcc(self, ctx, row.oid)?
+                    .ok_or_else(|| CatalogError::UnknownType(row.oid.to_string()))?,
+            );
+        }
+
+        let old_support_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_TYPE_RELATION_OID, type_oid)?
+                .into_iter()
+                .filter(type_support_proc_depend_row)
+                .collect::<Vec<_>>();
+        let mut new_support_depends = support_proc_oids
+            .iter()
+            .copied()
+            .filter(|proc_oid| *proc_oid != 0)
+            .map(|proc_oid| PgDependRow {
+                classid: PG_TYPE_RELATION_OID,
+                objid: type_oid,
+                objsubid: 0,
+                refclassid: PG_PROC_RELATION_OID,
+                refobjid: proc_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            })
+            .collect::<Vec<_>>();
+        sort_pg_depend_rows(&mut new_support_depends);
+        new_support_depends.dedup();
+
+        let kinds = [BootstrapCatalogKind::PgType, BootstrapCatalogKind::PgDepend];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: old_rows,
+                depends: old_support_depends,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: rows.clone(),
+                depends: new_support_depends,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        for row in rows {
+            effect_record_oid(&mut effect.type_oids, row.oid);
+        }
+        Ok(effect)
+    }
+}
+
+fn type_support_proc_depend_row(row: &PgDependRow) -> bool {
+    row.classid == PG_TYPE_RELATION_OID
+        && row.objsubid == 0
+        && row.refclassid == PG_PROC_RELATION_OID
+        && row.refobjsubid == 0
+        && row.deptype == DEPENDENCY_NORMAL
 }
 
 fn visible_catalog_caches_for_ctx(

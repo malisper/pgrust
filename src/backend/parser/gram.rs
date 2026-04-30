@@ -2573,6 +2573,9 @@ fn is_create_schema_element_start(input: &str) -> bool {
     } else if keyword_at_start(rest, "temporary") {
         rest = consume_keyword(rest, "temporary").trim_start();
     }
+    if keyword_at_start(rest, "unique") {
+        rest = consume_keyword(rest, "unique").trim_start();
+    }
     keyword_at_start(rest, "sequence")
         || keyword_at_start(rest, "table")
         || keyword_at_start(rest, "view")
