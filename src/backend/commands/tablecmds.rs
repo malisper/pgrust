@@ -3,10 +3,11 @@ use std::rc::Rc;
 
 use parking_lot::RwLock;
 
+use crate::backend::access::heap::HeapWalPolicy;
 use crate::backend::access::heap::heapam::{
-    HeapError, heap_delete_with_waiter, heap_fetch, heap_fetch_visible_with_txns,
-    heap_insert_mvcc_with_cid, heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple,
-    heap_scan_prepare_next_page, heap_update_with_waiter,
+    HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
+    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid, heap_scan_begin_visible,
+    heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_update_with_waiter,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -6845,6 +6846,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
                         relation_oid: row.relation.relation_oid,
                         relkind: 'r',
                         partition_delete_root_oid: None,
+                        relpersistence: row.relation.relpersistence,
                         toast: row.relation.toast,
                         desc: row.relation.desc.clone(),
                         referenced_by_foreign_keys,
@@ -13135,7 +13137,7 @@ fn execute_delete_from_joined_input(
                 } else {
                     None
                 };
-                match heap_delete_with_waiter(
+                match heap_delete_with_waiter_with_wal_policy(
                     &*ctx.pool,
                     ctx.client_id,
                     target.rel,
@@ -13144,6 +13146,7 @@ fn execute_delete_from_joined_input(
                     current_tid,
                     &snapshot,
                     waiter,
+                    HeapWalPolicy::from_relpersistence(target.relpersistence),
                 ) {
                     Ok(()) => {
                         if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref()) {
@@ -13382,23 +13385,6 @@ pub fn execute_delete_with_waiter(
                 let mut current_tid = *tid;
                 let mut current_values = values.clone();
                 loop {
-                    if let Some(catalog) = ctx.catalog.as_deref() {
-                        let namespace_oid = catalog
-                            .class_row_by_oid(target.relation_oid)
-                            .map(|row| row.relnamespace)
-                            .unwrap_or(0);
-                        let indexes = catalog.index_relations_for_heap(target.relation_oid);
-                        enforce_publication_replica_identity(
-                            &target.relation_name,
-                            target.relation_oid,
-                            namespace_oid,
-                            &target.desc,
-                            &indexes,
-                            catalog,
-                            PublicationDmlAction::Delete,
-                            true,
-                        )?;
-                    }
                     if let Some(triggers) = &triggers {
                         if !triggers.before_row_delete(&current_values, ctx)? {
                             break;
@@ -13424,7 +13410,7 @@ pub fn execute_delete_with_waiter(
                     } else {
                         None
                     };
-                    match heap_delete_with_waiter(
+                    match heap_delete_with_waiter_with_wal_policy(
                         &*ctx.pool,
                         ctx.client_id,
                         target.rel,
@@ -13433,6 +13419,7 @@ pub fn execute_delete_with_waiter(
                         current_tid,
                         &snapshot,
                         waiter,
+                        HeapWalPolicy::from_relpersistence(target.relpersistence),
                     ) {
                         Ok(()) => {
                             if let (Some(toast), Some(old_tuple)) =
@@ -14093,7 +14080,7 @@ pub(crate) fn apply_base_delete_row(
         } else {
             None
         };
-        match heap_delete_with_waiter(
+        match heap_delete_with_waiter_with_wal_policy(
             &*ctx.pool,
             ctx.client_id,
             target.rel,
@@ -14102,6 +14089,7 @@ pub(crate) fn apply_base_delete_row(
             current_tid,
             &snapshot,
             waiter,
+            HeapWalPolicy::from_relpersistence(target.relpersistence),
         ) {
             Ok(()) => {
                 if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref()) {

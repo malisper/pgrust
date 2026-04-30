@@ -21,9 +21,9 @@ use crate::include::access::amapi::{
 use crate::include::access::gin::{
     GIN_DATA, GIN_DELETED, GIN_ENTRY, GIN_INVALID_BLOCKNO, GIN_LEAF, GIN_LIST, GIN_METAPAGE_BLKNO,
     GIN_ROOT_BLKNO, GinEntryKey, GinEntryTupleData, GinMetaPageData, GinOptions, GinPageError,
-    GinPendingTupleData, GinPostingTupleData, gin_metapage_data, gin_metapage_init,
-    gin_metapage_set_data, gin_page_append_item, gin_page_get_opaque, gin_page_init,
-    gin_page_items, gin_page_set_opaque,
+    GinPageOpaqueData, GinPendingTupleData, GinPostingTupleData, gin_metapage_data,
+    gin_metapage_init, gin_metapage_set_data, gin_page_append_item, gin_page_get_opaque,
+    gin_page_init, gin_page_items, gin_page_set_opaque,
 };
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
@@ -148,13 +148,26 @@ fn write_index_pages(
             .map_err(|err| CatalogError::Io(format!("gin extend failed: {err:?}")))?;
     }
     for (block, page) in pages.iter().enumerate() {
-        let pin = pin_gin_block(pool, client_id, rel, block as u32)?;
-        let mut guard = pool
-            .lock_buffer_exclusive(pin.buffer_id())
-            .map_err(|err| CatalogError::Io(format!("gin exclusive lock failed: {err:?}")))?;
-        pool.install_page_image_locked(pin.buffer_id(), page, 0, &mut guard)
-            .map_err(|err| CatalogError::Io(format!("gin buffered write failed: {err:?}")))?;
+        write_gin_block(pool, client_id, rel, block as u32, page)?;
     }
+    Ok(())
+}
+
+fn write_gin_block(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    block: u32,
+    page: &[u8; BLCKSZ],
+) -> Result<(), CatalogError> {
+    pool.ensure_block_exists(rel, ForkNumber::Main, block)
+        .map_err(|err| CatalogError::Io(format!("gin extend failed: {err:?}")))?;
+    let pin = pin_gin_block(pool, client_id, rel, block)?;
+    let mut guard = pool
+        .lock_buffer_exclusive(pin.buffer_id())
+        .map_err(|err| CatalogError::Io(format!("gin exclusive lock failed: {err:?}")))?;
+    pool.install_page_image_locked(pin.buffer_id(), page, 0, &mut guard)
+        .map_err(|err| CatalogError::Io(format!("gin buffered write failed: {err:?}")))?;
     Ok(())
 }
 
@@ -256,11 +269,31 @@ fn scan_visible_heap_entries(
 }
 
 pub(crate) fn gininsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
-    let mut image = read_index_image(&ctx.pool, ctx.client_id, ctx.index_relation)?;
-    let options = read_gin_metapage(&ctx.pool, ctx.client_id, ctx.index_relation)
-        .map(|meta| meta.options())
-        .or_else(|_| gin_options_from_meta(&ctx.index_meta))?;
+    let metapage_options = read_gin_metapage(&ctx.pool, ctx.client_id, ctx.index_relation)
+        .ok()
+        .map(|meta| meta.options());
+    let options = if let Some(options) = &metapage_options {
+        options.clone()
+    } else {
+        gin_options_from_meta(&ctx.index_meta)?
+    };
     let row_entries = extract_row_entries(&ctx.values, ctx.heap_tid)?;
+    if options.fastupdate {
+        if metapage_options.is_some() {
+            append_fastupdate_pending_tuple(
+                &ctx.pool,
+                ctx.client_id,
+                ctx.index_relation,
+                GinPendingTupleData {
+                    tid: ctx.heap_tid,
+                    entries: row_entries.into_iter().collect(),
+                },
+            )?;
+            return Ok(false);
+        }
+    }
+
+    let mut image = read_index_image(&ctx.pool, ctx.client_id, ctx.index_relation)?;
     if options.fastupdate {
         image.pending.push(GinPendingTupleData {
             tid: ctx.heap_tid,
@@ -277,6 +310,113 @@ pub(crate) fn gininsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> 
     let pages = form_index_pages(&image, &options)?;
     write_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation, &pages)?;
     Ok(false)
+}
+
+fn append_fastupdate_pending_tuple(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    tuple: GinPendingTupleData,
+) -> Result<(), CatalogError> {
+    let mut tuple_bytes = Vec::with_capacity(tuple.serialized_len());
+    tuple.serialize_into(&mut tuple_bytes);
+
+    let mut metapage = read_gin_block(pool, client_id, rel, GIN_METAPAGE_BLKNO)?;
+    let mut meta = gin_metapage_data(&metapage).map_err(page_error)?;
+    let options = meta.options();
+
+    if meta.pending_tail == GIN_INVALID_BLOCKNO {
+        if meta.pending_head != GIN_INVALID_BLOCKNO {
+            return Err(CatalogError::Corrupt("GIN pending head without tail"));
+        }
+        append_pending_tuple_on_new_page(pool, client_id, rel, &mut meta, &tuple_bytes)?;
+    } else {
+        let mut tail_page = read_gin_block(pool, client_id, rel, meta.pending_tail)?;
+        validate_pending_page(&tail_page)?;
+        match append_pending_tuple_to_page(&mut tail_page, &tuple_bytes) {
+            Ok(tail_free_size) => {
+                meta.tail_free_size = tail_free_size;
+                meta.n_pending_heap_tuples = meta.n_pending_heap_tuples.saturating_add(1);
+                write_gin_block(pool, client_id, rel, meta.pending_tail, &tail_page)?;
+            }
+            Err(GinPageError::Page(PageError::NoSpace)) => {
+                append_pending_tuple_on_new_page(pool, client_id, rel, &mut meta, &tuple_bytes)?;
+            }
+            Err(err) => return Err(page_error(err)),
+        }
+    }
+
+    gin_metapage_set_data(&mut metapage, &meta).map_err(page_error)?;
+    write_gin_block(pool, client_id, rel, GIN_METAPAGE_BLKNO, &metapage)?;
+
+    if pending_cleanup_needed(&meta) {
+        let mut image = read_index_image(pool, client_id, rel)?;
+        cleanup_pending_into_entries(&mut image);
+        let pages = form_index_pages(&image, &options)?;
+        write_index_pages(pool, client_id, rel, &pages)?;
+    }
+
+    Ok(())
+}
+
+fn append_pending_tuple_on_new_page(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    meta: &mut GinMetaPageData,
+    tuple_bytes: &[u8],
+) -> Result<(), CatalogError> {
+    let new_block = relation_nblocks(pool, rel)?;
+    let (new_page, tail_free_size) = new_pending_page(tuple_bytes)?;
+    write_gin_block(pool, client_id, rel, new_block, &new_page)?;
+
+    if meta.pending_tail == GIN_INVALID_BLOCKNO {
+        meta.pending_head = new_block;
+    } else {
+        let mut old_tail_page = read_gin_block(pool, client_id, rel, meta.pending_tail)?;
+        let mut old_tail_opaque = validate_pending_page(&old_tail_page)?;
+        if old_tail_opaque.rightlink != GIN_INVALID_BLOCKNO {
+            return Err(CatalogError::Corrupt("GIN pending tail has rightlink"));
+        }
+        old_tail_opaque.rightlink = new_block;
+        gin_page_set_opaque(&mut old_tail_page, old_tail_opaque).map_err(page_error)?;
+        write_gin_block(pool, client_id, rel, meta.pending_tail, &old_tail_page)?;
+    }
+
+    meta.pending_tail = new_block;
+    meta.tail_free_size = tail_free_size;
+    meta.n_pending_pages = meta.n_pending_pages.saturating_add(1);
+    meta.n_pending_heap_tuples = meta.n_pending_heap_tuples.saturating_add(1);
+    meta.n_total_pages = meta.n_total_pages.max(new_block.saturating_add(1));
+    Ok(())
+}
+
+fn validate_pending_page(page: &[u8; BLCKSZ]) -> Result<GinPageOpaqueData, CatalogError> {
+    let opaque = gin_page_get_opaque(page).map_err(page_error)?;
+    if opaque.flags & GIN_LIST == 0 {
+        return Err(CatalogError::Corrupt("GIN pending page expected"));
+    }
+    Ok(opaque)
+}
+
+fn new_pending_page(tuple_bytes: &[u8]) -> Result<([u8; BLCKSZ], u32), CatalogError> {
+    let mut page = empty_page(GIN_LIST | GIN_LEAF)?;
+    let tail_free_size =
+        append_pending_tuple_to_page(&mut page, tuple_bytes).map_err(page_error)?;
+    Ok((page, tail_free_size))
+}
+
+fn append_pending_tuple_to_page(
+    page: &mut [u8; BLCKSZ],
+    tuple_bytes: &[u8],
+) -> Result<u32, GinPageError> {
+    gin_page_append_item(page, tuple_bytes)?;
+    Ok(page_header(page)?.free_space() as u32)
+}
+
+fn pending_cleanup_needed(meta: &GinMetaPageData) -> bool {
+    (meta.n_pending_pages as usize).saturating_mul(BLCKSZ)
+        > meta.options().pending_list_limit_bytes()
 }
 
 pub(crate) fn ginbeginscan(ctx: &IndexBeginScanContext) -> Result<IndexScanDesc, CatalogError> {
@@ -580,7 +720,7 @@ fn all_tids(image: &GinIndexImage) -> BTreeSet<ItemPointerData> {
 fn pending_bytes(pending: &[GinPendingTupleData]) -> usize {
     pending
         .iter()
-        .map(|tuple| tuple.serialize().len())
+        .map(GinPendingTupleData::serialized_len)
         .sum::<usize>()
 }
 
@@ -705,6 +845,11 @@ fn form_index_pages(
     }
     let pending_start = GIN_ROOT_BLKNO + entry_pages.len() as u32 + posting_pages.len() as u32;
     let pending_pages = pack_pending_pages(&image.pending, pending_start)?;
+    let pending_tail_free_size = pending_pages
+        .last()
+        .map(page_free_space)
+        .transpose()?
+        .unwrap_or(0);
 
     let mut meta = GinMetaPageData::new(options);
     meta.pending_head = if pending_pages.is_empty() {
@@ -717,6 +862,7 @@ fn form_index_pages(
     } else {
         pending_start + pending_pages.len() as u32 - 1
     };
+    meta.tail_free_size = pending_tail_free_size as u32;
     meta.n_pending_pages = pending_pages.len() as u32;
     meta.n_pending_heap_tuples = image.pending.len() as u64;
     meta.n_total_pages =
@@ -842,5 +988,33 @@ mod tests {
         assert!(pages.len() >= 2);
         let meta = gin_metapage_data(&pages[0]).unwrap();
         assert_eq!(meta.n_entries as usize, image.entries.len());
+    }
+
+    #[test]
+    fn form_index_pages_records_pending_tail_free_space() {
+        let mut image = GinIndexImage::default();
+        image.pending.push(GinPendingTupleData {
+            tid: ItemPointerData {
+                block_number: 3,
+                offset_number: 7,
+            },
+            entries: vec![GinEntryKey {
+                attnum: 1,
+                category: crate::include::access::gin::GinNullCategory::NormalKey,
+                bytes: b"queued".to_vec(),
+            }],
+        });
+
+        let pages = form_index_pages(&image, &GinOptions::default()).unwrap();
+        let meta = gin_metapage_data(&pages[0]).unwrap();
+
+        assert_ne!(meta.pending_head, GIN_INVALID_BLOCKNO);
+        assert_eq!(meta.n_pending_pages, 1);
+        assert_eq!(meta.n_pending_heap_tuples, 1);
+        assert_eq!(
+            meta.tail_free_size as usize,
+            page_free_space(&pages[meta.pending_tail as usize]).unwrap()
+        );
+        assert!(meta.tail_free_size > 0);
     }
 }

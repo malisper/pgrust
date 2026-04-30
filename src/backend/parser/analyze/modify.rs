@@ -114,6 +114,7 @@ pub struct BoundDeleteTarget {
     pub relation_oid: u32,
     pub relkind: char,
     pub partition_delete_root_oid: Option<u32>,
+    pub relpersistence: char,
     pub toast: Option<ToastRelationRef>,
     pub desc: RelationDesc,
     pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
@@ -3543,6 +3544,7 @@ fn build_delete_target(
         relation_oid: child.relation_oid,
         relkind: child.relkind,
         partition_delete_root_oid,
+        relpersistence: child.relpersistence,
         toast: child.toast,
         desc: child.desc.clone(),
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
@@ -3577,6 +3579,7 @@ fn build_delete_target_from_joined_input(
         relation_oid: child.relation_oid,
         relkind: child.relkind,
         partition_delete_root_oid,
+        relpersistence: child.relpersistence,
         toast: child.toast,
         desc: child.desc.clone(),
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(

@@ -673,6 +673,30 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Ok(())
     }
 
+    pub fn write_page_no_wal_locked(
+        &self,
+        buffer_id: BufferId,
+        page: &Page,
+        guard: &mut RwLockWriteGuard<'_, Page>,
+    ) -> Result<(), Error> {
+        let tag = self.buffer_tag(buffer_id)?;
+        let page_to_store = *page;
+        **guard = page_to_store;
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        frame.state.set_dirty();
+
+        if self.wal.is_none() {
+            let mut storage = self.storage.lock();
+            storage
+                .write_page(tag, &page_to_store, self.no_wal_skip_fsync)
+                .map_err(Error::Storage)?;
+            self.stats_written.fetch_add(1, Ordering::Relaxed);
+            frame.state.clear_dirty();
+        }
+
+        Ok(())
+    }
+
     pub fn write_page_image_locked(
         &self,
         buffer_id: BufferId,
