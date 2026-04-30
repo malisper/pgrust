@@ -2488,6 +2488,17 @@ fn compile_static_query_source(
     }
 }
 
+fn should_fallback_to_runtime_sql(err: &ParseError) -> bool {
+    !matches!(
+        err.unpositioned(),
+        ParseError::AmbiguousColumn(_)
+            | ParseError::DetailedError {
+                sqlstate: "42702",
+                ..
+            }
+    )
+}
+
 fn compile_return_query_stmt(
     source: &ForQuerySource,
     catalog: &dyn CatalogLookup,
@@ -2916,7 +2927,10 @@ fn compile_exec_sql_stmt(
         let targets = parse_select_into_assign_targets(&target_name)?;
         return match compile_select_into_stmt(&select_sql, &targets, false, catalog, env) {
             Ok(stmt) => Ok(stmt),
-            Err(_) => compile_runtime_select_into_stmt(&select_sql, &targets, false, env),
+            Err(err) if should_fallback_to_runtime_sql(&err) => {
+                compile_runtime_select_into_stmt(&select_sql, &targets, false, env)
+            }
+            Err(err) => Err(err),
         };
     }
 
@@ -2927,7 +2941,10 @@ fn compile_exec_sql_stmt(
             .collect::<Result<Vec<_>, _>>()?;
         return match compile_select_into_stmt(&select_sql, &targets, strict, catalog, env) {
             Ok(stmt) => Ok(stmt),
-            Err(_) => compile_runtime_select_into_stmt(&select_sql, &targets, strict, env),
+            Err(err) if should_fallback_to_runtime_sql(&err) => {
+                compile_runtime_select_into_stmt(&select_sql, &targets, strict, env)
+            }
+            Err(err) => Err(err),
         };
     }
     if let Some((exec_sql, target_names)) = split_dml_returning_into_targets(sql) {
@@ -2964,10 +2981,11 @@ fn compile_exec_sql_stmt(
             &[outer_scope],
         ) {
             Ok(stmt) => Ok(CompiledStmt::ExecInsert { stmt }),
-            Err(_) => Ok(CompiledStmt::RuntimeSql {
+            Err(err) if should_fallback_to_runtime_sql(&err) => Ok(CompiledStmt::RuntimeSql {
                 sql: rewritten_sql,
                 scope: runtime_sql_scope(env),
             }),
+            Err(err) => Err(err),
         },
         Statement::Update(stmt) => match bind_update_with_outer_scopes(
             &normalize_plpgsql_update(stmt, env),
@@ -2975,10 +2993,11 @@ fn compile_exec_sql_stmt(
             &[outer_scope],
         ) {
             Ok(stmt) => Ok(CompiledStmt::ExecUpdate { stmt }),
-            Err(_) => Ok(CompiledStmt::RuntimeSql {
+            Err(err) if should_fallback_to_runtime_sql(&err) => Ok(CompiledStmt::RuntimeSql {
                 sql: rewritten_sql,
                 scope: runtime_sql_scope(env),
             }),
+            Err(err) => Err(err),
         },
         Statement::Delete(stmt) => match bind_delete_with_outer_scopes(
             &normalize_plpgsql_delete(stmt, env),
@@ -2986,10 +3005,11 @@ fn compile_exec_sql_stmt(
             &[outer_scope],
         ) {
             Ok(stmt) => Ok(CompiledStmt::ExecDelete { stmt }),
-            Err(_) => Ok(CompiledStmt::RuntimeSql {
+            Err(err) if should_fallback_to_runtime_sql(&err) => Ok(CompiledStmt::RuntimeSql {
                 sql: rewritten_sql,
                 scope: runtime_sql_scope(env),
             }),
+            Err(err) => Err(err),
         },
         Statement::CreateTable(stmt) => Ok(CompiledStmt::CreateTable { stmt }),
         Statement::CreateTableAs(stmt) => Ok(CompiledStmt::CreateTableAs { stmt }),
@@ -3881,13 +3901,14 @@ fn compile_for_query_stmt(
                     CompiledForQuerySource::Static { plan: plan.clone() },
                     Some(plan),
                 ),
-                Err(_) => (
+                Err(err) if should_fallback_to_runtime_sql(&err) => (
                     CompiledForQuerySource::Runtime {
                         sql: rewrite_plpgsql_sql_text(sql, env)?,
                         scope: runtime_sql_scope(env),
                     },
                     None,
                 ),
+                Err(err) => return Err(err),
             }
         }
         ForQuerySource::Execute {

@@ -1581,6 +1581,70 @@ fn same_prepared_result_columns(left: &[QueryColumn], right: &[QueryColumn]) -> 
             .all(|(left, right)| left.sql_type == right.sql_type)
 }
 
+fn prepared_query_has_analyzed_relation(
+    query: &PreparedStatementQuery,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let mut relation_names = Vec::new();
+    collect_prepared_query_relation_names(query, &mut relation_names);
+    relation_names
+        .into_iter()
+        .filter_map(|name| catalog.lookup_any_relation(&name))
+        .any(|relation| {
+            !catalog
+                .statistic_rows_for_relation(relation.relation_oid)
+                .is_empty()
+        })
+}
+
+fn collect_prepared_query_relation_names(query: &PreparedStatementQuery, out: &mut Vec<String>) {
+    match query {
+        PreparedStatementQuery::Select(select) => collect_select_relation_names(select, out),
+        PreparedStatementQuery::Insert(insert) => {
+            out.push(insert.table_name.clone());
+            if let InsertSource::Select(select) = &insert.source {
+                collect_select_relation_names(select, out);
+            }
+        }
+        PreparedStatementQuery::Update(update) => {
+            out.push(update.table_name.clone());
+            if let Some(from) = &update.from {
+                collect_from_item_relation_names(from, out);
+            }
+        }
+    }
+}
+
+fn collect_select_relation_names(stmt: &SelectStatement, out: &mut Vec<String>) {
+    if let Some(from) = &stmt.from {
+        collect_from_item_relation_names(from, out);
+    }
+    if let Some(set_operation) = &stmt.set_operation {
+        for input in &set_operation.inputs {
+            collect_select_relation_names(input, out);
+        }
+    }
+}
+
+fn collect_from_item_relation_names(item: &FromItem, out: &mut Vec<String>) {
+    match item {
+        FromItem::Table { name, .. } => out.push(name.clone()),
+        FromItem::TableSample { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::Alias { source, .. } => collect_from_item_relation_names(source, out),
+        FromItem::DerivedTable(select) => collect_select_relation_names(select, out),
+        FromItem::Join { left, right, .. } => {
+            collect_from_item_relation_names(left, out);
+            collect_from_item_relation_names(right, out);
+        }
+        FromItem::Values { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_) => {}
+    }
+}
+
 fn prepared_statement_param_count_error(expected: usize, actual: usize) -> ExecError {
     ExecError::Parse(ParseError::DetailedError {
         message: format!(
@@ -7691,7 +7755,11 @@ impl Session {
             .ok_or_else(|| Self::prepared_statement_error(&name))
     }
 
-    fn choose_prepared_plan_kind(&self, prepared: &PreparedSelectStatement) -> PreparedPlanKind {
+    fn choose_prepared_plan_kind(
+        &self,
+        prepared: &PreparedSelectStatement,
+        catalog: Option<&dyn CatalogLookup>,
+    ) -> PreparedPlanKind {
         match self
             .gucs
             .get("plan_cache_mode")
@@ -7701,18 +7769,29 @@ impl Session {
             Some("force_generic_plan") => PreparedPlanKind::Generic,
             Some("force_custom_plan") => PreparedPlanKind::Custom,
             _ if prepared.custom_plans >= 5 => PreparedPlanKind::Generic,
-            _ => PreparedPlanKind::Custom,
+            _ if catalog.is_some_and(|catalog| {
+                prepared_query_has_analyzed_relation(&prepared.query, catalog)
+            }) =>
+            {
+                PreparedPlanKind::Custom
+            }
+            _ if catalog.is_none() => PreparedPlanKind::Custom,
+            _ => PreparedPlanKind::Generic,
         }
     }
 
-    fn record_prepared_plan_use(&mut self, name: &str) -> Result<PreparedPlanKind, ExecError> {
+    fn record_prepared_plan_use(
+        &mut self,
+        name: &str,
+        catalog: Option<&dyn CatalogLookup>,
+    ) -> Result<PreparedPlanKind, ExecError> {
         let name = Self::prepared_statement_name(name);
         let kind = {
             let prepared = self
                 .prepared_selects
                 .get(&name)
                 .ok_or_else(|| Self::prepared_statement_error(&name))?;
-            self.choose_prepared_plan_kind(prepared)
+            self.choose_prepared_plan_kind(prepared, catalog)
         };
         let prepared = self
             .prepared_selects
@@ -9027,8 +9106,8 @@ impl Session {
         execute_stmt: &ExecuteStatement,
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
-        let plan_kind = self.record_prepared_plan_use(&execute_stmt.name)?;
         if self.active_txn.is_some() {
+            let _plan_kind = self.record_prepared_plan_use(&execute_stmt.name, None)?;
             // Transactional prepared execution still uses the older substitution path until
             // transaction-local external-param plumbing is threaded through the large session
             // command dispatcher.
@@ -9038,6 +9117,9 @@ impl Session {
             return Ok(result);
         }
         let search_path = self.configured_search_path();
+        let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
+        let plan_kind = self
+            .record_prepared_plan_use(&execute_stmt.name, Some(&catalog as &dyn CatalogLookup))?;
         let result = match plan_kind {
             PreparedPlanKind::Custom => {
                 let statement = self.resolve_prepared_statement_to_statement(execute_stmt)?;
@@ -9079,7 +9161,13 @@ impl Session {
                 actual: format!("{:?}", explain_stmt.statement),
             }));
         };
-        let plan_kind = self.record_prepared_plan_use(&execute_stmt.name)?;
+        let search_path = self.configured_search_path();
+        let plan_kind = if self.active_txn.is_some() {
+            self.record_prepared_plan_use(&execute_stmt.name, None)?
+        } else {
+            let catalog = db.lazy_catalog_lookup(self.client_id, None, search_path.as_deref());
+            self.record_prepared_plan_use(&execute_stmt.name, Some(&catalog as &dyn CatalogLookup))?
+        };
         let mut resolved_explain = explain_stmt.clone();
         match plan_kind {
             PreparedPlanKind::Custom => {
@@ -9099,7 +9187,6 @@ impl Session {
                 statement_lock_scope_id,
             );
         }
-        let search_path = self.configured_search_path();
         match plan_kind {
             PreparedPlanKind::Custom => db
                 .execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
