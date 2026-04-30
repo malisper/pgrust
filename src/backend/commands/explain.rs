@@ -4252,7 +4252,14 @@ fn nonverbose_scan_filter_column_names(input: &Plan, ctx: &VerboseExplainContext
             relation_name,
             desc,
             ..
-        } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
+        } => context_relation_scan_alias(ctx, relation_name)
+            .map(|alias| {
+                desc.columns
+                    .iter()
+                    .map(|column| format!("{alias}.{}", column.name))
+                    .collect()
+            })
+            .unwrap_or_else(|| qualified_scan_output_exprs(relation_name, desc)),
         _ => input.column_names(),
     }
 }
