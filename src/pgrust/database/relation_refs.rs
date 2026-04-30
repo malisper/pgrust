@@ -286,6 +286,7 @@ fn collect_rels_from_set_returning_call(
             collect_rels_from_expr(relid, rels);
         }
         crate::include::nodes::primnodes::SetReturningCall::PgLockStatus { .. }
+        | crate::include::nodes::primnodes::SetReturningCall::PgStatProgressCopy { .. }
         | crate::include::nodes::primnodes::SetReturningCall::PgSequences { .. }
         | crate::include::nodes::primnodes::SetReturningCall::InformationSchemaSequences {
             ..

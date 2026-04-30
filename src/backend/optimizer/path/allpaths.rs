@@ -7,7 +7,9 @@ use std::{
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::compare_order_values;
-use crate::backend::parser::analyze::bind_relation_constraints;
+use crate::backend::parser::analyze::{
+    bind_relation_constraints, predicate_implies_index_predicate,
+};
 use crate::backend::parser::{
     BoundIndexRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp,
@@ -677,28 +679,164 @@ fn exprs_have_contradictory_equalities(left: &Expr, right: &Expr) -> bool {
         .chain(flatten_and_conjuncts(right))
         .collect::<Vec<_>>();
     expr_list_has_contradictory_equalities(clauses.iter().cloned())
-        || expr_list_has_disjoint_ranges(clauses)
 }
 
 fn expr_list_has_contradictory_equalities(clauses: impl IntoIterator<Item = Expr>) -> bool {
-    let mut equalities = Vec::<(Expr, Value, Option<u32>)>::new();
+    let mut ranges = Vec::<ConstComparisonRange>::new();
     for clause in clauses {
-        let Some((expr, value, collation_oid)) = equality_to_nonnull_const(&clause) else {
+        let Some(comparison) = comparison_to_nonnull_const(&clause) else {
             continue;
         };
-        if equalities
+        if let Some(range) = ranges
             .iter()
-            .any(|(existing_expr, existing_value, existing_collation_oid)| {
-                equality_exprs_match_for_contradiction(existing_expr, &expr)
-                    && existing_value != &value
-                    && *existing_collation_oid == collation_oid
+            .position(|range| range.matches_comparison(&comparison))
+            .and_then(|idx| ranges.get_mut(idx))
+        {
+            if range.add(comparison) {
+                return true;
+            }
+        } else {
+            let mut range =
+                ConstComparisonRange::new(comparison.expr.clone(), comparison.collation_oid);
+            if range.add(comparison) {
+                return true;
+            }
+            ranges.push(range);
+        }
+    }
+    false
+}
+
+struct ConstComparisonRange {
+    expr: Expr,
+    collation_oid: Option<u32>,
+    equal: Option<Value>,
+    lower: Option<(Value, bool)>,
+    upper: Option<(Value, bool)>,
+}
+
+impl ConstComparisonRange {
+    fn new(expr: Expr, collation_oid: Option<u32>) -> Self {
+        Self {
+            expr,
+            collation_oid,
+            equal: None,
+            lower: None,
+            upper: None,
+        }
+    }
+
+    fn matches_comparison(&self, comparison: &ConstComparison) -> bool {
+        self.collation_oid == comparison.collation_oid
+            && equality_exprs_match_for_contradiction(&self.expr, &comparison.expr)
+    }
+
+    fn add(&mut self, comparison: ConstComparison) -> bool {
+        match comparison.kind {
+            ConstComparisonKind::Eq => {
+                if self
+                    .equal
+                    .as_ref()
+                    .is_some_and(|existing| existing != &comparison.value)
+                {
+                    return true;
+                }
+                self.equal = Some(comparison.value);
+            }
+            ConstComparisonKind::Gt | ConstComparisonKind::GtEq => {
+                self.tighten_lower(
+                    comparison.value,
+                    matches!(comparison.kind, ConstComparisonKind::GtEq),
+                );
+            }
+            ConstComparisonKind::Lt | ConstComparisonKind::LtEq => {
+                self.tighten_upper(
+                    comparison.value,
+                    matches!(comparison.kind, ConstComparisonKind::LtEq),
+                );
+            }
+        }
+        self.equal_violates_bounds() || self.bounds_are_contradictory()
+    }
+
+    fn tighten_lower(&mut self, value: Value, inclusive: bool) {
+        let replace = self
+            .lower
+            .as_ref()
+            .and_then(|(existing, existing_inclusive)| {
+                compare_constraint_values(&value, existing, self.collation_oid).map(|ordering| {
+                    ordering == Ordering::Greater
+                        || (ordering == Ordering::Equal && !inclusive && *existing_inclusive)
+                })
             })
+            .unwrap_or(false);
+        if self.lower.is_none() || replace {
+            self.lower = Some((value, inclusive));
+        }
+    }
+
+    fn tighten_upper(&mut self, value: Value, inclusive: bool) {
+        let replace = self
+            .upper
+            .as_ref()
+            .and_then(|(existing, existing_inclusive)| {
+                compare_constraint_values(&value, existing, self.collation_oid).map(|ordering| {
+                    ordering == Ordering::Less
+                        || (ordering == Ordering::Equal && !inclusive && *existing_inclusive)
+                })
+            })
+            .unwrap_or(false);
+        if self.upper.is_none() || replace {
+            self.upper = Some((value, inclusive));
+        }
+    }
+
+    fn equal_violates_bounds(&self) -> bool {
+        let Some(equal) = &self.equal else {
+            return false;
+        };
+        if let Some((lower, inclusive)) = &self.lower
+            && let Some(ordering) = compare_constraint_values(equal, lower, self.collation_oid)
+            && (ordering == Ordering::Less || (ordering == Ordering::Equal && !inclusive))
         {
             return true;
         }
-        equalities.push((expr, value, collation_oid));
+        if let Some((upper, inclusive)) = &self.upper
+            && let Some(ordering) = compare_constraint_values(equal, upper, self.collation_oid)
+            && (ordering == Ordering::Greater || (ordering == Ordering::Equal && !inclusive))
+        {
+            return true;
+        }
+        false
     }
-    false
+
+    fn bounds_are_contradictory(&self) -> bool {
+        let (Some((lower, lower_inclusive)), Some((upper, upper_inclusive))) =
+            (&self.lower, &self.upper)
+        else {
+            return false;
+        };
+        compare_constraint_values(lower, upper, self.collation_oid).is_some_and(|ordering| {
+            ordering == Ordering::Greater
+                || (ordering == Ordering::Equal && (!lower_inclusive || !upper_inclusive))
+        })
+    }
+}
+
+struct ConstComparison {
+    expr: Expr,
+    value: Value,
+    collation_oid: Option<u32>,
+    kind: ConstComparisonKind,
+}
+
+#[derive(Clone, Copy)]
+enum ConstComparisonKind {
+    Eq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
 }
 
 fn equality_exprs_match_for_contradiction(left: &Expr, right: &Expr) -> bool {
@@ -713,185 +851,37 @@ fn equality_exprs_match_for_contradiction(left: &Expr, right: &Expr) -> bool {
         )
 }
 
-fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value, Option<u32>)> {
+fn comparison_to_nonnull_const(expr: &Expr) -> Option<ConstComparison> {
     let Expr::Op(op) = expr else {
         return None;
     };
-    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+    if op.args.len() != 2 {
         return None;
     }
     let collation_oid = op
         .collation_oid
         .or_else(|| op.args.iter().find_map(top_level_explicit_collation));
-    match (&op.args[0], &op.args[1]) {
-        (Expr::Const(value), other) | (other, Expr::Const(value))
-            if !matches!(value, Value::Null) =>
-        {
-            Some((other.clone(), value.clone(), collation_oid))
-        }
+    match (
+        nonnull_comparison_const_value(&op.args[0]),
+        nonnull_comparison_const_value(&op.args[1]),
+    ) {
+        (None, Some(value)) => Some(ConstComparison {
+            expr: strip_binary_coercible_casts(&op.args[0]),
+            value: value.clone(),
+            collation_oid,
+            kind: const_comparison_kind(op.op)?,
+        }),
+        (Some(value), None) => Some(ConstComparison {
+            expr: strip_binary_coercible_casts(&op.args[1]),
+            value: value.clone(),
+            collation_oid,
+            kind: commuted_const_comparison_kind(op.op)?,
+        }),
         _ => None,
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RangeBoundKind {
-    Lower,
-    Upper,
-}
-
-#[derive(Clone)]
-struct RangeBound {
-    value: Value,
-    inclusive: bool,
-}
-
-struct RangeRestriction {
-    expr: Expr,
-    collation_oid: Option<u32>,
-    lower: Option<RangeBound>,
-    upper: Option<RangeBound>,
-}
-
-impl RangeRestriction {
-    fn new(expr: Expr, collation_oid: Option<u32>) -> Self {
-        Self {
-            expr,
-            collation_oid,
-            lower: None,
-            upper: None,
-        }
-    }
-
-    fn add_bound(&mut self, kind: RangeBoundKind, bound: RangeBound) {
-        match kind {
-            RangeBoundKind::Lower => merge_lower_bound(&mut self.lower, bound, self.collation_oid),
-            RangeBoundKind::Upper => merge_upper_bound(&mut self.upper, bound, self.collation_oid),
-        }
-    }
-
-    fn is_contradictory(&self) -> bool {
-        let (Some(lower), Some(upper)) = (&self.lower, &self.upper) else {
-            return false;
-        };
-        match compare_range_values(&lower.value, &upper.value, self.collation_oid) {
-            Some(Ordering::Greater) => true,
-            Some(Ordering::Equal) => !(lower.inclusive && upper.inclusive),
-            _ => false,
-        }
-    }
-}
-
-fn merge_lower_bound(
-    existing: &mut Option<RangeBound>,
-    incoming: RangeBound,
-    collation_oid: Option<u32>,
-) {
-    let Some(current) = existing else {
-        *existing = Some(incoming);
-        return;
-    };
-    match compare_range_values(&incoming.value, &current.value, collation_oid) {
-        Some(Ordering::Greater) => *current = incoming,
-        Some(Ordering::Equal) => current.inclusive &= incoming.inclusive,
-        _ => {}
-    }
-}
-
-fn merge_upper_bound(
-    existing: &mut Option<RangeBound>,
-    incoming: RangeBound,
-    collation_oid: Option<u32>,
-) {
-    let Some(current) = existing else {
-        *existing = Some(incoming);
-        return;
-    };
-    match compare_range_values(&incoming.value, &current.value, collation_oid) {
-        Some(Ordering::Less) => *current = incoming,
-        Some(Ordering::Equal) => current.inclusive &= incoming.inclusive,
-        _ => {}
-    }
-}
-
-fn compare_range_values(
-    left: &Value,
-    right: &Value,
-    collation_oid: Option<u32>,
-) -> Option<Ordering> {
-    if matches!(left, Value::Null) || matches!(right, Value::Null) {
-        return None;
-    }
-    compare_order_values(left, right, collation_oid, Some(false), false).ok()
-}
-
-fn expr_list_has_disjoint_ranges(clauses: impl IntoIterator<Item = Expr>) -> bool {
-    let mut ranges = Vec::<RangeRestriction>::new();
-    for clause in clauses {
-        for (expr, kind, value, inclusive, collation_oid) in range_bounds_to_nonnull_const(&clause)
-        {
-            let expr = strip_binary_coercible_casts(&expr);
-            let bound = RangeBound { value, inclusive };
-            if let Some(existing) = ranges.iter_mut().find(|range| {
-                range.collation_oid == collation_oid
-                    && equality_exprs_match_for_contradiction(&range.expr, &expr)
-            }) {
-                existing.add_bound(kind, bound);
-                if existing.is_contradictory() {
-                    return true;
-                }
-            } else {
-                let mut range = RangeRestriction::new(expr, collation_oid);
-                range.add_bound(kind, bound);
-                ranges.push(range);
-            }
-        }
-    }
-    false
-}
-
-fn range_bounds_to_nonnull_const(
-    expr: &Expr,
-) -> Vec<(Expr, RangeBoundKind, Value, bool, Option<u32>)> {
-    let Expr::Op(op) = expr else {
-        return Vec::new();
-    };
-    if op.args.len() != 2 {
-        return Vec::new();
-    }
-    let collation_oid = op
-        .collation_oid
-        .or_else(|| op.args.iter().find_map(top_level_explicit_collation));
-    let mut bounds = Vec::new();
-    match (
-        range_const_value(&op.args[0]),
-        range_const_value(&op.args[1]),
-    ) {
-        (None, Some(value)) => {
-            push_range_bounds_for_operator(
-                &mut bounds,
-                op.args[0].clone(),
-                op.op,
-                value,
-                false,
-                collation_oid,
-            );
-        }
-        (Some(value), None) => {
-            push_range_bounds_for_operator(
-                &mut bounds,
-                op.args[1].clone(),
-                op.op,
-                value,
-                true,
-                collation_oid,
-            );
-        }
-        _ => {}
-    }
-    bounds
-}
-
-fn range_const_value(expr: &Expr) -> Option<Value> {
+fn nonnull_comparison_const_value(expr: &Expr) -> Option<Value> {
     match expr {
         Expr::Const(value) if !matches!(value, Value::Null) => Some(value.clone()),
         Expr::Cast(inner, ty) if matches!(ty.kind, SqlTypeKind::Date) => {
@@ -907,32 +897,34 @@ fn range_const_value(expr: &Expr) -> Option<Value> {
     }
 }
 
-fn push_range_bounds_for_operator(
-    out: &mut Vec<(Expr, RangeBoundKind, Value, bool, Option<u32>)>,
-    expr: Expr,
-    op: OpExprKind,
-    value: Value,
-    const_on_left: bool,
+fn const_comparison_kind(op: OpExprKind) -> Option<ConstComparisonKind> {
+    match op {
+        OpExprKind::Eq => Some(ConstComparisonKind::Eq),
+        OpExprKind::Lt => Some(ConstComparisonKind::Lt),
+        OpExprKind::LtEq => Some(ConstComparisonKind::LtEq),
+        OpExprKind::Gt => Some(ConstComparisonKind::Gt),
+        OpExprKind::GtEq => Some(ConstComparisonKind::GtEq),
+        _ => None,
+    }
+}
+
+fn commuted_const_comparison_kind(op: OpExprKind) -> Option<ConstComparisonKind> {
+    match op {
+        OpExprKind::Eq => Some(ConstComparisonKind::Eq),
+        OpExprKind::Lt => Some(ConstComparisonKind::Gt),
+        OpExprKind::LtEq => Some(ConstComparisonKind::GtEq),
+        OpExprKind::Gt => Some(ConstComparisonKind::Lt),
+        OpExprKind::GtEq => Some(ConstComparisonKind::LtEq),
+        _ => None,
+    }
+}
+
+fn compare_constraint_values(
+    left: &Value,
+    right: &Value,
     collation_oid: Option<u32>,
-) {
-    let (kind, inclusive) = match (op, const_on_left) {
-        (OpExprKind::Eq, _) => {
-            out.push((
-                expr.clone(),
-                RangeBoundKind::Lower,
-                value.clone(),
-                true,
-                collation_oid,
-            ));
-            (RangeBoundKind::Upper, true)
-        }
-        (OpExprKind::Gt, false) | (OpExprKind::Lt, true) => (RangeBoundKind::Lower, false),
-        (OpExprKind::GtEq, false) | (OpExprKind::LtEq, true) => (RangeBoundKind::Lower, true),
-        (OpExprKind::Lt, false) | (OpExprKind::Gt, true) => (RangeBoundKind::Upper, false),
-        (OpExprKind::LtEq, false) | (OpExprKind::GtEq, true) => (RangeBoundKind::Upper, true),
-        _ => return,
-    };
-    out.push((expr, kind, value, inclusive, collation_oid));
+) -> Option<Ordering> {
+    compare_order_values(left, right, collation_oid, None, false).ok()
 }
 
 fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
@@ -1725,7 +1717,10 @@ fn collect_bitmap_or_paths(
         let Some((child, recheck)) = best_bitmap_child_for_filter(&arm_filter) else {
             return Vec::new();
         };
-        combined_arm_choices.push((child, recheck));
+        let display_recheck = best_bitmap_child_for_filter(arm)
+            .map(|(_, arm_recheck)| arm_recheck)
+            .unwrap_or_else(|| recheck.clone());
+        combined_arm_choices.push((child, display_recheck));
     }
     let split_arm_choices = if common_bitmap.is_some() {
         let mut choices = Vec::new();
@@ -1802,6 +1797,10 @@ fn collect_bitmap_or_paths(
     } else {
         let filter_qual = if or_filter.common_quals.is_empty() {
             Vec::new()
+        } else if use_combined_arms {
+            and_exprs(or_filter.common_quals.clone())
+                .into_iter()
+                .collect()
         } else if bitmap_path_uses_partial_index(&bitmapqual) {
             Vec::new()
         } else if or_filter.common_quals.len() > 1 {
@@ -2229,7 +2228,6 @@ fn collect_relation_access_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {
@@ -2354,6 +2352,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.is_some()
             && !has_index_spec
+            && predicate_implies_index_predicate(filter.as_ref(), index.index_predicate.as_ref())
             && access_method_supports_index_scan_for_index(index)
         {
             paths.push(
@@ -2472,7 +2471,6 @@ fn collect_relation_ordered_index_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {

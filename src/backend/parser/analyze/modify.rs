@@ -5510,6 +5510,15 @@ pub(crate) fn bind_delete_with_outer_scopes_and_ctes(
         Some(entry.relation_oid),
         catalog,
     )?;
+    if stmt.target_alias.is_some()
+        && stmt.where_clause.as_ref().is_some_and(|expr| {
+            format!("{expr:?}").contains(&format!("Column(\"{}.", stmt.table_name))
+        })
+    {
+        return Err(ParseError::InvalidFromClauseReference(
+            stmt.table_name.clone(),
+        ));
+    }
     let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
     let predicate = stmt
         .where_clause

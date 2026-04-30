@@ -2356,6 +2356,17 @@ fn split_sql_procedure_body(body: &str) -> Result<Vec<String>, ExecError> {
     Ok(statements)
 }
 
+fn sql_procedure_transaction_control_is_noop(sql: &str, no_active_transaction: bool) -> bool {
+    if !no_active_transaction {
+        return false;
+    }
+    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(
+        normalized.to_ascii_lowercase().as_str(),
+        "commit" | "end" | "rollback" | "abort"
+    )
+}
+
 fn scan_sql_delimited_end(bytes: &[u8], start: usize, delimiter: u8) -> Result<usize, ExecError> {
     let mut i = start + 1;
     while i < bytes.len() {
@@ -3292,6 +3303,9 @@ impl Session {
         let has_output_args = procedure_output_args(&proc_row).next().is_some();
         let mut last_query = None;
         for statement in statements {
+            if sql_procedure_transaction_control_is_noop(&statement, self.active_txn.is_none()) {
+                continue;
+            }
             let result = self.execute(db, &statement)?;
             if matches!(result, StatementResult::Query { .. }) {
                 last_query = Some(result);
