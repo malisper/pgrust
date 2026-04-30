@@ -4874,6 +4874,20 @@ fn try_handle_pg_prepared_statements_query(
         vec![QueryColumn::text("name")]
     } else if projection == PreparedStatementsProjection::NameStatement {
         vec![QueryColumn::text("name"), QueryColumn::text("statement")]
+    } else if projection == PreparedStatementsProjection::PlanCounters {
+        vec![
+            QueryColumn::text("name"),
+            QueryColumn {
+                name: "generic_plans".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int8),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "custom_plans".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int8),
+                wire_type_oid: None,
+            },
+        ]
     } else {
         vec![
             QueryColumn::text("name"),
@@ -4888,29 +4902,37 @@ fn try_handle_pg_prepared_statements_query(
     let mut prepared_rows = state
         .prepared
         .iter()
-        .map(|(name, prepared)| (name.clone(), prepared.sql.clone(), false))
-        .chain(
-            state
-                .session
-                .prepared_statement_rows()
-                .into_iter()
-                .map(|(name, sql)| (name, sql, true)),
-        )
+        .map(|(name, prepared)| (name.clone(), prepared.sql.clone(), false, 0, 0))
+        .chain(state.session.prepared_statement_rows().into_iter().map(
+            |(name, sql, generic_plans, custom_plans)| {
+                (name, sql, true, generic_plans, custom_plans)
+            },
+        ))
         .collect::<Vec<_>>();
+    if let Some(filter_name) = pg_prepared_statements_name_filter(&normalized) {
+        prepared_rows.retain(|(name, ..)| name.eq_ignore_ascii_case(&filter_name));
+    }
     prepared_rows.sort_by(|left, right| left.0.cmp(&right.0));
     let rows = prepared_rows
         .into_iter()
-        .map(|(name, statement, from_sql)| match projection {
-            PreparedStatementsProjection::Name => vec![Value::Text(name.into())],
-            PreparedStatementsProjection::NameStatement => {
-                vec![Value::Text(name.into()), Value::Text(statement.into())]
-            }
-            PreparedStatementsProjection::All => vec![
-                Value::Text(name.into()),
-                Value::Text(statement.into()),
-                Value::Bool(from_sql),
-            ],
-        })
+        .map(
+            |(name, statement, from_sql, generic_plans, custom_plans)| match projection {
+                PreparedStatementsProjection::Name => vec![Value::Text(name.into())],
+                PreparedStatementsProjection::NameStatement => {
+                    vec![Value::Text(name.into()), Value::Text(statement.into())]
+                }
+                PreparedStatementsProjection::PlanCounters => vec![
+                    Value::Text(name.into()),
+                    Value::Int64(generic_plans as i64),
+                    Value::Int64(custom_plans as i64),
+                ],
+                PreparedStatementsProjection::All => vec![
+                    Value::Text(name.into()),
+                    Value::Text(statement.into()),
+                    Value::Bool(from_sql),
+                ],
+            },
+        )
         .collect::<Vec<_>>();
     send_query_result(
         stream,
@@ -4936,6 +4958,7 @@ fn try_handle_pg_prepared_statements_query(
 enum PreparedStatementsProjection {
     Name,
     NameStatement,
+    PlanCounters,
     All,
 }
 
@@ -4949,8 +4972,20 @@ fn pg_prepared_statements_projection(normalized_sql: &str) -> PreparedStatements
     match projection.split_whitespace().collect::<String>().as_str() {
         "name" => PreparedStatementsProjection::Name,
         "name,statement" => PreparedStatementsProjection::NameStatement,
+        "name,generic_plans,custom_plans" => PreparedStatementsProjection::PlanCounters,
         _ => PreparedStatementsProjection::All,
     }
+}
+
+fn pg_prepared_statements_name_filter(normalized_sql: &str) -> Option<String> {
+    let where_idx = normalized_sql.find(" where ")?;
+    let where_clause = &normalized_sql[where_idx + " where ".len()..];
+    let name_idx = where_clause.find("name")?;
+    let after_name = where_clause[name_idx + "name".len()..].trim_start();
+    let after_eq = after_name.strip_prefix('=')?.trim_start();
+    let after_quote = after_eq.strip_prefix('\'')?;
+    let end = after_quote.find('\'')?;
+    Some(after_quote[..end].to_string())
 }
 
 fn try_handle_pg_listening_channels_query(

@@ -2658,14 +2658,38 @@ impl Database {
                                 actual: relation_oid.to_string(),
                             })
                         })?;
-                    self.drop_temp_relation_in_transaction(
-                        client_id,
-                        &temp_name,
-                        xid,
-                        next_cid,
-                        catalog_effects,
-                        temp_effects,
-                    )?;
+                    if relkind == 'v' {
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: next_cid,
+                            client_id,
+                            waiter: Some(self.txn_waiter.clone()),
+                            interrupts: Arc::clone(&interrupts),
+                        };
+                        let effect = self
+                            .catalog
+                            .write()
+                            .drop_view_by_oid_mvcc(*relation_oid, &ctx)
+                            .map(|(_, effect)| effect)
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                        self.remove_temp_entry_after_catalog_drop(
+                            client_id,
+                            &temp_name,
+                            temp_effects,
+                        )?;
+                    } else {
+                        self.drop_temp_relation_in_transaction(
+                            client_id,
+                            &temp_name,
+                            xid,
+                            next_cid,
+                            catalog_effects,
+                            temp_effects,
+                        )?;
+                    }
                     next_cid = next_cid.saturating_add(1);
                     continue;
                 }

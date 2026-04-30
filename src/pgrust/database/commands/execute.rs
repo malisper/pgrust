@@ -2281,6 +2281,8 @@ impl Database {
             }
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let external_bindings = bind_prepared_external_params(external_params, &catalog)?;
+                let external_types = prepared_external_types(&external_bindings);
                 if restrict_nonsystem_view_enabled(gucs) {
                     reject_restricted_views_in_insert(insert_stmt, &catalog)?;
                 }
@@ -2347,8 +2349,9 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                     trigger_depth: 0,
                 };
+                install_prepared_external_params(&external_bindings, &mut ctx)?;
                 let mut locked_rels = Vec::new();
-                let result = (|| {
+                let result = with_external_param_types(&external_types, || {
                     let has_writable_ctes = insert_stmt
                         .with
                         .iter()
@@ -2474,7 +2477,7 @@ impl Database {
                         xid,
                         0,
                     )
-                })();
+                });
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
