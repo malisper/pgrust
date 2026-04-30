@@ -104,7 +104,10 @@ use ddl::{
     reject_index_with_referencing_foreign_keys, reject_relation_with_dependent_views,
     validate_alter_table_add_column,
 };
-pub(crate) use large_objects::LargeObjectRuntime;
+pub(crate) use large_objects::{
+    INV_WRITE, LargeObjectRuntime, ensure_large_object_write_allowed,
+    parse_large_object_default_privileges_sql,
+};
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 pub(crate) use sequences::{
     SequenceData, SequenceMutationEffect, SequenceOwnedByRef, SequenceRuntime,
@@ -2005,6 +2008,7 @@ impl Database {
         self.clear_plpgsql_function_cache(client_id);
         self.clear_session_view_state(client_id);
         self.sequences.clear_currvals_for_client(client_id);
+        self.large_objects.close_all(client_id);
     }
 
     pub(crate) fn register_session_activity(&self, client_id: ClientId) {

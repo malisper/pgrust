@@ -344,6 +344,10 @@ fn execute_statement_with_source(
             expected: "ALTER TABLE OWNER handled by database/session layer",
             actual: "ALTER TABLE OWNER".into(),
         })),
+        Statement::AlterLargeObjectOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER LARGE OBJECT handled by database/session layer",
+            actual: "ALTER LARGE OBJECT".into(),
+        })),
         Statement::AlterTableRenameColumn(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ALTER TABLE RENAME COLUMN handled by database/session layer",
@@ -420,6 +424,10 @@ fn execute_statement_with_source(
         Statement::CommentOnOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON OPERATOR handled by database/session layer",
             actual: "COMMENT ON OPERATOR".into(),
+        })),
+        Statement::CommentOnLargeObject(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON LARGE OBJECT handled by database/session layer",
+            actual: "COMMENT ON LARGE OBJECT".into(),
         })),
         Statement::CommentOnType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TYPE handled by database/session layer",
@@ -863,6 +871,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableAlterColumnExpression(_)
         | Statement::AlterTableOf(_)
         | Statement::AlterTableNotOf(_)
+        | Statement::AlterLargeObjectOwner(_)
         | Statement::AlterTableAlterColumnIdentity(_)
         | Statement::AlterTableAttachPartition(_)
         | Statement::AlterTableDetachPartition(_) => Ok(StatementResult::AffectedRows(0)),
@@ -908,6 +917,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CommentOnOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON OPERATOR".into(),
+        })),
+        Statement::CommentOnLargeObject(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON LARGE OBJECT".into(),
         })),
         Statement::CommentOnType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

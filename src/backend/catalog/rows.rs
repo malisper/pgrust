@@ -6,15 +6,16 @@ use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgAmRow,
     PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
-    PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow,
-    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
-    PgShdependRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_row_by_oid,
-    composite_array_type_row_with_owner, composite_type_row_with_owner,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDefaultAclRow,
+    PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow,
+    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgLargeobjectMetadataRow,
+    PgLargeobjectRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgShdependRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
+    bootstrap_composite_type_rows, builtin_type_row_by_oid, composite_array_type_row_with_owner,
+    composite_type_row_with_owner,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -41,6 +42,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub publications: Vec<PgPublicationRow>,
     pub publication_rels: Vec<PgPublicationRelRow>,
     pub publication_namespaces: Vec<PgPublicationNamespaceRow>,
+    pub default_acls: Vec<PgDefaultAclRow>,
     pub statistics_ext: Vec<PgStatisticExtRow>,
     pub statistics_ext_data: Vec<PgStatisticExtDataRow>,
     pub ams: Vec<PgAmRow>,
@@ -49,6 +51,8 @@ pub(crate) struct PhysicalCatalogRows {
     pub authids: Vec<PgAuthIdRow>,
     pub auth_members: Vec<PgAuthMembersRow>,
     pub languages: Vec<PgLanguageRow>,
+    pub largeobjects: Vec<PgLargeobjectRow>,
+    pub largeobject_metadata: Vec<PgLargeobjectMetadataRow>,
     pub ts_parsers: Vec<PgTsParserRow>,
     pub ts_templates: Vec<PgTsTemplateRow>,
     pub ts_dicts: Vec<PgTsDictRow>,
@@ -208,6 +212,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target
         .publication_namespaces
         .extend(source.publication_namespaces);
+    target.default_acls.extend(source.default_acls);
     target.statistics_ext.extend(source.statistics_ext);
     target
         .statistics_ext_data
@@ -218,6 +223,10 @@ pub(crate) fn extend_physical_catalog_rows(
     target.authids.extend(source.authids);
     target.auth_members.extend(source.auth_members);
     target.languages.extend(source.languages);
+    target.largeobjects.extend(source.largeobjects);
+    target
+        .largeobject_metadata
+        .extend(source.largeobject_metadata);
     target.ts_parsers.extend(source.ts_parsers);
     target.ts_templates.extend(source.ts_templates);
     target.ts_dicts.extend(source.ts_dicts);
@@ -264,6 +273,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         publications: catcache.publication_rows(),
         publication_rels: catcache.publication_rel_rows(),
         publication_namespaces: catcache.publication_namespace_rows(),
+        default_acls: Vec::new(),
         statistics_ext: catcache.statistic_ext_rows(),
         statistics_ext_data: catcache.statistic_ext_data_rows(),
         ams: catcache.am_rows(),
@@ -272,6 +282,8 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         authids: catcache.authid_rows(),
         auth_members: catcache.auth_members_rows(),
         languages: catcache.language_rows(),
+        largeobjects: Vec::new(),
+        largeobject_metadata: Vec::new(),
         ts_parsers: catcache.ts_parser_rows(),
         ts_templates: catcache.ts_template_rows(),
         ts_dicts: catcache.ts_dict_rows(),

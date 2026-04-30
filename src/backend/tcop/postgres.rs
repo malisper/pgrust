@@ -62,6 +62,7 @@ use crate::include::nodes::parsenodes::{CopyFormat, CopyToStatement};
 use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::ddl::format_sql_type_name;
+use crate::pgrust::session::LargeObjectFastpathCall;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
@@ -5282,6 +5283,10 @@ where
                     handle_execute(&mut writer, &db, state, &body)?;
                     writer.flush()?;
                 }
+                b'F' => {
+                    handle_function_call(&mut writer, &db, state, &body)?;
+                    writer.flush()?;
+                }
                 b'S' => {
                     state.session.interrupts().reset_statement_state();
                     db.interrupt_state(state.session.client_id)
@@ -5389,6 +5394,494 @@ fn handle_query(
     }
     send_ready_with_pending_messages(stream, db, &state.session)?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum FastpathArgType {
+    Int4,
+    Int8,
+    Oid,
+    Bytea,
+    Text,
+}
+
+#[derive(Clone, Copy)]
+enum FastpathResultType {
+    Int4,
+    Int8,
+    Oid,
+    Bytea,
+    Void,
+}
+
+#[derive(Clone, Copy)]
+enum FastpathFunction {
+    LoCreate,
+    LoImport,
+    LoExport,
+    LoOpen,
+    LoClose,
+    LoRead,
+    LoWrite,
+    LoLseek,
+    LoCreat,
+    LoTell,
+    LoUnlink,
+    LoTruncate,
+    LoLseek64,
+    LoTell64,
+    LoTruncate64,
+    LoFromBytea,
+    LoGet,
+    LoPut,
+}
+
+#[derive(Clone)]
+enum FastpathArgValue {
+    Int4(i32),
+    Int8(i64),
+    Oid(u32),
+    Bytea(Vec<u8>),
+    Text(String),
+    Null,
+}
+
+fn handle_function_call(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    body: &[u8],
+) -> io::Result<()> {
+    state.session.interrupts().reset_statement_state();
+    db.interrupt_state(state.session.client_id)
+        .reset_statement_state();
+
+    match execute_fastpath_function_call(db, state, body) {
+        Ok(result) => {
+            send_function_call_response(stream, result.as_deref())?;
+            send_ready_with_pending_messages(stream, db, &state.session)
+        }
+        Err(err) => {
+            send_exec_error(stream, "", &err)?;
+            send_ready_with_pending_messages(stream, db, &state.session)
+        }
+    }
+}
+
+fn execute_fastpath_function_call(
+    db: &Database,
+    state: &mut ConnectionState,
+    body: &[u8],
+) -> Result<Option<Vec<u8>>, ExecError> {
+    let mut offset = 0usize;
+    let function_oid = read_i32_bytes(body, &mut offset).map_err(fastpath_protocol_error)? as u32;
+    let (function, result_type, arg_types) = fastpath_large_object_signature(function_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("cannot call function with OID {function_oid} via fastpath interface"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        })?;
+
+    let arg_format_count = read_i16_bytes(body, &mut offset).map_err(fastpath_protocol_error)?;
+    if arg_format_count < 0 {
+        return Err(fastpath_invalid_message("negative argument format count"));
+    }
+    let mut arg_formats = Vec::with_capacity(arg_format_count as usize);
+    for _ in 0..arg_format_count {
+        arg_formats.push(read_i16_bytes(body, &mut offset).map_err(fastpath_protocol_error)?);
+    }
+
+    let arg_count = read_i16_bytes(body, &mut offset).map_err(fastpath_protocol_error)?;
+    if arg_count < 0 {
+        return Err(fastpath_invalid_message("negative argument count"));
+    }
+    let arg_count = arg_count as usize;
+    if arg_count != arg_types.len() {
+        return Err(fastpath_invalid_message(
+            "large-object fastpath arity mismatch",
+        ));
+    }
+
+    let mut rendered_args = Vec::with_capacity(arg_count);
+    for (idx, arg_type) in arg_types.iter().copied().enumerate() {
+        let len = read_i32_bytes(body, &mut offset).map_err(fastpath_protocol_error)?;
+        let bytes = if len < 0 {
+            None
+        } else {
+            let len = len as usize;
+            let end = offset.saturating_add(len);
+            let slice = body
+                .get(offset..end)
+                .ok_or_else(|| fastpath_invalid_message("short fastpath argument"))?;
+            offset = end;
+            Some(slice)
+        };
+        let format = match arg_formats.as_slice() {
+            [] => 0,
+            [format] => *format,
+            formats => *formats
+                .get(idx)
+                .ok_or_else(|| fastpath_invalid_message("missing argument format code"))?,
+        };
+        rendered_args.push(decode_fastpath_arg(bytes, format, arg_type)?);
+    }
+
+    let result_format = read_i16_bytes(body, &mut offset).map_err(fastpath_protocol_error)?;
+    if offset != body.len() {
+        return Err(fastpath_invalid_message("trailing data in fastpath call"));
+    }
+
+    let value = match fastpath_large_object_call(function, &rendered_args)? {
+        Some(call) => state.session.execute_large_object_fastpath(db, call)?,
+        None => Value::Null,
+    };
+    fastpath_result_bytes(
+        &value,
+        result_type,
+        result_format,
+        state.session.bytea_output(),
+    )
+}
+
+fn fastpath_large_object_signature(
+    function_oid: u32,
+) -> Option<(FastpathFunction, FastpathResultType, Vec<FastpathArgType>)> {
+    use FastpathArgType as A;
+    use FastpathFunction as F;
+    use FastpathResultType as R;
+    match function_oid {
+        715 => Some((F::LoCreate, R::Oid, vec![A::Oid])),
+        764 => Some((F::LoImport, R::Oid, vec![A::Text])),
+        765 => Some((F::LoExport, R::Int4, vec![A::Oid, A::Text])),
+        767 => Some((F::LoImport, R::Oid, vec![A::Text, A::Oid])),
+        952 => Some((F::LoOpen, R::Int4, vec![A::Oid, A::Int4])),
+        953 => Some((F::LoClose, R::Int4, vec![A::Int4])),
+        954 => Some((F::LoRead, R::Bytea, vec![A::Int4, A::Int4])),
+        955 => Some((F::LoWrite, R::Int4, vec![A::Int4, A::Bytea])),
+        956 => Some((F::LoLseek, R::Int4, vec![A::Int4, A::Int4, A::Int4])),
+        957 => Some((F::LoCreat, R::Oid, vec![A::Int4])),
+        958 => Some((F::LoTell, R::Int4, vec![A::Int4])),
+        964 => Some((F::LoUnlink, R::Int4, vec![A::Oid])),
+        1004 => Some((F::LoTruncate, R::Int4, vec![A::Int4, A::Int4])),
+        3170 => Some((F::LoLseek64, R::Int8, vec![A::Int4, A::Int8, A::Int4])),
+        3171 => Some((F::LoTell64, R::Int8, vec![A::Int4])),
+        3172 => Some((F::LoTruncate64, R::Int4, vec![A::Int4, A::Int8])),
+        3457 => Some((F::LoFromBytea, R::Oid, vec![A::Oid, A::Bytea])),
+        3458 => Some((F::LoGet, R::Bytea, vec![A::Oid])),
+        3459 => Some((F::LoGet, R::Bytea, vec![A::Oid, A::Int8, A::Int4])),
+        3460 => Some((F::LoPut, R::Void, vec![A::Oid, A::Int8, A::Bytea])),
+        _ => None,
+    }
+}
+
+fn decode_fastpath_arg(
+    bytes: Option<&[u8]>,
+    format: i16,
+    arg_type: FastpathArgType,
+) -> Result<FastpathArgValue, ExecError> {
+    let Some(bytes) = bytes else {
+        return Ok(FastpathArgValue::Null);
+    };
+    match format {
+        0 => decode_fastpath_text_arg(bytes, arg_type),
+        1 => decode_fastpath_binary_arg(bytes, arg_type),
+        _ => Err(fastpath_invalid_message(
+            "unsupported fastpath argument format",
+        )),
+    }
+}
+
+fn decode_fastpath_text_arg(
+    bytes: &[u8],
+    arg_type: FastpathArgType,
+) -> Result<FastpathArgValue, ExecError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| fastpath_invalid_message("invalid fastpath text argument"))?;
+    let trimmed = text.trim();
+    match arg_type {
+        FastpathArgType::Int4 => trimmed
+            .parse::<i32>()
+            .map(FastpathArgValue::Int4)
+            .map_err(|_| fastpath_invalid_message("invalid int4 fastpath argument")),
+        FastpathArgType::Int8 => trimmed
+            .parse::<i64>()
+            .map(FastpathArgValue::Int8)
+            .map_err(|_| fastpath_invalid_message("invalid int8 fastpath argument")),
+        FastpathArgType::Oid => trimmed
+            .parse::<u32>()
+            .map(FastpathArgValue::Oid)
+            .map_err(|_| fastpath_invalid_message("invalid oid fastpath argument")),
+        FastpathArgType::Bytea => {
+            crate::backend::executor::parse_bytea_text(text).map(FastpathArgValue::Bytea)
+        }
+        FastpathArgType::Text => Ok(FastpathArgValue::Text(text.to_string())),
+    }
+}
+
+fn decode_fastpath_binary_arg(
+    bytes: &[u8],
+    arg_type: FastpathArgType,
+) -> Result<FastpathArgValue, ExecError> {
+    Ok(match arg_type {
+        FastpathArgType::Int4 => FastpathArgValue::Int4(fastpath_i32(bytes)?),
+        FastpathArgType::Int8 => FastpathArgValue::Int8(fastpath_i64(bytes)?),
+        FastpathArgType::Oid => FastpathArgValue::Oid(fastpath_u32(bytes)?),
+        FastpathArgType::Bytea => FastpathArgValue::Bytea(bytes.to_vec()),
+        FastpathArgType::Text => {
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| fastpath_invalid_message("invalid fastpath text argument"))?;
+            FastpathArgValue::Text(text.to_string())
+        }
+    })
+}
+
+fn fastpath_large_object_call(
+    function: FastpathFunction,
+    args: &[FastpathArgValue],
+) -> Result<Option<LargeObjectFastpathCall>, ExecError> {
+    if args.iter().any(|arg| matches!(arg, FastpathArgValue::Null)) {
+        return Ok(None);
+    }
+    use FastpathArgValue as V;
+    use FastpathFunction as F;
+    let call = match (function, args) {
+        (F::LoCreate, [V::Oid(oid)]) => LargeObjectFastpathCall::Create { oid: *oid },
+        (F::LoImport, [V::Text(path)]) => LargeObjectFastpathCall::Import {
+            path: path.clone(),
+            oid: None,
+        },
+        (F::LoImport, [V::Text(path), V::Oid(oid)]) => LargeObjectFastpathCall::Import {
+            path: path.clone(),
+            oid: Some(*oid),
+        },
+        (F::LoExport, [V::Oid(oid), V::Text(path)]) => LargeObjectFastpathCall::Export {
+            oid: *oid,
+            path: path.clone(),
+        },
+        (F::LoOpen, [V::Oid(oid), V::Int4(mode)]) => LargeObjectFastpathCall::Open {
+            oid: *oid,
+            mode: *mode,
+        },
+        (F::LoClose, [V::Int4(fd)]) => LargeObjectFastpathCall::Close { fd: *fd },
+        (F::LoRead, [V::Int4(fd), V::Int4(len)]) => {
+            LargeObjectFastpathCall::Read { fd: *fd, len: *len }
+        }
+        (F::LoWrite, [V::Int4(fd), V::Bytea(data)]) => LargeObjectFastpathCall::Write {
+            fd: *fd,
+            data: data.clone(),
+        },
+        (F::LoLseek, [V::Int4(fd), V::Int4(offset), V::Int4(whence)]) => {
+            LargeObjectFastpathCall::Lseek {
+                fd: *fd,
+                offset: i64::from(*offset),
+                whence: *whence,
+                result_i64: false,
+            }
+        }
+        (F::LoCreat, [V::Int4(mode)]) => LargeObjectFastpathCall::Creat { mode: *mode },
+        (F::LoTell, [V::Int4(fd)]) => LargeObjectFastpathCall::Tell {
+            fd: *fd,
+            result_i64: false,
+        },
+        (F::LoUnlink, [V::Oid(oid)]) => LargeObjectFastpathCall::Unlink { oid: *oid },
+        (F::LoTruncate, [V::Int4(fd), V::Int4(len)]) => LargeObjectFastpathCall::Truncate {
+            fd: *fd,
+            len: i64::from(*len),
+        },
+        (F::LoLseek64, [V::Int4(fd), V::Int8(offset), V::Int4(whence)]) => {
+            LargeObjectFastpathCall::Lseek {
+                fd: *fd,
+                offset: *offset,
+                whence: *whence,
+                result_i64: true,
+            }
+        }
+        (F::LoTell64, [V::Int4(fd)]) => LargeObjectFastpathCall::Tell {
+            fd: *fd,
+            result_i64: true,
+        },
+        (F::LoTruncate64, [V::Int4(fd), V::Int8(len)]) => {
+            LargeObjectFastpathCall::Truncate { fd: *fd, len: *len }
+        }
+        (F::LoFromBytea, [V::Oid(oid), V::Bytea(data)]) => LargeObjectFastpathCall::FromBytea {
+            oid: *oid,
+            data: data.clone(),
+        },
+        (F::LoGet, [V::Oid(oid)]) => LargeObjectFastpathCall::Get {
+            oid: *oid,
+            offset: None,
+            len: None,
+        },
+        (F::LoGet, [V::Oid(oid), V::Int8(offset), V::Int4(len)]) => LargeObjectFastpathCall::Get {
+            oid: *oid,
+            offset: Some(*offset),
+            len: Some(*len),
+        },
+        (F::LoPut, [V::Oid(oid), V::Int8(offset), V::Bytea(data)]) => {
+            LargeObjectFastpathCall::Put {
+                oid: *oid,
+                offset: *offset,
+                data: data.clone(),
+            }
+        }
+        _ => {
+            return Err(fastpath_invalid_message(
+                "large-object fastpath type mismatch",
+            ));
+        }
+    };
+    Ok(Some(call))
+}
+
+fn fastpath_result_bytes(
+    value: &Value,
+    result_type: FastpathResultType,
+    format: i16,
+    bytea_output: crate::pgrust::session::ByteaOutputFormat,
+) -> Result<Option<Vec<u8>>, ExecError> {
+    if matches!(value, Value::Null) || matches!(result_type, FastpathResultType::Void) {
+        return Ok(None);
+    }
+    match format {
+        0 => Ok(Some(
+            fastpath_result_text(value, result_type, bytea_output)?.into_bytes(),
+        )),
+        1 => fastpath_result_binary(value, result_type).map(Some),
+        _ => Err(fastpath_invalid_message(
+            "unsupported fastpath result format",
+        )),
+    }
+}
+
+fn fastpath_result_text(
+    value: &Value,
+    result_type: FastpathResultType,
+    bytea_output: crate::pgrust::session::ByteaOutputFormat,
+) -> Result<String, ExecError> {
+    Ok(match result_type {
+        FastpathResultType::Int4 => fastpath_value_i32(value)?.to_string(),
+        FastpathResultType::Int8 => fastpath_value_i64(value)?.to_string(),
+        FastpathResultType::Oid => fastpath_value_u32(value)?.to_string(),
+        FastpathResultType::Bytea => match value {
+            Value::Bytea(bytes) => format_bytea_text(bytes, bytea_output),
+            _ => return Err(fastpath_invalid_message("fastpath result type mismatch")),
+        },
+        FastpathResultType::Void => String::new(),
+    })
+}
+
+fn fastpath_result_binary(
+    value: &Value,
+    result_type: FastpathResultType,
+) -> Result<Vec<u8>, ExecError> {
+    Ok(match result_type {
+        FastpathResultType::Int4 => fastpath_value_i32(value)?.to_be_bytes().to_vec(),
+        FastpathResultType::Int8 => fastpath_value_i64(value)?.to_be_bytes().to_vec(),
+        FastpathResultType::Oid => fastpath_value_u32(value)?.to_be_bytes().to_vec(),
+        FastpathResultType::Bytea => match value {
+            Value::Bytea(bytes) => bytes.clone(),
+            _ => return Err(fastpath_invalid_message("fastpath result type mismatch")),
+        },
+        FastpathResultType::Void => Vec::new(),
+    })
+}
+
+fn send_function_call_response(stream: &mut impl Write, bytes: Option<&[u8]>) -> io::Result<()> {
+    let payload_len = bytes.map_or(0, <[u8]>::len);
+    let len = 4 + 4 + payload_len;
+    stream.write_all(&[b'V'])?;
+    stream.write_all(&(len as i32).to_be_bytes())?;
+    match bytes {
+        Some(bytes) => {
+            stream.write_all(&(bytes.len() as i32).to_be_bytes())?;
+            stream.write_all(bytes)?;
+        }
+        None => stream.write_all(&(-1_i32).to_be_bytes())?,
+    }
+    Ok(())
+}
+
+fn fastpath_i32(bytes: &[u8]) -> Result<i32, ExecError> {
+    let array: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| fastpath_invalid_message("invalid int4 fastpath argument"))?;
+    Ok(i32::from_be_bytes(array))
+}
+
+fn fastpath_u32(bytes: &[u8]) -> Result<u32, ExecError> {
+    let array: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| fastpath_invalid_message("invalid oid fastpath argument"))?;
+    Ok(u32::from_be_bytes(array))
+}
+
+fn fastpath_i64(bytes: &[u8]) -> Result<i64, ExecError> {
+    let array: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| fastpath_invalid_message("invalid int8 fastpath argument"))?;
+    Ok(i64::from_be_bytes(array))
+}
+
+fn fastpath_value_i32(value: &Value) -> Result<i32, ExecError> {
+    match value {
+        Value::Int32(value) => Ok(*value),
+        Value::Int64(value) => {
+            i32::try_from(*value).map_err(|_| fastpath_invalid_message("int4 result out of range"))
+        }
+        _ => Err(fastpath_invalid_message("fastpath result type mismatch")),
+    }
+}
+
+fn fastpath_value_i64(value: &Value) -> Result<i64, ExecError> {
+    match value {
+        Value::Int64(value) => Ok(*value),
+        Value::Int32(value) => Ok(i64::from(*value)),
+        _ => Err(fastpath_invalid_message("fastpath result type mismatch")),
+    }
+}
+
+fn fastpath_value_u32(value: &Value) -> Result<u32, ExecError> {
+    match value {
+        Value::Int64(value) => {
+            u32::try_from(*value).map_err(|_| fastpath_invalid_message("oid result out of range"))
+        }
+        Value::Int32(value) => {
+            u32::try_from(*value).map_err(|_| fastpath_invalid_message("oid result out of range"))
+        }
+        _ => Err(fastpath_invalid_message("fastpath result type mismatch")),
+    }
+}
+
+fn fastpath_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn quote_fastpath_sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn fastpath_protocol_error(err: io::Error) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid fastpath message: {err}"),
+        detail: None,
+        hint: None,
+        sqlstate: "08P01",
+    }
+}
+
+fn fastpath_invalid_message(message: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "08P01",
+    }
 }
 
 fn normalize_psql_escaped_semicolons(sql: &str) -> String {

@@ -1209,6 +1209,39 @@ fn bind_scalar_function_call_from_bound_args(
                 )],
             ))
         }
+        BuiltinScalarFunction::LoCreate
+        | BuiltinScalarFunction::LoUnlink
+        | BuiltinScalarFunction::LoOpen
+        | BuiltinScalarFunction::LoClose
+        | BuiltinScalarFunction::LoRead
+        | BuiltinScalarFunction::LoWrite
+        | BuiltinScalarFunction::LoLseek
+        | BuiltinScalarFunction::LoLseek64
+        | BuiltinScalarFunction::LoTell
+        | BuiltinScalarFunction::LoTell64
+        | BuiltinScalarFunction::LoTruncate
+        | BuiltinScalarFunction::LoTruncate64
+        | BuiltinScalarFunction::LoCreat
+        | BuiltinScalarFunction::LoFromBytea
+        | BuiltinScalarFunction::LoGet
+        | BuiltinScalarFunction::LoPut
+        | BuiltinScalarFunction::LoImport
+        | BuiltinScalarFunction::LoExport => {
+            let target_types = if declared_arg_types.len() == bound_args.len() {
+                declared_arg_types.to_vec()
+            } else {
+                arg_types.clone()
+            };
+            let coerced = bound_args
+                .into_iter()
+                .zip(arg_types)
+                .zip(target_types)
+                .map(|((arg, actual_type), declared_type)| {
+                    coerce_bound_expr(arg, actual_type, declared_type)
+                })
+                .collect();
+            Ok(build_func(func_variadic, coerced))
+        }
         BuiltinScalarFunction::JustifyDays
         | BuiltinScalarFunction::JustifyHours
         | BuiltinScalarFunction::JustifyInterval => Ok(build_func(

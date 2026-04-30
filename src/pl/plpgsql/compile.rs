@@ -1971,6 +1971,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
         "not_null_violation" => Some("23502"),
         "check_violation" => Some("23514"),
         "foreign_key_violation" => Some("23503"),
+        "undefined_file" => Some("58P01"),
         "invalid_parameter_value" => Some("22023"),
         "null_value_not_allowed" => Some("22004"),
         _ => None,

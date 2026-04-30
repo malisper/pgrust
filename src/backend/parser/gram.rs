@@ -166,6 +166,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_constraint_comment_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_large_object_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_type_statement(&sql)? {
         return Ok(stmt);
     }
@@ -8137,6 +8140,231 @@ fn try_parse_grant_revoke_statement(sql: &str) -> Result<Option<Statement>, Pars
     Ok(None)
 }
 
+fn try_parse_large_object_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("alter large object ") {
+        return build_alter_large_object_owner_statement(trimmed).map(Some);
+    }
+    if lowered.starts_with("comment on large object ") {
+        return build_comment_on_large_object_statement(trimmed).map(Some);
+    }
+    Ok(None)
+}
+
+fn build_alter_large_object_owner_statement(sql: &str) -> Result<Statement, ParseError> {
+    let rest =
+        sql.get("alter large object ".len()..)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "ALTER LARGE OBJECT oid OWNER TO role",
+                actual: sql.into(),
+            })?;
+    let (oid_text, rest) = rest
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "large object oid",
+            actual: rest.into(),
+        })?;
+    let oid = oid_text
+        .parse::<u32>()
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected: "large object oid",
+            actual: oid_text.into(),
+        })?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "owner") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OWNER TO",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "owner").trim_start();
+    if !keyword_at_start(rest, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        });
+    }
+    let new_owner = consume_keyword(rest, "to").trim();
+    if new_owner.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(Statement::AlterLargeObjectOwner(
+        AlterLargeObjectOwnerStatement {
+            oid,
+            new_owner: normalize_grantee_identifier(new_owner)?,
+        },
+    ))
+}
+
+fn build_comment_on_large_object_statement(sql: &str) -> Result<Statement, ParseError> {
+    let rest =
+        sql.get("comment on large object ".len()..)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "COMMENT ON LARGE OBJECT oid IS ...",
+                actual: sql.into(),
+            })?;
+    let Some(is_index) = find_top_level_keyword(rest, "is") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.trim().into(),
+        });
+    };
+    let oid_text = rest[..is_index].trim();
+    let oid = oid_text
+        .parse::<u32>()
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected: "large object oid",
+            actual: oid_text.into(),
+        })?;
+    let comment = parse_comment_value(&rest[is_index..], "end of COMMENT ON LARGE OBJECT")?;
+    Ok(Statement::CommentOnLargeObject(
+        CommentOnLargeObjectStatement { oid, comment },
+    ))
+}
+
+fn parse_large_object_privilege_spec(privileges: &str) -> Result<GrantObjectPrivilege, ParseError> {
+    let mut chars = String::new();
+    for part in privileges.split(',') {
+        let privilege = part.trim().to_ascii_lowercase();
+        match privilege.as_str() {
+            "all" | "all privileges" => {
+                if !chars.contains('r') {
+                    chars.push('r');
+                }
+                if !chars.contains('w') {
+                    chars.push('w');
+                }
+            }
+            "select" => {
+                if !chars.contains('r') {
+                    chars.push('r');
+                }
+            }
+            "update" => {
+                if !chars.contains('w') {
+                    chars.push('w');
+                }
+            }
+            "insert" | "delete" | "truncate" | "references" | "trigger" | "usage" => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "valid large object privilege",
+                    actual: format!(
+                        "invalid privilege type {} for large object",
+                        privilege.to_ascii_uppercase()
+                    ),
+                });
+            }
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "large object privilege",
+                    actual: part.trim().into(),
+                });
+            }
+        }
+    }
+    Ok(match chars.as_str() {
+        "rw" => GrantObjectPrivilege::AllPrivilegesOnLargeObject,
+        "r" => GrantObjectPrivilege::SelectOnLargeObject,
+        "w" => GrantObjectPrivilege::UpdateOnLargeObject,
+        _ => GrantObjectPrivilege::LargeObjectPrivileges(chars),
+    })
+}
+
+fn parse_large_object_oid_list(input: &str) -> Result<Vec<String>, ParseError> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<u32>()
+                .map(|_| part.to_string())
+                .map_err(|_| ParseError::UnexpectedToken {
+                    expected: "large object oid",
+                    actual: part.into(),
+                })
+        })
+        .collect()
+}
+
+fn build_grant_large_object_acl(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let rest = sql
+        .get("grant ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON LARGE OBJECT",
+            actual: rest.into(),
+        });
+    };
+    let privilege = parse_large_object_privilege_spec(privileges)?;
+    let after_on = after_on.ok_or(ParseError::UnexpectedEof)?.trim_start();
+    if !keyword_at_start(after_on, "large") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "LARGE OBJECT",
+            actual: after_on.into(),
+        });
+    }
+    let after_large = consume_keyword(after_on, "large").trim_start();
+    if !keyword_at_start(after_large, "object") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OBJECT",
+            actual: after_large.into(),
+        });
+    }
+    let after_object = consume_keyword(after_large, "object").trim_start();
+    let (object_names, rest) = split_once_keyword(after_object, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege,
+        columns: Vec::new(),
+        object_names: parse_large_object_oid_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_revoke_large_object_acl(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let rest = sql
+        .get("revoke ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let rest = rest.strip_prefix("grant option for ").unwrap_or(rest);
+    let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON LARGE OBJECT",
+            actual: rest.into(),
+        });
+    };
+    let privilege = parse_large_object_privilege_spec(privileges)?;
+    let after_on = after_on.ok_or(ParseError::UnexpectedEof)?.trim_start();
+    if !keyword_at_start(after_on, "large") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "LARGE OBJECT",
+            actual: after_on.into(),
+        });
+    }
+    let after_large = consume_keyword(after_on, "large").trim_start();
+    if !keyword_at_start(after_large, "object") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OBJECT",
+            actual: after_large.into(),
+        });
+    }
+    let after_object = consume_keyword(after_large, "object").trim_start();
+    let (object_names, rest) = split_once_keyword(after_object, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege,
+        columns: Vec::new(),
+        object_names: parse_large_object_oid_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
 fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     let lowered = sql.to_ascii_lowercase();
     if lowered.starts_with("grant create on database ") {
@@ -8190,6 +8418,9 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if let Some(kind) = invalid_routine_usage_object(&lowered, "grant") {
         return Err(invalid_routine_usage_privilege(kind));
+    }
+    if lowered.contains(" on large object ") {
+        return Ok(Statement::GrantObject(build_grant_large_object_acl(sql)?));
     }
     if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
         return Ok(Statement::GrantObject(stmt));
@@ -8254,6 +8485,9 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if let Some(kind) = invalid_routine_usage_object(&lowered, "revoke") {
         return Err(invalid_routine_usage_privilege(kind));
+    }
+    if lowered.contains(" on large object ") {
+        return Ok(Statement::RevokeObject(build_revoke_large_object_acl(sql)?));
     }
     if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
         return Ok(Statement::RevokeObject(stmt));

@@ -42,9 +42,9 @@ use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
     BTREE_AM_OID, C_COLLATION_OID, DATE_TYPE_OID, DEFAULT_COLLATION_OID, GIST_AM_OID,
-    GIST_TSQUERY_FAMILY_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID,
-    PG_LARGEOBJECT_METADATA_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_SUBSCRIPTION_RELATION_OID,
-    POSIX_COLLATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    GIST_TSQUERY_FAMILY_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PG_NAMESPACE_RELATION_OID,
+    PG_SUBSCRIPTION_RELATION_OID, POSIX_COLLATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::{ArrayValue, Value};
@@ -423,19 +423,6 @@ fn sequence_scan_runtime(
         .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "sequence runtime unavailable".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        })
-}
-
-fn large_object_runtime(
-    ctx: &ExecutorContext,
-) -> Result<&crate::pgrust::database::LargeObjectRuntime, ExecError> {
-    ctx.large_objects
-        .as_deref()
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "large object runtime unavailable".into(),
             detail: None,
             hint: None,
             sqlstate: "XX000",
@@ -2023,46 +2010,6 @@ impl PlanNode for SeqScanState {
                         )
                     })
                     .collect();
-            }
-            loop {
-                let Some(values) = self.scan_rows.get(self.scan_index).cloned() else {
-                    finish_eof(&mut self.stats, start, ctx);
-                    return Ok(None);
-                };
-                self.scan_index += 1;
-                self.slot
-                    .store_virtual_row(values, None, Some(self.relation_oid));
-                self.current_bindings = vec![SystemVarBinding {
-                    varno: self.source_id,
-                    table_oid: self.relation_oid,
-                    tid: None,
-                    xmin: None,
-                    xmax: None,
-                }];
-                set_active_system_bindings(ctx, &self.current_bindings);
-                if let Some(qual) = &self.qual {
-                    let outer_values = materialize_slot_values(&mut self.slot)?;
-                    let current_bindings = self.current_bindings.clone();
-                    set_outer_expr_bindings(ctx, outer_values, &current_bindings);
-                    clear_inner_expr_bindings(ctx);
-                    if !qual(&mut self.slot, ctx)? {
-                        note_filtered_row(&mut self.stats);
-                        continue;
-                    }
-                }
-                finish_row(&mut self.stats, start);
-                return Ok(Some(&mut self.slot));
-            }
-        }
-        if self.relation_oid == PG_LARGEOBJECT_METADATA_RELATION_OID {
-            let start = if ctx.timed {
-                Some(Instant::now())
-            } else {
-                None
-            };
-            begin_node(&mut self.stats, ctx)?;
-            if self.scan_rows.is_empty() {
-                self.scan_rows = large_object_runtime(ctx)?.metadata_rows();
             }
             loop {
                 let Some(values) = self.scan_rows.get(self.scan_index).cloned() else {
