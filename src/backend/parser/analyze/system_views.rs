@@ -166,6 +166,7 @@ pub(super) fn bind_builtin_system_view(
         );
     }
     let rows = match view.kind {
+        SyntheticSystemViewKind::PgShmemAllocationsNuma => Vec::new(),
         SyntheticSystemViewKind::PgEnum => catalog
             .enum_rows()
             .into_iter()

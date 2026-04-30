@@ -3784,6 +3784,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'v',
         ),
+        proc_row(
+            4099,
+            "pg_numa_available",
+            BOOL_TYPE_OID,
+            "",
+            "pg_numa_available",
+            0,
+            false,
+            false,
+            'f',
+            's',
+        ),
         {
             let mut row = proc_row(
                 4543,
@@ -7972,6 +7984,31 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
 
 fn system_view_srf_proc_rows() -> Vec<PgProcRow> {
     vec![
+        record_out_proc_row(
+            5052,
+            "pg_get_shmem_allocations",
+            "",
+            "pg_get_shmem_allocations",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("off", INT8_TYPE_OID),
+                ("size", INT8_TYPE_OID),
+                ("allocated_size", INT8_TYPE_OID),
+            ],
+        ),
+        record_out_proc_row(
+            4100,
+            "pg_get_shmem_allocations_numa",
+            "",
+            "pg_get_shmem_allocations_numa",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("numa_node", INT4_TYPE_OID),
+                ("size", INT8_TYPE_OID),
+            ],
+        ),
         record_out_proc_row(
             3082,
             "pg_available_extensions",
@@ -12616,6 +12653,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
+        ("pg_numa_available", BuiltinScalarFunction::PgNumaAvailable),
         (
             "brin_summarize_new_values",
             BuiltinScalarFunction::BrinSummarizeNewValues,

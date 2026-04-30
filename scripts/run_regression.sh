@@ -636,6 +636,9 @@ direct_test_dependencies() {
         memoize)
             echo "create_index"
             ;;
+        select)
+            echo "create_index"
+            ;;
         select_parallel|with)
             echo "create_misc"
             ;;

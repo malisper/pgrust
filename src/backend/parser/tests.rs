@@ -11815,6 +11815,12 @@ fn parse_insert_update_delete() {
     assert!(
         matches!(parse_statement("delete from only people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, only, .. }) if table_name == "people" && only)
     );
+    assert!(
+        matches!(parse_statement("delete from people as p where p.id = 1").unwrap(), Statement::Delete(DeleteStatement { table_name, target_alias: Some(alias), .. }) if table_name == "people" && alias == "p")
+    );
+    assert!(
+        matches!(parse_statement("delete from people p where p.id = 1").unwrap(), Statement::Delete(DeleteStatement { table_name, target_alias: Some(alias), .. }) if table_name == "people" && alias == "p")
+    );
         })
         .unwrap()
         .join()

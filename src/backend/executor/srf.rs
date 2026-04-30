@@ -528,6 +528,16 @@ fn execute_native_set_returning_function(
         }
         "pg_available_extensions" => Some(Vec::new()),
         "pg_available_extension_versions" => Some(Vec::new()),
+        "pg_get_shmem_allocations" => Some(Vec::new()),
+        "pg_get_shmem_allocations_numa" => {
+            return Err(ExecError::DetailedError {
+                message: "libnuma initialization failed or NUMA is not supported on this platform"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "55000",
+            });
+        }
         "pg_get_backend_memory_contexts" => Some(eval_pg_backend_memory_contexts()),
         "pg_config" => Some(eval_pg_config()),
         "show_all_settings" => Some(eval_pg_show_all_settings(output_columns)),

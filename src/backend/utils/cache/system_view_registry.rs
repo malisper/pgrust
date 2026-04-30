@@ -22,6 +22,7 @@ pub enum SyntheticSystemViewKind {
     PgAvailableExtensions,
     PgAvailableExtensionVersions,
     PgBackendMemoryContexts,
+    PgShmemAllocationsNuma,
     PgConfig,
     PgCursors,
     PgFileSettings,
@@ -147,6 +148,7 @@ impl SyntheticSystemView {
             PgAvailableExtensions => (3082, "pg_available_extensions"),
             PgAvailableExtensionVersions => (3083, "pg_available_extension_versions"),
             PgBackendMemoryContexts => (2282, "pg_get_backend_memory_contexts"),
+            PgShmemAllocationsNuma => (4100, "pg_get_shmem_allocations_numa"),
             PgConfig => (3400, "pg_config"),
             PgCursors => (2511, "pg_cursor"),
             PgFileSettings => (3329, "pg_show_all_file_settings"),
@@ -207,6 +209,10 @@ const PG_AVAILABLE_EXTENSION_VERSIONS_ALIASES: &[&str] = &[
 const PG_BACKEND_MEMORY_CONTEXTS_ALIASES: &[&str] = &[
     "pg_backend_memory_contexts",
     "pg_catalog.pg_backend_memory_contexts",
+];
+const PG_SHMEM_ALLOCATIONS_NUMA_ALIASES: &[&str] = &[
+    "pg_shmem_allocations_numa",
+    "pg_catalog.pg_shmem_allocations_numa",
 ];
 const PG_CONFIG_ALIASES: &[&str] = &["pg_config", "pg_catalog.pg_config"];
 const PG_CURSORS_ALIASES: &[&str] = &["pg_cursors", "pg_catalog.pg_cursors"];
@@ -695,6 +701,12 @@ const PG_BACKEND_MEMORY_CONTEXTS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("free_bytes", SqlType::new(SqlTypeKind::Int8)),
     SyntheticSystemViewColumn::new("free_chunks", SqlType::new(SqlTypeKind::Int8)),
     SyntheticSystemViewColumn::new("used_bytes", SqlType::new(SqlTypeKind::Int8)),
+];
+
+const PG_SHMEM_ALLOCATIONS_NUMA_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::new("numa_node", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("size", SqlType::new(SqlTypeKind::Int8)),
 ];
 
 const PG_CONFIG_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -1487,6 +1499,13 @@ const SYNTHETIC_SYSTEM_VIEWS: &[SyntheticSystemView] = &[
         canonical_name: "pg_catalog.pg_backend_memory_contexts",
         aliases: PG_BACKEND_MEMORY_CONTEXTS_ALIASES,
         columns: PG_BACKEND_MEMORY_CONTEXTS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgShmemAllocationsNuma,
+        canonical_name: "pg_catalog.pg_shmem_allocations_numa",
+        aliases: PG_SHMEM_ALLOCATIONS_NUMA_ALIASES,
+        columns: PG_SHMEM_ALLOCATIONS_NUMA_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

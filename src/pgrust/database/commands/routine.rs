@@ -274,11 +274,10 @@ fn resolve_routine(
     match candidates.as_slice() {
         [row] => Ok((*row).clone()),
         [] if kind != RoutineKind::Routine && !all_signature_candidates.is_empty() => {
-            let candidate_kind = routine_prokind_name(all_signature_candidates[0].prokind);
             let signature = routine_signature_display(&catalog, signature, &arg_specs);
             Err(ExecError::DetailedError {
                 message: format!(
-                    "{candidate_kind} {signature} is not {} {}",
+                    "{signature} is not {} {}",
                     routine_kind_article(kind),
                     routine_kind_name(kind)
                 ),

@@ -3684,7 +3684,8 @@ fn parameterized_base_index_path(
                 required_attrs =
                     index_only_attrs_for_parameterized_path(source_id, pathtarget, filter);
             }
-            let target_index_only = index_supports_index_only_attrs(index, &required_attrs);
+            let target_index_only = (has_target_attrs || desc.columns.len() == 1)
+                && index_supports_index_only_attrs(index, &required_attrs);
             let candidate = estimate_index_candidate(
                 source_id,
                 rel,

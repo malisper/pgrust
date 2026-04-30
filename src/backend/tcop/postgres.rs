@@ -3821,9 +3821,18 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
             .as_deref()
             .is_some_and(|hint| hint.contains("table alias"))
         && let Some(table_name) = invalid_from_clause_reference_table(e)
+        && delete_target_alias_for_table(sql, table_name).is_none()
     {
         response.detail = Some(format!(
             "There is an entry for table \"{table_name}\", but it cannot be referenced from this part of the query."
+        ));
+    }
+    if response.hint.is_none()
+        && let Some(table_name) = invalid_from_clause_reference_table(e)
+        && let Some(alias) = delete_target_alias_for_table(sql, table_name)
+    {
+        response.hint = Some(format!(
+            "Perhaps you meant to reference the table alias \"{alias}\"."
         ));
     }
 
@@ -3842,6 +3851,29 @@ fn invalid_from_clause_reference_table(e: &ExecError) -> Option<&str> {
         },
         _ => None,
     }
+}
+
+fn delete_target_alias_for_table(sql: &str, table_name: &str) -> Option<String> {
+    let trimmed = sql.trim_start();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("delete from ") {
+        return None;
+    }
+    let rest = trimmed.get("delete from ".len()..)?.trim_start();
+    let mut parts = rest.split_whitespace();
+    let table = parts.next()?.trim_matches('"');
+    if !table.eq_ignore_ascii_case(table_name) {
+        return None;
+    }
+    let alias = match parts.next()? {
+        word if word.eq_ignore_ascii_case("as") => parts.next()?,
+        word => word,
+    };
+    let alias_lower = alias.to_ascii_lowercase();
+    if matches!(alias_lower.as_str(), "where" | "using" | "returning") {
+        return None;
+    }
+    Some(alias.trim_matches('"').to_string())
 }
 
 fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -6531,7 +6563,7 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
         if paren_depth == 0
             && !sql_function_atomic_body
             && simple_query_keyword_at(sql, i, "begin").is_some()
-            && simple_query_current_statement_is_create_function(sql, start, i)
+            && simple_query_current_statement_is_create_routine(sql, start, i)
         {
             let begin_end = simple_query_keyword_at(sql, i, "begin").unwrap_or(i);
             let atomic_start = simple_query_skip_whitespace(sql, begin_end);
@@ -6560,13 +6592,16 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
     statements
 }
 
-fn simple_query_current_statement_is_create_function(
+fn simple_query_current_statement_is_create_routine(
     sql: &str,
     start: usize,
     keyword_pos: usize,
 ) -> bool {
     let prefix = sql[start..keyword_pos].trim_start().to_ascii_lowercase();
-    prefix.starts_with("create function ") || prefix.starts_with("create or replace function ")
+    prefix.starts_with("create function ")
+        || prefix.starts_with("create or replace function ")
+        || prefix.starts_with("create procedure ")
+        || prefix.starts_with("create or replace procedure ")
 }
 
 fn simple_query_keyword_at(sql: &str, pos: usize, keyword: &str) -> Option<usize> {
@@ -17514,6 +17549,20 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             split_simple_query_statements(sql, true),
             vec![
                 "create function f(text) returns text\nbegin atomic\n select $1 || ';';\nend;",
+                "\nselect 1;",
+                "\n",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_simple_query_statements_keeps_sql_standard_procedure_body_together() {
+        let sql = "create procedure p(text)\nlanguage sql\nbegin atomic\n insert into t values (1, $1);\nend;\nselect 1;\n";
+
+        assert_eq!(
+            split_simple_query_statements(sql, true),
+            vec![
+                "create procedure p(text)\nlanguage sql\nbegin atomic\n insert into t values (1, $1);\nend;",
                 "\nselect 1;",
                 "\n",
             ]

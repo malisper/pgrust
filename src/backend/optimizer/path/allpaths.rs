@@ -7,7 +7,9 @@ use std::{
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::compare_order_values;
-use crate::backend::parser::analyze::bind_relation_constraints;
+use crate::backend::parser::analyze::{
+    bind_relation_constraints, predicate_implies_index_predicate,
+};
 use crate::backend::parser::{
     BoundIndexRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp,
@@ -1497,7 +1499,10 @@ fn collect_bitmap_or_paths(
         let Some((child, recheck)) = best_bitmap_child_for_filter(&arm_filter) else {
             return Vec::new();
         };
-        combined_arm_choices.push((child, recheck));
+        let display_recheck = best_bitmap_child_for_filter(arm)
+            .map(|(_, arm_recheck)| arm_recheck)
+            .unwrap_or_else(|| recheck.clone());
+        combined_arm_choices.push((child, display_recheck));
     }
     let split_arm_choices = if common_bitmap.is_some() {
         let mut choices = Vec::new();
@@ -1574,6 +1579,10 @@ fn collect_bitmap_or_paths(
     } else {
         let filter_qual = if or_filter.common_quals.is_empty() {
             Vec::new()
+        } else if use_combined_arms {
+            and_exprs(or_filter.common_quals.clone())
+                .into_iter()
+                .collect()
         } else if bitmap_path_uses_partial_index(&bitmapqual) {
             Vec::new()
         } else if or_filter.common_quals.len() > 1 {
@@ -2001,7 +2010,6 @@ fn collect_relation_access_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {
@@ -2127,6 +2135,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.is_some()
             && !has_index_spec
+            && predicate_implies_index_predicate(filter.as_ref(), index.index_predicate.as_ref())
             && access_method_supports_index_scan(index.index_meta.am_oid)
         {
             paths.push(
@@ -2245,7 +2254,6 @@ fn collect_relation_ordered_index_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {
