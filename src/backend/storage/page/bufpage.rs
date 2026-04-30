@@ -251,7 +251,21 @@ pub fn page_get_item_unchecked(page: &[u8; BLCKSZ], offset: OffsetNumber) -> &[u
 }
 
 pub fn page_add_item(page: &mut [u8; BLCKSZ], item: &[u8]) -> Result<OffsetNumber, PageError> {
+    let offset = page_get_max_offset_number(page)? + 1;
+    page_add_item_at(page, item, offset)
+}
+
+pub fn page_add_item_at(
+    page: &mut [u8; BLCKSZ],
+    item: &[u8],
+    offset: OffsetNumber,
+) -> Result<OffsetNumber, PageError> {
     let mut header = page_header(page)?;
+    let max_offset = page_get_max_offset_number(page)?;
+    if offset == 0 || offset > max_offset + 1 {
+        return Err(PageError::InvalidOffsetNumber(offset));
+    }
+
     let aligned_len = max_align(item.len());
     let required = aligned_len + ITEM_ID_SIZE;
     if header.free_space() < required {
@@ -260,18 +274,22 @@ pub fn page_add_item(page: &mut [u8; BLCKSZ], item: &[u8]) -> Result<OffsetNumbe
 
     let new_upper = usize::from(header.pd_upper) - aligned_len;
     let new_lower = usize::from(header.pd_lower) + ITEM_ID_SIZE;
+    let old_lower = header.pd_lower;
 
     page[new_upper..new_upper + item.len()].copy_from_slice(item);
     for b in &mut page[new_upper + item.len()..new_upper + aligned_len] {
         *b = 0;
     }
 
-    let offset = page_get_max_offset_number(page)? + 1;
+    if offset <= max_offset {
+        let idx = max_align(SIZE_OF_PAGE_HEADER_DATA) + (usize::from(offset) - 1) * ITEM_ID_SIZE;
+        page.copy_within(idx..usize::from(old_lower), idx + ITEM_ID_SIZE);
+    }
     write_item_id(
         page,
         offset,
         ItemIdData::normal(new_upper as u16, item.len() as u16),
-        header.pd_lower,
+        old_lower,
     );
 
     header.pd_upper = new_upper as u16;

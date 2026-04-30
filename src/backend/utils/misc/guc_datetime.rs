@@ -27,6 +27,7 @@ pub struct DateTimeConfig {
     pub date_order: DateOrder,
     pub interval_style: IntervalStyle,
     pub time_zone: String,
+    pub time_zone_display: Option<String>,
     pub transaction_timestamp_usecs: Option<i64>,
     pub statement_timestamp_usecs: Option<i64>,
     pub max_stack_depth_kb: u32,
@@ -42,6 +43,7 @@ impl Default for DateTimeConfig {
             date_order,
             interval_style: IntervalStyle::Postgres,
             time_zone: default_timezone(),
+            time_zone_display: None,
             transaction_timestamp_usecs: None,
             statement_timestamp_usecs: None,
             max_stack_depth_kb:
@@ -63,6 +65,7 @@ pub fn default_datetime_config() -> DateTimeConfig {
     }
     if let Some(time_zone) = parse_timezone(&default_timezone()) {
         config.time_zone = time_zone;
+        config.time_zone_display = None;
     }
     config
 }
@@ -146,6 +149,10 @@ pub fn format_intervalstyle(style: IntervalStyle) -> &'static str {
 }
 
 pub fn parse_timezone(value: &str) -> Option<String> {
+    parse_timezone_with_display(value).map(|(time_zone, _)| time_zone)
+}
+
+pub fn parse_timezone_with_display(value: &str) -> Option<(String, Option<String>)> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -160,29 +167,43 @@ pub fn parse_timezone(value: &str) -> Option<String> {
         && trimmed.as_bytes().get(2).is_some_and(u8::is_ascii_digit)
         && let Some(offset) = parse_offset_seconds(trimmed)
     {
-        return Some(format_offset(offset));
+        return Some((format_offset(offset), None));
     }
 
     if let Ok(hours) = trimmed.parse::<f64>() {
         if !hours.is_finite() {
             return None;
         }
-        return Some(format_offset((hours * 3600.0).round() as i32));
+        let offset = (hours * 3600.0).round() as i32;
+        let normalized = format_offset(offset);
+        // PostgreSQL shows negative fractional numeric time zones as the
+        // generated POSIX zone name while still using the ISO-style offset for
+        // arithmetic.
+        let display = (hours < 0.0 && hours.fract() != 0.0)
+            .then(|| format!("<{normalized}>{}", format_offset(-offset)));
+        return Some((normalized, display));
     }
 
     if matches!(trimmed.as_bytes().first(), Some(b'+') | Some(b'-')) {
         if let Some(offset) = parse_offset_seconds(trimmed) {
-            return Some(format_offset(-offset));
+            return Some((format_offset(-offset), None));
         }
     }
 
     if trimmed.contains(':') {
         if let Some(offset) = parse_offset_seconds(&format!("+{trimmed}")) {
-            return Some(format_offset(-offset));
+            return Some((format_offset(-offset), None));
         }
     }
 
-    Some(trimmed.to_string())
+    Some((trimmed.to_string(), None))
+}
+
+pub fn format_timezone(config: &DateTimeConfig) -> &str {
+    config
+        .time_zone_display
+        .as_deref()
+        .unwrap_or(config.time_zone.as_str())
 }
 
 #[cfg(test)]
@@ -197,6 +218,19 @@ mod tests {
         assert_eq!(parse_timezone("+9.75"), Some("+09:45".into()));
         assert_eq!(parse_timezone("+02:00"), Some("-02".into()));
         assert_eq!(parse_timezone("04:30"), Some("-04:30".into()));
+    }
+
+    #[test]
+    fn preserves_postgres_display_for_negative_fractional_timezone() {
+        let (time_zone, display) = parse_timezone_with_display("-1.5").unwrap();
+        assert_eq!(time_zone, "-01:30");
+        assert_eq!(display.as_deref(), Some("<-01:30>+01:30"));
+        let config = DateTimeConfig {
+            time_zone,
+            time_zone_display: display,
+            ..DateTimeConfig::default()
+        };
+        assert_eq!(format_timezone(&config), "<-01:30>+01:30");
     }
 
     #[test]

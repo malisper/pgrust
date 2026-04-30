@@ -677,6 +677,7 @@ fn write_buffered_btree_page_with_init(
                 },
                 page,
                 will_init,
+                force_image: true,
                 data: &[],
             }],
             &[],
@@ -2337,6 +2338,7 @@ fn write_split_pages_locked(
                 },
                 page: &left_page,
                 will_init: false,
+                force_image: true,
                 data: &[],
             }],
             &[],
@@ -2395,6 +2397,7 @@ fn clear_incomplete_split(ctx: &IndexInsertContext, block: u32) -> Result<(), Ca
                 },
                 page: &page,
                 will_init: false,
+                force_image: true,
                 data: &[],
             }],
             &[],
@@ -2451,12 +2454,18 @@ fn insert_tuple_into_locked_page(
             ) != Ordering::Greater
         })
     };
+    let insert_offnum =
+        u16::try_from(insert_at + 1 + if existing_high_key.is_some() { 1 } else { 0 })
+            .map_err(|_| CatalogError::Io("btree insert offset out of range".into()))?;
+    let insert_tuple_wal_data = new_tuple.serialize();
     items.insert(insert_at, new_tuple);
 
+    let mut log_insert_delta = true;
     let rebuilt =
         match build_insert_page_image(old_opaque, existing_high_key.as_ref(), &items, is_leaf) {
             Ok(rebuilt) => rebuilt,
             Err(_) if is_leaf && prune_aborted_leaf_items(ctx, &mut items) > 0 => {
+                log_insert_delta = false;
                 match build_insert_page_image(
                     old_opaque,
                     existing_high_key.as_ref(),
@@ -2520,9 +2529,14 @@ fn insert_tuple_into_locked_page(
                 },
                 page: &rebuilt,
                 will_init: false,
-                data: &[],
+                force_image: !log_insert_delta,
+                data: if log_insert_delta {
+                    &insert_tuple_wal_data
+                } else {
+                    &[]
+                },
             }],
-            &[],
+            &insert_offnum.to_le_bytes(),
         )
         .map_err(|err| CatalogError::Io(format!("btree WAL log failed: {err}")))?
     } else {

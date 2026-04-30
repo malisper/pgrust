@@ -11625,6 +11625,124 @@ fn attach_partition_creates_missing_keys_and_fk_to_partitioned_key_stays_rejecte
 }
 
 #[test]
+fn partitioned_primary_key_propagates_to_nested_and_attached_partitions() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table nested_pk_parent (
+                id int4 not null,
+                bucket int4 not null,
+                primary key (id, bucket)
+             ) partition by range (bucket)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table nested_pk_mid partition of nested_pk_parent
+             for values from (0) to (100) partition by range (bucket)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table nested_pk_leaf partition of nested_pk_mid
+             for values from (0) to (50)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table nested_pk_attached (
+                id int4 not null,
+                bucket int4 not null
+             )",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table nested_pk_parent attach partition nested_pk_attached
+             for values from (100) to (200)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, con.conparentid <> 0, con.conislocal, con.coninhcount::int4
+               from pg_constraint con
+               join pg_class c on c.oid = con.conrelid
+              where c.relname in (
+                    'nested_pk_parent',
+                    'nested_pk_mid',
+                    'nested_pk_leaf',
+                    'nested_pk_attached'
+                )
+                and con.contype::text = 'p'
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nested_pk_attached".into()),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("nested_pk_leaf".into()),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("nested_pk_mid".into()),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("nested_pk_parent".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int32(0),
+            ],
+        ]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname
+               from pg_inherits i
+               join pg_class child on child.oid = i.inhrelid
+               join pg_class parent on parent.oid = i.inhparent
+              where parent.relname in ('nested_pk_parent_pkey', 'nested_pk_mid_pkey')
+              order by parent.relname, child.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nested_pk_leaf_pkey".into()),
+                Value::Text("nested_pk_mid_pkey".into()),
+            ],
+            vec![
+                Value::Text("nested_pk_attached_pkey".into()),
+                Value::Text("nested_pk_parent_pkey".into()),
+            ],
+            vec![
+                Value::Text("nested_pk_mid_pkey".into()),
+                Value::Text("nested_pk_parent_pkey".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn drop_table_still_rejects_legacy_inheritance_parents() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -23145,7 +23263,7 @@ fn explain_inherited_append_uses_relation_names_and_sql_casts() {
     assert!(
         rendered
             .iter()
-            .any(|line| line.contains("'2009-08-01'::date"))
+            .any(|line| line.contains("'08-01-2009'::date"))
     );
     assert!(
         rendered.iter().all(|line| !line.contains("Projection")),
@@ -50664,6 +50782,107 @@ fn tablesample_bernoulli_repeatable_filters_heap_offsets() {
             vec![Value::Int32(8)],
             vec![Value::Int32(9)],
         ]
+    );
+}
+
+#[test]
+fn tablesample_system_accepts_lateral_expressions_in_explain() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table sampled_docs (id int4, title text) partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table sampled_docs_p1 partition of sampled_docs for values from (0) to (3)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table sampled_docs_p2 partition of sampled_docs for values from (3) to (6)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into sampled_docs values (1, 'one'), (2, 'two'), (3, 'three')",
+        )
+        .unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select *
+         from sampled_docs s1
+         join lateral (
+           select * from sampled_docs s2
+             tablesample system (s1.id) repeatable (s1.id)
+         ) s2 on s1.id = s2.id",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("PgRustTablesampleBernoulli")),
+        "expected lowered TABLESAMPLE SYSTEM predicate, got {lines:?}"
+    );
+}
+
+#[test]
+fn partition_prune_nested_sublink_filter_does_not_panic() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table prune_outer (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prune_outer_p1 partition of prune_outer for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prune_outer_p2 partition of prune_outer for values from (10) to (20)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table prune_mid (a int4, b int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table prune_inner (a int4, b int4, c int4)")
+        .unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select t1.*
+         from prune_outer t1
+         where t1.a in (
+           select t1.b
+           from prune_mid t1
+           where t1.b in (
+             select (t1.a + t1.b) / 2
+             from prune_inner t1
+             where t1.c = 0
+           )
+         )
+         and t1.b = 0
+         order by t1.a",
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Append")),
+        "expected partitioned outer scan in EXPLAIN, got {lines:?}"
     );
 }
 

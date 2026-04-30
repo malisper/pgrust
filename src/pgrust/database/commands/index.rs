@@ -1942,6 +1942,7 @@ impl Database {
         build_options: &CatalogIndexBuildOptions,
         maintenance_work_mem_kb: usize,
         leave_invalid_on_failure: bool,
+        defer_cache_invalidation: bool,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<crate::backend::catalog::CatalogEntry, ExecError> {
         let interrupts = self.interrupt_state(client_id);
@@ -1974,7 +1975,11 @@ impl Database {
             .map_err(map_catalog_error)?;
         drop(catalog_guard);
 
-        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        if defer_cache_invalidation {
+            self.apply_catalog_mutation_effect_storage_only(&effect)?;
+        } else {
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+        }
         catalog_effects.push(effect);
         if let Some(tablespace_oid) = tablespace_oid
             && tablespace_oid != index_entry.rel.spc_oid
@@ -2060,7 +2065,11 @@ impl Database {
                     }),
                 })?;
             drop(catalog_guard);
-            self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
+            if defer_cache_invalidation {
+                self.apply_catalog_mutation_effect_storage_only(&ready_effect)?;
+            } else {
+                self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
+            }
             catalog_effects.push(ready_effect);
             return Ok(index_entry);
         }
@@ -2210,7 +2219,11 @@ impl Database {
             })?;
         drop(catalog_guard);
 
-        self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
+        if defer_cache_invalidation {
+            self.apply_catalog_mutation_effect_storage_only(&ready_effect)?;
+        } else {
+            self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
+        }
         catalog_effects.push(ready_effect);
         if relation.relpersistence == 't' {
             let mut temp_index_meta = index_meta.clone();
@@ -2896,6 +2909,7 @@ impl Database {
             &build_options,
             maintenance_work_mem_kb,
             effective_concurrently,
+            false,
             catalog_effects,
         ) {
             Ok(_) => {}

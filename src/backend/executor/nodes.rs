@@ -238,7 +238,12 @@ fn aggregate_key_values_equal(left: &[Value], right: &[Value]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::pg_sql_sort_by;
+    use super::{pg_sql_sort_by, render_explain_const, render_explain_datetime_cast_literal};
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::backend::utils::time::datetime::days_from_ymd;
+    use crate::include::nodes::datetime::DateADT;
+    use crate::include::nodes::datum::Value;
+    use crate::include::nodes::primnodes::Expr;
 
     #[test]
     fn pg_sql_sort_by_matches_postgres_empsalary_peer_order() {
@@ -296,6 +301,21 @@ mod tests {
                 (3, 3),
                 (7, 3),
             ]
+        );
+    }
+
+    #[test]
+    fn explain_renders_date_constants_in_postgres_mdy_style() {
+        let date = DateADT(days_from_ymd(1997, 1, 1).unwrap());
+        assert_eq!(
+            render_explain_const(&Value::Date(date)),
+            "'01-01-1997'::date"
+        );
+
+        let expr = Expr::Const(Value::Text("1997-01-01".into()));
+        assert_eq!(
+            render_explain_datetime_cast_literal(&expr, SqlType::new(SqlTypeKind::Date)),
+            Some("'01-01-1997'::date".into())
         );
     }
 }
@@ -1389,6 +1409,7 @@ impl AppendState {
                             table_oid: binding.table_oid,
                             tid: binding.tid,
                             xmin: binding.xmin,
+                            xmax: binding.xmax,
                         }]
                     })
                     .unwrap_or_default();
@@ -1699,6 +1720,7 @@ impl PlanNode for MergeAppendState {
         let table_oid = row.slot.table_oid;
         let tid = row.slot.tid();
         let xmin = row.system_bindings.first().and_then(|binding| binding.xmin);
+        let xmax = row.system_bindings.first().and_then(|binding| binding.xmax);
         self.current_bindings = table_oid
             .map(|table_oid| {
                 vec![SystemVarBinding {
@@ -1706,6 +1728,7 @@ impl PlanNode for MergeAppendState {
                     table_oid,
                     tid,
                     xmin,
+                    xmax,
                 }]
             })
             .unwrap_or_default();
@@ -1954,6 +1977,7 @@ impl PlanNode for SeqScanState {
                     table_oid: self.relation_oid,
                     tid: None,
                     xmin: None,
+                    xmax: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
                 if let Some(qual) = &self.qual {
@@ -2013,6 +2037,7 @@ impl PlanNode for SeqScanState {
                     table_oid: self.relation_oid,
                     tid: None,
                     xmin: None,
+                    xmax: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
                 if let Some(qual) = &self.qual {
@@ -2052,6 +2077,7 @@ impl PlanNode for SeqScanState {
                     table_oid: self.relation_oid,
                     tid: None,
                     xmin: None,
+                    xmax: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
                 if let Some(qual) = &self.qual {
@@ -2095,6 +2121,7 @@ impl PlanNode for SeqScanState {
                 table_oid: self.relation_oid,
                 tid: None,
                 xmin: None,
+                xmax: None,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2174,11 +2201,13 @@ impl PlanNode for SeqScanState {
                     self.slot.decode_offset = 0;
                     self.slot.table_oid = Some(self.relation_oid);
                     let xmin = self.slot.xmin();
+                    let xmax = self.slot.xmax();
                     self.current_bindings = vec![SystemVarBinding {
                         varno: self.source_id,
                         table_oid: self.relation_oid,
                         tid: Some(tid),
                         xmin,
+                        xmax,
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2418,6 +2447,7 @@ impl PlanNode for IndexOnlyScanState {
                     table_oid: self.relation_oid,
                     tid: Some(tid),
                     xmin: None,
+                    xmax: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2472,11 +2502,13 @@ impl PlanNode for IndexOnlyScanState {
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
             let xmin = self.slot.xmin();
+            let xmax = self.slot.xmax();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
                 tid: Some(tid),
                 xmin,
+                xmax,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2719,6 +2751,7 @@ impl PlanNode for IndexScanState {
                         table_oid: self.relation_oid,
                         tid: Some(tid),
                         xmin: None,
+                        xmax: None,
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2770,11 +2803,13 @@ impl PlanNode for IndexScanState {
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
             let xmin = self.slot.xmin();
+            let xmax = self.slot.xmax();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
                 tid: Some(tid),
                 xmin,
+                xmax,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -3707,6 +3742,7 @@ impl PlanNode for BitmapHeapScanState {
             self.slot.decode_offset = 0;
             self.slot.table_oid = Some(self.relation_oid);
             let xmin = self.slot.xmin();
+            let xmax = self.slot.xmax();
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
@@ -3715,6 +3751,7 @@ impl PlanNode for BitmapHeapScanState {
                     offset_number: offset,
                 }),
                 xmin,
+                xmax,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -6218,6 +6255,13 @@ fn render_explain_cast(
                 render_explain_sql_type_name(ty)
             );
         }
+        if matches!(ty.kind, SqlTypeKind::Numeric) {
+            return format!(
+                "{}::{}",
+                render_explain_typed_literal(value, ty),
+                render_explain_sql_type_name(ty)
+            );
+        }
         return format!(
             "{}::{}",
             render_explain_literal(value),
@@ -6235,6 +6279,12 @@ fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<Stri
     let text = value.as_text()?;
     let config = postgres_utc_datetime_config();
     match ty.kind {
+        SqlTypeKind::Date => parse_date_text(text, &config).ok().map(|date| {
+            format!(
+                "'{}'::date",
+                format_date_text(date, &postgres_explain_datetime_config()).replace('\'', "''")
+            )
+        }),
         SqlTypeKind::Timestamp => parse_timestamp_text(text, &config).ok().map(|timestamp| {
             format!(
                 "'{}'::timestamp without time zone",

@@ -89,16 +89,17 @@ fn eval_merge_key_exprs(
     exprs: &[Expr],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
-) -> Result<Option<MergeKey>, ExecError> {
+) -> Result<(MergeKey, bool), ExecError> {
     let mut key = Vec::with_capacity(exprs.len());
+    let mut matchable = true;
     for expr in exprs {
         let value = eval_expr(expr, slot, ctx)?.to_owned_value();
         if matches!(value, Value::Null) {
-            return Ok(None);
+            matchable = false;
         }
         key.push(value);
     }
-    Ok(Some(key))
+    Ok((key, matchable))
 }
 
 fn merge_clause_collation(clause: &Expr) -> Option<u32> {
@@ -149,10 +150,11 @@ fn materialize_keyed_rows(
         let mut row = input.materialize_current_row()?;
         set_active_system_bindings(ctx, &row.system_bindings);
         set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
-        let key = eval_merge_key_exprs(key_exprs, &mut row.slot, ctx)?;
+        let (key, matchable) = eval_merge_key_exprs(key_exprs, &mut row.slot, ctx)?;
         rows.push(MergeJoinBufferedRow {
             row,
             key,
+            matchable,
             matched: false,
         });
     }
@@ -168,14 +170,10 @@ fn group_end(
     start: usize,
     clauses: &[Expr],
 ) -> Result<usize, ExecError> {
-    let Some(first_key) = rows[start].key.as_ref() else {
-        return Ok(start + 1);
-    };
+    let first_key = &rows[start].key;
     let mut end = start + 1;
     while end < rows.len() {
-        let Some(next_key) = rows[end].key.as_ref() else {
-            break;
-        };
+        let next_key = &rows[end].key;
         if !same_merge_key(clauses, first_key, next_key)? {
             break;
         }
@@ -354,33 +352,49 @@ fn build_outputs(
             continue;
         }
 
-        let left_key = state.left_rows.as_ref().unwrap()[left_index].key.as_ref();
-        let right_key = state.right_rows.as_ref().unwrap()[right_index].key.as_ref();
-        let (Some(left_key), Some(right_key)) = (left_key, right_key) else {
-            match (left_key.is_some(), right_key.is_some()) {
-                (true, false) | (false, false) => {
-                    let left_row = &state.left_rows.as_ref().unwrap()[left_index].row;
-                    emit_unmatched_left(state.kind, left_row, state.right_width, &mut outputs);
-                    left_index += 1;
-                }
-                (false, true) => {
-                    let right_rows = state.right_rows.as_mut().unwrap();
-                    let right_row = &right_rows[right_index].row;
-                    emit_unmatched_right(state.kind, right_row, state.left_width, &mut outputs);
-                    right_rows[right_index].matched = true;
-                    right_index += 1;
-                }
-                (true, true) => unreachable!(),
-            }
-            continue;
-        };
-
-        match compare_merge_keys(
+        let left_key = &state.left_rows.as_ref().unwrap()[left_index].key;
+        let right_key = &state.right_rows.as_ref().unwrap()[right_index].key;
+        let ordering = compare_merge_keys(
             &state.merge_clauses,
             &state.merge_key_descending,
             left_key,
             right_key,
-        )? {
+        )?;
+        if !state.left_rows.as_ref().unwrap()[left_index].matchable
+            || !state.right_rows.as_ref().unwrap()[right_index].matchable
+        {
+            match ordering {
+                Ordering::Less | Ordering::Equal => {
+                    let left_end = group_end(
+                        state.left_rows.as_ref().unwrap(),
+                        left_index,
+                        &state.merge_clauses,
+                    )?;
+                    for index in left_index..left_end {
+                        let left_row = &state.left_rows.as_ref().unwrap()[index].row;
+                        emit_unmatched_left(state.kind, left_row, state.right_width, &mut outputs);
+                    }
+                    left_index = left_end;
+                }
+                Ordering::Greater => {
+                    let right_end = group_end(
+                        state.right_rows.as_ref().unwrap(),
+                        right_index,
+                        &state.merge_clauses,
+                    )?;
+                    for index in right_index..right_end {
+                        let right_rows = state.right_rows.as_mut().unwrap();
+                        let right_row = &right_rows[index].row;
+                        emit_unmatched_right(state.kind, right_row, state.left_width, &mut outputs);
+                        right_rows[index].matched = true;
+                    }
+                    right_index = right_end;
+                }
+            }
+            continue;
+        }
+
+        match ordering {
             Ordering::Less => {
                 let left_end = group_end(
                     state.left_rows.as_ref().unwrap(),

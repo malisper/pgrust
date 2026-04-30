@@ -15,7 +15,8 @@ use crate::include::nodes::primnodes::{
     SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SqlJsonTable, SqlJsonTableBehavior,
     SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
     SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
-    SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMIN_ATTR_NO, expr_sql_type_hint, user_attrno,
+    SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, expr_sql_type_hint,
+    user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -460,6 +461,8 @@ fn resolve_system_column_in_scope(
         (SELF_ITEM_POINTER_ATTR_NO, SqlType::new(SqlTypeKind::Tid))
     } else if column_name.eq_ignore_ascii_case("xmin") {
         (XMIN_ATTR_NO, SqlType::new(SqlTypeKind::Xid))
+    } else if column_name.eq_ignore_ascii_case("xmax") {
+        (XMAX_ATTR_NO, SqlType::new(SqlTypeKind::Xid))
     } else {
         return Ok(None);
     };
@@ -544,10 +547,14 @@ pub(super) fn resolve_column_with_outer(
     name: &str,
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<ResolvedColumn, ParseError> {
+    let mut hidden_invalid_error = None;
     match resolve_column(scope, name) {
         Ok(index) => return Ok(ResolvedColumn::Local(index)),
         Err(ParseError::AmbiguousColumn(name)) => return Err(ParseError::AmbiguousColumn(name)),
         Err(ParseError::UnknownColumn(_)) => {}
+        Err(err @ ParseError::InvalidFromClauseReference(_)) => {
+            hidden_invalid_error = Some(err);
+        }
         Err(other) => return Err(other),
     }
 
@@ -596,7 +603,7 @@ pub(super) fn resolve_column_with_outer(
         }
     }
 
-    Err(ParseError::UnknownColumn(name.to_string()))
+    Err(hidden_invalid_error.unwrap_or_else(|| ParseError::UnknownColumn(name.to_string())))
 }
 
 fn scope_has_visible_relation(scope: &BoundScope, name: &str) -> bool {
@@ -1148,8 +1155,6 @@ pub(super) fn bind_from_item_with_ctes(
                 ctes,
                 expanded_views,
             )?;
-            let sample_qual =
-                table_sample_qual(&sample.method, &sample.args, sample.repeatable.as_ref())?;
             let call_scope = empty_scope();
             let args = sample
                 .args
@@ -1179,6 +1184,7 @@ pub(super) fn bind_from_item_with_ctes(
                     )
                 })
                 .transpose()?;
+            let sample_qual = table_sample_qual(&sample.method, &args, repeatable.as_ref())?;
             attach_table_sample(
                 &mut plan,
                 TableSampleClause {
@@ -1305,7 +1311,7 @@ fn attach_table_sample(
     else {
         unreachable!();
     };
-    if !matches!(*relkind, 'r' | 'm') {
+    if !matches!(*relkind, 'r' | 'm' | 'p') {
         return Err(ParseError::DetailedError {
             message: "TABLESAMPLE clause can only be applied to tables and materialized views"
                 .into(),
@@ -1324,10 +1330,11 @@ fn attach_table_sample(
 
 fn table_sample_qual(
     method: &str,
-    args: &[SqlExpr],
-    repeatable: Option<&SqlExpr>,
+    args: &[Expr],
+    repeatable: Option<&Expr>,
 ) -> Result<Expr, ParseError> {
-    if !method.eq_ignore_ascii_case("bernoulli") {
+    let normalized_method = method.to_ascii_lowercase();
+    if !matches!(normalized_method.as_str(), "bernoulli" | "system") {
         return Err(ParseError::FeatureNotSupported(format!(
             "TABLESAMPLE method {method}"
         )));
@@ -1335,7 +1342,7 @@ fn table_sample_qual(
     let [percent_arg] = args else {
         return Err(ParseError::DetailedError {
             message: format!(
-                "tablesample method bernoulli requires 1 argument, not {}",
+                "tablesample method {normalized_method} requires 1 argument, not {}",
                 args.len()
             ),
             detail: None,
@@ -1343,11 +1350,13 @@ fn table_sample_qual(
             sqlstate: "42804",
         });
     };
-    let percent = table_sample_const_f64(percent_arg, "TABLESAMPLE")?;
+    // :HACK: Lower SYSTEM to the same deterministic row-level predicate as
+    // BERNOULLI until pgrust has block-level sample scan support.
+    let percent = table_sample_float_expr(percent_arg.clone());
     let seed = repeatable
-        .map(|expr| table_sample_const_f64(expr, "TABLESAMPLE REPEATABLE"))
-        .transpose()?
-        .unwrap_or(0.0);
+        .cloned()
+        .map(table_sample_float_expr)
+        .unwrap_or(Expr::Const(Value::Float64(0.0)));
     Ok(Expr::Func(Box::new(FuncExpr {
         funcid: 0,
         funcname: Some("pgrust_tablesample_bernoulli".into()),
@@ -1364,29 +1373,19 @@ fn table_sample_qual(
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Tid),
             }),
-            Expr::Const(Value::Float64(percent)),
-            Expr::Const(Value::Float64(seed)),
+            percent,
+            seed,
         ],
     })))
 }
 
-fn table_sample_const_f64(expr: &SqlExpr, context: &'static str) -> Result<f64, ParseError> {
+fn table_sample_float_expr(expr: Expr) -> Expr {
     match expr {
-        SqlExpr::IntegerLiteral(value) | SqlExpr::NumericLiteral(value) => value
-            .parse::<f64>()
-            .map_err(|_| ParseError::UnexpectedToken {
-                expected: context,
-                actual: value.clone(),
-            }),
-        SqlExpr::Const(Value::Int16(value)) => Ok(f64::from(*value)),
-        SqlExpr::Const(Value::Int32(value)) => Ok(f64::from(*value)),
-        SqlExpr::Const(Value::Int64(value)) => Ok(*value as f64),
-        SqlExpr::Const(Value::Float64(value)) => Ok(*value),
-        SqlExpr::UnaryPlus(inner) => table_sample_const_f64(inner, context),
-        SqlExpr::Negate(inner) => Ok(-table_sample_const_f64(inner, context)?),
-        _ => Err(ParseError::FeatureNotSupported(format!(
-            "{context} expression"
-        ))),
+        Expr::Const(Value::Int16(value)) => Expr::Const(Value::Float64(f64::from(value))),
+        Expr::Const(Value::Int32(value)) => Expr::Const(Value::Float64(f64::from(value))),
+        Expr::Const(Value::Int64(value)) => Expr::Const(Value::Float64(value as f64)),
+        Expr::Const(Value::Float64(_)) => expr,
+        other => Expr::Cast(Box::new(other), SqlType::new(SqlTypeKind::Float8)),
     }
 }
 

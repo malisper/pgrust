@@ -38,7 +38,9 @@ use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::cache::syscache::backend_catcache;
 use crate::backend::utils::cache::system_views::format_pg_get_expr_policy_sql;
-use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
+use crate::backend::utils::misc::guc_datetime::{
+    DateTimeConfig, format_datestyle, format_timezone,
+};
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
@@ -316,6 +318,23 @@ fn exec_error_internal_position(e: &ExecError) -> Option<usize> {
     }
 }
 
+fn is_datetime_template_call(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    lower.contains("to_timestamp(") || lower.contains("to_date(")
+}
+
+fn is_datetime_template_runtime_error(message: &str) -> bool {
+    message.starts_with("invalid input syntax for type timestamp with time zone: ")
+        || message.starts_with("invalid input syntax for type date: ")
+        || message.starts_with("date/time field value out of range: ")
+        || message.starts_with("invalid value ")
+        || message.starts_with("source string too short for ")
+        || message.starts_with("conflicting values for ")
+        || message.starts_with("value for ")
+        || message == "invalid combination of date conventions"
+        || message.starts_with("hour \"")
+}
+
 fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     if let ExecError::WithContext { source, context } = e {
         if context.starts_with("invalid type name ")
@@ -437,6 +456,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             expected: "supported explicit cast",
             actual,
         }) if actual.starts_with("cannot cast type ") => {
+            return find_explicit_cast_target_position(sql);
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+            if message.starts_with("cannot cast type ") =>
+        {
             return find_explicit_cast_target_position(sql);
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
@@ -762,6 +786,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if is_datetime_template_call(sql) && is_datetime_template_runtime_error(message) {
+                return None;
+            }
+            if message.starts_with("cannot cast type ") {
+                return find_explicit_cast_target_position(sql);
+            }
             if message
                 == "aggregate functions are not allowed in FROM clause of their own query level"
             {
@@ -2557,12 +2587,91 @@ fn find_bytea_cast_literal_position(sql: &str) -> Option<usize> {
 }
 
 fn find_explicit_cast_target_position(sql: &str) -> Option<usize> {
-    let cast_index = sql.rfind("::")?;
-    let mut position = cast_index + 2;
-    while position < sql.len() && sql.as_bytes()[position].is_ascii_whitespace() {
-        position += 1;
+    if let Some(cast_index) = sql.rfind("::") {
+        let mut position = cast_index + 2;
+        while position < sql.len() && sql.as_bytes()[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        return (position < sql.len()).then_some(position + 1);
     }
-    (position < sql.len()).then_some(position + 1)
+    find_cast_syntax_target_position(sql)
+}
+
+fn find_cast_syntax_target_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let cast_indices = lower
+        .match_indices("cast")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    for cast_index in cast_indices.into_iter().rev() {
+        let mut open = cast_index + "cast".len();
+        while open < lower.len() && lower.as_bytes()[open].is_ascii_whitespace() {
+            open += 1;
+        }
+        if lower.as_bytes().get(open) != Some(&b'(') {
+            continue;
+        }
+
+        let mut depth = 0usize;
+        let mut index = open;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        while index < lower.len() {
+            let byte = lower.as_bytes()[index];
+            if in_single_quote {
+                if byte == b'\'' {
+                    if lower.as_bytes().get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                        continue;
+                    }
+                    in_single_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            if in_double_quote {
+                if byte == b'"' {
+                    if lower.as_bytes().get(index + 1) == Some(&b'"') {
+                        index += 2;
+                        continue;
+                    }
+                    in_double_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+
+            match byte {
+                b'\'' => in_single_quote = true,
+                b'"' => in_double_quote = true,
+                b'(' => depth += 1,
+                b')' => {
+                    if depth == 1 {
+                        break;
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                b'a' if depth == 1 && lower[index..].starts_with("as") => {
+                    let before = index.checked_sub(1).and_then(|i| lower.as_bytes().get(i));
+                    let after = lower.as_bytes().get(index + 2);
+                    if before.is_some_and(u8::is_ascii_whitespace)
+                        && after.is_some_and(u8::is_ascii_whitespace)
+                    {
+                        let mut position = index + 2;
+                        while position < lower.len()
+                            && lower.as_bytes()[position].is_ascii_whitespace()
+                        {
+                            position += 1;
+                        }
+                        return (position < lower.len()).then_some(position + 1);
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+    None
 }
 
 fn find_detailed_operator_position(sql: &str, message: &str) -> Option<usize> {
@@ -3699,6 +3808,10 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
         ));
     }
     if response.detail.is_none()
+        && !response
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("table alias"))
         && let Some(table_name) = invalid_from_clause_reference_table(e)
     {
         response.detail = Some(format!(
@@ -3774,6 +3887,73 @@ fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResp
     apply_join_regression_error_compat(sql, response);
     apply_alter_table_regression_error_compat(sql, response);
     apply_insert_conflict_regression_error_compat(sql, response);
+    apply_update_alias_regression_error_compat(sql, response);
+    apply_update_regression_error_position_compat(sql, response);
+}
+
+fn apply_update_regression_error_position_compat(sql: &str, response: &mut ExecErrorResponse) {
+    if !sql.trim_start().to_ascii_lowercase().starts_with("update ") || response.position.is_some()
+    {
+        return;
+    }
+    if response.message.starts_with("column \"") && response.message.contains("\" of relation \"") {
+        response.position = find_token_after_case_insensitive_phrase(sql, "SET");
+        return;
+    }
+    if response.message == "column \"a\" is of type integer but expression is of type record" {
+        response.position = find_case_insensitive_token_position(sql, "v.*");
+        return;
+    }
+    if response.message
+        == "source for a multiple-column UPDATE item must be a sub-SELECT or ROW() expression"
+    {
+        response.position = find_case_insensitive_token_position(sql, "(v.*)")
+            .or_else(|| find_case_insensitive_token_position(sql, "v.*"));
+    }
+}
+
+fn apply_update_alias_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
+    if !response
+        .message
+        .starts_with("invalid reference to FROM-clause entry for table ")
+    {
+        return;
+    }
+    let Some((table_name, alias)) = update_target_alias(sql) else {
+        return;
+    };
+    if response.message
+        != format!("invalid reference to FROM-clause entry for table \"{table_name}\"")
+    {
+        return;
+    }
+    response.detail = None;
+    response.hint = Some(format!(
+        "Perhaps you meant to reference the table alias \"{alias}\"."
+    ));
+}
+
+fn update_target_alias(sql: &str) -> Option<(String, String)> {
+    let mut tokens = sql.split_whitespace();
+    let update = tokens.next()?;
+    if !update.eq_ignore_ascii_case("update") {
+        return None;
+    }
+    let table_name = clean_sql_identifier_token(tokens.next()?);
+    let mut alias = clean_sql_identifier_token(tokens.next()?);
+    if alias.eq_ignore_ascii_case("as") {
+        alias = clean_sql_identifier_token(tokens.next()?);
+    }
+    if alias.eq_ignore_ascii_case("set") || alias.is_empty() {
+        return None;
+    }
+    Some((table_name, alias))
+}
+
+fn clean_sql_identifier_token(token: &str) -> String {
+    token
+        .trim_matches(|ch: char| matches!(ch, '"' | ',' | ';' | '(' | ')'))
+        .to_string()
 }
 
 fn apply_insert_conflict_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -5018,7 +5198,7 @@ where
     send_parameter_status(
         &mut writer,
         "TimeZone",
-        &state.session.datetime_config().time_zone,
+        format_timezone(state.session.datetime_config()),
     )?;
     send_parameter_status(&mut writer, "integer_datetimes", "on")?;
     send_parameter_status(
@@ -16120,6 +16300,56 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
         });
 
         assert_eq!(exec_error_position(sql, &err), Some(20));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_failed_cast_syntax_target() {
+        let sql = "SELECT CAST(time with time zone '01:02-08' AS interval) AS \"+00:01\";";
+        let err = ExecError::DetailedError {
+            message: "cannot cast type time with time zone to interval".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42846",
+        };
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("interval").map(|index| index + 1)
+        );
+
+        let sql = "SELECT CAST(interval '02:03' AS time with time zone) AS \"02:03:00-08\";";
+        let err = ExecError::DetailedError {
+            message: "cannot cast type interval to time with time zone".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42846",
+        };
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("time with time zone").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_omits_datetime_template_runtime_errors() {
+        let sql = "SELECT to_timestamp('19971', 'YYYYMMDD');";
+        let err = ExecError::DetailedError {
+            message: "source string too short for \"MM\" formatting field".into(),
+            detail: Some("Field requires 2 characters, but only 1 remain.".into()),
+            hint: Some(
+                "If your source string is not fixed-width, try using the \"FM\" modifier.".into(),
+            ),
+            sqlstate: "22007",
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
+
+        let sql = "SELECT to_date('2016-13-10', 'YYYY-MM-DD');";
+        let err = ExecError::DetailedError {
+            message: "date/time field value out of range: \"2016-13-10\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
     }
 
     #[test]

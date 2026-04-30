@@ -35,6 +35,7 @@ fn json_datetime_config(config: &DateTimeConfig) -> DateTimeConfig {
         date_order: DateOrder::Ymd,
         interval_style: config.interval_style,
         time_zone: config.time_zone.clone(),
+        time_zone_display: config.time_zone_display.clone(),
         transaction_timestamp_usecs: config.transaction_timestamp_usecs,
         statement_timestamp_usecs: config.statement_timestamp_usecs,
         max_stack_depth_kb: config.max_stack_depth_kb,

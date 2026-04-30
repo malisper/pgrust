@@ -1,5 +1,5 @@
-use std::collections::BTreeSet;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use super::super::*;
@@ -81,6 +81,9 @@ struct PartitionedKeyInstaller<'a> {
     gucs: Option<&'a HashMap<String, String>>,
     catalog_effects: &'a mut Vec<CatalogMutationEffect>,
     interrupts: Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+    relation_cache: RefCell<BTreeMap<u32, BoundRelation>>,
+    relation_name_cache: RefCell<BTreeMap<u32, String>>,
+    direct_partition_children_cache: RefCell<BTreeMap<u32, Vec<BoundRelation>>>,
 }
 
 impl<'a> PartitionedKeyInstaller<'a> {
@@ -101,7 +104,11 @@ impl<'a> PartitionedKeyInstaller<'a> {
     }
 
     fn current_relation(&self, relation_oid: u32) -> Result<BoundRelation, ExecError> {
-        self.db
+        if let Some(relation) = self.relation_cache.borrow().get(&relation_oid).cloned() {
+            return Ok(relation);
+        }
+        let relation = self
+            .db
             .lazy_catalog_lookup(
                 self.client_id,
                 Some((self.xid, self.visible_cid())),
@@ -110,11 +117,24 @@ impl<'a> PartitionedKeyInstaller<'a> {
             .relation_by_oid(relation_oid)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
-            })
+            })?;
+        self.relation_cache
+            .borrow_mut()
+            .insert(relation_oid, relation.clone());
+        Ok(relation)
     }
 
     fn relation_name(&self, relation_oid: u32) -> Result<String, ExecError> {
-        self.db
+        if let Some(name) = self
+            .relation_name_cache
+            .borrow()
+            .get(&relation_oid)
+            .cloned()
+        {
+            return Ok(name);
+        }
+        let name = self
+            .db
             .lazy_catalog_lookup(
                 self.client_id,
                 Some((self.xid, self.visible_cid())),
@@ -124,7 +144,11 @@ impl<'a> PartitionedKeyInstaller<'a> {
             .map(|row| row.relname)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
-            })
+            })?;
+        self.relation_name_cache
+            .borrow_mut()
+            .insert(relation_oid, name.clone());
+        Ok(name)
     }
 
     fn write_ctx(&self, cid: CommandId) -> CatalogWriteContext {
@@ -164,24 +188,21 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     .filter(|parent| parent.partitioned_table.is_some())
                     .map(|parent| parent.relation_oid)
             });
-        parent_oid
-            .map(|oid| {
-                catalog
-                    .relation_by_oid(oid)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("missing partitioned parent {oid}"),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "XX000",
-                    })
-            })
-            .transpose()
+        parent_oid.map(|oid| self.current_relation(oid)).transpose()
     }
 
     fn direct_partition_children(
         &self,
         relation_oid: u32,
     ) -> Result<Vec<BoundRelation>, ExecError> {
+        if let Some(children) = self
+            .direct_partition_children_cache
+            .borrow()
+            .get(&relation_oid)
+            .cloned()
+        {
+            return Ok(children);
+        }
         let catalog = self.db.lazy_catalog_lookup(
             self.client_id,
             Some((self.xid, self.visible_cid())),
@@ -189,7 +210,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
         );
         let mut inherits = catalog.inheritance_children(relation_oid);
         inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
-        inherits
+        let children = inherits
             .into_iter()
             .filter(|row| !row.inhdetachpending)
             .filter_map(|row| {
@@ -198,8 +219,12 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     .map(|child| (child.relispartition, child))
             })
             .filter(|(is_partition, _)| *is_partition)
-            .map(|(_, child)| Ok(child))
-            .collect()
+            .map(|(_, child)| child)
+            .collect::<Vec<_>>();
+        self.direct_partition_children_cache
+            .borrow_mut()
+            .insert(relation_oid, children.clone());
+        Ok(children)
     }
 
     fn column_attnums_for_names(
@@ -1086,6 +1111,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 &build_options,
                 65_536,
                 false,
+                true,
                 self.catalog_effects,
             )?;
             let (conparentid, conislocal, coninhcount, connoinherit) = if let Some(parent) = parent
@@ -1153,6 +1179,9 @@ impl Database {
             gucs,
             catalog_effects,
             interrupts,
+            relation_cache: RefCell::new(BTreeMap::new()),
+            relation_name_cache: RefCell::new(BTreeMap::new()),
+            direct_partition_children_cache: RefCell::new(BTreeMap::new()),
         };
         for action in actions {
             let relation = installer.current_relation(relation.relation_oid)?;
@@ -1190,6 +1219,9 @@ impl Database {
             gucs: None,
             catalog_effects,
             interrupts,
+            relation_cache: RefCell::new(BTreeMap::new()),
+            relation_name_cache: RefCell::new(BTreeMap::new()),
+            direct_partition_children_cache: RefCell::new(BTreeMap::new()),
         };
         let parent = installer.current_relation(parent_relation_oid)?;
         let child = installer.current_relation(child_relation_oid)?;

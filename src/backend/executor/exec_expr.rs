@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
+use crate::backend::utils::misc::guc_datetime::format_timezone;
 use crate::backend::utils::sql_deparse::{
     normalize_check_expr_sql, normalize_index_expression_sql, normalize_index_predicate_sql,
 };
@@ -192,8 +193,8 @@ use crate::include::nodes::datum::{
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
     OpExprKind, RULE_NEW_VAR, RULE_OLD_VAR, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr,
-    SubLinkType, TABLE_OID_ATTR_NO, XMIN_ATTR_NO, attrno_index, is_executor_special_varno,
-    is_system_attr,
+    SubLinkType, TABLE_OID_ATTR_NO, XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index,
+    is_executor_special_varno, is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::SequenceData;
@@ -2884,6 +2885,17 @@ fn lookup_xmin_binding(
         .map(|xmin| Value::Xid8(u64::from(xmin)))
 }
 
+fn lookup_xmax_binding(
+    bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
+    varno: usize,
+) -> Option<Value> {
+    bindings
+        .iter()
+        .find(|binding| binding.varno == varno)
+        .and_then(|binding| binding.xmax)
+        .map(|xmax| Value::Xid8(u64::from(xmax)))
+}
+
 fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecError> {
     builtin_scalar_function_for_proc_oid(funcid).ok_or_else(|| ExecError::DetailedError {
         message: format!("no builtin implementation for function oid {funcid}").into(),
@@ -2953,7 +2965,7 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         return Ok(Value::Text("none".into()));
     }
     if name == "timezone" {
-        return Ok(Value::Text(ctx.datetime_config.time_zone.clone().into()));
+        return Ok(Value::Text(format_timezone(&ctx.datetime_config).into()));
     }
     if name == "server_encoding" {
         return Ok(Value::Text("UTF8".into()));
@@ -4822,8 +4834,8 @@ pub(crate) fn partition_constraint_conditions_for_catalog(
         }
         | PartitionBoundSpec::Range {
             is_default: true, ..
-        }
-        | PartitionBoundSpec::Hash { .. } => return Ok(None),
+        } => default_partition_constraint_conditions_for_catalog(catalog, parent, &key_names)?,
+        PartitionBoundSpec::Hash { .. } => return Ok(None),
         PartitionBoundSpec::List { values, .. } => {
             if key_names.is_empty() {
                 return Ok(None);
@@ -4834,8 +4846,150 @@ pub(crate) fn partition_constraint_conditions_for_catalog(
             range_partition_constraint_conditions(&key_names, from, to)
         }
     };
-    let _ = catalog;
     Ok(Some(conditions))
+}
+
+fn default_partition_constraint_conditions_for_catalog(
+    catalog: &dyn CatalogLookup,
+    parent: &crate::backend::parser::BoundRelation,
+    key_names: &[String],
+) -> Result<Vec<String>, ExecError> {
+    let mut sibling_bounds = catalog
+        .inheritance_children(parent.relation_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .filter_map(|row| catalog.relation_by_oid(row.inhrelid))
+        .filter_map(|child| child.relpartbound)
+        .map(|bound_text| deserialize_partition_bound(&bound_text).map_err(ExecError::Parse))
+        .collect::<Result<Vec<_>, _>>()?;
+    sibling_bounds.retain(|bound| !bound.is_default());
+    if sibling_bounds.is_empty() {
+        return Ok(Vec::new());
+    }
+    sibling_bounds.sort_by(|left, right| {
+        partition_bound_catalog_sort_key(left).cmp(&partition_bound_catalog_sort_key(right))
+    });
+
+    let disjuncts = sibling_bounds
+        .iter()
+        .filter_map(|bound| default_excluded_partition_disjunct(key_names, bound))
+        .collect::<Vec<_>>();
+    if disjuncts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut parts = key_names
+        .iter()
+        .map(|key| format!("({key} IS NOT NULL)"))
+        .collect::<Vec<_>>();
+    parts.push(format!("({})", disjuncts.join(" OR ")));
+    Ok(vec![format!("NOT ({})", parts.join(" AND "))])
+}
+
+fn partition_bound_catalog_sort_key(bound: &PartitionBoundSpec) -> String {
+    match bound {
+        PartitionBoundSpec::List { values, .. } => values
+            .iter()
+            .map(partition_value_text)
+            .collect::<Vec<_>>()
+            .join("\u{1f}"),
+        PartitionBoundSpec::Range { from, .. } => from
+            .iter()
+            .map(|value| match value {
+                PartitionRangeDatumValue::MinValue => String::new(),
+                PartitionRangeDatumValue::MaxValue => "\u{10ffff}".into(),
+                PartitionRangeDatumValue::Value(value) => partition_value_text(value),
+            })
+            .collect::<Vec<_>>()
+            .join("\u{1f}"),
+        PartitionBoundSpec::Hash { modulus, remainder } => format!("{modulus}:{remainder}"),
+    }
+}
+
+fn default_excluded_partition_disjunct(
+    key_names: &[String],
+    bound: &PartitionBoundSpec,
+) -> Option<String> {
+    match bound {
+        PartitionBoundSpec::List { values, .. } => {
+            let value_conditions = values
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| {
+                    key_names.get(index).map(|key| {
+                        format!("({key} = {})", partition_value_constraint_literal(value))
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!value_conditions.is_empty()).then(|| {
+                if value_conditions.len() == 1 {
+                    value_conditions[0].clone()
+                } else {
+                    format!("({})", value_conditions.join(" AND "))
+                }
+            })
+        }
+        PartitionBoundSpec::Range { from, to, .. } => {
+            simplified_range_partition_disjunct(key_names, from, to).or_else(|| {
+                let mut terms = Vec::new();
+                if let Some(lower) = range_partition_side_constraint(key_names, from, true) {
+                    terms.push(lower);
+                }
+                if let Some(upper) = range_partition_side_constraint(key_names, to, false) {
+                    terms.push(upper);
+                }
+                (!terms.is_empty()).then(|| format!("({})", terms.join(" AND ")))
+            })
+        }
+        PartitionBoundSpec::Hash { .. } => None,
+    }
+}
+
+fn simplified_range_partition_disjunct(
+    key_names: &[String],
+    from: &[PartitionRangeDatumValue],
+    to: &[PartitionRangeDatumValue],
+) -> Option<String> {
+    let mut terms = Vec::new();
+    for ((key, lower), upper) in key_names.iter().zip(from.iter()).zip(to.iter()) {
+        match (lower, upper) {
+            (PartitionRangeDatumValue::Value(lower), PartitionRangeDatumValue::Value(upper))
+                if lower == upper =>
+            {
+                terms.push(format!(
+                    "({key} = {})",
+                    default_partition_value_constraint_literal(lower)
+                ));
+            }
+            (PartitionRangeDatumValue::Value(lower), PartitionRangeDatumValue::Value(upper)) => {
+                terms.push(format!(
+                    "({key} >= {})",
+                    default_partition_value_constraint_literal(lower)
+                ));
+                terms.push(format!(
+                    "({key} < {})",
+                    default_partition_value_constraint_literal(upper)
+                ));
+                return Some(format!("({})", terms.join(" AND ")));
+            }
+            _ => return None,
+        }
+    }
+    (!terms.is_empty()).then(|| format!("({})", terms.join(" AND ")))
+}
+
+fn default_partition_value_constraint_literal(value: &SerializedPartitionValue) -> String {
+    match value {
+        SerializedPartitionValue::Int16(value) => {
+            format!("{}::smallint", quote_sql_literal(&value.to_string()))
+        }
+        SerializedPartitionValue::Int32(value) => {
+            format!("{}::integer", quote_sql_literal(&value.to_string()))
+        }
+        SerializedPartitionValue::Int64(value) => {
+            format!("{}::bigint", quote_sql_literal(&value.to_string()))
+        }
+        _ => partition_value_constraint_literal(value),
+    }
 }
 
 fn list_partition_constraint_conditions(
@@ -9459,6 +9613,7 @@ fn eval_bound_system_var(
         TABLE_OID_ATTR_NO => lookup_system_binding(bindings, var.varno),
         SELF_ITEM_POINTER_ATTR_NO => lookup_ctid_binding(bindings, var.varno),
         XMIN_ATTR_NO => lookup_xmin_binding(bindings, var.varno),
+        XMAX_ATTR_NO => lookup_xmax_binding(bindings, var.varno),
         _ => None,
     }
 }
@@ -9644,6 +9799,12 @@ pub fn eval_expr(
                     .xmin()
                     .map(|xmin| Value::Xid8(u64::from(xmin)))
                     .or_else(|| lookup_xmin_binding(&ctx.system_bindings, var.varno))
+                    .unwrap_or(Value::Null))
+            } else if var.varattno == XMAX_ATTR_NO {
+                Ok(slot
+                    .xmax()
+                    .map(|xmax| Value::Xid8(u64::from(xmax)))
+                    .or_else(|| lookup_xmax_binding(&ctx.system_bindings, var.varno))
                     .unwrap_or(Value::Null))
             } else {
                 let index = attrno_index(var.varattno).ok_or_else(|| {

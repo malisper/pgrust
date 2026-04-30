@@ -1903,16 +1903,7 @@ fn collated_duplicate_expression_partition_keys_prune_independently() {
 
 fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
     match plan {
-        Plan::Append { children, .. }
-            if children.iter().all(|child| {
-                matches!(
-                    child,
-                    Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
-                )
-            }) =>
-        {
-            Some(children)
-        }
+        Plan::Append { children, .. } if children.iter().all(plan_is_join_child) => Some(children),
         Plan::Append { children, .. }
         | Plan::BitmapOr { children, .. }
         | Plan::BitmapAnd { children, .. }
@@ -1955,6 +1946,14 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => None,
+    }
+}
+
+fn plan_is_join_child(plan: &Plan) -> bool {
+    match plan {
+        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. } => true,
+        Plan::Projection { input, .. } => plan_is_join_child(input),
+        _ => false,
     }
 }
 

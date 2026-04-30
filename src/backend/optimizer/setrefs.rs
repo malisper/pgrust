@@ -906,40 +906,206 @@ fn search_input_tlist_entry<'a>(
     input: &Path,
     tlist: &'a IndexedTlist,
 ) -> Option<&'a IndexedTlistEntry> {
-    let flattened_expr = root.and_then(|root| maybe_flatten_join_alias_vars(root, expr));
-    search_tlist_entry(root, expr, tlist).or_else(|| {
-        let mut matched_index = None;
-        for entry in &tlist.entries {
-            let entry_matches = entry.match_exprs.iter().any(|candidate| {
-                exprs_equivalent(root, candidate, expr)
-                    || output_component_matches_expr(candidate, expr)
-                    || flattened_expr.as_ref().is_some_and(|flattened_expr| {
-                        exprs_equivalent(root, candidate, flattened_expr)
-                            || output_component_matches_expr(candidate, flattened_expr)
-                    })
-                    || exprs_equivalent(
-                        root,
-                        &fully_expand_output_expr_with_root(root, candidate.clone(), input),
-                        expr,
-                    )
-                    || flattened_expr.as_ref().is_some_and(|flattened_expr| {
-                        exprs_equivalent(
-                            root,
-                            &fully_expand_output_expr_with_root(root, candidate.clone(), input),
-                            flattened_expr,
-                        )
-                    })
-            });
-            if !entry_matches {
-                continue;
-            }
-            match matched_index {
-                Some(index) if index != entry.index => return None,
-                Some(_) => {}
-                None => matched_index = Some(entry.index),
+    let mut search_exprs = vec![expr.clone()];
+    if let Some(root) = root {
+        if let Some(flattened) = maybe_flatten_join_alias_vars(root, expr) {
+            push_unique_search_expr(&mut search_exprs, flattened);
+        }
+        for candidate in search_exprs.clone() {
+            for translated in appendrel_search_exprs(root, &candidate) {
+                if let Some(flattened) = maybe_flatten_join_alias_vars(root, &translated) {
+                    push_unique_search_expr(&mut search_exprs, flattened);
+                }
+                push_unique_search_expr(&mut search_exprs, translated);
             }
         }
-        matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
+    }
+    search_tlist_entry(root, expr, tlist)
+        .or_else(|| {
+            let mut matched_index = None;
+            for entry in &tlist.entries {
+                let entry_matches = entry.match_exprs.iter().any(|candidate| {
+                    let expanded =
+                        fully_expand_output_expr_with_root(root, candidate.clone(), input);
+                    search_exprs.iter().any(|search_expr| {
+                        exprs_equivalent(root, candidate, search_expr)
+                            || output_component_matches_expr(candidate, search_expr)
+                            || exprs_equivalent(root, &expanded, search_expr)
+                    })
+                });
+                if !entry_matches {
+                    continue;
+                }
+                match matched_index {
+                    Some(index) if index != entry.index => return None,
+                    Some(_) => {}
+                    None => matched_index = Some(entry.index),
+                }
+            }
+            matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
+        })
+        .or_else(|| root.and_then(|root| search_partition_child_alias_var(root, expr, tlist)))
+        .or_else(|| root.and_then(|root| search_partition_child_shape_var(root, expr, tlist)))
+}
+
+fn push_unique_search_expr(search_exprs: &mut Vec<Expr>, expr: Expr) {
+    if !search_exprs.iter().any(|existing| existing == &expr) {
+        search_exprs.push(expr);
+    }
+}
+
+fn appendrel_search_exprs(root: &PlannerInfo, expr: &Expr) -> Vec<Expr> {
+    root.append_rel_infos
+        .iter()
+        .flatten()
+        .filter_map(|info| {
+            let translated = rewrite_expr_for_append_rel(expr.clone(), info);
+            (translated != *expr).then_some(translated)
+        })
+        .collect()
+}
+
+fn search_partition_child_alias_var<'a>(
+    root: &PlannerInfo,
+    expr: &Expr,
+    tlist: &'a IndexedTlist,
+) -> Option<&'a IndexedTlistEntry> {
+    let Expr::Var(var) = expr else {
+        return None;
+    };
+    if var.varlevelsup > 0 || is_executor_special_varno(var.varno) || is_system_attr(var.varattno) {
+        return None;
+    }
+    let mut matched_index = None;
+    for entry in &tlist.entries {
+        let entry_matches = entry.match_exprs.iter().any(|candidate| {
+            let Expr::Var(candidate_var) = candidate else {
+                return false;
+            };
+            candidate_var.varlevelsup == 0
+                && !is_executor_special_varno(candidate_var.varno)
+                && candidate_var.varattno == var.varattno
+                && candidate_var.vartype == var.vartype
+                && appendrel_child_matches(root, var.varno, candidate_var.varno)
+                && rte_alias_matches_partition_child(root, var.varno, candidate_var.varno)
+        });
+        if !entry_matches {
+            continue;
+        }
+        match matched_index {
+            Some(index) if index != entry.index => return None,
+            Some(_) => {}
+            None => matched_index = Some(entry.index),
+        }
+    }
+    matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
+}
+
+fn search_partition_child_shape_var<'a>(
+    root: &PlannerInfo,
+    expr: &Expr,
+    tlist: &'a IndexedTlist,
+) -> Option<&'a IndexedTlistEntry> {
+    let Expr::Var(var) = expr else {
+        return None;
+    };
+    if var.varlevelsup > 0 || is_executor_special_varno(var.varno) || is_system_attr(var.varattno) {
+        return None;
+    }
+    let parent_types = root
+        .parse
+        .rtable
+        .get(var.varno.saturating_sub(1))?
+        .desc
+        .columns
+        .iter()
+        .map(|column| column.sql_type)
+        .collect::<Vec<_>>();
+    let mut matched_index = None;
+    for entry in &tlist.entries {
+        let entry_matches = entry.match_exprs.iter().any(|candidate| {
+            let Expr::Var(candidate_var) = candidate else {
+                return false;
+            };
+            candidate_var.varlevelsup == 0
+                && !is_executor_special_varno(candidate_var.varno)
+                && candidate_var.varattno == var.varattno
+                && candidate_var.vartype == var.vartype
+                && appendrel_child_matches(root, var.varno, candidate_var.varno)
+                && tlist_varno_matches_desc_shape(tlist, candidate_var.varno, &parent_types)
+        });
+        if !entry_matches {
+            continue;
+        }
+        match matched_index {
+            Some(index) if index != entry.index => return None,
+            Some(_) => {}
+            None => matched_index = Some(entry.index),
+        }
+    }
+    matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
+}
+
+fn tlist_varno_matches_desc_shape(
+    tlist: &IndexedTlist,
+    candidate_varno: usize,
+    parent_types: &[crate::backend::parser::SqlType],
+) -> bool {
+    let mut candidate_types = vec![None; parent_types.len()];
+    for entry in &tlist.entries {
+        for candidate in &entry.match_exprs {
+            let Expr::Var(var) = candidate else {
+                continue;
+            };
+            if var.varlevelsup != 0 || var.varno != candidate_varno {
+                continue;
+            }
+            let Some(index) = attrno_index(var.varattno) else {
+                continue;
+            };
+            if index < candidate_types.len() {
+                candidate_types[index] = Some(var.vartype);
+            }
+        }
+    }
+    candidate_types
+        .into_iter()
+        .zip(parent_types.iter().copied())
+        .all(|(candidate, parent)| candidate == Some(parent))
+}
+
+fn appendrel_child_matches(root: &PlannerInfo, parent_varno: usize, child_varno: usize) -> bool {
+    root.append_rel_infos
+        .iter()
+        .flatten()
+        .any(|info| info.parent_relid == parent_varno && info.child_relid == child_varno)
+}
+
+fn rte_alias_matches_partition_child(
+    root: &PlannerInfo,
+    parent_varno: usize,
+    candidate_varno: usize,
+) -> bool {
+    let Some(parent_alias) = rte_alias(root, parent_varno) else {
+        return false;
+    };
+    let Some(candidate_alias) = rte_alias(root, candidate_varno) else {
+        return false;
+    };
+    candidate_alias == parent_alias
+        || candidate_alias
+            .strip_prefix(&parent_alias)
+            .and_then(|suffix| suffix.strip_prefix('_'))
+            .is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+            })
+}
+
+fn rte_alias(root: &PlannerInfo, varno: usize) -> Option<String> {
+    root.parse.rtable.get(varno.saturating_sub(1)).map(|rte| {
+        rte.alias
+            .clone()
+            .unwrap_or_else(|| rte.eref.aliasname.clone())
     })
 }
 
@@ -1916,6 +2082,17 @@ fn fix_semantic_output_expr_for_input(
         })
 }
 
+fn fix_input_tlist_expr(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+    input_tlist: &IndexedTlist,
+) -> Option<Expr> {
+    search_input_tlist_entry(root, expr, input, input_tlist)
+        .filter(|entry| entry.sql_type == expr_sql_type(expr))
+        .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+}
+
 fn fix_join_rte_var_for_input(
     root: Option<&PlannerInfo>,
     expr: &Expr,
@@ -1960,6 +2137,9 @@ fn fix_upper_expr_for_input(
         if let Some(fixed) = fix_executor_join_var_for_input(&rewritten, input) {
             return fixed;
         }
+        if expr_contains_local_semantic_var(&rewritten) {
+            return fix_upper_expr_for_input(root, rewritten, input, input_tlist);
+        }
         return rewritten;
     }
     if let Some(root) = root {
@@ -1970,9 +2150,20 @@ fn fix_upper_expr_for_input(
                 if let Some(fixed) = fix_executor_join_var_for_input(&translated_rewritten, input) {
                     return fixed;
                 }
+                if expr_contains_local_semantic_var(&translated_rewritten) {
+                    return fix_upper_expr_for_input(
+                        Some(root),
+                        translated_rewritten,
+                        input,
+                        input_tlist,
+                    );
+                }
                 return translated_rewritten;
             }
         }
+    }
+    if let Some(rewritten) = fix_input_tlist_expr(root, &expr, input, input_tlist) {
+        return rewritten;
     }
     if let Some(rewritten) = fix_immediate_subquery_output_expr(root, &expr, input, input_tlist) {
         return rewritten;
@@ -1985,6 +2176,12 @@ fn fix_upper_expr_for_input(
     }
     if let Some(rewritten) = fix_semantic_output_expr_for_input(root, &expr, input) {
         return rewritten;
+    }
+    let rebuilt = rebuild_setrefs_expr(root, expr.clone(), |inner| {
+        fix_upper_expr_for_input(root, inner, input, input_tlist)
+    });
+    if rebuilt != expr {
+        return rebuilt;
     }
     expr
 }
@@ -5642,7 +5839,13 @@ fn lower_partition_prune_plan(
 
 fn lower_partition_prune_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
     match expr {
-        Expr::SubLink(sublink) => lower_sublink(ctx, *sublink, LowerMode::Scalar),
+        Expr::SubLink(sublink) => {
+            // Partition-prune filters intentionally keep semantic partition key
+            // Vars so pruning can reason about child bounds. Subqueries are not
+            // useful pruning constraints here, so leave them in planner form
+            // and let the prune checker ignore them conservatively.
+            Expr::SubLink(sublink)
+        }
         Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
             sublink_type: subplan.sublink_type,
             testexpr: subplan
@@ -6054,11 +6257,11 @@ fn set_seq_scan_references(
         args: sample
             .args
             .into_iter()
-            .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar))
+            .map(|expr| lower_tablesample_metadata_expr(ctx, expr))
             .collect(),
         repeatable: sample
             .repeatable
-            .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar)),
+            .map(|expr| lower_tablesample_metadata_expr(ctx, expr)),
     });
     Plan::SeqScan {
         plan_info,
@@ -6072,6 +6275,18 @@ fn set_seq_scan_references(
         toast,
         tablesample,
         desc,
+    }
+}
+
+fn lower_tablesample_metadata_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
+    // :HACK: TableSampleClause is EXPLAIN metadata while pgrust executes
+    // TABLESAMPLE through the lowered sampling qual. Lateral sample arguments
+    // can still contain same-level semantic Vars here, so keep those display
+    // expressions intact instead of forcing them through Scalar lowering.
+    if expr_contains_local_semantic_var(&expr) {
+        expr
+    } else {
+        lower_expr(ctx, expr, LowerMode::Scalar)
     }
 }
 

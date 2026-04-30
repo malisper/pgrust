@@ -17,7 +17,9 @@ use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
-use crate::backend::executor::value_io::format_failing_row_detail;
+use crate::backend::executor::value_io::{
+    format_failing_row_detail, format_failing_row_detail_for_columns,
+};
 use crate::backend::optimizer::partition_prune::{
     relation_may_satisfy_own_partition_bound,
     relation_may_satisfy_own_partition_bound_with_runtime_values,
@@ -119,8 +121,8 @@ use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, OpExprKind, ParamKind, QueryColumn, RULE_OLD_VAR,
-    RelationPrivilegeMask, RelationPrivilegeRequirement, SubLinkType, TargetEntry, Var,
-    attrno_index, expr_sql_type_hint, user_attrno,
+    RelationPrivilegeMask, RelationPrivilegeRequirement, SubLinkType, SubPlan, TargetEntry, Var,
+    XMAX_ATTR_NO, XMIN_ATTR_NO, attrno_index, expr_sql_type_hint, user_attrno,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -365,6 +367,11 @@ fn finalize_bound_update(
                 .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
             rls_write_checks: target
                 .rls_write_checks
+                .into_iter()
+                .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
+                .collect(),
+            parent_rls_write_checks: target
+                .parent_rls_write_checks
                 .into_iter()
                 .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
                 .collect(),
@@ -3046,6 +3053,17 @@ fn explain_update_lines(
                 lines.push("        One-Time Filter: false".into());
                 return lines;
             }
+            if explain_update_verbose_onetime_result(
+                stmt,
+                bound,
+                target,
+                alias.as_deref(),
+                show_costs,
+                catalog,
+                &mut lines,
+            ) {
+                return lines;
+            }
             push_explain_line(
                 &format!(
                     "  ->  {}",
@@ -3117,6 +3135,309 @@ fn explain_update_lines(
         lines.push("        One-Time Filter: false".into());
     }
     lines
+}
+
+fn explain_update_verbose_onetime_result(
+    stmt: &UpdateStatement,
+    bound: &BoundUpdateStatement,
+    target: &BoundUpdateTarget,
+    alias: Option<&str>,
+    show_costs: bool,
+    _catalog: &dyn CatalogLookup,
+    lines: &mut Vec<String>,
+) -> bool {
+    if show_costs {
+        return false;
+    }
+    let Some(predicate) = target.predicate.as_ref() else {
+        return false;
+    };
+    if target.assignments.len() <= 1 || !expr_is_onetime_update_filter(predicate) {
+        return false;
+    }
+    let assignment_subplans = target
+        .assignments
+        .iter()
+        .filter_map(|assignment| first_subplan_in_expr(&assignment.expr))
+        .collect::<Vec<_>>();
+    let Some(first_subplan) = assignment_subplans.first().copied() else {
+        return false;
+    };
+    let Some(subplan_plan) = bound.subplans.get(first_subplan.plan_id) else {
+        return false;
+    };
+    let Some((_subplan_targets, subplan_predicate, scan_relation_name, scan_desc)) =
+        projection_filter_seqscan(subplan_plan)
+    else {
+        return false;
+    };
+
+    let target_alias = alias
+        .or(stmt.target_alias.as_deref())
+        .unwrap_or(stmt.table_name.as_str());
+    let scan_alias = scan_relation_name
+        .split_whitespace()
+        .last()
+        .unwrap_or(scan_relation_name);
+    let target_column_names = target
+        .desc
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let scan_column_names = scan_desc
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let subplan_id = first_subplan.plan_id + 1;
+    let mut output = (1..=target.assignments.len())
+        .map(|index| format!("(SubPlan {subplan_id}).col{index}"))
+        .collect::<Vec<_>>();
+    output.push(format!("(rescan SubPlan {subplan_id})"));
+    output.push(format!("{target_alias}.ctid"));
+
+    lines.push("  ->  Result".into());
+    lines.push(format!("        Output: {}", output.join(", ")));
+    lines.push(format!(
+        "        One-Time Filter: {}",
+        crate::backend::executor::render_explain_expr(predicate, &target_column_names)
+    ));
+    lines.push(format!(
+        "        ->  Seq Scan on {}",
+        explain_update_target_name(
+            &format!(
+                "{} {}",
+                scan_relation_base_name(scan_relation_name),
+                target_alias
+            ),
+            true,
+        )
+    ));
+    let mut child_output = first_subplan
+        .args
+        .iter()
+        .map(|arg| {
+            strip_outer_parens_once(
+                &crate::backend::executor::render_explain_projection_expr_with_qualifier(
+                    arg,
+                    Some(target_alias),
+                    &target_column_names,
+                ),
+            )
+            .to_string()
+        })
+        .collect::<Vec<_>>();
+    child_output.push(format!("{target_alias}.ctid"));
+    lines.push(format!("              Output: {}", child_output.join(", ")));
+    lines.push(format!("        SubPlan {subplan_id}"));
+    lines.push(format!(
+        "          ->  Seq Scan on {}",
+        explain_update_target_name(scan_relation_name, true)
+    ));
+    let subplan_output = assignment_subplans
+        .iter()
+        .filter_map(|subplan| bound.subplans.get(subplan.plan_id))
+        .filter_map(|plan| projection_filter_seqscan(plan).map(|(targets, _, _, _)| targets))
+        .filter_map(|targets| targets.first())
+        .map(|target| {
+            strip_outer_parens_once(
+                &crate::backend::executor::render_explain_projection_expr_with_qualifier(
+                    &target.expr,
+                    Some(scan_alias),
+                    &scan_column_names,
+                ),
+            )
+            .to_string()
+        })
+        .collect::<Vec<_>>();
+    let subplan_output = if subplan_output.is_empty() {
+        scan_desc
+            .columns
+            .iter()
+            .map(|column| format!("{scan_alias}.{}", column.name))
+            .collect::<Vec<_>>()
+    } else {
+        subplan_output
+    };
+    lines.push(format!(
+        "                Output: {}",
+        subplan_output.join(", ")
+    ));
+    lines.push(format!(
+        "                Filter: {}",
+        render_update_subplan_predicate(
+            subplan_predicate,
+            first_subplan,
+            scan_alias,
+            &scan_column_names,
+            target_alias,
+            &target_column_names,
+        )
+    ));
+    true
+}
+
+fn projection_filter_seqscan(
+    plan: &Plan,
+) -> Option<(
+    &[TargetEntry],
+    &Expr,
+    &str,
+    &crate::include::nodes::primnodes::RelationDesc,
+)> {
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            let Plan::Filter {
+                input, predicate, ..
+            } = input.as_ref()
+            else {
+                return None;
+            };
+            let Plan::SeqScan {
+                relation_name,
+                desc,
+                ..
+            } = input.as_ref()
+            else {
+                return None;
+            };
+            Some((targets.as_slice(), predicate, relation_name, desc))
+        }
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            let Plan::SeqScan {
+                relation_name,
+                desc,
+                ..
+            } = input.as_ref()
+            else {
+                return None;
+            };
+            Some((&[], predicate, relation_name, desc))
+        }
+        _ => None,
+    }
+}
+
+fn scan_relation_base_name(relation_name: &str) -> &str {
+    relation_name
+        .split_whitespace()
+        .next()
+        .unwrap_or(relation_name)
+}
+
+fn first_subplan_in_expr(expr: &Expr) -> Option<&SubPlan> {
+    match expr {
+        Expr::SubPlan(subplan) => Some(subplan),
+        Expr::FieldSelect { expr, .. }
+        | Expr::Cast(expr, _)
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr) => first_subplan_in_expr(expr),
+        Expr::Op(op) => op.args.iter().find_map(first_subplan_in_expr),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().find_map(first_subplan_in_expr),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .find_map(|(_, expr)| first_subplan_in_expr(expr)),
+        _ => None,
+    }
+}
+
+fn expr_is_onetime_update_filter(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(_)
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => op.args.iter().all(expr_is_onetime_update_filter),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().all(expr_is_onetime_update_filter),
+        Expr::Cast(expr, _)
+        | Expr::Collate { expr, .. }
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr) => expr_is_onetime_update_filter(expr),
+        _ => false,
+    }
+}
+
+fn render_update_subplan_predicate(
+    expr: &Expr,
+    subplan: &SubPlan,
+    scan_alias: &str,
+    scan_column_names: &[String],
+    target_alias: &str,
+    target_column_names: &[String],
+) -> String {
+    match expr {
+        Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec) => subplan
+            .par_param
+            .iter()
+            .position(|paramid| *paramid == param.paramid)
+            .and_then(|index| subplan.args.get(index))
+            .map(|arg| {
+                crate::backend::executor::render_explain_projection_expr_with_qualifier(
+                    arg,
+                    Some(target_alias),
+                    target_column_names,
+                )
+            })
+            .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Var(_) => crate::backend::executor::render_explain_projection_expr_with_qualifier(
+            expr,
+            Some(scan_alias),
+            scan_column_names,
+        ),
+        Expr::Op(op) if op.args.len() == 2 => {
+            let left = render_update_subplan_predicate(
+                &op.args[0],
+                subplan,
+                scan_alias,
+                scan_column_names,
+                target_alias,
+                target_column_names,
+            );
+            let right = render_update_subplan_predicate(
+                &op.args[1],
+                subplan,
+                scan_alias,
+                scan_column_names,
+                target_alias,
+                target_column_names,
+            );
+            let op = match op.op {
+                OpExprKind::Eq => "=",
+                OpExprKind::NotEq => "<>",
+                OpExprKind::Lt => "<",
+                OpExprKind::LtEq => "<=",
+                OpExprKind::Gt => ">",
+                OpExprKind::GtEq => ">=",
+                _ => {
+                    return crate::backend::executor::render_explain_projection_expr_with_qualifier(
+                        expr,
+                        Some(scan_alias),
+                        scan_column_names,
+                    );
+                }
+            };
+            format!(
+                "({} {op} {})",
+                strip_outer_parens_once(&left),
+                strip_outer_parens_once(&right)
+            )
+        }
+        _ => crate::backend::executor::render_explain_projection_expr_with_qualifier(
+            expr,
+            Some(scan_alias),
+            scan_column_names,
+        ),
+    }
 }
 
 fn explain_partitioned_update_append_plain(
@@ -3747,6 +4068,13 @@ pub(crate) struct UpdatedRowWriteInfo {
     desc: RelationDesc,
     constraints: BoundRelationConstraints,
     values: Vec<Value>,
+    projected_values: Option<Vec<Value>>,
+}
+
+impl UpdatedRowWriteInfo {
+    pub(crate) fn relation_oid(&self) -> u32 {
+        self.relation_oid
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4691,6 +5019,7 @@ pub(crate) fn rollback_inserted_row(
 
 struct PartitionUpdateDestination {
     relation_info: PartitionResultRelInfo,
+    parent_desc: RelationDesc,
     parent_values: Vec<Value>,
     values: Vec<Value>,
 }
@@ -4714,7 +5043,16 @@ fn route_updated_partition_row(
     }
     let Some(root_oid) = partition_update_root_oid else {
         let mut proute = exec_setup_partition_tuple_routing(catalog, &current_relation)?;
-        exec_find_partition(catalog, &mut proute, &current_relation, current_values, ctx)?;
+        exec_find_partition(catalog, &mut proute, &current_relation, current_values, ctx).map_err(
+            |err| {
+                remap_routed_insert_error_detail(
+                    err,
+                    current_values,
+                    Some(&current_relation.desc),
+                    ctx,
+                )
+            },
+        )?;
         return Ok(None);
     };
     let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
@@ -4726,7 +5064,10 @@ fn route_updated_partition_row(
         &root_relation.desc,
     )?;
     let mut proute = exec_setup_partition_tuple_routing(catalog, &root_relation)?;
-    let routed = exec_find_partition(catalog, &mut proute, &root_relation, &root_values, ctx)?;
+    let routed = exec_find_partition(catalog, &mut proute, &root_relation, &root_values, ctx)
+        .map_err(|err| {
+            remap_routed_insert_error_detail(err, &root_values, Some(&root_relation.desc), ctx)
+        })?;
     if routed.relation_oid == relation_oid {
         return Ok(None);
     }
@@ -4743,6 +5084,7 @@ fn route_updated_partition_row(
     )?;
     Ok(Some(PartitionUpdateDestination {
         relation_info,
+        parent_desc: root_relation.desc,
         parent_values: root_values,
         values: routed_values,
     }))
@@ -4763,7 +5105,8 @@ fn enforce_direct_partition_update_constraint(
         return Ok(());
     }
     let mut proute = exec_setup_partition_tuple_routing(catalog.as_ref(), &target)?;
-    exec_find_partition(catalog.as_ref(), &mut proute, &target, values, ctx)?;
+    exec_find_partition(catalog.as_ref(), &mut proute, &target, values, ctx)
+        .map_err(|err| remap_routed_insert_error_detail(err, values, Some(&target.desc), ctx))?;
     Ok(())
 }
 
@@ -4797,15 +5140,19 @@ fn remap_root_partition_update_error_detail(
     else {
         return err;
     };
-    remap_routed_insert_error_detail(err, &root_values, ctx)
+    remap_routed_insert_error_detail(err, &root_values, Some(&root_relation.desc), ctx)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn move_updated_row_to_partition(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
+    relation_oid: u32,
     toast: Option<ToastRelationRef>,
     desc: &RelationDesc,
+    rls_relation_name: &str,
+    rls_write_checks: &[RlsWriteCheck],
+    parent_rls_write_checks: &[RlsWriteCheck],
     referenced_by_foreign_keys: &[BoundReferencedByForeignKey],
     destination: PartitionUpdateDestination,
     current_tid: ItemPointerData,
@@ -4820,11 +5167,88 @@ fn move_updated_row_to_partition(
         &crate::backend::utils::misc::interrupts::InterruptState,
     )>,
 ) -> Result<WriteUpdatedRowResult, ExecError> {
+    let catalog = ctx.catalog.clone();
+    let delete_triggers = catalog
+        .as_deref()
+        .map(|catalog| {
+            RuntimeTriggers::load(
+                catalog,
+                relation_oid,
+                relation_name,
+                desc,
+                TriggerOperation::Delete,
+                &[],
+                ctx.session_replication_role,
+            )
+        })
+        .transpose()?;
+    if let Some(triggers) = &delete_triggers {
+        if !triggers.before_row_delete(current_old_values, ctx)? {
+            capture_copy_to_dml_notices();
+            return Ok(WriteUpdatedRowResult::AlreadyModified);
+        }
+        capture_copy_to_dml_notices();
+    }
+
+    let insert_triggers = catalog
+        .as_deref()
+        .map(|catalog| {
+            RuntimeTriggers::load(
+                catalog,
+                destination.relation_info.relation.relation_oid,
+                &destination.relation_info.relation_name,
+                &destination.relation_info.relation.desc,
+                TriggerOperation::Insert,
+                &[],
+                ctx.session_replication_role,
+            )
+        })
+        .transpose()?;
+    let Some(mut destination_values) = (match &insert_triggers {
+        Some(triggers) => triggers.before_row_insert(destination.values.clone(), ctx)?,
+        None => Some(destination.values.clone()),
+    }) else {
+        capture_copy_to_dml_notices();
+        return Ok(WriteUpdatedRowResult::AlreadyModified);
+    };
+    capture_copy_to_dml_notices();
+    materialize_generated_columns(
+        &destination.relation_info.relation.desc,
+        &mut destination_values,
+        ctx,
+    )?;
+    let projected_values = remap_partition_row_to_parent_layout(
+        &destination_values,
+        &destination.relation_info.relation.desc,
+        &destination.parent_desc,
+    )?;
+    if parent_rls_write_checks.is_empty() {
+        crate::backend::executor::enforce_row_security_write_checks(
+            rls_relation_name,
+            desc,
+            rls_write_checks,
+            current_values,
+            ctx,
+        )?;
+    } else {
+        crate::backend::executor::enforce_row_security_write_checks(
+            rls_relation_name,
+            &destination.parent_desc,
+            parent_rls_write_checks,
+            &projected_values,
+            ctx,
+        )?;
+    }
+    enforce_insert_domain_constraints(
+        &destination.relation_info.relation.desc,
+        &destination_values,
+        ctx,
+    )?;
     apply_inbound_foreign_key_actions_on_update(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        current_values,
+        &projected_values,
         ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
@@ -4832,7 +5256,6 @@ fn move_updated_row_to_partition(
         waiter,
     )?;
 
-    let destination = destination;
     let inserted_tid = write_insert_heap_row(
         &destination.relation_info.relation_name,
         &destination.relation_info.relation_name,
@@ -4842,17 +5265,24 @@ fn move_updated_row_to_partition(
         &destination.relation_info.relation.desc,
         &destination.relation_info.relation_constraints,
         &[],
-        &destination.values,
+        &destination_values,
         ctx,
         xid,
         cid,
     )
-    .map_err(|err| remap_routed_insert_error_detail(err, &destination.parent_values, ctx))?;
+    .map_err(|err| {
+        remap_routed_insert_error_detail(
+            err,
+            &projected_values,
+            Some(&destination.parent_desc),
+            ctx,
+        )
+    })?;
     maintain_indexes_for_row(
         destination.relation_info.relation.rel,
         &destination.relation_info.relation.desc,
         &destination.relation_info.indexes,
-        &destination.values,
+        &destination_values,
         inserted_tid,
         ctx,
     )?;
@@ -4860,7 +5290,7 @@ fn move_updated_row_to_partition(
         &destination.relation_info.relation_name,
         destination.relation_info.relation.rel,
         &destination.relation_info.relation_constraints.foreign_keys,
-        &destination.values,
+        &destination_values,
         crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
         ctx,
     )?;
@@ -4949,11 +5379,19 @@ fn move_updated_row_to_partition(
     if let (Some(toast), Some(old_tuple)) = (toast, old_tuple.as_ref()) {
         delete_external_from_tuple(ctx, toast, desc, old_tuple, xid)?;
     }
+    if let Some(triggers) = &delete_triggers {
+        triggers.after_row_delete(current_old_values, ctx)?;
+        capture_copy_to_dml_notices();
+    }
+    if let Some(triggers) = &insert_triggers {
+        triggers.after_row_insert(&destination_values, ctx)?;
+        capture_copy_to_dml_notices();
+    }
     let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        current_values,
+        &projected_values,
         ForeignKeyActionPhase::AfterParentWrite,
         ctx,
         xid,
@@ -4965,7 +5403,7 @@ fn move_updated_row_to_partition(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        current_values,
+        &projected_values,
         ctx,
     )?;
     Ok(WriteUpdatedRowResult::Updated(
@@ -4975,7 +5413,8 @@ fn move_updated_row_to_partition(
             relation_name: destination.relation_info.relation_name,
             desc: destination.relation_info.relation.desc,
             constraints: destination.relation_info.relation_constraints,
-            values: destination.values,
+            values: destination_values,
+            projected_values: Some(projected_values),
         },
         pending_no_action_checks,
         Vec::new(),
@@ -4993,6 +5432,9 @@ pub(crate) fn write_updated_row(
     desc: &RelationDesc,
     relation_constraints: &BoundRelationConstraints,
     rls_write_checks: &[RlsWriteCheck],
+    parent_desc: Option<&RelationDesc>,
+    parent_rls_write_checks: &[RlsWriteCheck],
+    reject_routed_system_column_returning: bool,
     referenced_by_foreign_keys: &[BoundReferencedByForeignKey],
     indexes: &[BoundIndexRelation],
     current_tid: ItemPointerData,
@@ -5036,14 +5478,12 @@ pub(crate) fn write_updated_row(
     } else {
         None
     };
-    crate::backend::executor::enforce_row_security_write_checks(
-        relation_name,
-        desc,
-        rls_write_checks,
-        &current_values,
-        ctx,
-    )?;
-    enforce_insert_domain_constraints(desc, &current_values, ctx)?;
+    let rls_relation_name = ctx
+        .catalog
+        .as_deref()
+        .and_then(|catalog| partition_update_root_oid.and_then(|oid| catalog.class_row_by_oid(oid)))
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_name.to_string());
     if let Some(catalog) = ctx.catalog.clone()
         && allow_partition_routing
         && let Some(destination) = route_updated_partition_row(
@@ -5058,11 +5498,18 @@ pub(crate) fn write_updated_row(
             ctx,
         )?
     {
+        if reject_routed_system_column_returning {
+            return Err(cannot_retrieve_system_column_in_context());
+        }
         return move_updated_row_to_partition(
             relation_name,
             rel,
+            relation_oid,
             toast,
             desc,
+            &rls_relation_name,
+            rls_write_checks,
+            parent_rls_write_checks,
             referenced_by_foreign_keys,
             destination,
             current_tid,
@@ -5074,6 +5521,28 @@ pub(crate) fn write_updated_row(
             waiter,
         );
     }
+    if let Some(parent_desc) = parent_desc
+        && !parent_rls_write_checks.is_empty()
+    {
+        let parent_values =
+            remap_partition_row_to_parent_layout(&current_values, desc, parent_desc)?;
+        crate::backend::executor::enforce_row_security_write_checks(
+            &rls_relation_name,
+            parent_desc,
+            parent_rls_write_checks,
+            &parent_values,
+            ctx,
+        )?;
+    } else {
+        crate::backend::executor::enforce_row_security_write_checks(
+            &rls_relation_name,
+            desc,
+            rls_write_checks,
+            &current_values,
+            ctx,
+        )?;
+    }
+    enforce_insert_domain_constraints(desc, &current_values, ctx)?;
     if !allow_partition_routing {
         enforce_direct_partition_update_constraint(relation_oid, &current_values, ctx)?;
     }
@@ -5207,6 +5676,7 @@ pub(crate) fn write_updated_row(
                     desc: desc.clone(),
                     constraints: relation_constraints.clone(),
                     values: current_values.iter().map(Value::to_owned_value).collect(),
+                    projected_values: None,
                 },
                 pending_no_action_checks,
                 pending_outbound_checks.into_iter().collect(),
@@ -6944,6 +7414,9 @@ fn apply_referential_action_to_rows(
                     &row.relation.desc,
                     &relation_constraints,
                     &[],
+                    None,
+                    &[],
+                    false,
                     &referenced_by_foreign_keys,
                     &indexes,
                     row.tid,
@@ -9026,8 +9499,20 @@ fn execute_insert_rows_with_routing(
     let result = (|| {
         let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
         let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
+        let reject_transaction_system_returning = returning
+            .is_some_and(returning_contains_transaction_system_var)
+            && partition_tree_has_nonmatching_user_layout(
+                catalog,
+                target_relation.relation_oid,
+                &target_relation.desc,
+            );
         for row in rows {
             let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
+            if reject_transaction_system_returning
+                && relation_user_layout_matches(&target_relation.desc, &leaf.desc)
+            {
+                return Err(cannot_retrieve_system_column_in_context());
+            }
             let leaf_row =
                 remap_partition_row_to_child_layout(row, &target_relation.desc, &leaf.desc)?;
             match routed.entry(leaf.relation_oid) {
@@ -9078,7 +9563,9 @@ fn execute_insert_rows_with_routing(
                     xid,
                     cid,
                 )
-                .map_err(|err| remap_routed_insert_error_detail(err, parent_row, ctx))?;
+                .map_err(|err| {
+                    remap_routed_insert_error_detail(err, parent_row, Some(desc), ctx)
+                })?;
                 if let Some(returning) = returning {
                     for leaf_row in leaf_inserted_rows.iter() {
                         let projected_row = remap_partition_row_to_parent_layout(
@@ -9122,9 +9609,15 @@ fn execute_insert_rows_with_routing(
 fn remap_routed_insert_error_detail(
     err: ExecError,
     parent_row: &[Value],
+    parent_desc: Option<&RelationDesc>,
     ctx: &ExecutorContext,
 ) -> ExecError {
-    let detail = Some(format_failing_row_detail(parent_row, &ctx.datetime_config));
+    let detail = Some(match parent_desc {
+        Some(desc) => {
+            format_failing_row_detail_for_columns(parent_row, &desc.columns, &ctx.datetime_config)
+        }
+        None => format_failing_row_detail(parent_row, &ctx.datetime_config),
+    });
     match err {
         ExecError::CheckViolation {
             relation,
@@ -9145,6 +9638,17 @@ fn remap_routed_insert_error_detail(
             column,
             constraint,
             detail,
+        },
+        ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate: "23514",
+            ..
+        } if message.contains("violates partition constraint") => ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate: "23514",
         },
         other => other,
     }
@@ -10720,7 +11224,10 @@ pub(crate) fn apply_assignment_target(
     .map_err(|err| {
         rewrite_assignment_coercion_error(desc, target, &value, assignment_type, err, ctx)
     })?;
-    let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
+    let value =
+        coerce_record_assignment_value(value.clone(), assignment_type, ctx).map_err(|err| {
+            rewrite_assignment_coercion_error(desc, target, &value, assignment_type, err, ctx)
+        })?;
     enforce_domain_constraints_for_value_ref(&value, assignment_type, ctx).map_err(|err| {
         rewrite_assignment_coercion_error(desc, target, &value, assignment_type, err, ctx)
     })?;
@@ -10759,8 +11266,16 @@ pub(crate) fn apply_assignment_target(
     };
     let current = values[target.column_index].clone();
     let column_type = desc.columns[target.column_index].sql_type;
-    let assigned =
-        assign_typed_value_ordered(current, column_type, &resolved_indirection, value, ctx)?;
+    let assigned = assign_typed_value_ordered(
+        current,
+        column_type,
+        &resolved_indirection,
+        value.clone(),
+        ctx,
+    )
+    .map_err(|err| {
+        rewrite_assignment_coercion_error(desc, target, &value, assignment_type, err, ctx)
+    })?;
     values[target.column_index] = assigned;
     Ok(())
 }
@@ -10800,7 +11315,11 @@ fn coerce_record_assignment_value(
             SqlTypeKind::Composite | SqlTypeKind::Record
         )
     {
-        return Ok(Value::Record(record));
+        return Err(ExecError::TypeMismatch {
+            op: "assignment",
+            left: Value::Null,
+            right: Value::Record(record),
+        });
     }
     let descriptor = assignment_record_descriptor(target_type, ctx)?;
     if descriptor.fields.len() != record.fields.len() {
@@ -10844,6 +11363,24 @@ fn rewrite_assignment_coercion_error(
             message: format!(
                 "subfield \"{}\" is of type {} but expression is of type {}",
                 field,
+                sql_type_display_name_with_catalog(assignment_type, ctx.catalog.as_deref()),
+                sql_type_display_name_with_catalog(actual_type, ctx.catalog.as_deref()),
+            ),
+            detail: None,
+            hint: Some("You will need to rewrite or cast the expression.".into()),
+            sqlstate: "42804",
+        };
+    }
+    if target.subscripts.is_empty()
+        && target.field_path.is_empty()
+        && target.indirection.is_empty()
+        && matches!(err, ExecError::TypeMismatch { .. })
+        && let Some(actual_type) = value.sql_type_hint()
+    {
+        return ExecError::DetailedError {
+            message: format!(
+                "column \"{}\" is of type {} but expression is of type {}",
+                desc.columns[target.column_index].name,
                 sql_type_display_name_with_catalog(assignment_type, ctx.catalog.as_deref()),
                 sql_type_display_name_with_catalog(actual_type, ctx.catalog.as_deref()),
             ),
@@ -12187,6 +12724,20 @@ pub(crate) fn project_returning_row_with_old_new(
     );
     ctx.expr_bindings.outer_system_bindings.clear();
     ctx.expr_bindings.inner_system_bindings.clear();
+    let saved_system_bindings = ctx.system_bindings.clone();
+    if let Some(table_oid) = table_oid
+        && let Some(xid) = ctx.transaction_xid()
+    {
+        let has_old = old_row.is_some();
+        let has_new = new_row.is_some();
+        ctx.system_bindings = vec![SystemVarBinding {
+            varno: 1,
+            table_oid,
+            tid,
+            xmin: has_new.then_some(xid),
+            xmax: if has_old { Some(xid) } else { Some(0) },
+        }];
+    }
     let mut slot = TupleSlot::virtual_row_with_metadata(row.to_vec(), tid, table_oid);
     let result = targets
         .iter()
@@ -12196,6 +12747,7 @@ pub(crate) fn project_returning_row_with_old_new(
         Value::materialize_all(&mut values);
         values
     });
+    ctx.system_bindings = saved_system_bindings;
     ctx.expr_bindings = saved_bindings;
     result
 }
@@ -12207,6 +12759,86 @@ fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> S
         column_names,
         rows,
     }
+}
+
+fn cannot_retrieve_system_column_in_context() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot retrieve a system column in this context".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn returning_contains_transaction_system_var(returning: &[TargetEntry]) -> bool {
+    returning
+        .iter()
+        .any(|target| expr_contains_transaction_system_var(&target.expr))
+}
+
+fn expr_contains_transaction_system_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => matches!(var.varattno, XMIN_ATTR_NO | XMAX_ATTR_NO),
+        Expr::Cast(inner, _)
+        | Expr::FieldSelect { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => expr_contains_transaction_system_var(inner),
+        Expr::Func(func) => func.args.iter().any(expr_contains_transaction_system_var),
+        Expr::Op(op) => op.args.iter().any(expr_contains_transaction_system_var),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_transaction_system_var),
+        Expr::Coalesce(left, right) => {
+            expr_contains_transaction_system_var(left)
+                || expr_contains_transaction_system_var(right)
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_transaction_system_var)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_transaction_system_var(&arm.expr)
+                        || expr_contains_transaction_system_var(&arm.result)
+                })
+                || expr_contains_transaction_system_var(&case_expr.defresult)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(expr_contains_transaction_system_var)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_transaction_system_var(expr)),
+        _ => false,
+    }
+}
+
+fn partition_tree_has_nonmatching_user_layout(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    parent_desc: &RelationDesc,
+) -> bool {
+    catalog
+        .find_all_inheritors(relation_oid)
+        .into_iter()
+        .filter(|oid| *oid != relation_oid)
+        .filter_map(|oid| catalog.relation_by_oid(oid))
+        .filter(|relation| relation.relkind == 'r')
+        .any(|relation| !relation_user_layout_matches(parent_desc, &relation.desc))
+}
+
+fn relation_user_layout_matches(parent_desc: &RelationDesc, child_desc: &RelationDesc) -> bool {
+    let parent_columns = &parent_desc.columns;
+    let child_columns = &child_desc.columns;
+    parent_columns.len() == child_columns.len()
+        && parent_columns
+            .iter()
+            .zip(child_columns.iter())
+            .all(|(parent, child)| {
+                parent.dropped == child.dropped
+                    && parent.name.eq_ignore_ascii_case(&child.name)
+                    && parent.sql_type == child.sql_type
+            })
 }
 
 pub(crate) fn execute_insert_rows(
@@ -12693,12 +13325,17 @@ pub fn execute_update_with_waiter(
                     )
                 })
                 .transpose()?;
-            if let Some(triggers) = &triggers {
+            let fire_target_statement_triggers = root_update_triggers.is_none();
+            if fire_target_statement_triggers && let Some(triggers) = &triggers {
                 triggers.before_statement(ctx)?;
             }
-            let mut transition_capture = triggers
-                .as_ref()
-                .map(|triggers| triggers.new_transition_capture());
+            let mut transition_capture = if fire_target_statement_triggers {
+                triggers
+                    .as_ref()
+                    .map(|triggers| triggers.new_transition_capture())
+            } else {
+                None
+            };
             let namespace_oid = catalog
                 .class_row_by_oid(target.relation_oid)
                 .map(|row| row.relnamespace)
@@ -12795,6 +13432,9 @@ pub fn execute_update_with_waiter(
                         &target.desc,
                         &target.relation_constraints,
                         &target.rls_write_checks,
+                        target.parent_desc.as_ref(),
+                        &target.parent_rls_write_checks,
+                        returning_contains_transaction_system_var(&stmt.returning),
                         &target.referenced_by_foreign_keys,
                         &target.indexes,
                         current_tid,
@@ -12815,10 +13455,10 @@ pub fn execute_update_with_waiter(
                             pending_outbound_checks.extend(outbound_checks);
                             pending_updated_exclusion_checks.push(PendingUpdatedExclusionCheck {
                                 relation_oid: write_info.relation_oid,
-                                relation_name: write_info.relation_name,
-                                desc: write_info.desc,
-                                constraints: write_info.constraints,
-                                values: write_info.values,
+                                relation_name: write_info.relation_name.clone(),
+                                desc: write_info.desc.clone(),
+                                constraints: write_info.constraints.clone(),
+                                values: write_info.values.clone(),
                             });
                             ctx.session_stats
                                 .write()
@@ -12829,9 +13469,11 @@ pub fn execute_update_with_waiter(
                                     target,
                                     &current_old_values,
                                     &triggered_values,
+                                    write_info.projected_values.as_deref(),
                                     &[],
                                     current_tid,
                                     new_tid,
+                                    write_info.relation_oid,
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_returning_row(row.clone());
@@ -12862,11 +13504,14 @@ pub fn execute_update_with_waiter(
                                     &target.desc,
                                     &root_relation.desc,
                                 )?;
-                                let root_new_values = remap_partition_row_to_parent_layout(
-                                    &triggered_values,
-                                    &target.desc,
-                                    &root_relation.desc,
-                                )?;
+                                let root_new_values = match write_info.projected_values.as_deref() {
+                                    Some(values) => values.to_vec(),
+                                    None => remap_partition_row_to_parent_layout(
+                                        &triggered_values,
+                                        &target.desc,
+                                        &root_relation.desc,
+                                    )?,
+                                };
                                 root_triggers.capture_update_row(
                                     root_capture,
                                     &root_old_values,
@@ -12928,7 +13573,7 @@ pub fn execute_update_with_waiter(
             validate_pending_outbound_foreign_key_checks(pending_outbound_checks, ctx)?;
             validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
-            if let Some(triggers) = &triggers {
+            if fire_target_statement_triggers && let Some(triggers) = &triggers {
                 if let Some(capture) = transition_capture.as_ref() {
                     triggers.after_transition_rows(capture, ctx)?;
                     triggers.after_statement(Some(capture), ctx)?;
@@ -13062,22 +13707,26 @@ fn project_update_from_returning_row(
     target: &BoundUpdateTarget,
     old_values: &[Value],
     new_values: &[Value],
+    new_projected_values: Option<&[Value]>,
     source_values: &[Value],
     old_tid: ItemPointerData,
     new_tid: ItemPointerData,
+    new_relation_oid: u32,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
     let old_visible_values =
         project_update_target_visible_values(target, old_values, old_tid, ctx)?;
-    let new_visible_values =
-        project_update_target_visible_values(target, new_values, new_tid, ctx)?;
+    let new_visible_values = match new_projected_values {
+        Some(values) => values.to_vec(),
+        None => project_update_target_visible_values(target, new_values, new_tid, ctx)?,
+    };
     let mut returning_values = new_visible_values.clone();
     returning_values.extend(source_values.iter().cloned());
     project_returning_row_with_old_new(
         &stmt.returning,
         &returning_values,
         Some(new_tid),
-        Some(target.relation_oid),
+        Some(new_relation_oid),
         Some(&old_visible_values),
         Some(&new_visible_values),
         ctx,
@@ -13250,6 +13899,9 @@ fn execute_update_from_joined_input(
                     &target.desc,
                     &target.relation_constraints,
                     &target.rls_write_checks,
+                    target.parent_desc.as_ref(),
+                    &target.parent_rls_write_checks,
+                    returning_contains_transaction_system_var(&stmt.returning),
                     &target.referenced_by_foreign_keys,
                     &target.indexes,
                     current_tid,
@@ -13270,10 +13922,10 @@ fn execute_update_from_joined_input(
                         pending_outbound_checks.extend(outbound_checks);
                         pending_updated_exclusion_checks.push(PendingUpdatedExclusionCheck {
                             relation_oid: write_info.relation_oid,
-                            relation_name: write_info.relation_name,
-                            desc: write_info.desc,
-                            constraints: write_info.constraints,
-                            values: write_info.values,
+                            relation_name: write_info.relation_name.clone(),
+                            desc: write_info.desc.clone(),
+                            constraints: write_info.constraints.clone(),
+                            values: write_info.values.clone(),
                         });
                         ctx.session_stats
                             .write()
@@ -13284,9 +13936,11 @@ fn execute_update_from_joined_input(
                                 target,
                                 &current_old_values,
                                 &triggered_values,
+                                write_info.projected_values.as_deref(),
                                 &source_values,
                                 current_tid,
                                 new_tid,
+                                write_info.relation_oid,
                                 ctx,
                             )?;
                             capture_copy_to_dml_returning_row(row.clone());

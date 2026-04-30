@@ -1,12 +1,14 @@
 use super::*;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{
-    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
+    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref, RecursiveUnionQuery,
+    SetOperationQuery, TableSampleClause,
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
     RelationPrivilegeMask, RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr,
-    SubLink, SubPlan, attrno_index, is_special_varno, is_system_attr, user_attrno,
+    SubLink, SubPlan, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
+    WindowSpec, attrno_index, is_special_varno, is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -768,7 +770,7 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
     source_varno: usize,
     output_exprs: &[Expr],
 ) -> Expr {
-    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, false)
+    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, false, 0)
 }
 
 pub(crate) fn rewrite_planned_local_vars_for_output_exprs(
@@ -776,7 +778,7 @@ pub(crate) fn rewrite_planned_local_vars_for_output_exprs(
     source_varno: usize,
     output_exprs: &[Expr],
 ) -> Expr {
-    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, true)
+    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, true, 0)
 }
 
 fn rewrite_local_vars_for_output_exprs_impl(
@@ -784,6 +786,7 @@ fn rewrite_local_vars_for_output_exprs_impl(
     source_varno: usize,
     output_exprs: &[Expr],
     allow_planned_subqueries: bool,
+    source_varlevelsup: usize,
 ) -> Expr {
     let rewrite_local_vars_for_output_exprs = |expr, source_varno, output_exprs| {
         rewrite_local_vars_for_output_exprs_impl(
@@ -791,6 +794,7 @@ fn rewrite_local_vars_for_output_exprs_impl(
             source_varno,
             output_exprs,
             allow_planned_subqueries,
+            source_varlevelsup,
         )
     };
     match expr {
@@ -818,11 +822,11 @@ fn rewrite_local_vars_for_output_exprs_impl(
                 .collect(),
             ..*func
         })),
-        Expr::SqlJsonQueryFunction(func) => Expr::SqlJsonQueryFunction(Box::new(
-            (*func).map_exprs(|expr| {
+        Expr::SqlJsonQueryFunction(func) => {
+            Expr::SqlJsonQueryFunction(Box::new((*func).map_exprs(|expr| {
                 rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
-            }),
-        )),
+            })))
+        }
         Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
             call: srf.call.map_exprs(|expr| {
                 rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
@@ -862,9 +866,7 @@ fn rewrite_local_vars_for_output_exprs_impl(
                 .collect(),
             aggfilter: aggref
                 .aggfilter
-                .map(|expr| {
-                    rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
-                }),
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)),
             ..*aggref
         })),
         Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
@@ -883,8 +885,8 @@ fn rewrite_local_vars_for_output_exprs_impl(
                 .collect(),
             ..*grouping_func
         })),
-        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(
-            crate::include::nodes::primnodes::WindowFuncExpr {
+        Expr::WindowFunc(window_func) => {
+            Expr::WindowFunc(Box::new(crate::include::nodes::primnodes::WindowFuncExpr {
                 kind: match window_func.kind {
                     crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
                         crate::include::nodes::primnodes::WindowFuncKind::Aggregate(
@@ -907,13 +909,11 @@ fn rewrite_local_vars_for_output_exprs_impl(
                 args: window_func
                     .args
                     .into_iter()
-                    .map(|arg| {
-                        rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs)
-                    })
+                    .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
                     .collect(),
                 ..*window_func
-            },
-        )),
+            }))
+        }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(rewrite_local_vars_for_output_exprs(
                 *saop.left,
@@ -927,8 +927,12 @@ fn rewrite_local_vars_for_output_exprs_impl(
             )),
             ..*saop
         })),
-        Expr::Var(var) if var.varlevelsup == 0 && var.varno == source_varno && !is_system_attr(var.varattno) => {
-            output_exprs
+        Expr::Var(var)
+            if var.varlevelsup == source_varlevelsup
+                && var.varno == source_varno
+                && !is_system_attr(var.varattno) =>
+        {
+            let replacement = output_exprs
                 .get(attrno_index(var.varattno).unwrap_or(usize::MAX))
                 .cloned()
                 .unwrap_or_else(|| {
@@ -937,15 +941,18 @@ fn rewrite_local_vars_for_output_exprs_impl(
                          parser/analyze should provide explicit output identity",
                         var.varattno
                     )
-                })
+                });
+            raise_expr_varlevels(replacement, source_varlevelsup)
         }
         expr @ (Expr::Param(_) | Expr::Var(_) | Expr::Const(_) | Expr::Random) => expr,
-        Expr::Cast(inner, ty) => {
-            Expr::Cast(
-                Box::new(rewrite_local_vars_for_output_exprs(*inner, source_varno, output_exprs)),
-                ty,
-            )
-        }
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(rewrite_local_vars_for_output_exprs(
+                *inner,
+                source_varno,
+                output_exprs,
+            )),
+            ty,
+        ),
         Expr::Collate {
             expr,
             collation_oid,
@@ -965,9 +972,23 @@ fn rewrite_local_vars_for_output_exprs_impl(
             negated,
             collation_oid,
         } => Expr::Like {
-            expr: Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs)),
-            pattern: Box::new(rewrite_local_vars_for_output_exprs(*pattern, source_varno, output_exprs)),
-            escape: escape.map(|expr| Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs))),
+            expr: Box::new(rewrite_local_vars_for_output_exprs(
+                *expr,
+                source_varno,
+                output_exprs,
+            )),
+            pattern: Box::new(rewrite_local_vars_for_output_exprs(
+                *pattern,
+                source_varno,
+                output_exprs,
+            )),
+            escape: escape.map(|expr| {
+                Box::new(rewrite_local_vars_for_output_exprs(
+                    *expr,
+                    source_varno,
+                    output_exprs,
+                ))
+            }),
             case_insensitive,
             negated,
             collation_oid,
@@ -979,9 +1000,23 @@ fn rewrite_local_vars_for_output_exprs_impl(
             negated,
             collation_oid,
         } => Expr::Similar {
-            expr: Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs)),
-            pattern: Box::new(rewrite_local_vars_for_output_exprs(*pattern, source_varno, output_exprs)),
-            escape: escape.map(|expr| Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs))),
+            expr: Box::new(rewrite_local_vars_for_output_exprs(
+                *expr,
+                source_varno,
+                output_exprs,
+            )),
+            pattern: Box::new(rewrite_local_vars_for_output_exprs(
+                *pattern,
+                source_varno,
+                output_exprs,
+            )),
+            escape: escape.map(|expr| {
+                Box::new(rewrite_local_vars_for_output_exprs(
+                    *expr,
+                    source_varno,
+                    output_exprs,
+                ))
+            }),
             negated,
             collation_oid,
         },
@@ -990,20 +1025,34 @@ fn rewrite_local_vars_for_output_exprs_impl(
             source_varno,
             output_exprs,
         ))),
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(rewrite_local_vars_for_output_exprs(
-                *inner,
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_local_vars_for_output_exprs(
+            *inner,
+            source_varno,
+            output_exprs,
+        ))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(rewrite_local_vars_for_output_exprs(
+                *left,
                 source_varno,
                 output_exprs,
-            )))
-        }
-        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(rewrite_local_vars_for_output_exprs(*left, source_varno, output_exprs)),
-            Box::new(rewrite_local_vars_for_output_exprs(*right, source_varno, output_exprs)),
+            )),
+            Box::new(rewrite_local_vars_for_output_exprs(
+                *right,
+                source_varno,
+                output_exprs,
+            )),
         ),
         Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(rewrite_local_vars_for_output_exprs(*left, source_varno, output_exprs)),
-            Box::new(rewrite_local_vars_for_output_exprs(*right, source_varno, output_exprs)),
+            Box::new(rewrite_local_vars_for_output_exprs(
+                *left,
+                source_varno,
+                output_exprs,
+            )),
+            Box::new(rewrite_local_vars_for_output_exprs(
+                *right,
+                source_varno,
+                output_exprs,
+            )),
         ),
         Expr::ArrayLiteral {
             elements,
@@ -1041,23 +1090,30 @@ fn rewrite_local_vars_for_output_exprs_impl(
             field_type,
         },
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
-            testexpr: sublink
-                .testexpr
-                .map(|expr| {
-                    Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs))
-                }),
-            ..*sublink
+            testexpr: sublink.testexpr.map(|expr| {
+                Box::new(rewrite_local_vars_for_output_exprs(
+                    *expr,
+                    source_varno,
+                    output_exprs,
+                ))
+            }),
+            subselect: Box::new(rewrite_query_local_vars_for_output_exprs(
+                *sublink.subselect,
+                source_varno,
+                output_exprs,
+                allow_planned_subqueries,
+                source_varlevelsup + 1,
+            )),
+            sublink_type: sublink.sublink_type,
         })),
         Expr::SubPlan(subplan) if allow_planned_subqueries => Expr::SubPlan(Box::new(SubPlan {
-            testexpr: subplan
-                .testexpr
-                .map(|expr| {
-                    Box::new(rewrite_local_vars_for_output_exprs(
-                        *expr,
-                        source_varno,
-                        output_exprs,
-                    ))
-                }),
+            testexpr: subplan.testexpr.map(|expr| {
+                Box::new(rewrite_local_vars_for_output_exprs(
+                    *expr,
+                    source_varno,
+                    output_exprs,
+                ))
+            }),
             args: subplan
                 .args
                 .into_iter()
@@ -1069,15 +1125,25 @@ fn rewrite_local_vars_for_output_exprs_impl(
             unreachable!("semantic analyze should not rewrite planned subqueries")
         }
         Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(rewrite_local_vars_for_output_exprs(*left, source_varno, output_exprs)),
-            Box::new(rewrite_local_vars_for_output_exprs(*right, source_varno, output_exprs)),
+            Box::new(rewrite_local_vars_for_output_exprs(
+                *left,
+                source_varno,
+                output_exprs,
+            )),
+            Box::new(rewrite_local_vars_for_output_exprs(
+                *right,
+                source_varno,
+                output_exprs,
+            )),
         ),
         Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
-            arg: case_expr
-                .arg
-                .map(|arg| {
-                    Box::new(rewrite_local_vars_for_output_exprs(*arg, source_varno, output_exprs))
-                }),
+            arg: case_expr.arg.map(|arg| {
+                Box::new(rewrite_local_vars_for_output_exprs(
+                    *arg,
+                    source_varno,
+                    output_exprs,
+                ))
+            }),
             args: case_expr
                 .args
                 .into_iter()
@@ -1099,17 +1165,21 @@ fn rewrite_local_vars_for_output_exprs_impl(
         })),
         Expr::CaseTest(case_test) => Expr::CaseTest(case_test),
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(rewrite_local_vars_for_output_exprs(*array, source_varno, output_exprs)),
+            array: Box::new(rewrite_local_vars_for_output_exprs(
+                *array,
+                source_varno,
+                output_exprs,
+            )),
             subscripts: subscripts
                 .into_iter()
                 .map(|subscript| ExprArraySubscript {
                     is_slice: subscript.is_slice,
-                    lower: subscript
-                        .lower
-                        .map(|expr| rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)),
-                    upper: subscript
-                        .upper
-                        .map(|expr| rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)),
+                    lower: subscript.lower.map(|expr| {
+                        rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
+                    }),
+                    upper: subscript.upper.map(|expr| {
+                        rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
+                    }),
                 })
                 .collect(),
         },
@@ -1123,5 +1193,505 @@ fn rewrite_local_vars_for_output_exprs_impl(
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. }) => expr,
+    }
+}
+
+fn rewrite_query_local_vars_for_output_exprs(
+    mut query: Query,
+    source_varno: usize,
+    output_exprs: &[Expr],
+    allow_planned_subqueries: bool,
+    source_varlevelsup: usize,
+) -> Query {
+    let rewrite_expr = |expr| {
+        rewrite_local_vars_for_output_exprs_impl(
+            expr,
+            source_varno,
+            output_exprs,
+            allow_planned_subqueries,
+            source_varlevelsup,
+        )
+    };
+
+    query.target_list = query
+        .target_list
+        .into_iter()
+        .map(|target| TargetEntry {
+            expr: rewrite_expr(target.expr),
+            ..target
+        })
+        .collect();
+    query.where_qual = query.where_qual.map(rewrite_expr);
+    query.group_by = query.group_by.into_iter().map(rewrite_expr).collect();
+    query.accumulators = query
+        .accumulators
+        .into_iter()
+        .map(|accum| AggAccum {
+            direct_args: accum.direct_args.into_iter().map(rewrite_expr).collect(),
+            args: accum.args.into_iter().map(rewrite_expr).collect(),
+            order_by: accum
+                .order_by
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: rewrite_expr(item.expr),
+                    ..item
+                })
+                .collect(),
+            filter: accum.filter.map(rewrite_expr),
+            ..accum
+        })
+        .collect();
+    query.having_qual = query.having_qual.map(rewrite_expr);
+    query.sort_clause = query
+        .sort_clause
+        .into_iter()
+        .map(|clause| SortGroupClause {
+            expr: rewrite_expr(clause.expr),
+            ..clause
+        })
+        .collect();
+    query.window_clauses = query
+        .window_clauses
+        .into_iter()
+        .map(|clause| WindowClause {
+            spec: WindowSpec {
+                partition_by: clause
+                    .spec
+                    .partition_by
+                    .into_iter()
+                    .map(rewrite_expr)
+                    .collect(),
+                order_by: clause
+                    .spec
+                    .order_by
+                    .into_iter()
+                    .map(|item| OrderByEntry {
+                        expr: rewrite_expr(item.expr),
+                        ..item
+                    })
+                    .collect(),
+                frame: rewrite_window_frame_exprs(clause.spec.frame, &rewrite_expr),
+            },
+            functions: clause.functions,
+        })
+        .collect();
+    query.jointree = query
+        .jointree
+        .map(|jointree| rewrite_jointree_local_vars(jointree, &rewrite_expr));
+    query.rtable = query
+        .rtable
+        .into_iter()
+        .map(|mut rte| {
+            rte.security_quals = rte.security_quals.into_iter().map(rewrite_expr).collect();
+            rte.kind = match rte.kind {
+                RangeTblEntryKind::Relation {
+                    rel,
+                    relation_oid,
+                    relkind,
+                    relispopulated,
+                    toast,
+                    tablesample,
+                } => RangeTblEntryKind::Relation {
+                    rel,
+                    relation_oid,
+                    relkind,
+                    relispopulated,
+                    toast,
+                    tablesample: tablesample.map(|sample| TableSampleClause {
+                        method: sample.method,
+                        args: sample.args.into_iter().map(rewrite_expr).collect(),
+                        repeatable: sample.repeatable.map(rewrite_expr),
+                    }),
+                },
+                RangeTblEntryKind::Join {
+                    jointype,
+                    joinmergedcols,
+                    joinaliasvars,
+                    joinleftcols,
+                    joinrightcols,
+                } => RangeTblEntryKind::Join {
+                    jointype,
+                    joinmergedcols,
+                    joinaliasvars: joinaliasvars.into_iter().map(rewrite_expr).collect(),
+                    joinleftcols,
+                    joinrightcols,
+                },
+                RangeTblEntryKind::Values {
+                    rows,
+                    output_columns,
+                } => RangeTblEntryKind::Values {
+                    rows: rows
+                        .into_iter()
+                        .map(|row| row.into_iter().map(rewrite_expr).collect())
+                        .collect(),
+                    output_columns,
+                },
+                RangeTblEntryKind::Function { call } => RangeTblEntryKind::Function {
+                    call: call.map_exprs(rewrite_expr),
+                },
+                RangeTblEntryKind::Cte { cte_id, query } => RangeTblEntryKind::Cte {
+                    cte_id,
+                    query: Box::new(rewrite_query_local_vars_for_output_exprs(
+                        *query,
+                        source_varno,
+                        output_exprs,
+                        allow_planned_subqueries,
+                        source_varlevelsup + 1,
+                    )),
+                },
+                RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
+                    query: Box::new(rewrite_query_local_vars_for_output_exprs(
+                        *query,
+                        source_varno,
+                        output_exprs,
+                        allow_planned_subqueries,
+                        source_varlevelsup + 1,
+                    )),
+                },
+                kind @ (RangeTblEntryKind::Result | RangeTblEntryKind::WorkTable { .. }) => kind,
+            };
+            rte
+        })
+        .collect();
+    query.recursive_union = query.recursive_union.map(|union| {
+        Box::new(RecursiveUnionQuery {
+            anchor: rewrite_query_local_vars_for_output_exprs(
+                union.anchor,
+                source_varno,
+                output_exprs,
+                allow_planned_subqueries,
+                source_varlevelsup,
+            ),
+            recursive: rewrite_query_local_vars_for_output_exprs(
+                union.recursive,
+                source_varno,
+                output_exprs,
+                allow_planned_subqueries,
+                source_varlevelsup,
+            ),
+            ..*union
+        })
+    });
+    query.set_operation = query.set_operation.map(|setop| {
+        Box::new(SetOperationQuery {
+            inputs: setop
+                .inputs
+                .into_iter()
+                .map(|input| {
+                    rewrite_query_local_vars_for_output_exprs(
+                        input,
+                        source_varno,
+                        output_exprs,
+                        allow_planned_subqueries,
+                        source_varlevelsup,
+                    )
+                })
+                .collect(),
+            ..*setop
+        })
+    });
+    query
+}
+
+fn rewrite_jointree_local_vars(
+    node: JoinTreeNode,
+    rewrite_expr: &impl Fn(Expr) -> Expr,
+) -> JoinTreeNode {
+    match node {
+        JoinTreeNode::RangeTblRef(_) => node,
+        JoinTreeNode::JoinExpr {
+            left,
+            right,
+            kind,
+            quals,
+            rtindex,
+        } => JoinTreeNode::JoinExpr {
+            left: Box::new(rewrite_jointree_local_vars(*left, rewrite_expr)),
+            right: Box::new(rewrite_jointree_local_vars(*right, rewrite_expr)),
+            kind,
+            quals: rewrite_expr(quals),
+            rtindex,
+        },
+    }
+}
+
+fn rewrite_window_frame_exprs(
+    frame: WindowFrame,
+    rewrite_expr: &impl Fn(Expr) -> Expr,
+) -> WindowFrame {
+    WindowFrame {
+        start_bound: rewrite_window_frame_bound(frame.start_bound, rewrite_expr),
+        end_bound: rewrite_window_frame_bound(frame.end_bound, rewrite_expr),
+        ..frame
+    }
+}
+
+fn rewrite_window_frame_bound(
+    bound: WindowFrameBound,
+    rewrite_expr: &impl Fn(Expr) -> Expr,
+) -> WindowFrameBound {
+    match bound {
+        WindowFrameBound::OffsetPreceding(mut offset) => {
+            offset.expr = rewrite_expr(offset.expr);
+            WindowFrameBound::OffsetPreceding(offset)
+        }
+        WindowFrameBound::OffsetFollowing(mut offset) => {
+            offset.expr = rewrite_expr(offset.expr);
+            WindowFrameBound::OffsetFollowing(offset)
+        }
+        other => other,
+    }
+}
+
+fn raise_expr_varlevels(expr: Expr, delta: usize) -> Expr {
+    if delta == 0 {
+        return expr;
+    }
+    match expr {
+        Expr::Var(mut var) => {
+            var.varlevelsup += delta;
+            Expr::Var(var)
+        }
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
+            expr: Box::new(raise_expr_varlevels(*grouping_key.expr, delta)),
+            ..*grouping_key
+        })),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: grouping_func
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            ..*grouping_func
+        })),
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            direct_args: aggref
+                .direct_args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: raise_expr_varlevels(item.expr, delta),
+                    ..item
+                })
+                .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| raise_expr_varlevels(expr, delta)),
+            ..*aggref
+        })),
+        Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(WindowFuncExpr {
+            kind: match window_func.kind {
+                WindowFuncKind::Aggregate(aggref) => {
+                    let Expr::Aggref(aggref) =
+                        raise_expr_varlevels(Expr::Aggref(Box::new(aggref)), delta)
+                    else {
+                        unreachable!()
+                    };
+                    WindowFuncKind::Aggregate(*aggref)
+                }
+                WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+            },
+            args: window_func
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            ..*window_func
+        })),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            ..*func
+        })),
+        Expr::SqlJsonQueryFunction(func) => Expr::SqlJsonQueryFunction(Box::new(
+            func.map_exprs(|expr| raise_expr_varlevels(expr, delta)),
+        )),
+        Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
+            call: srf.call.map_exprs(|expr| raise_expr_varlevels(expr, delta)),
+            ..*srf
+        })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| raise_expr_varlevels(arg, delta))
+                .collect(),
+            ..*xml
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(raise_expr_varlevels(*saop.left, delta)),
+            right: Box::new(raise_expr_varlevels(*saop.right, delta)),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(raise_expr_varlevels(*inner, delta)), ty),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(raise_expr_varlevels(*expr, delta)),
+            collation_oid,
+        },
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            collation_oid,
+        } => Expr::Like {
+            expr: Box::new(raise_expr_varlevels(*expr, delta)),
+            pattern: Box::new(raise_expr_varlevels(*pattern, delta)),
+            escape: escape.map(|expr| Box::new(raise_expr_varlevels(*expr, delta))),
+            case_insensitive,
+            negated,
+            collation_oid,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+            collation_oid,
+        } => Expr::Similar {
+            expr: Box::new(raise_expr_varlevels(*expr, delta)),
+            pattern: Box::new(raise_expr_varlevels(*pattern, delta)),
+            escape: escape.map(|expr| Box::new(raise_expr_varlevels(*expr, delta))),
+            negated,
+            collation_oid,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(raise_expr_varlevels(*inner, delta))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(raise_expr_varlevels(*inner, delta))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(raise_expr_varlevels(*left, delta)),
+            Box::new(raise_expr_varlevels(*right, delta)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(raise_expr_varlevels(*left, delta)),
+            Box::new(raise_expr_varlevels(*right, delta)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|expr| raise_expr_varlevels(expr, delta))
+                .collect(),
+            array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, raise_expr_varlevels(expr, delta)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(raise_expr_varlevels(*expr, delta)),
+            field,
+            field_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(raise_expr_varlevels(*left, delta)),
+            Box::new(raise_expr_varlevels(*right, delta)),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(raise_expr_varlevels(*array, delta)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| raise_expr_varlevels(expr, delta)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| raise_expr_varlevels(expr, delta)),
+                })
+                .collect(),
+        },
+        Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
+            testexpr: sublink
+                .testexpr
+                .map(|expr| Box::new(raise_expr_varlevels(*expr, delta))),
+            ..*sublink
+        })),
+        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
+            testexpr: subplan
+                .testexpr
+                .map(|expr| Box::new(raise_expr_varlevels(*expr, delta))),
+            args: subplan
+                .args
+                .into_iter()
+                .map(|expr| raise_expr_varlevels(expr, delta))
+                .collect(),
+            ..*subplan
+        })),
+        expr @ (Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CaseTest(_)
+        | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. }) => expr,
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(raise_expr_varlevels(*arg, delta))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: raise_expr_varlevels(arm.expr, delta),
+                    result: raise_expr_varlevels(arm.result, delta),
+                })
+                .collect(),
+            defresult: Box::new(raise_expr_varlevels(*case_expr.defresult, delta)),
+            ..*case_expr
+        })),
     }
 }

@@ -25,6 +25,7 @@ use crate::include::access::amapi::{
     IndexBeginScanContext, IndexBuildContext, IndexInsertContext, IndexUniqueCheck,
     IndexVacuumContext,
 };
+use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
@@ -394,27 +395,46 @@ fn system_catalog_index_build_context(
 pub fn maintain_catalog_indexes_for_insert(
     ctx: &CatalogWriteContext,
     heap_kind: BootstrapCatalogKind,
-    heap_tid: crate::include::access::itemptr::ItemPointerData,
+    heap_tid: ItemPointerData,
     values: &[Value],
 ) -> Result<(), CatalogError> {
     maintain_catalog_indexes_for_insert_in_db(ctx, heap_kind, 1, heap_tid, values)
 }
 
-pub fn maintain_catalog_indexes_for_insert_in_db(
+pub(crate) struct CatalogIndexInsertState {
+    contexts: Vec<IndexInsertContext>,
+}
+
+impl CatalogIndexInsertState {
+    pub(crate) fn insert(
+        &self,
+        heap_tid: ItemPointerData,
+        values: &[Value],
+    ) -> Result<(), CatalogError> {
+        for template in &self.contexts {
+            let mut insert_ctx = template.clone();
+            insert_ctx.heap_tid = heap_tid;
+            insert_ctx.values = values.to_vec();
+            crate::backend::access::index::indexam::index_insert_stub(&insert_ctx, BTREE_AM_OID)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn catalog_index_insert_state_for_db(
     ctx: &CatalogWriteContext,
     heap_kind: BootstrapCatalogKind,
     db_oid: u32,
-    heap_tid: crate::include::access::itemptr::ItemPointerData,
-    values: &[Value],
-) -> Result<(), CatalogError> {
+) -> Result<CatalogIndexInsertState, CatalogError> {
     let snapshot = ctx
         .txns
         .read()
         .snapshot_for_command(ctx.xid, ctx.cid)
         .map_err(|err| CatalogError::Io(format!("catalog snapshot failed: {err:?}")))?;
-    for descriptor in system_catalog_indexes_for_heap(heap_kind) {
-        let heap_relation = bootstrap_catalog_rel(heap_kind, db_oid);
-        let insert_ctx = IndexInsertContext {
+    let heap_relation = bootstrap_catalog_rel(heap_kind, db_oid);
+    let heap_desc = crate::include::catalog::bootstrap_relation_desc(heap_kind);
+    let contexts = system_catalog_indexes_for_heap(heap_kind)
+        .map(|descriptor| IndexInsertContext {
             pool: ctx.pool.clone(),
             txns: ctx.txns.clone(),
             txn_waiter: ctx.waiter.clone(),
@@ -422,24 +442,33 @@ pub fn maintain_catalog_indexes_for_insert_in_db(
             interrupts: ctx.interrupts.clone(),
             snapshot: snapshot.clone(),
             heap_relation,
-            heap_desc: crate::include::catalog::bootstrap_relation_desc(heap_kind),
+            heap_desc: heap_desc.clone(),
             index_relation: system_catalog_index_rel(*descriptor, db_oid),
             index_name: descriptor.relation_name.to_string(),
             index_desc: system_catalog_index_desc(*descriptor),
             index_meta: system_catalog_index_relcache(*descriptor),
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
-            heap_tid,
+            heap_tid: ItemPointerData::default(),
             old_heap_tid: None,
-            values: values.to_vec(),
+            values: Vec::new(),
             unique_check: if descriptor.unique {
                 IndexUniqueCheck::Yes
             } else {
                 IndexUniqueCheck::No
             },
-        };
-        crate::backend::access::index::indexam::index_insert_stub(&insert_ctx, BTREE_AM_OID)?;
-    }
-    Ok(())
+        })
+        .collect();
+    Ok(CatalogIndexInsertState { contexts })
+}
+
+pub fn maintain_catalog_indexes_for_insert_in_db(
+    ctx: &CatalogWriteContext,
+    heap_kind: BootstrapCatalogKind,
+    db_oid: u32,
+    heap_tid: ItemPointerData,
+    values: &[Value],
+) -> Result<(), CatalogError> {
+    catalog_index_insert_state_for_db(ctx, heap_kind, db_oid)?.insert(heap_tid, values)
 }
 
 pub fn probe_system_catalog_rows_visible(
