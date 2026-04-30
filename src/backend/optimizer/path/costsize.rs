@@ -5484,6 +5484,7 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
             expr_uses_immediate_outer_columns(relid)
         }
         SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgStatProgressCopy { .. }
         | SetReturningCall::PgSequences { .. }
         | SetReturningCall::InformationSchemaSequences { .. } => false,
         SetReturningCall::TxidSnapshotXip { arg, .. } => expr_uses_immediate_outer_columns(arg),

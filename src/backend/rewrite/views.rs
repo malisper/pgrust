@@ -1937,6 +1937,13 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
         SetReturningCall::PgLockStatus {
             with_ordinality, ..
         } => ("pg_lock_status".to_string(), Vec::new(), *with_ordinality),
+        SetReturningCall::PgStatProgressCopy {
+            with_ordinality, ..
+        } => (
+            "pg_stat_progress_copy".to_string(),
+            Vec::new(),
+            *with_ordinality,
+        ),
         SetReturningCall::PgSequences {
             with_ordinality, ..
         } => ("pg_sequences".to_string(), Vec::new(), *with_ordinality),

@@ -387,6 +387,7 @@ fn query_references_local_cte(
                     SetReturningCall::PartitionTree { relid, .. }
                     | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
                     SetReturningCall::PgLockStatus { .. }
+                    | SetReturningCall::PgStatProgressCopy { .. }
                     | SetReturningCall::PgSequences { .. }
                     | SetReturningCall::InformationSchemaSequences { .. } => Vec::new(),
                     SetReturningCall::TxidSnapshotXip { arg, .. } => vec![arg],

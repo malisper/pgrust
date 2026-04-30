@@ -140,6 +140,17 @@ pub(super) fn bind_builtin_system_view(
             },
         );
     }
+    if matches!(view.kind, SyntheticSystemViewKind::PgStatProgressCopy) {
+        let output_columns = view.output_columns();
+        return build_function_view(
+            name,
+            output_columns.clone(),
+            SetReturningCall::PgStatProgressCopy {
+                output_columns,
+                with_ordinality: false,
+            },
+        );
+    }
     if matches!(view.kind, SyntheticSystemViewKind::PgSequences) {
         let output_columns = view.output_columns();
         return build_function_view(
@@ -361,7 +372,9 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgStatioUserTables => catalog.pg_statio_user_tables_rows(),
         SyntheticSystemViewKind::PgStatUserFunctions => catalog.pg_stat_user_functions_rows(),
         SyntheticSystemViewKind::PgStatIo => catalog.pg_stat_io_rows(),
-        SyntheticSystemViewKind::PgStatProgressCopy => catalog.pg_stat_progress_copy_rows(),
+        SyntheticSystemViewKind::PgStatProgressCopy => {
+            unreachable!("pg_stat_progress_copy is bound as a runtime SRF")
+        }
         SyntheticSystemViewKind::PgLocks => unreachable!("pg_locks is bound as pg_lock_status()"),
         SyntheticSystemViewKind::InformationSchemaTables => information_schema_table_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaViews => information_schema_view_rows(catalog),
