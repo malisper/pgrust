@@ -190,7 +190,7 @@ fn plan_needs_network_strict_less_tiebreak(plan: &Plan) -> bool {
 fn recursive_union_distinct_hashable(sql_type: SqlType) -> bool {
     !matches!(
         sql_type.element_type().kind,
-        SqlTypeKind::VarBit | SqlTypeKind::Json | SqlTypeKind::JsonPath | SqlTypeKind::Record
+        SqlTypeKind::VarBit | SqlTypeKind::Json | SqlTypeKind::JsonPath
     )
 }
 

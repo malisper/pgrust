@@ -892,6 +892,16 @@ pub(super) fn bind_from_item_with_ctes(
             ctes,
         ),
         FromItem::DerivedTable(select) => {
+            if select
+                .with
+                .iter()
+                .any(|cte| super::cte_body_is_modifying(&cte.body))
+            {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "WITH clause containing a data-modifying statement must be at the top level"
+                        .into(),
+                ));
+            }
             reject_from_subselect_outer_aggregates(
                 select,
                 catalog,
@@ -931,6 +941,16 @@ pub(super) fn bind_from_item_with_ctes(
         }
         FromItem::Lateral(source) => match source.as_ref() {
             FromItem::DerivedTable(select) => {
+                if select
+                    .with
+                    .iter()
+                    .any(|cte| super::cte_body_is_modifying(&cte.body))
+                {
+                    return Err(ParseError::FeatureNotSupportedMessage(
+                        "WITH clause containing a data-modifying statement must be at the top level"
+                            .into(),
+                    ));
+                }
                 reject_from_subselect_outer_aggregates(
                     select,
                     catalog,

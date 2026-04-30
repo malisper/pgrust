@@ -1168,7 +1168,7 @@ fn bind_money_arithmetic_expr(
     })
 }
 
-pub(super) fn supports_comparison_operator(
+pub(crate) fn supports_comparison_operator(
     catalog: &dyn CatalogLookup,
     op: &str,
     left: SqlType,

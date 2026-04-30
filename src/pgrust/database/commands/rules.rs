@@ -15,7 +15,7 @@ use crate::backend::commands::tablecmds::{
 };
 use crate::backend::commands::trigger::{RuntimeTriggers, relation_has_instead_row_trigger};
 use crate::backend::executor::{
-    ExecError, ExecutorContext, StatementResult, TupleSlot, Value, eval_expr,
+    ExecError, ExecutorContext, StatementResult, TupleSlot, Value, eval_expr, execute_planned_stmt,
 };
 use crate::backend::parser::{
     BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement,
@@ -33,7 +33,7 @@ use crate::pgrust::database::TransactionWaiter;
 use crate::pgrust::database::ddl::map_catalog_error;
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_rule_relation_for_ddl};
 use crate::pgrust::database::foreign_keys::TableLockRequest;
-use crate::pgrust::database::{AutoCommitGuard, Database};
+use crate::pgrust::database::{AutoCommitGuard, Database, queue_pending_notification};
 use crate::pl::plpgsql::TriggerOperation;
 
 impl Database {
@@ -105,6 +105,15 @@ impl Database {
             waiter: None,
             interrupts: Arc::clone(&self.interrupt_state(client_id)),
         };
+        if create_stmt.replace_existing
+            && let Some(existing) =
+                lookup_rule_row(&catalog, relation.relation_oid, &create_stmt.rule_name)
+        {
+            let effect = catalog_guard
+                .drop_rule_mvcc(existing.oid, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
         let effect = catalog_guard
             .create_rule_mvcc(
                 relation.relation_oid,
@@ -311,7 +320,9 @@ fn validate_create_rule_stmt(
             "DO ALSO NOTHING".into(),
         )));
     }
-    if lookup_rule_row(catalog, relation.relation_oid, &create_stmt.rule_name).is_some() {
+    if lookup_rule_row(catalog, relation.relation_oid, &create_stmt.rule_name).is_some()
+        && !create_stmt.replace_existing
+    {
         return Err(ExecError::DetailedError {
             message: format!(
                 "rule \"{}\" for relation \"{}\" already exists",
@@ -348,6 +359,67 @@ fn referenced_relation_oids_for_rule(
         }
     }
     Ok(referenced.into_iter().collect())
+}
+
+pub(crate) fn enforce_modifying_cte_rule_restrictions(
+    relation_oid: u32,
+    event: RuleEvent,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for row in catalog
+        .rewrite_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter(|row| row.rulename != "_RETURN" && row.ev_type == rule_event_code(event))
+    {
+        if !row.ev_qual.is_empty() && row.is_instead {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "conditional DO INSTEAD rules are not supported for data-modifying statements in WITH"
+                    .into(),
+            )));
+        }
+        if !row.is_instead {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "DO ALSO rules are not supported for data-modifying statements in WITH".into(),
+            )));
+        }
+
+        let action_sql = split_stored_rule_action_sql(&row.ev_action);
+        if action_sql.is_empty() {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "DO INSTEAD NOTHING rules are not supported for data-modifying statements in WITH"
+                    .into(),
+            )));
+        }
+        if action_sql.len() > 1 {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "multi-statement DO INSTEAD rules are not supported for data-modifying statements in WITH"
+                    .into(),
+            )));
+        }
+
+        let statement = crate::backend::parser::parse_statement(action_sql[0])?;
+        match statement {
+            Statement::Notify(_) => {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                    "DO INSTEAD NOTIFY rules are not supported for data-modifying statements in WITH"
+                        .into(),
+                )));
+            }
+            Statement::Insert(insert)
+                if matches!(
+                    insert.source,
+                    crate::backend::parser::InsertSource::Select(_)
+                ) =>
+            {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                    "INSERT ... SELECT rule actions are not supported for queries having data-modifying statements in WITH"
+                        .into(),
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn lookup_rule_row(
@@ -1258,6 +1330,11 @@ fn rule_action_has_returning(action: &crate::backend::parser::BoundRuleAction) -
         crate::backend::parser::BoundRuleAction::Insert(stmt) => !stmt.returning.is_empty(),
         crate::backend::parser::BoundRuleAction::Update(stmt) => !stmt.returning.is_empty(),
         crate::backend::parser::BoundRuleAction::Delete(stmt) => !stmt.returning.is_empty(),
+        crate::backend::parser::BoundRuleAction::Select(_)
+        | crate::backend::parser::BoundRuleAction::Notify(_) => false,
+        crate::backend::parser::BoundRuleAction::Sequence(actions) => {
+            actions.last().is_some_and(rule_action_has_returning)
+        }
     }
 }
 
@@ -1370,13 +1447,34 @@ fn execute_rule_action(
 ) -> Result<StatementResult, ExecError> {
     match action {
         crate::backend::parser::BoundRuleAction::Insert(stmt) => {
-            execute_bound_insert_with_rules(stmt.clone(), catalog, ctx, xid, cid)
+            let prepared = prepare_bound_insert_for_execution(stmt.clone(), catalog)?;
+            execute_bound_insert_with_rules(prepared.stmt, catalog, ctx, xid, cid)
         }
         crate::backend::parser::BoundRuleAction::Update(stmt) => {
-            execute_bound_update_with_rules(stmt.clone(), catalog, ctx, xid, cid, waiter)
+            let prepared = prepare_bound_update_for_execution(stmt.clone(), catalog)?;
+            execute_bound_update_with_rules(prepared.stmt, catalog, ctx, xid, cid, waiter)
         }
         crate::backend::parser::BoundRuleAction::Delete(stmt) => {
-            execute_bound_delete_with_rules(stmt.clone(), catalog, ctx, xid, waiter)
+            let prepared = prepare_bound_delete_for_execution(stmt.clone(), catalog)?;
+            execute_bound_delete_with_rules(prepared.stmt, catalog, ctx, xid, waiter)
+        }
+        crate::backend::parser::BoundRuleAction::Select(stmt) => {
+            execute_planned_stmt(stmt.clone(), ctx)
+        }
+        crate::backend::parser::BoundRuleAction::Notify(stmt) => {
+            queue_pending_notification(
+                &mut ctx.pending_async_notifications,
+                &stmt.channel,
+                stmt.payload.as_deref().unwrap_or(""),
+            )?;
+            Ok(StatementResult::AffectedRows(0))
+        }
+        crate::backend::parser::BoundRuleAction::Sequence(actions) => {
+            let mut result = StatementResult::AffectedRows(0);
+            for action in actions {
+                result = execute_rule_action(action, catalog, ctx, xid, cid, waiter)?;
+            }
+            Ok(result)
         }
     }
 }

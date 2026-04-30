@@ -5946,6 +5946,7 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::LPad
             | BuiltinScalarFunction::RPad
             | BuiltinScalarFunction::ObjDescription
+            | BuiltinScalarFunction::PgGetViewDef
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim

@@ -5,10 +5,14 @@ use crate::backend::executor::{
     execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
-    CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions,
-    PreparedExternalParam, SelectStatement, UpdateStatement,
-    bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope,
-    bound_cte_from_query_rows, resolve_raw_type_name, with_external_param_types,
+    BoundCte, CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement,
+    ParseOptions, PreparedExternalParam, RuleEvent, SelectStatement, UpdateStatement,
+    bind_delete_with_outer_scopes_and_ctes, bind_insert_with_outer_scopes_and_ctes,
+    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes_and_ctes,
+    bound_cte_from_query_rows, cte_body_references_table, delete_statement_references_table,
+    insert_statement_references_table, merge_statement_references_table,
+    pg_plan_values_query_with_outer_scopes_and_ctes, plan_merge_with_outer_ctes,
+    resolve_raw_type_name, update_statement_references_table, with_external_param_types,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::push_warning_with_hint;
@@ -129,6 +133,19 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
         ),
         fold_constants: true,
     }
+}
+
+fn refresh_autocommit_snapshot_after_lock_wait(
+    db: &Database,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waited_for_lock: bool,
+) -> Result<(), ExecError> {
+    if waited_for_lock {
+        ctx.snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -288,13 +305,8 @@ fn reject_restricted_views_in_cte_body(
         CteBody::Values(_) => Ok(()),
         CteBody::Insert(insert) => reject_restricted_views_in_insert(insert, catalog),
         CteBody::Update(update) => reject_restricted_views_in_update(update, catalog),
-        CteBody::Merge(merge) => {
-            for cte in &merge.with {
-                reject_restricted_views_in_cte_body(&cte.body, catalog)?;
-            }
-            reject_restricted_view_access(&merge.target_table, catalog)?;
-            reject_restricted_views_in_from_item(&merge.source, catalog)
-        }
+        CteBody::Delete(delete) => reject_restricted_views_in_delete(delete, catalog),
+        CteBody::Merge(merge) => reject_restricted_views_in_merge(merge, catalog),
         CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -356,6 +368,31 @@ fn reject_restricted_views_in_update(
     Ok(())
 }
 
+fn reject_restricted_views_in_delete(
+    delete: &crate::backend::parser::DeleteStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for cte in &delete.with {
+        reject_restricted_views_in_cte_body(&cte.body, catalog)?;
+    }
+    reject_restricted_view_access(&delete.table_name, catalog)?;
+    if let Some(using) = &delete.using {
+        reject_restricted_views_in_from_item(using, catalog)?;
+    }
+    Ok(())
+}
+
+fn reject_restricted_views_in_merge(
+    merge: &crate::backend::parser::MergeStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    for cte in &merge.with {
+        reject_restricted_views_in_cte_body(&cte.body, catalog)?;
+    }
+    reject_restricted_view_access(&merge.target_table, catalog)?;
+    reject_restricted_views_in_from_item(&merge.source, catalog)
+}
+
 fn autocommit_datetime_config(config: &DateTimeConfig) -> DateTimeConfig {
     let statement_timestamp_usecs = config
         .statement_timestamp_usecs
@@ -396,6 +433,218 @@ fn apply_writable_cte_column_aliases(
         column.name = name.clone();
     }
     Ok(columns)
+}
+
+fn cte_body_has_writable(body: &CteBody) -> bool {
+    match body {
+        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => true,
+        CteBody::Select(select) => select_has_writable_ctes(select),
+        CteBody::Values(values) => values
+            .with
+            .iter()
+            .any(|cte| cte_body_has_writable(&cte.body)),
+        CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            cte_body_has_writable(anchor)
+                || recursive
+                    .with
+                    .iter()
+                    .any(|cte| cte_body_has_writable(&cte.body))
+        }
+    }
+}
+
+fn select_has_writable_ctes(select: &SelectStatement) -> bool {
+    select
+        .with
+        .iter()
+        .any(|cte| cte_body_has_writable(&cte.body))
+        || select
+            .set_operation
+            .as_ref()
+            .is_some_and(|setop| setop.inputs.iter().any(select_has_writable_ctes))
+}
+
+fn cte_body_is_modifying(body: &CteBody) -> bool {
+    matches!(
+        body,
+        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_)
+    )
+}
+
+fn modifying_cte_body_has_returning(body: &CteBody) -> bool {
+    match body {
+        CteBody::Insert(insert) => !insert.returning.is_empty(),
+        CteBody::Update(update) => !update.returning.is_empty(),
+        CteBody::Delete(delete) => !delete.returning.is_empty(),
+        CteBody::Merge(merge) => !merge.returning.is_empty(),
+        _ => false,
+    }
+}
+
+fn modifying_cte_body_has_nested_modifying_ctes(body: &CteBody) -> bool {
+    let nested = match body {
+        CteBody::Insert(insert) => &insert.with,
+        CteBody::Update(update) => &update.with,
+        CteBody::Delete(delete) => &delete.with,
+        CteBody::Merge(merge) => &merge.with,
+        _ => return false,
+    };
+    nested.iter().any(|cte| cte_body_has_writable(&cte.body))
+}
+
+fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> CteBody {
+    match body {
+        CteBody::Insert(insert) => {
+            let mut insert = (**insert).clone();
+            let mut with = ctes.to_vec();
+            with.extend(insert.with);
+            insert.with = with;
+            CteBody::Insert(Box::new(insert))
+        }
+        CteBody::Update(update) => {
+            let mut update = (**update).clone();
+            let mut with = ctes.to_vec();
+            with.extend(update.with);
+            update.with = with;
+            CteBody::Update(Box::new(update))
+        }
+        CteBody::Delete(delete) => {
+            let mut delete = (**delete).clone();
+            let mut with = ctes.to_vec();
+            with.extend(delete.with);
+            delete.with = with;
+            CteBody::Delete(Box::new(delete))
+        }
+        CteBody::Merge(merge) => {
+            let mut merge = (**merge).clone();
+            let mut with = ctes.to_vec();
+            with.extend(merge.with);
+            merge.with = with;
+            CteBody::Merge(Box::new(merge))
+        }
+        _ => body.clone(),
+    }
+}
+
+fn modifying_cte_reference_error(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::FeatureNotSupportedMessage(format!(
+        "WITH query \"{name}\" does not have a RETURNING clause"
+    )))
+}
+
+fn recursive_modifying_cte_error(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::InvalidRecursion(format!(
+        "recursive query \"{name}\" must not contain data-modifying statements"
+    )))
+}
+
+fn nested_modifying_cte_error() -> ExecError {
+    ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+        "WITH clause containing a data-modifying statement must be at the top level".into(),
+    ))
+}
+
+fn cte_referenced_after<F>(
+    ctes: &[CommonTableExpr],
+    cte_index: usize,
+    name: &str,
+    with_recursive: bool,
+    outer_references: &F,
+) -> bool
+where
+    F: Fn(&str) -> bool,
+{
+    let referenced_by_ctes = if with_recursive {
+        ctes.iter()
+            .enumerate()
+            .any(|(index, cte)| index != cte_index && cte_body_references_table(&cte.body, name))
+    } else {
+        ctes.iter()
+            .skip(cte_index + 1)
+            .any(|later| cte_body_references_table(&later.body, name))
+    };
+    referenced_by_ctes || outer_references(name)
+}
+
+fn modifying_cte_execution_order(
+    ctes: &[CommonTableExpr],
+    with_recursive: bool,
+) -> Result<Vec<usize>, ExecError> {
+    let modifying_indexes = ctes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cte)| cte_body_is_modifying(&cte.body).then_some(index))
+        .collect::<Vec<_>>();
+    if !with_recursive {
+        return Ok(modifying_indexes);
+    }
+
+    fn visit(
+        ctes: &[CommonTableExpr],
+        modifying_indexes: &[usize],
+        index: usize,
+        state: &mut [u8],
+        order: &mut Vec<usize>,
+    ) -> Result<(), ExecError> {
+        match state[index] {
+            1 => return Err(recursive_modifying_cte_error(&ctes[index].name)),
+            2 => return Ok(()),
+            _ => {}
+        }
+        state[index] = 1;
+        for &dependency in modifying_indexes {
+            if dependency != index
+                && cte_body_references_table(&ctes[index].body, &ctes[dependency].name)
+            {
+                visit(ctes, modifying_indexes, dependency, state, order)?;
+            }
+        }
+        state[index] = 2;
+        order.push(index);
+        Ok(())
+    }
+
+    let mut state = vec![0; ctes.len()];
+    let mut order = Vec::with_capacity(modifying_indexes.len());
+    for &index in &modifying_indexes {
+        visit(ctes, &modifying_indexes, index, &mut state, &mut order)?;
+    }
+    Ok(order)
+}
+
+fn visible_select_ctes_for_modifying_body(
+    ctes: &[CommonTableExpr],
+    cte_index: usize,
+    with_recursive: bool,
+    all_select_ctes: &[CommonTableExpr],
+) -> Vec<CommonTableExpr> {
+    if with_recursive {
+        return all_select_ctes.to_vec();
+    }
+    ctes.iter()
+        .take(cte_index)
+        .filter(|cte| !cte_body_is_modifying(&cte.body))
+        .cloned()
+        .collect()
+}
+
+fn materialized_cte_from_dml_result(
+    cte: &CommonTableExpr,
+    result: StatementResult,
+) -> Result<Option<BoundCte>, ExecError> {
+    match result {
+        StatementResult::Query { columns, rows, .. } => {
+            let columns = apply_writable_cte_column_aliases(cte, columns)?;
+            Ok(Some(bound_cte_from_query_rows(
+                cte.name.clone(),
+                columns,
+                &rows,
+            )))
+        }
+        StatementResult::AffectedRows(_) => Ok(None),
+    }
 }
 
 fn oa_sql_tokens(sql: &str) -> Vec<String> {
@@ -460,6 +709,205 @@ fn oa_unsupported_ddl(feature: &str, sql: &str) -> ExecError {
 }
 
 impl Database {
+    fn execute_modifying_cte_body_autocommit(
+        &self,
+        client_id: ClientId,
+        interrupts: &Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+        locked_rels: &mut Vec<crate::backend::storage::smgr::RelFileLocator>,
+        cte: &CommonTableExpr,
+        catalog: &dyn CatalogLookup,
+        ctx: &mut ExecutorContext,
+        xid: TransactionId,
+        cid: CommandId,
+        materialized_ctes: &[BoundCte],
+    ) -> Result<Option<BoundCte>, ExecError> {
+        let result = match &cte.body {
+            CteBody::Insert(cte_insert) => {
+                let bound = bind_insert_with_outer_scopes_and_ctes(
+                    cte_insert,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?;
+                let prepared = super::rules::prepare_bound_insert_for_execution(bound, catalog)?;
+                super::rules::enforce_modifying_cte_rule_restrictions(
+                    prepared.stmt.relation_oid,
+                    RuleEvent::Insert,
+                    catalog,
+                )?;
+                let lock_requests = merge_table_lock_requests(
+                    &insert_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
+                let waited_for_lock =
+                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                        &self.table_locks,
+                        client_id,
+                        &lock_requests,
+                        interrupts.as_ref(),
+                    )?;
+                locked_rels.extend(table_lock_relations(&lock_requests));
+                refresh_autocommit_snapshot_after_lock_wait(self, ctx, xid, cid, waited_for_lock)?;
+                super::rules::execute_bound_insert_with_rules(
+                    prepared.stmt,
+                    catalog,
+                    ctx,
+                    xid,
+                    cid,
+                )?
+            }
+            CteBody::Update(cte_update) => {
+                let bound = bind_update_with_outer_scopes_and_ctes(
+                    cte_update,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?;
+                let prepared = super::rules::prepare_bound_update_for_execution(bound, catalog)?;
+                for target in &prepared.stmt.targets {
+                    super::rules::enforce_modifying_cte_rule_restrictions(
+                        target.relation_oid,
+                        RuleEvent::Update,
+                        catalog,
+                    )?;
+                }
+                let lock_requests = merge_table_lock_requests(
+                    &update_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
+                let waited_for_lock =
+                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                        &self.table_locks,
+                        client_id,
+                        &lock_requests,
+                        interrupts.as_ref(),
+                    )?;
+                locked_rels.extend(table_lock_relations(&lock_requests));
+                refresh_autocommit_snapshot_after_lock_wait(self, ctx, xid, cid, waited_for_lock)?;
+                super::rules::execute_bound_update_with_rules(
+                    prepared.stmt,
+                    catalog,
+                    ctx,
+                    xid,
+                    cid,
+                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
+                )?
+            }
+            CteBody::Delete(cte_delete) => {
+                let bound = bind_delete_with_outer_scopes_and_ctes(
+                    cte_delete,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?;
+                let prepared = super::rules::prepare_bound_delete_for_execution(bound, catalog)?;
+                for target in &prepared.stmt.targets {
+                    super::rules::enforce_modifying_cte_rule_restrictions(
+                        target.relation_oid,
+                        RuleEvent::Delete,
+                        catalog,
+                    )?;
+                }
+                let lock_requests = merge_table_lock_requests(
+                    &delete_foreign_key_lock_requests(&prepared.stmt),
+                    &prepared.extra_lock_requests,
+                );
+                let waited_for_lock =
+                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                        &self.table_locks,
+                        client_id,
+                        &lock_requests,
+                        interrupts.as_ref(),
+                    )?;
+                locked_rels.extend(table_lock_relations(&lock_requests));
+                refresh_autocommit_snapshot_after_lock_wait(self, ctx, xid, cid, waited_for_lock)?;
+                super::rules::execute_bound_delete_with_rules(
+                    prepared.stmt,
+                    catalog,
+                    ctx,
+                    xid,
+                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
+                )?
+            }
+            CteBody::Merge(cte_merge) => {
+                let bound = plan_merge_with_outer_ctes(cte_merge, catalog, materialized_ctes)?;
+                crate::backend::commands::tablecmds::execute_merge(bound, catalog, ctx, xid, cid)?
+            }
+            _ => return Ok(None),
+        };
+        materialized_cte_from_dml_result(cte, result)
+    }
+
+    fn materialize_modifying_ctes_autocommit<F>(
+        &self,
+        client_id: ClientId,
+        interrupts: &Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+        locked_rels: &mut Vec<crate::backend::storage::smgr::RelFileLocator>,
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+        catalog: &dyn CatalogLookup,
+        ctx: &mut ExecutorContext,
+        xid: TransactionId,
+        cid: CommandId,
+        outer_references: F,
+    ) -> Result<(Vec<BoundCte>, Vec<CommonTableExpr>), ExecError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut materialized_ctes = Vec::new();
+        let mut remaining_ctes = Vec::new();
+
+        for cte in ctes {
+            if !cte_body_is_modifying(&cte.body) {
+                if cte_body_has_writable(&cte.body) {
+                    return Err(nested_modifying_cte_error());
+                }
+                remaining_ctes.push(cte.clone());
+            }
+        }
+
+        let execution_order = modifying_cte_execution_order(ctes, with_recursive)?;
+        for index in execution_order {
+            let cte = &ctes[index];
+
+            if cte_body_references_table(&cte.body, &cte.name) {
+                return Err(recursive_modifying_cte_error(&cte.name));
+            }
+            if modifying_cte_body_has_nested_modifying_ctes(&cte.body) {
+                return Err(nested_modifying_cte_error());
+            }
+            if !modifying_cte_body_has_returning(&cte.body)
+                && cte_referenced_after(ctes, index, &cte.name, with_recursive, &outer_references)
+            {
+                return Err(modifying_cte_reference_error(&cte.name));
+            }
+
+            let mut executable = cte.clone();
+            let visible_select_ctes = visible_select_ctes_for_modifying_body(
+                ctes,
+                index,
+                with_recursive,
+                &remaining_ctes,
+            );
+            executable.body = prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes);
+            if let Some(bound) = self.execute_modifying_cte_body_autocommit(
+                client_id,
+                interrupts,
+                locked_rels,
+                &executable,
+                catalog,
+                ctx,
+                xid,
+                cid,
+                &materialized_ctes,
+            )? {
+                materialized_ctes.push(bound);
+            }
+        }
+
+        Ok((materialized_ctes, remaining_ctes))
+    }
+
     fn execute_object_address_unsupported_stmt(
         &self,
         client_id: ClientId,
@@ -1817,7 +2265,6 @@ impl Database {
                 ),
             Statement::Merge(ref merge_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let bound = crate::backend::parser::plan_merge(merge_stmt, &catalog)?;
                 let xid = self.txns.write().begin();
                 let guard =
                     AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
@@ -1880,9 +2327,42 @@ impl Database {
                     deferred_foreign_keys: None,
                     trigger_depth: 0,
                 };
-                let result = crate::backend::commands::tablecmds::execute_merge(
-                    bound, &catalog, &mut ctx, xid, 0,
-                );
+                let mut locked_rels = Vec::new();
+                let result = (|| {
+                    let has_writable_ctes = merge_stmt
+                        .with
+                        .iter()
+                        .any(|cte| cte_body_has_writable(&cte.body));
+                    if !has_writable_ctes {
+                        let bound = crate::backend::parser::plan_merge(merge_stmt, &catalog)?;
+                        return crate::backend::commands::tablecmds::execute_merge(
+                            bound, &catalog, &mut ctx, xid, 0,
+                        );
+                    }
+
+                    let mut outer_merge = merge_stmt.clone();
+                    outer_merge.with.clear();
+                    let refs_merge = outer_merge.clone();
+                    let (materialized_ctes, remaining_ctes) = self
+                        .materialize_modifying_ctes_autocommit(
+                            client_id,
+                            &interrupts,
+                            &mut locked_rels,
+                            &merge_stmt.with,
+                            merge_stmt.with_recursive,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            0,
+                            |name| merge_statement_references_table(&refs_merge, name),
+                        )?;
+                    outer_merge.with = remaining_ctes;
+                    let bound =
+                        plan_merge_with_outer_ctes(&outer_merge, &catalog, &materialized_ctes)?;
+                    crate::backend::commands::tablecmds::execute_merge(
+                        bound, &catalog, &mut ctx, xid, 0,
+                    )
+                })();
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
@@ -1896,6 +2376,7 @@ impl Database {
                     pending_async_notifications,
                 );
                 guard.disarm();
+                unlock_relations(&self.table_locks, client_id, &locked_rels);
                 result
             }
             Statement::CommentOnTable(ref comment_stmt) => self
@@ -2092,6 +2573,135 @@ impl Database {
             Statement::DropUserMapping(ref drop_stmt) => {
                 self.execute_drop_user_mapping_stmt(client_id, drop_stmt)
             }
+            Statement::Values(ref values_stmt)
+                if values_stmt
+                    .with
+                    .iter()
+                    .any(|cte| cte_body_has_writable(&cte.body)) =>
+            {
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let xid = self.txns.write().begin();
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
+                let deferred_foreign_keys =
+                    crate::backend::executor::DeferredForeignKeyTracker::default();
+                let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
+                let mut ctx = ExecutorContext {
+                    pool: std::sync::Arc::clone(&self.pool),
+                    data_dir: Some(self.cluster.base_dir.clone()),
+                    txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
+                    sequences: Some(self.sequences.clone()),
+                    large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+                    row_locks: std::sync::Arc::clone(&self.row_locks),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
+                    datetime_config: datetime_config.clone(),
+                    statement_timestamp_usecs: statement_timestamp_usecs(datetime_config),
+                    gucs: gucs.clone(),
+                    interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
+                    snapshot,
+                    transaction_state: None,
+                    client_id,
+                    current_database_name: self.current_database_name(),
+                    session_user_oid: self.auth_state(client_id).session_user_oid(),
+                    current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    session_replication_role,
+                    statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
+                    next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
+                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+                    case_test_values: Vec::new(),
+                    system_bindings: Vec::new(),
+                    active_grouping_refs: Vec::new(),
+                    subplans: Vec::new(),
+                    timed: false,
+                    allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
+                    catalog_effects: Vec::new(),
+                    temp_effects: Vec::new(),
+                    database: Some(self.clone()),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
+                    pending_portals: Vec::new(),
+                    catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                    scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
+                    trigger_depth: 0,
+                };
+                let mut locked_rels = Vec::new();
+                let result = (|| {
+                    let mut outer_values = values_stmt.clone();
+                    outer_values.with.clear();
+                    let refs_body = CteBody::Values(outer_values.clone());
+                    let (materialized_ctes, remaining_ctes) = self
+                        .materialize_modifying_ctes_autocommit(
+                            client_id,
+                            &interrupts,
+                            &mut locked_rels,
+                            &values_stmt.with,
+                            values_stmt.with_recursive,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            0,
+                            |name| cte_body_references_table(&refs_body, name),
+                        )?;
+                    outer_values.with = remaining_ctes;
+                    let planned = pg_plan_values_query_with_outer_scopes_and_ctes(
+                        &outer_values,
+                        &catalog,
+                        &[],
+                        &materialized_ctes,
+                    )?;
+                    execute_planned_stmt(planned, &mut ctx)
+                })();
+                let pending_async_notifications =
+                    std::mem::take(&mut ctx.pending_async_notifications);
+                drop(ctx);
+                let validation_catalog =
+                    self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
+                let result = result.and_then(|result| {
+                    crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                        self,
+                        client_id,
+                        &validation_catalog,
+                        xid,
+                        1,
+                        Arc::clone(&interrupts),
+                        datetime_config,
+                        &deferred_foreign_keys,
+                    )?;
+                    Ok(result)
+                });
+                let result = self.finish_txn_with_async_notifications(
+                    client_id,
+                    xid,
+                    result,
+                    &[],
+                    &[],
+                    &[],
+                    pending_async_notifications,
+                );
+                guard.disarm();
+                unlock_relations(&self.table_locks, client_id, &locked_rels);
+                result
+            }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
@@ -2122,7 +2732,7 @@ impl Database {
                         let mut planned_select = None;
                         let mut planned_select_for_update = false;
                         match &stmt {
-                            Statement::Select(select) => {
+                            Statement::Select(select) if !select_has_writable_ctes(select) => {
                                 let planned_stmt =
                                     crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
                                         restrict_nonsystem_view_enabled(gucs),
@@ -2136,9 +2746,12 @@ impl Database {
                                 planned_select_for_update = select.locking_clause.is_some();
                                 planned_select = Some(planned_stmt);
                             }
+                            Statement::Select(_) => {}
                             Statement::Values(_) => {}
                             Statement::Explain(explain) => {
-                                if let Statement::Select(select) = explain.statement.as_ref() {
+                                if let Statement::Select(select) = explain.statement.as_ref()
+                                    && !select_has_writable_ctes(select)
+                                {
                                     let planned_stmt =
                                         crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
                                             restrict_nonsystem_view_enabled(gucs),
@@ -2383,7 +2996,7 @@ impl Database {
                     let has_writable_ctes = insert_stmt
                         .with
                         .iter()
-                        .any(|cte| matches!(cte.body, CteBody::Insert(_)));
+                        .any(|cte| cte_body_has_writable(&cte.body));
                     if !has_writable_ctes {
                         let bound = bind_insert(insert_stmt, &catalog)?;
                         let prepared =
@@ -2392,13 +3005,21 @@ impl Database {
                             &insert_foreign_key_lock_requests(&prepared.stmt),
                             &prepared.extra_lock_requests,
                         );
-                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                            &self.table_locks,
-                            client_id,
-                            &lock_requests,
-                            interrupts.as_ref(),
-                        )?;
+                        let waited_for_lock =
+                            crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                &self.table_locks,
+                                client_id,
+                                &lock_requests,
+                                interrupts.as_ref(),
+                            )?;
                         locked_rels.extend(table_lock_relations(&lock_requests));
+                        refresh_autocommit_snapshot_after_lock_wait(
+                            self,
+                            &mut ctx,
+                            xid,
+                            0,
+                            waited_for_lock,
+                        )?;
                         return super::rules::execute_bound_insert_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -2408,75 +3029,187 @@ impl Database {
                         );
                     }
 
-                    if insert_stmt.with_recursive {
-                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                            "WITH RECURSIVE containing data-modifying statements is not supported"
-                                .into(),
-                        )));
-                    }
-
                     let mut materialized_ctes = Vec::new();
                     let mut outer_insert = insert_stmt.clone();
                     outer_insert.with.clear();
+                    let refs_insert = outer_insert.clone();
+                    let mut preceding_select_ctes = Vec::new();
 
-                    for cte in &insert_stmt.with {
-                        let CteBody::Insert(cte_insert) = &cte.body else {
+                    for (index, cte) in insert_stmt.with.iter().enumerate() {
+                        if !cte_body_is_modifying(&cte.body) {
+                            if cte_body_has_writable(&cte.body) {
+                                return Err(nested_modifying_cte_error());
+                            }
                             outer_insert.with.push(cte.clone());
+                            preceding_select_ctes.push(cte.clone());
                             continue;
-                        };
-                        if cte_insert.with_recursive
-                            || cte_insert
+                        }
+
+                        if cte_body_references_table(&cte.body, &cte.name) {
+                            return Err(recursive_modifying_cte_error(&cte.name));
+                        }
+                        if !modifying_cte_body_has_returning(&cte.body)
+                            && (insert_stmt
                                 .with
                                 .iter()
-                                .any(|nested| matches!(nested.body, CteBody::Insert(_)))
+                                .skip(index + 1)
+                                .any(|later| cte_body_references_table(&later.body, &cte.name))
+                                || insert_statement_references_table(&refs_insert, &cte.name))
                         {
-                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                "nested writable CTEs are not supported".into(),
-                            )));
-                        }
-                        if cte_insert.returning.is_empty() {
-                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                "writable CTE without RETURNING is not supported".into(),
-                            )));
+                            return Err(modifying_cte_reference_error(&cte.name));
                         }
 
-                        let bound = bind_insert_with_outer_scopes_and_ctes(
-                            cte_insert,
-                            &catalog,
-                            &[],
-                            &materialized_ctes,
-                        )?;
-                        let prepared =
-                            super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
-                        let lock_requests = merge_table_lock_requests(
-                            &insert_foreign_key_lock_requests(&prepared.stmt),
-                            &prepared.extra_lock_requests,
-                        );
-                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                            &self.table_locks,
-                            client_id,
-                            &lock_requests,
-                            interrupts.as_ref(),
-                        )?;
-                        locked_rels.extend(table_lock_relations(&lock_requests));
-                        let result = super::rules::execute_bound_insert_with_rules(
-                            prepared.stmt,
-                            &catalog,
-                            &mut ctx,
-                            xid,
-                            0,
-                        )?;
-                        let StatementResult::Query { columns, rows, .. } = result else {
-                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                                "writable CTE without RETURNING is not supported".into(),
-                            )));
+                        let mut executable = cte.clone();
+                        executable.body =
+                            prepend_ctes_to_modifying_body(&cte.body, &preceding_select_ctes);
+                        let result = match &executable.body {
+                            CteBody::Insert(cte_insert) => {
+                                let bound = bind_insert_with_outer_scopes_and_ctes(
+                                    cte_insert,
+                                    &catalog,
+                                    &[],
+                                    &materialized_ctes,
+                                )?;
+                                let prepared = super::rules::prepare_bound_insert_for_execution(
+                                    bound, &catalog,
+                                )?;
+                                super::rules::enforce_modifying_cte_rule_restrictions(
+                                    prepared.stmt.relation_oid,
+                                    RuleEvent::Insert,
+                                    &catalog,
+                                )?;
+                                let lock_requests = merge_table_lock_requests(
+                                    &insert_foreign_key_lock_requests(&prepared.stmt),
+                                    &prepared.extra_lock_requests,
+                                );
+                                let waited_for_lock =
+                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                    &self.table_locks,
+                                    client_id,
+                                    &lock_requests,
+                                    interrupts.as_ref(),
+                                )?;
+                                locked_rels.extend(table_lock_relations(&lock_requests));
+                                refresh_autocommit_snapshot_after_lock_wait(
+                                    self,
+                                    &mut ctx,
+                                    xid,
+                                    0,
+                                    waited_for_lock,
+                                )?;
+                                super::rules::execute_bound_insert_with_rules(
+                                    prepared.stmt,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    0,
+                                )?
+                            }
+                            CteBody::Update(cte_update) => {
+                                let bound = bind_update_with_outer_scopes_and_ctes(
+                                    cte_update,
+                                    &catalog,
+                                    &[],
+                                    &materialized_ctes,
+                                )?;
+                                let prepared = super::rules::prepare_bound_update_for_execution(
+                                    bound, &catalog,
+                                )?;
+                                for target in &prepared.stmt.targets {
+                                    super::rules::enforce_modifying_cte_rule_restrictions(
+                                        target.relation_oid,
+                                        RuleEvent::Update,
+                                        &catalog,
+                                    )?;
+                                }
+                                let lock_requests = merge_table_lock_requests(
+                                    &update_foreign_key_lock_requests(&prepared.stmt),
+                                    &prepared.extra_lock_requests,
+                                );
+                                let waited_for_lock =
+                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                    &self.table_locks,
+                                    client_id,
+                                    &lock_requests,
+                                    interrupts.as_ref(),
+                                )?;
+                                locked_rels.extend(table_lock_relations(&lock_requests));
+                                refresh_autocommit_snapshot_after_lock_wait(
+                                    self,
+                                    &mut ctx,
+                                    xid,
+                                    0,
+                                    waited_for_lock,
+                                )?;
+                                super::rules::execute_bound_update_with_rules(
+                                    prepared.stmt,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    0,
+                                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
+                                )?
+                            }
+                            CteBody::Delete(cte_delete) => {
+                                let bound = bind_delete_with_outer_scopes_and_ctes(
+                                    cte_delete,
+                                    &catalog,
+                                    &[],
+                                    &materialized_ctes,
+                                )?;
+                                let prepared = super::rules::prepare_bound_delete_for_execution(
+                                    bound, &catalog,
+                                )?;
+                                for target in &prepared.stmt.targets {
+                                    super::rules::enforce_modifying_cte_rule_restrictions(
+                                        target.relation_oid,
+                                        RuleEvent::Delete,
+                                        &catalog,
+                                    )?;
+                                }
+                                let lock_requests = merge_table_lock_requests(
+                                    &delete_foreign_key_lock_requests(&prepared.stmt),
+                                    &prepared.extra_lock_requests,
+                                );
+                                let waited_for_lock =
+                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                    &self.table_locks,
+                                    client_id,
+                                    &lock_requests,
+                                    interrupts.as_ref(),
+                                )?;
+                                locked_rels.extend(table_lock_relations(&lock_requests));
+                                refresh_autocommit_snapshot_after_lock_wait(
+                                    self,
+                                    &mut ctx,
+                                    xid,
+                                    0,
+                                    waited_for_lock,
+                                )?;
+                                super::rules::execute_bound_delete_with_rules(
+                                    prepared.stmt,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
+                                )?
+                            }
+                            CteBody::Merge(cte_merge) => {
+                                let bound = plan_merge_with_outer_ctes(
+                                    cte_merge,
+                                    &catalog,
+                                    &materialized_ctes,
+                                )?;
+                                crate::backend::commands::tablecmds::execute_merge(
+                                    bound, &catalog, &mut ctx, xid, 0,
+                                )?
+                            }
+                            _ => continue,
                         };
-                        let columns = apply_writable_cte_column_aliases(cte, columns)?;
-                        materialized_ctes.push(bound_cte_from_query_rows(
-                            cte.name.clone(),
-                            columns,
-                            &rows,
-                        ));
+                        if let Some(bound) = materialized_cte_from_dml_result(&executable, result)?
+                        {
+                            materialized_ctes.push(bound);
+                        }
                     }
 
                     let bound = bind_insert_with_outer_scopes_and_ctes(
@@ -2487,17 +3220,30 @@ impl Database {
                     )?;
                     let prepared =
                         super::rules::prepare_bound_insert_for_execution(bound, &catalog)?;
+                    super::rules::enforce_modifying_cte_rule_restrictions(
+                        prepared.stmt.relation_oid,
+                        RuleEvent::Insert,
+                        &catalog,
+                    )?;
                     let lock_requests = merge_table_lock_requests(
                         &insert_foreign_key_lock_requests(&prepared.stmt),
                         &prepared.extra_lock_requests,
                     );
-                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                        &self.table_locks,
-                        client_id,
-                        &lock_requests,
-                        interrupts.as_ref(),
-                    )?;
+                    let waited_for_lock =
+                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                            &self.table_locks,
+                            client_id,
+                            &lock_requests,
+                            interrupts.as_ref(),
+                        )?;
                     locked_rels.extend(table_lock_relations(&lock_requests));
+                    refresh_autocommit_snapshot_after_lock_wait(
+                        self,
+                        &mut ctx,
+                        xid,
+                        0,
+                        waited_for_lock,
+                    )?;
                     super::rules::execute_bound_insert_with_rules(
                         prepared.stmt,
                         &catalog,
@@ -2541,22 +3287,6 @@ impl Database {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let external_bindings = bind_prepared_external_params(external_params, &catalog)?;
                 let external_types = prepared_external_types(&external_bindings);
-                let bound = with_external_param_types(&external_types, || {
-                    bind_update(update_stmt, &catalog)
-                })?;
-                let prepared = super::rules::prepare_bound_update_for_execution(bound, &catalog)?;
-                let lock_requests = merge_table_lock_requests(
-                    &update_foreign_key_lock_requests(&prepared.stmt),
-                    &prepared.extra_lock_requests,
-                );
-                crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                    &self.table_locks,
-                    client_id,
-                    &lock_requests,
-                    interrupts.as_ref(),
-                )?;
-                let locked_rels = table_lock_relations(&lock_requests);
-
                 let xid = self.txns.write().begin();
                 let guard =
                     AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
@@ -2622,14 +3352,105 @@ impl Database {
                     trigger_depth: 0,
                 };
                 install_prepared_external_params(&external_bindings, &mut ctx)?;
-                let result = super::rules::execute_bound_update_with_rules(
-                    prepared.stmt,
-                    &catalog,
-                    &mut ctx,
-                    xid,
-                    0,
-                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
-                );
+                let mut locked_rels = Vec::new();
+                let result = with_external_param_types(&external_types, || {
+                    let has_writable_ctes = update_stmt
+                        .with
+                        .iter()
+                        .any(|cte| cte_body_has_writable(&cte.body));
+                    if !has_writable_ctes {
+                        let bound = bind_update(update_stmt, &catalog)?;
+                        let prepared =
+                            super::rules::prepare_bound_update_for_execution(bound, &catalog)?;
+                        let lock_requests = merge_table_lock_requests(
+                            &update_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        let waited_for_lock =
+                            crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                &self.table_locks,
+                                client_id,
+                                &lock_requests,
+                                interrupts.as_ref(),
+                            )?;
+                        locked_rels.extend(table_lock_relations(&lock_requests));
+                        refresh_autocommit_snapshot_after_lock_wait(
+                            self,
+                            &mut ctx,
+                            xid,
+                            0,
+                            waited_for_lock,
+                        )?;
+                        return super::rules::execute_bound_update_with_rules(
+                            prepared.stmt,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            0,
+                            Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
+                        );
+                    }
+
+                    let mut outer_update = update_stmt.clone();
+                    outer_update.with.clear();
+                    let refs_update = outer_update.clone();
+                    let (materialized_ctes, remaining_ctes) = self
+                        .materialize_modifying_ctes_autocommit(
+                            client_id,
+                            &interrupts,
+                            &mut locked_rels,
+                            &update_stmt.with,
+                            update_stmt.with_recursive,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            0,
+                            |name| update_statement_references_table(&refs_update, name),
+                        )?;
+                    outer_update.with = remaining_ctes;
+                    let bound = bind_update_with_outer_scopes_and_ctes(
+                        &outer_update,
+                        &catalog,
+                        &[],
+                        &materialized_ctes,
+                    )?;
+                    let prepared =
+                        super::rules::prepare_bound_update_for_execution(bound, &catalog)?;
+                    for target in &prepared.stmt.targets {
+                        super::rules::enforce_modifying_cte_rule_restrictions(
+                            target.relation_oid,
+                            RuleEvent::Update,
+                            &catalog,
+                        )?;
+                    }
+                    let lock_requests = merge_table_lock_requests(
+                        &update_foreign_key_lock_requests(&prepared.stmt),
+                        &prepared.extra_lock_requests,
+                    );
+                    let waited_for_lock =
+                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                            &self.table_locks,
+                            client_id,
+                            &lock_requests,
+                            interrupts.as_ref(),
+                        )?;
+                    locked_rels.extend(table_lock_relations(&lock_requests));
+                    refresh_autocommit_snapshot_after_lock_wait(
+                        self,
+                        &mut ctx,
+                        xid,
+                        0,
+                        waited_for_lock,
+                    )?;
+                    super::rules::execute_bound_update_with_rules(
+                        prepared.stmt,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        0,
+                        Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
+                    )
+                });
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
@@ -2663,20 +3484,6 @@ impl Database {
             }
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let bound = bind_delete(delete_stmt, &catalog)?;
-                let prepared = super::rules::prepare_bound_delete_for_execution(bound, &catalog)?;
-                let lock_requests = merge_table_lock_requests(
-                    &delete_foreign_key_lock_requests(&prepared.stmt),
-                    &prepared.extra_lock_requests,
-                );
-                crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                    &self.table_locks,
-                    client_id,
-                    &lock_requests,
-                    interrupts.as_ref(),
-                )?;
-                let locked_rels = table_lock_relations(&lock_requests);
-
                 let xid = self.txns.write().begin();
                 let guard =
                     AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
@@ -2741,13 +3548,103 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                     trigger_depth: 0,
                 };
-                let result = super::rules::execute_bound_delete_with_rules(
-                    prepared.stmt,
-                    &catalog,
-                    &mut ctx,
-                    xid,
-                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
-                );
+                let mut locked_rels = Vec::new();
+                let result = (|| {
+                    let has_writable_ctes = delete_stmt
+                        .with
+                        .iter()
+                        .any(|cte| cte_body_has_writable(&cte.body));
+                    if !has_writable_ctes {
+                        let bound = bind_delete(delete_stmt, &catalog)?;
+                        let prepared =
+                            super::rules::prepare_bound_delete_for_execution(bound, &catalog)?;
+                        let lock_requests = merge_table_lock_requests(
+                            &delete_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        let waited_for_lock =
+                            crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                                &self.table_locks,
+                                client_id,
+                                &lock_requests,
+                                interrupts.as_ref(),
+                            )?;
+                        locked_rels.extend(table_lock_relations(&lock_requests));
+                        refresh_autocommit_snapshot_after_lock_wait(
+                            self,
+                            &mut ctx,
+                            xid,
+                            0,
+                            waited_for_lock,
+                        )?;
+                        return super::rules::execute_bound_delete_with_rules(
+                            prepared.stmt,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
+                        );
+                    }
+
+                    let mut outer_delete = delete_stmt.clone();
+                    outer_delete.with.clear();
+                    let refs_delete = outer_delete.clone();
+                    let (materialized_ctes, remaining_ctes) = self
+                        .materialize_modifying_ctes_autocommit(
+                            client_id,
+                            &interrupts,
+                            &mut locked_rels,
+                            &delete_stmt.with,
+                            delete_stmt.with_recursive,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            0,
+                            |name| delete_statement_references_table(&refs_delete, name),
+                        )?;
+                    outer_delete.with = remaining_ctes;
+                    let bound = bind_delete_with_outer_scopes_and_ctes(
+                        &outer_delete,
+                        &catalog,
+                        &[],
+                        &materialized_ctes,
+                    )?;
+                    let prepared =
+                        super::rules::prepare_bound_delete_for_execution(bound, &catalog)?;
+                    for target in &prepared.stmt.targets {
+                        super::rules::enforce_modifying_cte_rule_restrictions(
+                            target.relation_oid,
+                            RuleEvent::Delete,
+                            &catalog,
+                        )?;
+                    }
+                    let lock_requests = merge_table_lock_requests(
+                        &delete_foreign_key_lock_requests(&prepared.stmt),
+                        &prepared.extra_lock_requests,
+                    );
+                    let waited_for_lock =
+                        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+                            &self.table_locks,
+                            client_id,
+                            &lock_requests,
+                            interrupts.as_ref(),
+                        )?;
+                    locked_rels.extend(table_lock_relations(&lock_requests));
+                    refresh_autocommit_snapshot_after_lock_wait(
+                        self,
+                        &mut ctx,
+                        xid,
+                        0,
+                        waited_for_lock,
+                    )?;
+                    super::rules::execute_bound_delete_with_rules(
+                        prepared.stmt,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
+                    )
+                })();
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);

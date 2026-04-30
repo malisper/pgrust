@@ -10873,6 +10873,7 @@ fn raw_cte_body_is_writable(body: &crate::backend::parser::CteBody) -> bool {
     match body {
         crate::backend::parser::CteBody::Insert(_)
         | crate::backend::parser::CteBody::Update(_)
+        | crate::backend::parser::CteBody::Delete(_)
         | crate::backend::parser::CteBody::Merge(_) => true,
         crate::backend::parser::CteBody::Select(select_stmt) => {
             raw_select_contains_writable_cte(select_stmt)
@@ -10901,38 +10902,11 @@ fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bo
         crate::backend::parser::CteBody::Update(update_stmt) => {
             raw_update_statement_contains_pg_notify(update_stmt)
         }
+        crate::backend::parser::CteBody::Delete(delete_stmt) => {
+            raw_delete_statement_contains_pg_notify(delete_stmt)
+        }
         crate::backend::parser::CteBody::Merge(merge_stmt) => {
-            merge_stmt.with.iter().any(raw_cte_contains_pg_notify)
-                || raw_expr_contains_pg_notify(&merge_stmt.join_condition)
-                || merge_stmt.when_clauses.iter().any(|clause| {
-                    clause
-                        .condition
-                        .as_ref()
-                        .is_some_and(raw_expr_contains_pg_notify)
-                        || match &clause.action {
-                            crate::backend::parser::MergeAction::Update { assignments } => {
-                                assignments
-                                    .iter()
-                                    .any(|assignment| raw_expr_contains_pg_notify(&assignment.expr))
-                            }
-                            crate::backend::parser::MergeAction::Insert { source, .. } => {
-                                match source {
-                                    crate::backend::parser::MergeInsertSource::Values(values) => {
-                                        values.iter().any(raw_expr_contains_pg_notify)
-                                    }
-                                    crate::backend::parser::MergeInsertSource::DefaultValues => {
-                                        false
-                                    }
-                                }
-                            }
-                            crate::backend::parser::MergeAction::Delete
-                            | crate::backend::parser::MergeAction::DoNothing => false,
-                        }
-                })
-                || merge_stmt
-                    .returning
-                    .iter()
-                    .any(|item| raw_expr_contains_pg_notify(&item.expr))
+            raw_merge_statement_contains_pg_notify(merge_stmt)
         }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
@@ -10998,6 +10972,55 @@ fn raw_update_statement_contains_pg_notify(
             .as_ref()
             .is_some_and(raw_expr_contains_pg_notify)
         || update_stmt
+            .returning
+            .iter()
+            .any(|item| raw_expr_contains_pg_notify(&item.expr))
+}
+
+fn raw_delete_statement_contains_pg_notify(
+    delete_stmt: &crate::backend::parser::DeleteStatement,
+) -> bool {
+    delete_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || delete_stmt
+            .using
+            .as_ref()
+            .is_some_and(raw_from_item_contains_pg_notify)
+        || delete_stmt
+            .where_clause
+            .as_ref()
+            .is_some_and(raw_expr_contains_pg_notify)
+        || delete_stmt
+            .returning
+            .iter()
+            .any(|item| raw_expr_contains_pg_notify(&item.expr))
+}
+
+fn raw_merge_statement_contains_pg_notify(
+    merge_stmt: &crate::backend::parser::MergeStatement,
+) -> bool {
+    merge_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || raw_from_item_contains_pg_notify(&merge_stmt.source)
+        || raw_expr_contains_pg_notify(&merge_stmt.join_condition)
+        || merge_stmt.when_clauses.iter().any(|clause| {
+            clause
+                .condition
+                .as_ref()
+                .is_some_and(raw_expr_contains_pg_notify)
+                || match &clause.action {
+                    crate::backend::parser::MergeAction::DoNothing
+                    | crate::backend::parser::MergeAction::Delete => false,
+                    crate::backend::parser::MergeAction::Update { assignments } => assignments
+                        .iter()
+                        .any(|assignment| raw_expr_contains_pg_notify(&assignment.expr)),
+                    crate::backend::parser::MergeAction::Insert { source, .. } => match source {
+                        crate::backend::parser::MergeInsertSource::Values(values) => {
+                            values.iter().any(raw_expr_contains_pg_notify)
+                        }
+                        crate::backend::parser::MergeInsertSource::DefaultValues => false,
+                    },
+                }
+        })
+        || merge_stmt
             .returning
             .iter()
             .any(|item| raw_expr_contains_pg_notify(&item.expr))
