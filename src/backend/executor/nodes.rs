@@ -62,8 +62,8 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
-    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var, attrno_index,
-    is_special_varno,
+    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, SubLinkType, Var,
+    attrno_index, is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -5475,8 +5475,74 @@ pub(crate) fn render_explain_join_expr_inner(
             render_explain_join_expr_inner(expr, outer_names, inner_names)
         }),
         Expr::Func(func) => render_explain_join_func_expr(func, outer_names, inner_names),
+        Expr::SubPlan(subplan) => match subplan.sublink_type {
+            SubLinkType::ExistsSubLink => format!("EXISTS(SubPlan {})", subplan.plan_id + 1),
+            _ if subplan.par_param.is_empty() => format!("(InitPlan {}).col1", subplan.plan_id + 1),
+            _ => format!("(SubPlan {})", subplan.plan_id + 1),
+        },
+        Expr::Row { fields, .. } => render_explain_join_whole_row(fields, outer_names, inner_names)
+            .unwrap_or_else(|| {
+                let fields = fields
+                    .iter()
+                    .map(|(_, expr)| render_explain_join_expr_inner(expr, outer_names, inner_names))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("ROW({fields})")
+            }),
+        Expr::Case(case_expr) => {
+            if let Some(rendered) =
+                render_explain_join_whole_row_case(case_expr, outer_names, inner_names)
+            {
+                rendered
+            } else {
+                format!("{expr:?}")
+            }
+        }
         other => format!("{other:?}"),
     }
+}
+
+fn render_explain_join_whole_row_case(
+    case_expr: &crate::include::nodes::primnodes::CaseExpr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> Option<String> {
+    if case_expr.arg.is_some() || case_expr.args.len() != 1 {
+        return None;
+    }
+    if !matches!(case_expr.args[0].result, Expr::Const(Value::Null)) {
+        return None;
+    }
+    let Expr::Row { fields, .. } = case_expr.defresult.as_ref() else {
+        return None;
+    };
+    render_explain_join_whole_row(fields, outer_names, inner_names)
+}
+
+fn render_explain_join_whole_row(
+    fields: &[(String, Expr)],
+    outer_names: &[String],
+    inner_names: &[String],
+) -> Option<String> {
+    let mut prefix = None::<String>;
+    for (_, expr) in fields {
+        let Expr::Var(var) = expr else {
+            return None;
+        };
+        let names = match var.varno {
+            OUTER_VAR => outer_names,
+            INNER_VAR | INDEX_VAR => inner_names,
+            _ => return None,
+        };
+        let name = render_explain_var_name(var, names)?;
+        let (candidate, _) = name.rsplit_once('.')?;
+        match &prefix {
+            Some(existing) if existing != candidate => return None,
+            Some(_) => {}
+            None => prefix = Some(candidate.to_string()),
+        }
+    }
+    prefix.map(|prefix| format!("{prefix}.*"))
 }
 
 fn render_explain_join_func_expr(
