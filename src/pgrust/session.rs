@@ -2980,7 +2980,31 @@ impl Session {
                 }
             }
         }
-        Ok(StatementResult::AffectedRows(0))
+        let relation_to_lock = catalog
+            .lookup_any_relation(&stmt.table_name)
+            .map(|relation| relation.rel);
+        drop(catalog);
+        if let Some((xid, cid)) = self.catalog_txn_ctx() {
+            if let Some(rel) = relation_to_lock {
+                self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
+            }
+            let search_path = self.configured_search_path();
+            let txn = self.active_txn.as_mut().unwrap();
+            return db.execute_alter_table_set_stmt_in_transaction_with_search_path(
+                self.client_id,
+                stmt,
+                xid,
+                cid,
+                search_path.as_deref(),
+                &mut txn.catalog_effects,
+            );
+        }
+        let search_path = self.configured_search_path();
+        db.execute_alter_table_set_stmt_with_search_path(
+            self.client_id,
+            stmt,
+            search_path.as_deref(),
+        )
     }
 
     fn apply_alter_index_set(

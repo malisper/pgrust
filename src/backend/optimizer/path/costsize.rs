@@ -2224,7 +2224,10 @@ pub(super) fn estimate_index_candidate(
             catalog,
         );
     }
-    if spec.row_prefix && spec.residual.is_some() {
+    let full_index_only =
+        config.enable_indexonlyscan && index_supports_index_only_scan(&desc, &spec.index);
+    let can_index_only = full_index_only || (config.enable_indexonlyscan && target_index_only);
+    if spec.row_prefix && spec.residual.is_some() && (config.enable_seqscan || !can_index_only) {
         return estimate_bitmap_candidate(
             source_id,
             rel,
@@ -2319,9 +2322,7 @@ pub(super) fn estimate_index_candidate(
         0.0
     };
     base_cost += unused_btree_column_cost;
-    let full_index_only =
-        config.enable_indexonlyscan && index_supports_index_only_scan(&desc, &spec.index);
-    let index_only = full_index_only || (config.enable_indexonlyscan && target_index_only);
+    let index_only = can_index_only;
     if index_only {
         if spec.keys.is_empty() {
             base_cost = index_pages * SEQ_PAGE_COST
@@ -4542,6 +4543,13 @@ fn select_best_join_path(paths: Vec<Path>) -> Path {
 }
 
 fn better_join_path(candidate: &Path, current: &Path) -> bool {
+    if let (Some(candidate_left_relid), Some(current_left_relid)) = (
+        cross_plain_values_join_left_relid(candidate),
+        cross_plain_values_join_left_relid(current),
+    ) && candidate_left_relid != current_left_relid
+    {
+        return candidate_left_relid < current_left_relid;
+    }
     if let (Some(candidate_left_relids), Some(current_left_relids)) = (
         cross_join_left_relid_count(candidate),
         cross_join_left_relid_count(current),
@@ -4752,6 +4760,53 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,
+    }
+}
+
+fn cross_plain_values_join_left_relid(path: &Path) -> Option<usize> {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind,
+            restrict_clauses,
+            ..
+        } if values_cross_like_join(*kind, restrict_clauses)
+            && path_is_plain_values_relation(left)
+            && path_is_plain_values_relation(right) =>
+        {
+            path_relids(left).first().copied()
+        }
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => cross_plain_values_join_left_relid(input),
+        _ => None,
+    }
+}
+
+fn values_cross_like_join(kind: JoinType, restrict_clauses: &[RestrictInfo]) -> bool {
+    let _ = restrict_clauses;
+    matches!(kind, JoinType::Cross | JoinType::Inner)
+}
+
+fn path_is_plain_values_relation(path: &Path) -> bool {
+    match path {
+        Path::Values { .. } => true,
+        Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => path_is_plain_values_relation(input),
+        Path::Filter { .. } => false,
+        _ => false,
     }
 }
 
@@ -7070,6 +7125,8 @@ fn clause_selectivity_internal(
                     | OpExprKind::JsonbExists
                     | OpExprKind::JsonbExistsAny
                     | OpExprKind::JsonbExistsAll
+                    | OpExprKind::JsonbPathExists
+                    | OpExprKind::JsonbPathMatch
             ) =>
         {
             // :HACK: PostgreSQL has JSONB-specific selectivity estimators.
@@ -9600,17 +9657,16 @@ fn builtin_btree_strategy_type_compatible(
             SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char
         )
     );
-    let same_name_family = index.index_meta.am_oid == BRIN_AM_OID
-        && matches!(
-            (column.sql_type.kind, argument_type.kind),
-            (
-                SqlTypeKind::Name,
-                SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char | SqlTypeKind::Name
-            ) | (
-                SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char,
-                SqlTypeKind::Name
-            )
-        );
+    let same_name_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Name,
+            SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char | SqlTypeKind::Name
+        ) | (
+            SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char,
+            SqlTypeKind::Name
+        )
+    );
     let same_oid_integer_family = matches!(
         (column.sql_type.kind, argument_type.kind),
         (
