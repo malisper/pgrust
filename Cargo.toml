@@ -49,6 +49,11 @@ path = "src/bin/comment_on_table_bench.rs"
 required-features = ["tools"]
 
 [[bin]]
+name = "catalog_ddl_profile"
+path = "src/bin/catalog_ddl_profile.rs"
+required-features = ["tools"]
+
+[[bin]]
 name = "deferred_parent_delete_bench"
 path = "src/bin/deferred_parent_delete_bench.rs"
 required-features = ["tools"]

@@ -602,6 +602,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
             &spec.build_options,
             self.maintenance_work_mem_kb,
             false,
+            false,
             self.catalog_effects,
         )
     }
