@@ -301,7 +301,8 @@ fn execute_statement_with_source(
         | Statement::AlterTextSearchDictionary(_)
         | Statement::CreateTextSearchConfiguration(_)
         | Statement::AlterTextSearchConfiguration(_)
-        | Statement::DropTextSearchConfiguration(_) => {
+        | Statement::DropTextSearchConfiguration(_)
+        | Statement::DropTextSearch(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "TEXT SEARCH handled by database/session layer",
                 actual: "TEXT SEARCH".into(),
@@ -690,6 +691,14 @@ fn execute_statement_with_source(
         Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP DATABASE handled by database/session layer",
             actual: "DROP DATABASE".into(),
+        })),
+        Statement::DropExtension(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP EXTENSION handled by database/session layer",
+            actual: "DROP EXTENSION".into(),
+        })),
+        Statement::DropAccessMethod(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP ACCESS METHOD handled by database/session layer",
+            actual: "DROP ACCESS METHOD".into(),
         })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW handled by database/session layer",
@@ -1158,6 +1167,14 @@ pub fn execute_readonly_statement_with_config(
         Statement::DropDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP DATABASE".into(),
+        })),
+        Statement::DropExtension(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP EXTENSION".into(),
+        })),
+        Statement::DropAccessMethod(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP ACCESS METHOD".into(),
         })),
         other => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

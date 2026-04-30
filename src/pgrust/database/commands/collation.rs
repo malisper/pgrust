@@ -143,6 +143,23 @@ impl Database {
         )?
         else {
             if stmt.if_exists {
+                if let Some((schema_name, _)) = stmt.collation_name.split_once('.')
+                    && self
+                        .visible_namespace_oid_by_name(client_id, Some((xid, cid)), schema_name)
+                        .is_none()
+                {
+                    crate::backend::utils::misc::notices::push_notice(format!(
+                        "schema \"{schema_name}\" does not exist, skipping"
+                    ));
+                } else {
+                    crate::backend::utils::misc::notices::push_notice(format!(
+                        "collation \"{}\" does not exist, skipping",
+                        stmt.collation_name
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(&stmt.collation_name)
+                    ));
+                }
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::DetailedError {

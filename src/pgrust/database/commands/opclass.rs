@@ -1893,6 +1893,17 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let access_method =
             resolve_index_access_method(self, client_id, Some((xid, cid)), &stmt.access_method)?;
+        if stmt.if_exists
+            && let Some(schema_name) = stmt.schema_name.as_deref()
+            && self
+                .visible_namespace_oid_by_name(client_id, Some((xid, cid)), schema_name)
+                .is_none()
+        {
+            crate::backend::utils::misc::notices::push_notice(format!(
+                "schema \"{schema_name}\" does not exist, skipping"
+            ));
+            return Ok(StatementResult::AffectedRows(0));
+        }
         let Some(current) = lookup_opfamily_row(
             self,
             client_id,
@@ -1904,6 +1915,10 @@ impl Database {
         )?
         else {
             if stmt.if_exists {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    "operator family \"{}\" does not exist for access method \"{}\", skipping",
+                    stmt.family_name, stmt.access_method
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::DetailedError {
@@ -1972,6 +1987,17 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let access_method =
             resolve_index_access_method(self, client_id, Some((xid, cid)), &stmt.access_method)?;
+        if stmt.if_exists
+            && let Some(schema_name) = stmt.schema_name.as_deref()
+            && self
+                .visible_namespace_oid_by_name(client_id, Some((xid, cid)), schema_name)
+                .is_none()
+        {
+            crate::backend::utils::misc::notices::push_notice(format!(
+                "schema \"{schema_name}\" does not exist, skipping"
+            ));
+            return Ok(StatementResult::AffectedRows(0));
+        }
         let Some(current) = lookup_opclass_row(
             self,
             client_id,
@@ -1983,6 +2009,10 @@ impl Database {
         )?
         else {
             if stmt.if_exists {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    "operator class \"{}\" does not exist for access method \"{}\", skipping",
+                    stmt.opclass_name, stmt.access_method
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::DetailedError {

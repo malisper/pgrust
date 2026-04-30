@@ -10,15 +10,16 @@ use crate::backend::catalog::persistence::{
 };
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
-    aggregate_depend_rows, collation_depend_rows, conversion_depend_rows, derived_pg_depend_rows,
-    foreign_data_wrapper_depend_rows, foreign_key_constraint_depend_rows,
-    foreign_server_depend_rows, index_backed_constraint_depend_rows, inheritance_depend_rows,
-    language_depend_rows, opclass_depend_rows, operator_depend_rows, opfamily_depend_rows,
-    policy_depend_rows, primary_key_owned_not_null_depend_rows, proc_depend_rows,
-    publication_namespace_depend_rows, publication_rel_depend_rows,
-    relation_constraint_depend_rows, relation_rule_depend_rows, sequence_owned_by_depend_row,
-    sort_pg_depend_rows, statistic_ext_depend_rows, trigger_depend_rows, ts_config_depend_rows,
-    ts_dict_depend_rows, ts_parser_depend_rows, ts_template_depend_rows, view_rewrite_depend_rows,
+    access_method_depend_rows, aggregate_depend_rows, collation_depend_rows,
+    conversion_depend_rows, derived_pg_depend_rows, foreign_data_wrapper_depend_rows,
+    foreign_key_constraint_depend_rows, foreign_server_depend_rows,
+    index_backed_constraint_depend_rows, inheritance_depend_rows, language_depend_rows,
+    opclass_depend_rows, operator_depend_rows, opfamily_depend_rows, policy_depend_rows,
+    primary_key_owned_not_null_depend_rows, proc_depend_rows, publication_namespace_depend_rows,
+    publication_rel_depend_rows, relation_constraint_depend_rows, relation_rule_depend_rows,
+    sequence_owned_by_depend_row, sort_pg_depend_rows, statistic_ext_depend_rows,
+    trigger_depend_rows, ts_config_depend_rows, ts_config_map_depend_rows, ts_dict_depend_rows,
+    ts_parser_depend_rows, ts_template_depend_rows, view_rewrite_depend_rows,
 };
 use crate::backend::catalog::rowcodec::{
     pg_cast_row_from_values, pg_description_row_from_values, pg_foreign_table_row_from_values,
@@ -55,8 +56,8 @@ use crate::include::catalog::{
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
     PG_SUBSCRIPTION_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
-    PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
     PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
     PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
     PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
@@ -1578,10 +1579,13 @@ impl CatalogStore {
             BootstrapCatalogKind::PgTsConfigMap,
             BootstrapCatalogKind::PgDepend,
         ];
+        let mut depends = ts_config_depend_rows(&row);
+        depends.extend(ts_config_map_depend_rows(row.oid, &map_rows));
+        sort_pg_depend_rows(&mut depends);
         let rows = PhysicalCatalogRows {
             ts_configs: vec![row.clone()],
             ts_config_maps: map_rows,
-            depends: ts_config_depend_rows(&row),
+            depends,
             ..PhysicalCatalogRows::default()
         };
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
@@ -1590,6 +1594,28 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, row.oid);
         Ok((row.oid, effect))
+    }
+
+    pub fn drop_ts_dict_mvcc(
+        &mut self,
+        row: PgTsDictRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [
+            BootstrapCatalogKind::PgTsDict,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        let rows = PhysicalCatalogRows {
+            ts_dicts: vec![row.clone()],
+            depends: ts_dict_depend_rows(&row),
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok(effect)
     }
 
     pub fn replace_ts_config_mvcc(
@@ -1623,6 +1649,28 @@ impl CatalogStore {
         Ok((row.oid, effect))
     }
 
+    pub fn drop_ts_template_mvcc(
+        &mut self,
+        row: PgTsTemplateRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [
+            BootstrapCatalogKind::PgTsTemplate,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        let rows = PhysicalCatalogRows {
+            ts_templates: vec![row.clone()],
+            depends: ts_template_depend_rows(&row),
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok(effect)
+    }
+
     pub fn create_ts_template_mvcc(
         &mut self,
         mut row: PgTsTemplateRow,
@@ -1644,6 +1692,28 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, row.oid);
         Ok((row.oid, effect))
+    }
+
+    pub fn drop_ts_parser_mvcc(
+        &mut self,
+        row: PgTsParserRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [
+            BootstrapCatalogKind::PgTsParser,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        let rows = PhysicalCatalogRows {
+            ts_parsers: vec![row.clone()],
+            depends: ts_parser_depend_rows(&row),
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok(effect)
     }
 
     pub fn replace_ts_template_mvcc(
@@ -2335,6 +2405,25 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         Ok((cast_row, effect))
+    }
+
+    pub fn drop_access_method_mvcc(
+        &mut self,
+        row: PgAmRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [BootstrapCatalogKind::PgAm, BootstrapCatalogKind::PgDepend];
+        let rows = PhysicalCatalogRows {
+            ams: vec![row.clone()],
+            depends: access_method_depend_rows(&row),
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok(effect)
     }
 
     pub fn create_operator_class_mvcc(
@@ -3284,10 +3373,21 @@ impl CatalogStore {
         new_rows: Vec<PgTsConfigMapRow>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let kinds = [BootstrapCatalogKind::PgTsConfigMap];
+        let config_oid = old_rows
+            .first()
+            .map(|row| row.mapcfg)
+            .or_else(|| new_rows.first().map(|row| row.mapcfg))
+            .unwrap_or(0);
+        let old_depends = ts_config_map_depend_rows(config_oid, &old_rows);
+        let new_depends = ts_config_map_depend_rows(config_oid, &new_rows);
+        let kinds = [
+            BootstrapCatalogKind::PgTsConfigMap,
+            BootstrapCatalogKind::PgDepend,
+        ];
         if !old_rows.is_empty() {
             let rows = PhysicalCatalogRows {
                 ts_config_maps: old_rows,
+                depends: old_depends,
                 ..PhysicalCatalogRows::default()
             };
             delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
@@ -3295,6 +3395,7 @@ impl CatalogStore {
         if !new_rows.is_empty() {
             let rows = PhysicalCatalogRows {
                 ts_config_maps: new_rows,
+                depends: new_depends,
                 ..PhysicalCatalogRows::default()
             };
             insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
@@ -3310,10 +3411,13 @@ impl CatalogStore {
         map_rows: Vec<PgTsConfigMapRow>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut depends = ts_config_depend_rows(&row);
+        depends.extend(ts_config_map_depend_rows(row.oid, &map_rows));
+        sort_pg_depend_rows(&mut depends);
         let rows = PhysicalCatalogRows {
             ts_configs: vec![row.clone()],
             ts_config_maps: map_rows,
-            depends: ts_config_depend_rows(&row),
+            depends,
             ..PhysicalCatalogRows::default()
         };
         let kinds = [

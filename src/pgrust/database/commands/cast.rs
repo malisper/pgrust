@@ -4,6 +4,7 @@ use crate::backend::parser::{
     CastContext, CatalogLookup, CreateCastMethod, CreateCastStatement, DropCastStatement,
     ParseError, RawTypeName, resolve_raw_type_name,
 };
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
     BOOL_TYPE_OID, DEPENDENCY_NORMAL, INT4_TYPE_OID, PG_CAST_RELATION_OID, PG_PROC_RELATION_OID,
     PG_TYPE_RELATION_OID, PgCastRow, PgDependRow, PgProcRow, PgTypeRow, builtin_type_name_for_oid,
@@ -19,10 +20,75 @@ fn cast_context_code(context: CastContext) -> char {
 
 fn cast_display(catalog: &dyn CatalogLookup, source_oid: u32, target_oid: u32) -> String {
     format!(
-        "cast from {} to {}",
+        "cast from type {} to type {}",
         format_type_text(source_oid, None, catalog),
         format_type_text(target_oid, None, catalog)
     )
+}
+
+fn raw_cast_type_display_name(raw: &RawTypeName) -> String {
+    match raw {
+        RawTypeName::Builtin(sql_type) => {
+            crate::pgrust::database::ddl::format_sql_type_name(*sql_type)
+        }
+        RawTypeName::Serial(kind) => match kind {
+            crate::include::nodes::parsenodes::SerialKind::Small => "smallserial".into(),
+            crate::include::nodes::parsenodes::SerialKind::Regular => "serial".into(),
+            crate::include::nodes::parsenodes::SerialKind::Big => "bigserial".into(),
+        },
+        RawTypeName::Named { name, array_bounds } => {
+            let mut display = name.clone();
+            for _ in 0..*array_bounds {
+                display.push_str("[]");
+            }
+            display
+        }
+        RawTypeName::Record => "record".into(),
+    }
+}
+
+fn missing_schema_for_cast_type(catalog: &dyn CatalogLookup, raw: &RawTypeName) -> Option<String> {
+    let RawTypeName::Named { name, .. } = raw else {
+        return None;
+    };
+    let (schema_name, _) = name.split_once('.')?;
+    let schema_name = schema_name.trim_matches('"').replace("\"\"", "\"");
+    if schema_name.eq_ignore_ascii_case("pg_catalog")
+        || catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
+    {
+        None
+    } else {
+        Some(schema_name)
+    }
+}
+
+fn push_missing_cast_type_notice(catalog: &dyn CatalogLookup, raw: &RawTypeName) {
+    if let Some(schema_name) = missing_schema_for_cast_type(catalog, raw) {
+        push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+    } else {
+        push_notice(format!(
+            "type \"{}\" does not exist, skipping",
+            raw_cast_type_display_name(raw)
+        ));
+    }
+}
+
+fn missing_cast_type_notice_pushed(catalog: &dyn CatalogLookup, raw: &RawTypeName) -> bool {
+    if let Some(schema_name) = missing_schema_for_cast_type(catalog, raw) {
+        push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+        return true;
+    }
+    match resolve_raw_type_name(raw, catalog) {
+        Ok(sql_type) if catalog.type_oid_for_sql_type(sql_type).is_some() => false,
+        Ok(_) | Err(ParseError::UnsupportedType(_)) => {
+            push_missing_cast_type_notice(catalog, raw);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 fn resolve_cast_type_oid(catalog: &dyn CatalogLookup, raw: &RawTypeName) -> Result<u32, ExecError> {
@@ -390,11 +456,29 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let source_oid = resolve_cast_type_oid(&catalog, &stmt.source_type)?;
-        let target_oid = resolve_cast_type_oid(&catalog, &stmt.target_type)?;
+        let source_oid = match resolve_cast_type_oid(&catalog, &stmt.source_type) {
+            Ok(type_oid) => type_oid,
+            Err(err) if stmt.if_exists => {
+                if missing_cast_type_notice_pushed(&catalog, &stmt.source_type) {
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+        let target_oid = match resolve_cast_type_oid(&catalog, &stmt.target_type) {
+            Ok(type_oid) => type_oid,
+            Err(err) if stmt.if_exists => {
+                if missing_cast_type_notice_pushed(&catalog, &stmt.target_type) {
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
         let Some(cast_row) = catalog.cast_by_source_target(source_oid, target_oid) else {
             if stmt.if_exists {
-                crate::backend::utils::misc::notices::push_notice(format!(
+                push_notice(format!(
                     "{} does not exist, skipping",
                     cast_display(&catalog, source_oid, target_oid)
                 ));

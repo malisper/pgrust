@@ -2,11 +2,12 @@ use super::super::*;
 use crate::backend::executor::StatementResult;
 use crate::backend::parser::{
     AlterTextSearchAction, AlterTextSearchStatement, CreateTextSearchStatement,
-    TextSearchObjectKind, TextSearchParameter,
+    DropTextSearchStatement, TextSearchObjectKind, TextSearchParameter,
 };
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
-    DEFAULT_TS_PARSER_OID, PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, PgTsConfigRow,
-    PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    DEFAULT_TS_PARSER_OID, PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
 };
 use crate::pgrust::database::ddl::ensure_can_set_role;
 
@@ -368,6 +369,7 @@ fn lookup_ts_object(
     })
 }
 
+#[derive(Clone)]
 enum TextSearchCatalogRow {
     Dictionary(PgTsDictRow),
     Configuration(PgTsConfigRow),
@@ -391,6 +393,280 @@ fn text_search_row_name(row: &TextSearchCatalogRow) -> &str {
         TextSearchCatalogRow::Template(row) => &row.tmplname,
         TextSearchCatalogRow::Parser(row) => &row.prsname,
     }
+}
+
+fn text_search_row_oid(row: &TextSearchCatalogRow) -> u32 {
+    match row {
+        TextSearchCatalogRow::Dictionary(row) => row.oid,
+        TextSearchCatalogRow::Configuration(row) => row.oid,
+        TextSearchCatalogRow::Template(row) => row.oid,
+        TextSearchCatalogRow::Parser(row) => row.oid,
+    }
+}
+
+fn text_search_object_name_parts(raw_name: &str) -> (Option<&str>, &str) {
+    raw_name
+        .split_once('.')
+        .map(|(schema, name)| (Some(schema), name))
+        .unwrap_or((None, raw_name))
+}
+
+fn text_search_missing_error(kind: TextSearchObjectKind, object_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "{} \"{}\" does not exist",
+            text_search_kind_name(kind),
+            object_name.rsplit('.').next().unwrap_or(object_name)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    }
+}
+
+fn push_missing_text_search_notice(kind: TextSearchObjectKind, object_name: &str) {
+    push_notice(format!(
+        "{} \"{}\" does not exist, skipping",
+        text_search_kind_name(kind),
+        object_name.rsplit('.').next().unwrap_or(object_name)
+    ));
+}
+
+fn text_search_object_display(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    row: &TextSearchCatalogRow,
+) -> Result<String, ExecError> {
+    let schema = namespace_name(db, client_id, txn_ctx, text_search_row_namespace(row))?;
+    Ok(format!("{schema}.{}", text_search_row_name(row)))
+}
+
+fn text_search_dependency_error(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    target: &TextSearchCatalogRow,
+    dependent: &TextSearchCatalogRow,
+) -> ExecError {
+    let target_kind = text_search_kind_name(match target {
+        TextSearchCatalogRow::Dictionary(_) => TextSearchObjectKind::Dictionary,
+        TextSearchCatalogRow::Configuration(_) => TextSearchObjectKind::Configuration,
+        TextSearchCatalogRow::Template(_) => TextSearchObjectKind::Template,
+        TextSearchCatalogRow::Parser(_) => TextSearchObjectKind::Parser,
+    });
+    let dependent_kind = text_search_kind_name(match dependent {
+        TextSearchCatalogRow::Dictionary(_) => TextSearchObjectKind::Dictionary,
+        TextSearchCatalogRow::Configuration(_) => TextSearchObjectKind::Configuration,
+        TextSearchCatalogRow::Template(_) => TextSearchObjectKind::Template,
+        TextSearchCatalogRow::Parser(_) => TextSearchObjectKind::Parser,
+    });
+    let target_display = text_search_object_display(db, client_id, txn_ctx, target)
+        .unwrap_or_else(|_| text_search_row_name(target).to_string());
+    let dependent_display = text_search_object_display(db, client_id, txn_ctx, dependent)
+        .unwrap_or_else(|_| text_search_row_name(dependent).to_string());
+    ExecError::DetailedError {
+        message: format!(
+            "cannot drop {target_kind} {target_display} because other objects depend on it"
+        ),
+        detail: Some(format!(
+            "{dependent_kind} {dependent_display} depends on {target_kind} {target_display}"
+        )),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    }
+}
+
+fn ensure_text_search_superuser(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    kind: TextSearchObjectKind,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    if auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|role| role.rolsuper)
+    {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be superuser to drop {}", text_search_kind_name(kind)),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+fn ensure_text_search_drop_permission(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    row: &TextSearchCatalogRow,
+) -> Result<(), ExecError> {
+    match row {
+        TextSearchCatalogRow::Dictionary(row) => ensure_text_search_owner(
+            db,
+            client_id,
+            txn_ctx,
+            TextSearchObjectKind::Dictionary,
+            row.dictowner,
+            &row.dictname,
+        ),
+        TextSearchCatalogRow::Configuration(row) => ensure_text_search_owner(
+            db,
+            client_id,
+            txn_ctx,
+            TextSearchObjectKind::Configuration,
+            row.cfgowner,
+            &row.cfgname,
+        ),
+        TextSearchCatalogRow::Template(_) => {
+            ensure_text_search_superuser(db, client_id, txn_ctx, TextSearchObjectKind::Template)
+        }
+        TextSearchCatalogRow::Parser(_) => {
+            ensure_text_search_superuser(db, client_id, txn_ctx, TextSearchObjectKind::Parser)
+        }
+    }
+}
+
+struct TextSearchCatalogSnapshot {
+    configs: Vec<PgTsConfigRow>,
+    config_maps: Vec<PgTsConfigMapRow>,
+    dicts: Vec<PgTsDictRow>,
+}
+
+#[derive(Default)]
+struct TextSearchDropPlan {
+    configs: Vec<PgTsConfigRow>,
+    dicts: Vec<PgTsDictRow>,
+    templates: Vec<PgTsTemplateRow>,
+    parsers: Vec<PgTsParserRow>,
+}
+
+impl TextSearchDropPlan {
+    fn contains(&self, row: &TextSearchCatalogRow) -> bool {
+        match row {
+            TextSearchCatalogRow::Configuration(row) => {
+                self.configs.iter().any(|existing| existing.oid == row.oid)
+            }
+            TextSearchCatalogRow::Dictionary(row) => {
+                self.dicts.iter().any(|existing| existing.oid == row.oid)
+            }
+            TextSearchCatalogRow::Template(row) => self
+                .templates
+                .iter()
+                .any(|existing| existing.oid == row.oid),
+            TextSearchCatalogRow::Parser(row) => {
+                self.parsers.iter().any(|existing| existing.oid == row.oid)
+            }
+        }
+    }
+
+    fn push(&mut self, row: TextSearchCatalogRow) {
+        if self.contains(&row) {
+            return;
+        }
+        match row {
+            TextSearchCatalogRow::Configuration(row) => self.configs.push(row),
+            TextSearchCatalogRow::Dictionary(row) => self.dicts.push(row),
+            TextSearchCatalogRow::Template(row) => self.templates.push(row),
+            TextSearchCatalogRow::Parser(row) => self.parsers.push(row),
+        }
+    }
+}
+
+fn collect_text_search_drop_plan(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    target: TextSearchCatalogRow,
+    cascade: bool,
+    snapshot: &TextSearchCatalogSnapshot,
+    plan: &mut TextSearchDropPlan,
+) -> Result<(), ExecError> {
+    if plan.contains(&target) {
+        return Ok(());
+    }
+    match &target {
+        TextSearchCatalogRow::Configuration(_) => {}
+        TextSearchCatalogRow::Dictionary(row) => {
+            let dependent_configs = snapshot.configs.iter().filter(|config| {
+                snapshot
+                    .config_maps
+                    .iter()
+                    .any(|map| map.mapcfg == config.oid && map.mapdict == row.oid)
+            });
+            for config in dependent_configs {
+                let dependent = TextSearchCatalogRow::Configuration(config.clone());
+                if !cascade {
+                    return Err(text_search_dependency_error(
+                        db, client_id, txn_ctx, &target, &dependent,
+                    ));
+                }
+                push_notice(format!(
+                    "drop cascades to {} {}",
+                    text_search_kind_name(TextSearchObjectKind::Configuration),
+                    text_search_object_display(db, client_id, txn_ctx, &dependent)
+                        .unwrap_or_else(|_| config.cfgname.clone())
+                ));
+                collect_text_search_drop_plan(
+                    db, client_id, txn_ctx, dependent, cascade, snapshot, plan,
+                )?;
+            }
+        }
+        TextSearchCatalogRow::Template(row) => {
+            let dependent_dicts = snapshot
+                .dicts
+                .iter()
+                .filter(|dict| dict.dicttemplate == row.oid);
+            for dict in dependent_dicts {
+                let dependent = TextSearchCatalogRow::Dictionary(dict.clone());
+                if !cascade {
+                    return Err(text_search_dependency_error(
+                        db, client_id, txn_ctx, &target, &dependent,
+                    ));
+                }
+                push_notice(format!(
+                    "drop cascades to {} {}",
+                    text_search_kind_name(TextSearchObjectKind::Dictionary),
+                    text_search_object_display(db, client_id, txn_ctx, &dependent)
+                        .unwrap_or_else(|_| dict.dictname.clone())
+                ));
+                collect_text_search_drop_plan(
+                    db, client_id, txn_ctx, dependent, cascade, snapshot, plan,
+                )?;
+            }
+        }
+        TextSearchCatalogRow::Parser(row) => {
+            let dependent_configs = snapshot
+                .configs
+                .iter()
+                .filter(|config| config.cfgparser == row.oid);
+            for config in dependent_configs {
+                let dependent = TextSearchCatalogRow::Configuration(config.clone());
+                if !cascade {
+                    return Err(text_search_dependency_error(
+                        db, client_id, txn_ctx, &target, &dependent,
+                    ));
+                }
+                push_notice(format!(
+                    "drop cascades to {} {}",
+                    text_search_kind_name(TextSearchObjectKind::Configuration),
+                    text_search_object_display(db, client_id, txn_ctx, &dependent)
+                        .unwrap_or_else(|_| config.cfgname.clone())
+                ));
+                collect_text_search_drop_plan(
+                    db, client_id, txn_ctx, dependent, cascade, snapshot, plan,
+                )?;
+            }
+        }
+    }
+    plan.push(target);
+    Ok(())
 }
 
 fn duplicate_text_search_exists(
@@ -855,6 +1131,152 @@ impl Database {
         };
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_drop_text_search_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &DropTextSearchStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_drop_text_search_stmt_in_transaction_with_search_path(
+            client_id,
+            stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_drop_text_search_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &DropTextSearchStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let txn_ctx = Some((xid, cid));
+        let catcache = self
+            .backend_catcache(client_id, txn_ctx)
+            .map_err(map_catalog_error)?;
+        let snapshot = TextSearchCatalogSnapshot {
+            configs: catcache.ts_config_rows(),
+            config_maps: catcache.ts_config_map_rows(),
+            dicts: catcache.ts_dict_rows(),
+        };
+        let mut plan = TextSearchDropPlan::default();
+
+        for raw_name in &stmt.object_names {
+            let (schema_name, object_name) = text_search_object_name_parts(raw_name);
+            if let Some(schema_name) = schema_name
+                && self
+                    .visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                    .is_none()
+            {
+                if stmt.if_exists {
+                    push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+                    continue;
+                }
+                return Err(ExecError::DetailedError {
+                    message: format!("schema \"{schema_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3F000",
+                });
+            }
+            let Some(row) = lookup_ts_object(
+                self,
+                client_id,
+                txn_ctx,
+                stmt.kind,
+                schema_name,
+                object_name,
+                configured_search_path,
+            )?
+            else {
+                if stmt.if_exists {
+                    push_missing_text_search_notice(stmt.kind, raw_name);
+                    continue;
+                }
+                return Err(text_search_missing_error(stmt.kind, raw_name));
+            };
+            ensure_text_search_drop_permission(self, client_id, txn_ctx, &row)?;
+            collect_text_search_drop_plan(
+                self,
+                client_id,
+                txn_ctx,
+                row,
+                stmt.cascade,
+                &snapshot,
+                &mut plan,
+            )?;
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+
+        for config in plan.configs {
+            let map_rows = snapshot
+                .config_maps
+                .iter()
+                .filter(|row| row.mapcfg == config.oid)
+                .cloned()
+                .collect::<Vec<_>>();
+            let effect = self
+                .catalog
+                .write()
+                .drop_ts_config_mvcc(config, map_rows, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        for dict in plan.dicts {
+            let effect = self
+                .catalog
+                .write()
+                .drop_ts_dict_mvcc(dict, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        for template in plan.templates {
+            let effect = self
+                .catalog
+                .write()
+                .drop_ts_template_mvcc(template, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        for parser in plan.parsers {
+            let effect = self
+                .catalog
+                .write()
+                .drop_ts_parser_mvcc(parser, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        if !catalog_effects.is_empty() {
+            self.plan_cache.invalidate_all();
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }

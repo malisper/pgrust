@@ -269,6 +269,15 @@ impl Database {
         let mut dropped = 0usize;
 
         for type_name in &drop_stmt.type_names {
+            if drop_stmt.if_exists
+                && let Some((schema_name, _)) = type_name.split_once('.')
+                && self
+                    .visible_namespace_oid_by_name(client_id, Some((xid, cid)), schema_name)
+                    .is_none()
+            {
+                push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+                continue;
+            }
             match self.resolve_drop_type_target(
                 client_id,
                 Some((xid, cid)),
@@ -400,7 +409,12 @@ impl Database {
                             catalog_effects.push(effect);
                             dropped += 1;
                         }
-                        Err(CatalogError::UnknownTable(_)) if drop_stmt.if_exists => {}
+                        Err(CatalogError::UnknownTable(_)) if drop_stmt.if_exists => {
+                            push_notice(format!(
+                                "type \"{}\" does not exist, skipping",
+                                type_name.rsplit('.').next().unwrap_or(type_name)
+                            ));
+                        }
                         Err(CatalogError::UnknownTable(_)) => {
                             return Err(type_does_not_exist_error(type_name));
                         }
@@ -459,7 +473,12 @@ impl Database {
                             catalog_effects.push(effect);
                             dropped += 1;
                         }
-                        Err(CatalogError::UnknownType(_)) if drop_stmt.if_exists => {}
+                        Err(CatalogError::UnknownType(_)) if drop_stmt.if_exists => {
+                            push_notice(format!(
+                                "type \"{}\" does not exist, skipping",
+                                type_name.rsplit('.').next().unwrap_or(type_name)
+                            ));
+                        }
                         Err(CatalogError::UnknownType(_)) => {
                             return Err(type_does_not_exist_error(type_name));
                         }
@@ -613,7 +632,12 @@ impl Database {
                         self.invalidate_backend_cache_state(client_id);
                         self.plan_cache.invalidate_all();
                         dropped += 1;
-                    } else if !drop_stmt.if_exists {
+                    } else if drop_stmt.if_exists {
+                        push_notice(format!(
+                            "type \"{}\" does not exist, skipping",
+                            type_name.rsplit('.').next().unwrap_or(type_name)
+                        ));
+                    } else {
                         return Err(type_does_not_exist_error(type_name));
                     }
                 }
@@ -673,11 +697,21 @@ impl Database {
                         self.invalidate_backend_cache_state(client_id);
                         self.plan_cache.invalidate_all();
                         dropped += 1;
-                    } else if !drop_stmt.if_exists {
+                    } else if drop_stmt.if_exists {
+                        push_notice(format!(
+                            "type \"{}\" does not exist, skipping",
+                            type_name.rsplit('.').next().unwrap_or(type_name)
+                        ));
+                    } else {
                         return Err(type_does_not_exist_error(type_name));
                     }
                 }
-                None if drop_stmt.if_exists => {}
+                None if drop_stmt.if_exists => {
+                    push_notice(format!(
+                        "type \"{}\" does not exist, skipping",
+                        type_name.rsplit('.').next().unwrap_or(type_name)
+                    ));
+                }
                 None => return Err(type_does_not_exist_error(type_name)),
             }
         }

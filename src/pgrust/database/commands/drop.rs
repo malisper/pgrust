@@ -12,14 +12,15 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
-    CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_REWRITE_RELATION_OID, PgCastRow, PgConstraintRow, PgPolicyRow, PgProcRow, PgRewriteRow,
+    CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_POLICY_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PgCastRow, PgConstraintRow, PgPolicyRow,
+    PgProcRow, PgRewriteRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
-    DropSchemaStatement,
+    AggregateArgType, AggregateSignatureKind, DropAggregateStatement, DropFunctionStatement,
+    DropIndexStatement, DropProcedureStatement, DropSchemaStatement, RawTypeName,
 };
 use crate::pgrust::auth::AuthCatalog;
 use crate::pgrust::database::ddl::format_sql_type_name;
@@ -227,6 +228,106 @@ fn push_missing_relation_notice(
     push_notice(format!(
         "{object_kind} \"{display_name}\" does not exist, skipping"
     ));
+}
+
+fn missing_relation_error(relation_name: &str, object_kind: &'static str) -> ExecError {
+    let display_name = relation_name.rsplit('.').next().unwrap_or(relation_name);
+    let display_name = display_name.trim_matches('"').replace("\"\"", "\"");
+    ExecError::DetailedError {
+        message: format!("{object_kind} \"{display_name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P01",
+    }
+}
+
+fn raw_type_display_name(raw: &RawTypeName) -> String {
+    match raw {
+        RawTypeName::Builtin(sql_type) => format_sql_type_name(*sql_type),
+        RawTypeName::Serial(kind) => match kind {
+            crate::include::nodes::parsenodes::SerialKind::Small => "smallserial".into(),
+            crate::include::nodes::parsenodes::SerialKind::Regular => "serial".into(),
+            crate::include::nodes::parsenodes::SerialKind::Big => "bigserial".into(),
+        },
+        RawTypeName::Named { name, array_bounds } => {
+            let mut display = name.clone();
+            for _ in 0..*array_bounds {
+                display.push_str("[]");
+            }
+            display
+        }
+        RawTypeName::Record => "record".into(),
+    }
+}
+
+fn missing_schema_for_raw_type(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    raw: &RawTypeName,
+) -> Option<String> {
+    let RawTypeName::Named { name, .. } = raw else {
+        return None;
+    };
+    let (schema_name, _) = name.split_once('.')?;
+    let schema_name = schema_name.trim_matches('"').replace("\"\"", "\"");
+    if schema_name.eq_ignore_ascii_case("pg_catalog")
+        || catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
+    {
+        None
+    } else {
+        Some(schema_name)
+    }
+}
+
+fn push_missing_raw_type_notice(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    raw: &RawTypeName,
+) {
+    if let Some(schema_name) = missing_schema_for_raw_type(catalog, raw) {
+        push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+        return;
+    }
+    push_notice(format!(
+        "type \"{}\" does not exist, skipping",
+        raw_type_display_name(raw)
+    ));
+}
+
+fn missing_raw_type_notice_pushed(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    raw: &RawTypeName,
+) -> bool {
+    if let Some(schema_name) = missing_schema_for_raw_type(catalog, raw) {
+        push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+        return true;
+    }
+    match resolve_raw_type_name(raw, catalog) {
+        Ok(sql_type) if catalog.type_oid_for_sql_type(sql_type).is_some() => false,
+        Ok(_) | Err(ParseError::UnsupportedType(_)) => {
+            push_missing_raw_type_notice(catalog, raw);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn missing_drop_aggregate_type_notice_pushed(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    signature: &AggregateSignatureKind,
+) -> bool {
+    let AggregateSignatureKind::Args(signature) = signature else {
+        return false;
+    };
+    signature
+        .args
+        .iter()
+        .chain(signature.order_by.iter())
+        .any(|arg| match &arg.arg_type {
+            AggregateArgType::Type(raw) => missing_raw_type_notice_pushed(catalog, raw),
+            AggregateArgType::AnyPseudo => false,
+        })
 }
 
 fn cast_drop_notice(
@@ -972,6 +1073,79 @@ fn drop_routine_signature_display(
     format!("{name}({args})")
 }
 
+fn drop_type_notice_name(catalog: &dyn crate::backend::parser::CatalogLookup, oid: u32) -> String {
+    if let Some(row) = catalog.type_by_oid(oid) {
+        if row.typelem != 0 && row.typname.starts_with('_') {
+            return format!("{}[]", drop_type_notice_name(catalog, row.typelem));
+        }
+        if row.typname == "text" {
+            return row.typname;
+        }
+        if row.typnamespace == PG_CATALOG_NAMESPACE_OID {
+            return format!("pg_catalog.{}", row.typname);
+        }
+        return row.typname;
+    }
+    oid.to_string()
+}
+
+fn drop_routine_signature_notice_display(
+    name: &str,
+    specs: &[DropRoutineArgSpec],
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> String {
+    let args = specs
+        .iter()
+        .map(|spec| drop_type_notice_name(catalog, spec.type_oid))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{name}({args})")
+}
+
+fn drop_signature_notice_for_oids(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    arg_oids: &[u32],
+) -> String {
+    let args = arg_oids
+        .iter()
+        .map(|oid| drop_type_notice_name(catalog, *oid))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{name}({args})")
+}
+
+fn drop_routine_arg_raw_type(arg: &str) -> Result<RawTypeName, ParseError> {
+    let mut text = arg.trim();
+    if let Some((rest, _mode)) = strip_drop_routine_arg_mode(text) {
+        text = rest;
+    }
+
+    match parse_type_name(text) {
+        Ok(raw_type) => Ok(raw_type),
+        Err(first_err) => {
+            let Some(rest) = strip_leading_sql_word(text) else {
+                return Err(first_err);
+            };
+            let rest = strip_drop_routine_arg_mode(rest)
+                .map(|(rest, _)| rest)
+                .unwrap_or(rest);
+            parse_type_name(rest)
+        }
+    }
+}
+
+fn missing_drop_routine_type_notice_pushed(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    args: &[String],
+) -> bool {
+    args.iter().any(|arg| {
+        drop_routine_arg_raw_type(arg)
+            .ok()
+            .is_some_and(|raw| missing_raw_type_notice_pushed(catalog, &raw))
+    })
+}
+
 fn drop_routine_arg_spec(
     arg: &str,
     catalog: &dyn crate::backend::parser::CatalogLookup,
@@ -1575,18 +1749,37 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let txn_ctx = Some((xid, cid));
         let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
-        let arg_oids = aggregate_signature_arg_oids(&catalog, &drop_stmt.signature)
-            .map_err(ExecError::Parse)?;
+        let arg_oids = match aggregate_signature_arg_oids(&catalog, &drop_stmt.signature) {
+            Ok(arg_oids) => arg_oids,
+            Err(_err)
+                if drop_stmt.if_exists
+                    && missing_drop_aggregate_type_notice_pushed(
+                        &catalog,
+                        &drop_stmt.signature,
+                    ) =>
+            {
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            Err(err) => return Err(ExecError::Parse(err)),
+        };
         let schema_oid = match &drop_stmt.schema_name {
-            Some(schema_name) => Some(
-                self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("schema \"{schema_name}\" does not exist"),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "3F000",
-                    })?,
-            ),
+            Some(schema_name) => {
+                match self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name) {
+                    Some(schema_oid) => Some(schema_oid),
+                    None if drop_stmt.if_exists => {
+                        push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+                        return Ok(StatementResult::AffectedRows(0));
+                    }
+                    None => {
+                        return Err(ExecError::DetailedError {
+                            message: format!("schema \"{schema_name}\" does not exist"),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "3F000",
+                        });
+                    }
+                }
+            }
             None => None,
         };
         let matches =
@@ -1596,17 +1789,21 @@ impl Database {
             [] if drop_stmt.if_exists => {
                 push_notice(format!(
                     "aggregate {} does not exist, skipping",
-                    format_aggregate_signature(
-                        &drop_stmt.aggregate_name,
-                        &drop_stmt.signature,
-                        &catalog
-                    )?
+                    drop_signature_notice_for_oids(&catalog, &drop_stmt.aggregate_name, &arg_oids)
                 ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             [] => {
-                let signature =
-                    drop_signature_for_oids(&catalog, &drop_stmt.aggregate_name, &arg_oids);
+                let signature = match drop_stmt.signature {
+                    AggregateSignatureKind::Star => format_aggregate_signature(
+                        &drop_stmt.aggregate_name,
+                        &drop_stmt.signature,
+                        &catalog,
+                    )?,
+                    AggregateSignatureKind::Args(_) => {
+                        drop_signature_for_oids(&catalog, &drop_stmt.aggregate_name, &arg_oids)
+                    }
+                };
                 return Err(ExecError::DetailedError {
                     message: format!("aggregate {signature} does not exist"),
                     detail: None,
@@ -1837,22 +2034,39 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let txn_ctx = Some((xid, cid));
         let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
-        let desired_arg_specs = drop_stmt
+        let desired_arg_specs = match drop_stmt
             .arg_types
             .iter()
             .map(|arg| drop_routine_arg_spec(arg, &catalog))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(ExecError::Parse)?;
+        {
+            Ok(specs) => specs,
+            Err(_err)
+                if drop_stmt.if_exists
+                    && missing_drop_routine_type_notice_pushed(&catalog, &drop_stmt.arg_types) =>
+            {
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            Err(err) => return Err(ExecError::Parse(err)),
+        };
         let schema_oid = match &drop_stmt.schema_name {
-            Some(schema_name) => Some(
-                self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("schema \"{schema_name}\" does not exist"),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "3F000",
-                    })?,
-            ),
+            Some(schema_name) => {
+                match self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name) {
+                    Some(schema_oid) => Some(schema_oid),
+                    None if drop_stmt.if_exists => {
+                        push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+                        return Ok(StatementResult::AffectedRows(0));
+                    }
+                    None => {
+                        return Err(ExecError::DetailedError {
+                            message: format!("schema \"{schema_name}\" does not exist"),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "3F000",
+                        });
+                    }
+                }
+            }
             None => None,
         };
         let matches = catalog
@@ -1906,6 +2120,11 @@ impl Database {
                 });
             }
             [] if drop_stmt.if_exists => {
+                let display_signature = drop_routine_signature_notice_display(
+                    &drop_stmt.function_name,
+                    &desired_arg_specs,
+                    &catalog,
+                );
                 push_notice(format!(
                     "{object_kind} {display_signature} does not exist, skipping"
                 ));
@@ -2320,6 +2539,15 @@ impl Database {
         let domains_guard = self.domains.read();
         let mut explicit_domains = Vec::new();
         for domain_name in &domain_names {
+            if drop_stmt.if_exists
+                && let Some((schema_name, _)) = domain_name.split_once('.')
+                && self
+                    .visible_namespace_oid_by_name(client_id, Some((xid, cid)), schema_name)
+                    .is_none()
+            {
+                push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+                continue;
+            }
             let (normalized, _, _) = self.normalize_domain_name_for_create(
                 client_id,
                 domain_name,
@@ -2327,6 +2555,10 @@ impl Database {
             )?;
             let Some(domain) = domains_guard.get(&normalized).cloned() else {
                 if drop_stmt.if_exists {
+                    push_notice(format!(
+                        "type \"{}\" does not exist, skipping",
+                        domain_name.rsplit('.').next().unwrap_or(domain_name)
+                    ));
                     continue;
                 }
                 return Err(ExecError::Parse(ParseError::UnsupportedType(
@@ -2919,11 +3151,7 @@ impl Database {
         for index_name in &drop_stmt.index_names {
             let Some(entry) = catalog.lookup_any_relation(index_name) else {
                 if drop_stmt.if_exists {
-                    let display_name = index_name.rsplit('.').next().unwrap_or(index_name);
-                    push_notice(format!(
-                        "index \"{}\" does not exist, skipping",
-                        display_name.trim_matches('"')
-                    ));
+                    push_missing_relation_notice(&catalog, index_name, "index");
                     continue;
                 }
                 return Err(ExecError::DetailedError {
@@ -3138,7 +3366,10 @@ impl Database {
                 .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid));
             let schema = match maybe_schema {
                 Some(schema) => schema,
-                None if drop_stmt.if_exists => continue,
+                None if drop_stmt.if_exists => {
+                    push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+                    continue;
+                }
                 None => {
                     return Err(ExecError::DetailedError {
                         message: format!("schema \"{schema_name}\" does not exist"),
@@ -3598,11 +3829,12 @@ impl Database {
                     }));
                     break;
                 }
-                None if if_exists => continue,
+                None if if_exists => {
+                    push_missing_relation_notice(&catalog, relation_name, expected_name);
+                    continue;
+                }
                 None => {
-                    result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                        relation_name.clone(),
-                    )));
+                    result = Err(missing_relation_error(relation_name, expected_name));
                     break;
                 }
             };
@@ -3693,9 +3925,7 @@ impl Database {
                 }
                 Err(CatalogError::UnknownTable(_)) if if_exists => {}
                 Err(CatalogError::UnknownTable(_)) => {
-                    result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                        relation_name.clone(),
-                    )));
+                    result = Err(missing_relation_error(relation_name, expected_name));
                     break;
                 }
                 Err(other) => {
@@ -3763,9 +3993,7 @@ impl Database {
                     continue;
                 }
                 None => {
-                    return Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                        relation_name.clone(),
-                    )));
+                    return Err(missing_relation_error(relation_name, expected_name));
                 }
             };
             ensure_relation_owner(self, client_id, &relation, relation_name)?;

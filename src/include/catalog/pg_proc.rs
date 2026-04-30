@@ -11254,6 +11254,13 @@ fn operator_catalog_proc_rows() -> Vec<PgProcRow> {
             "int4or",
         ),
         (
+            1906,
+            "int8xor",
+            INT8_TYPE_OID,
+            &[INT8_TYPE_OID, INT8_TYPE_OID],
+            "int8xor",
+        ),
+        (
             2981,
             "record_eq",
             BOOL_TYPE_OID,

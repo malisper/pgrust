@@ -32,6 +32,24 @@ fn lookup_sequence_relation_for_ddl(
     }
 }
 
+fn push_missing_sequence_notice(catalog: &dyn CatalogLookup, sequence_name: &str) {
+    if let Some((schema_name, _)) = sequence_name.split_once('.')
+        && !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+    {
+        crate::backend::utils::misc::notices::push_notice(format!(
+            "schema \"{schema_name}\" does not exist, skipping"
+        ));
+        return;
+    }
+    crate::backend::utils::misc::notices::push_notice(format!(
+        "sequence \"{}\" does not exist, skipping",
+        sequence_name.rsplit('.').next().unwrap_or(sequence_name)
+    ));
+}
+
 fn resolve_owned_by_clause(
     catalog: &dyn CatalogLookup,
     sequence_namespace_oid: u32,
@@ -582,7 +600,10 @@ impl Database {
                     }));
                     break;
                 }
-                None if drop_stmt.if_exists => continue,
+                None if drop_stmt.if_exists => {
+                    push_missing_sequence_notice(&catalog, sequence_name);
+                    continue;
+                }
                 None => {
                     result = Err(ExecError::DetailedError {
                         message: format!(r#"sequence "{sequence_name}" does not exist"#).into(),

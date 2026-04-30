@@ -3378,11 +3378,12 @@ fn parse_text_search_configuration_ddl() {
     let stmt = parse_statement("drop text search configuration if exists dummy_tst").unwrap();
     assert!(matches!(
         stmt,
-        Statement::DropTextSearchConfiguration(DropTextSearchConfigurationStatement {
+        Statement::DropTextSearch(DropTextSearchStatement {
+            kind: TextSearchObjectKind::Configuration,
             if_exists: true,
-            config_name,
+            object_names,
             ..
-        }) if config_name == "dummy_tst"
+        }) if object_names == vec!["dummy_tst"]
     ));
 }
 
@@ -3734,6 +3735,50 @@ fn parse_text_search_generic_statements() {
     assert!(
         err.to_string()
             .contains("parameter \"Init\" not recognized")
+    );
+    assert_eq!(
+        parse_statement("drop text search dictionary if exists alt_ts_dict1 cascade").unwrap(),
+        Statement::DropTextSearch(DropTextSearchStatement {
+            kind: TextSearchObjectKind::Dictionary,
+            if_exists: true,
+            object_names: vec!["alt_ts_dict1".into()],
+            cascade: true,
+        })
+    );
+    assert_eq!(
+        parse_statement("drop text search parser alt_ts_prs1, public.alt_ts_prs2 restrict")
+            .unwrap(),
+        Statement::DropTextSearch(DropTextSearchStatement {
+            kind: TextSearchObjectKind::Parser,
+            if_exists: false,
+            object_names: vec!["alt_ts_prs1".into(), "public.alt_ts_prs2".into()],
+            cascade: false,
+        })
+    );
+    assert_eq!(
+        parse_statement("drop text search template if exists alt_ts_tmpl1").unwrap(),
+        Statement::DropTextSearch(DropTextSearchStatement {
+            kind: TextSearchObjectKind::Template,
+            if_exists: true,
+            object_names: vec!["alt_ts_tmpl1".into()],
+            cascade: false,
+        })
+    );
+    assert_eq!(
+        parse_statement("drop extension if exists alt_ext1, alt_ext2 cascade").unwrap(),
+        Statement::DropExtension(DropExtensionStatement {
+            if_exists: true,
+            extension_names: vec!["alt_ext1".into(), "alt_ext2".into()],
+            cascade: true,
+        })
+    );
+    assert_eq!(
+        parse_statement("drop access method if exists alt_am1 cascade").unwrap(),
+        Statement::DropAccessMethod(DropAccessMethodStatement {
+            if_exists: true,
+            access_method_names: vec!["alt_am1".into()],
+            cascade: true,
+        })
     );
 }
 
@@ -5243,6 +5288,23 @@ fn parse_drop_database_statement() {
         Statement::DropDatabase(DropDatabaseStatement {
             if_exists: true,
             database_name: "analytics".into(),
+            force: false,
+        })
+    );
+    assert_eq!(
+        parse_statement("drop database analytics (force)").unwrap(),
+        Statement::DropDatabase(DropDatabaseStatement {
+            if_exists: false,
+            database_name: "analytics".into(),
+            force: true,
+        })
+    );
+    assert_eq!(
+        parse_statement("drop database if exists analytics with (force)").unwrap(),
+        Statement::DropDatabase(DropDatabaseStatement {
+            if_exists: true,
+            database_name: "analytics".into(),
+            force: true,
         })
     );
 }

@@ -152,6 +152,20 @@ impl Database {
         )?
         .map(|(key, entry, _)| (key, entry.name.clone())) else {
             if stmt.if_exists {
+                if let Some((schema_name, _)) = stmt.conversion_name.split_once('.')
+                    && self
+                        .visible_namespace_oid_by_name(client_id, Some((xid, cid)), schema_name)
+                        .is_none()
+                {
+                    crate::backend::utils::misc::notices::push_notice(format!(
+                        "schema \"{schema_name}\" does not exist, skipping"
+                    ));
+                } else {
+                    crate::backend::utils::misc::notices::push_notice(format!(
+                        "conversion \"{}\" does not exist, skipping",
+                        conversion_object_name(&stmt.conversion_name)
+                    ));
+                }
                 return Ok(StatementResult::AffectedRows(0));
             }
             let object_name = conversion_object_name(&stmt.conversion_name);

@@ -97,6 +97,12 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_language_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_drop_database_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_drop_catalog_object_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_text_search_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1805,9 +1811,9 @@ fn try_parse_text_search_statement(sql: &str) -> Result<Option<Statement>, Parse
         return build_alter_text_search_statement(trimmed)
             .map(|stmt| Some(Statement::AlterTextSearch(stmt)));
     }
-    if lowered.starts_with("drop text search configuration ") {
-        return build_drop_text_search_configuration_statement(trimmed)
-            .map(|stmt| Some(Statement::DropTextSearchConfiguration(stmt)));
+    if lowered.starts_with("drop text search ") {
+        return build_drop_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::DropTextSearch(stmt)));
     }
     if lowered.starts_with("create text search ") {
         return build_create_text_search_statement(trimmed)
@@ -1945,6 +1951,26 @@ fn build_drop_text_search_configuration_statement(
         if_exists,
         schema_name,
         config_name,
+    })
+}
+
+fn build_drop_text_search_statement(sql: &str) -> Result<DropTextSearchStatement, ParseError> {
+    let rest = sql["drop text search".len()..].trim_start();
+    let (kind, rest) = parse_text_search_kind(rest)?;
+    let mut rest = rest.trim_start();
+    let if_exists = if let Some(after) = consume_keywords(rest, &["if", "exists"]) {
+        rest = after;
+        true
+    } else {
+        false
+    };
+    let (names_sql, cascade) = split_drop_routine_suffix(rest)?;
+    let object_names = parse_drop_qualified_name_list(names_sql)?;
+    Ok(DropTextSearchStatement {
+        kind,
+        if_exists,
+        object_names,
+        cascade,
     })
 }
 
@@ -6236,6 +6262,122 @@ fn try_parse_language_statement(sql: &str) -> Result<Option<Statement>, ParseErr
             .map(|stmt| Some(Statement::DropLanguage(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_drop_database_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !trimmed.to_ascii_lowercase().starts_with("drop database ") {
+        return Ok(None);
+    }
+    build_drop_database_statement(trimmed).map(|stmt| Some(Statement::DropDatabase(stmt)))
+}
+
+fn build_drop_database_statement(sql: &str) -> Result<DropDatabaseStatement, ParseError> {
+    let mut rest = sql["drop database".len()..].trim_start();
+    let if_exists = if let Some(after) = consume_keywords(rest, &["if", "exists"]) {
+        rest = after;
+        true
+    } else {
+        false
+    };
+    let (database_name, mut rest) = parse_unqualified_identifier(rest, "database name")?;
+    rest = rest.trim_start();
+
+    let mut force = false;
+    if !rest.is_empty() {
+        if let Some(after_with) = consume_keywords(rest, &["with"]) {
+            rest = after_with.trim_start();
+        }
+        if !rest.starts_with('(') {
+            return Err(ParseError::UnexpectedToken {
+                expected: "DROP DATABASE option list",
+                actual: rest.into(),
+            });
+        }
+        let (options_sql, tail) = take_parenthesized_segment(rest)?;
+        require_empty_tail(tail, "end of DROP DATABASE")?;
+        for option in split_top_level_items(&options_sql, ',')? {
+            let option = option.trim();
+            if option.eq_ignore_ascii_case("force") {
+                force = true;
+            } else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "DROP DATABASE option",
+                    actual: option.into(),
+                });
+            }
+        }
+    }
+
+    Ok(DropDatabaseStatement {
+        if_exists,
+        database_name,
+        force,
+    })
+}
+
+fn try_parse_drop_catalog_object_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("drop extension ") {
+        return build_drop_extension_statement(trimmed)
+            .map(|stmt| Some(Statement::DropExtension(stmt)));
+    }
+    if lowered.starts_with("drop access method ") {
+        return build_drop_access_method_statement(trimmed)
+            .map(|stmt| Some(Statement::DropAccessMethod(stmt)));
+    }
+    Ok(None)
+}
+
+fn build_drop_extension_statement(sql: &str) -> Result<DropExtensionStatement, ParseError> {
+    let mut rest = sql["drop extension".len()..].trim_start();
+    let if_exists = if let Some(after) = consume_keywords(rest, &["if", "exists"]) {
+        rest = after;
+        true
+    } else {
+        false
+    };
+    let (names_sql, cascade) = split_drop_routine_suffix(rest)?;
+    let extension_names = parse_drop_qualified_name_list(names_sql)?;
+    Ok(DropExtensionStatement {
+        if_exists,
+        extension_names,
+        cascade,
+    })
+}
+
+fn build_drop_access_method_statement(sql: &str) -> Result<DropAccessMethodStatement, ParseError> {
+    let mut rest = sql["drop access method".len()..].trim_start();
+    let if_exists = if let Some(after) = consume_keywords(rest, &["if", "exists"]) {
+        rest = after;
+        true
+    } else {
+        false
+    };
+    let (names_sql, cascade) = split_drop_routine_suffix(rest)?;
+    let access_method_names = parse_drop_qualified_name_list(names_sql)?;
+    Ok(DropAccessMethodStatement {
+        if_exists,
+        access_method_names,
+        cascade,
+    })
+}
+
+fn parse_drop_qualified_name_list(input: &str) -> Result<Vec<String>, ParseError> {
+    let names = split_top_level_items(input, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| {
+            let (parts, rest) = parse_qualified_identifier_parts(item.trim())?;
+            require_empty_tail(rest, "end of DROP object name")?;
+            Ok(parts.join("."))
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    if names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(names)
 }
 
 fn parse_text_search_kind(input: &str) -> Result<(TextSearchObjectKind, &str), ParseError> {
@@ -23130,6 +23272,7 @@ fn build_drop_database(pair: Pair<'_, Rule>) -> Result<DropDatabaseStatement, Pa
     Ok(DropDatabaseStatement {
         if_exists,
         database_name: database_name.ok_or(ParseError::UnexpectedEof)?,
+        force: false,
     })
 }
 

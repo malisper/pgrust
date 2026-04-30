@@ -1702,6 +1702,12 @@ impl Database {
                     drop_stmt,
                     configured_search_path,
                 ),
+            Statement::DropTextSearch(ref drop_stmt) => self
+                .execute_drop_text_search_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::DropStatistics(ref drop_stmt) => self
                 .execute_drop_statistics_stmt_with_search_path(
                     client_id,
@@ -2038,6 +2044,12 @@ impl Database {
             Statement::DropRole(ref drop_stmt) => self.execute_drop_role_stmt(client_id, drop_stmt),
             Statement::DropDatabase(ref drop_stmt) => {
                 self.execute_drop_database_stmt(client_id, drop_stmt)
+            }
+            Statement::DropExtension(ref drop_stmt) => {
+                self.execute_drop_extension_stmt(client_id, drop_stmt)
+            }
+            Statement::DropAccessMethod(ref drop_stmt) => {
+                self.execute_drop_access_method_stmt(client_id, drop_stmt)
             }
             Statement::GrantObject(ref grant_stmt) => self
                 .execute_grant_object_stmt_with_search_path(

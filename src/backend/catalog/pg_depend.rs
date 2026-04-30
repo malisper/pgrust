@@ -12,9 +12,9 @@ use crate::include::catalog::{
     PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
     PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TS_CONFIG_RELATION_OID,
     PG_TS_DICT_RELATION_OID, PG_TS_PARSER_RELATION_OID, PG_TS_TEMPLATE_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgAggregateRow, PgDependRow, PgForeignServerRow, PgLanguageRow,
-    PgOpclassRow, PgOpfamilyRow, PgStatisticExtRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow,
+    PG_TYPE_RELATION_OID, PgAggregateRow, PgAmRow, PgDependRow, PgForeignServerRow, PgLanguageRow,
+    PgOpclassRow, PgOpfamilyRow, PgStatisticExtRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow,
 };
 use crate::include::nodes::parsenodes::{SqlExpr, function_arg_values};
 use std::collections::BTreeSet;
@@ -659,6 +659,24 @@ pub fn opfamily_depend_rows(row: &PgOpfamilyRow) -> Vec<PgDependRow> {
     rows
 }
 
+pub fn access_method_depend_rows(row: &PgAmRow) -> Vec<PgDependRow> {
+    let mut rows = if row.amhandler == 0 {
+        Vec::new()
+    } else {
+        vec![PgDependRow {
+            classid: PG_AM_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: row.amhandler,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        }]
+    };
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
 pub fn opclass_depend_rows(row: &PgOpclassRow) -> Vec<PgDependRow> {
     let mut rows = vec![
         PgDependRow {
@@ -759,6 +777,33 @@ pub fn ts_config_depend_rows(row: &PgTsConfigRow) -> Vec<PgDependRow> {
             deptype: DEPENDENCY_NORMAL,
         },
     ];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn ts_config_map_depend_rows(
+    config_oid: u32,
+    map_rows: &[PgTsConfigMapRow],
+) -> Vec<PgDependRow> {
+    let mut dict_oids = map_rows
+        .iter()
+        .map(|row| row.mapdict)
+        .filter(|oid| *oid != 0)
+        .collect::<Vec<_>>();
+    dict_oids.sort_unstable();
+    dict_oids.dedup();
+    let mut rows = dict_oids
+        .into_iter()
+        .map(|dict_oid| PgDependRow {
+            classid: PG_TS_CONFIG_RELATION_OID,
+            objid: config_oid,
+            objsubid: 0,
+            refclassid: PG_TS_DICT_RELATION_OID,
+            refobjid: dict_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        })
+        .collect::<Vec<_>>();
     sort_pg_depend_rows(&mut rows);
     rows
 }
