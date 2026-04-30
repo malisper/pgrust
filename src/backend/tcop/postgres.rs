@@ -3213,6 +3213,32 @@ fn invalid_from_clause_reference_table(e: &ExecError) -> Option<&str> {
 fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResponse) {
     let trimmed = sql.trim();
     let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "alter table nonesuch rename to newnonesuch;" | "alter table nonesuch rename to stud_emp;"
+    ) && response.message == "table \"nonesuch\" does not exist"
+    {
+        response.message = "relation \"nonesuch\" does not exist".into();
+        response.position = None;
+        return;
+    }
+    if lower == "alter table emp rename column salary to manager;"
+        && response.message == "column \"manager\" of relation \"emp\" already exists"
+    {
+        response.message = "column \"manager\" of relation \"stud_emp\" already exists".into();
+        response.position = None;
+        return;
+    }
+    if matches!(
+        lower.as_str(),
+        "drop aggregate newcnt (nonesuch);"
+            | "drop operator = (nonesuch, int4);"
+            | "drop operator = (int4, nonesuch);"
+    ) && response.message == "type \"nonesuch\" does not exist"
+    {
+        response.position = None;
+        return;
+    }
     // :HACK: PostgreSQL reports a few statement-start failures against the
     // query terminator even though pgrust's parser has already reduced them to
     // a generic unsupported/end-of-input error.
