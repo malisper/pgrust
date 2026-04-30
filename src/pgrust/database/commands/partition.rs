@@ -146,6 +146,39 @@ fn lookup_partition_alter_child(
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.to_string())))
 }
 
+fn reject_attach_foreign_partition_with_unique_parent_indexes(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    parent: &BoundRelation,
+    parent_name: &str,
+    child: &BoundRelation,
+    child_name: &str,
+) -> Result<(), ExecError> {
+    if child.relkind != 'f' {
+        return Ok(());
+    }
+    let has_unique_index = db
+        .backend_catcache(client_id, txn_ctx)
+        .map_err(map_catalog_error)?
+        .index_rows()
+        .into_iter()
+        .any(|row| row.indrelid == parent.relation_oid && (row.indisunique || row.indisprimary));
+    if !has_unique_index {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot attach foreign table \"{child_name}\" as partition of partitioned table \"{parent_name}\""
+        ),
+        detail: Some(format!(
+            "Partitioned table \"{parent_name}\" contains unique indexes."
+        )),
+        hint: None,
+        sqlstate: "42809",
+    })
+}
+
 fn detach_unsupported_action(mode: &DetachPartitionMode) -> &'static str {
     match mode {
         DetachPartitionMode::Finalize => "DETACH PARTITION ... FINALIZE",
@@ -551,6 +584,15 @@ impl Database {
                 sqlstate: "42809",
             });
         }
+        reject_attach_foreign_partition_with_unique_parent_indexes(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &parent,
+            &stmt.parent_table,
+            &child,
+            &stmt.partition_table,
+        )?;
         validate_partition_relation_compatibility(
             &catalog,
             &parent,
@@ -571,7 +613,11 @@ impl Database {
             cid.saturating_add(1),
             std::sync::Arc::clone(&interrupts),
         )?;
-        validate_relation_rows_for_partition_bound(&catalog, &parent, &child, &bound, &mut ctx)?;
+        if child.relkind != 'f' {
+            validate_relation_rows_for_partition_bound(
+                &catalog, &parent, &child, &bound, &mut ctx,
+            )?;
+        }
         validate_default_partition_rows_for_new_bound(&catalog, &parent, &bound, &mut ctx)?;
         validate_new_partition_bound(
             &catalog,
@@ -654,8 +700,10 @@ impl Database {
             configured_search_path,
             catalog_effects,
         )?;
-        let next_cid = self
-            .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
+        let next_cid = if updated_child.relkind == 'f' {
+            next_cid
+        } else {
+            self.reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
                 client_id,
                 xid,
                 next_cid,
@@ -663,7 +711,8 @@ impl Database {
                 updated_child.relation_oid,
                 configured_search_path,
                 catalog_effects,
-            )?;
+            )?
+        };
         let next_cid = self
             .reconcile_partitioned_parent_foreign_keys_for_attached_child_in_transaction(
                 client_id,
@@ -1095,7 +1144,7 @@ impl Database {
             return Ok(None);
         };
         let child = lookup_partition_alter_child(&catalog, &stmt.partition_table)?;
-        if !matches!(child.relkind, 'r' | 'p') {
+        if !matches!(child.relkind, 'r' | 'p' | 'f') {
             return Err(ExecError::Parse(ParseError::WrongObjectType {
                 name: stmt.partition_table.clone(),
                 expected: "table",

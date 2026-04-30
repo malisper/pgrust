@@ -6829,6 +6829,7 @@ fn parse_create_trigger_statement_with_when_and_update_of() {
         stmt,
         Statement::CreateTrigger(CreateTriggerStatement {
             replace_existing: true,
+            is_constraint: false,
             trigger_name: "audit_row".into(),
             schema_name: Some("public".into()),
             table_name: "people".into(),
@@ -6863,6 +6864,7 @@ fn parse_create_instead_of_trigger_statement() {
         stmt,
         Statement::CreateTrigger(CreateTriggerStatement {
             replace_existing: false,
+            is_constraint: false,
             trigger_name: "audit_row".into(),
             schema_name: Some("public".into()),
             table_name: "people_view".into(),
@@ -6899,6 +6901,24 @@ fn parse_create_trigger_statement_for_statement_without_each() {
         }
         other => panic!("expected create trigger, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_create_constraint_trigger_statement() {
+    let stmt = parse_statement(
+        "create constraint trigger audit_constraint after insert on public.people for each row execute function public.audit_people()",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateTrigger(CreateTriggerStatement {
+            is_constraint: true,
+            trigger_name,
+            timing: TriggerTiming::After,
+            level: TriggerLevel::Row,
+            ..
+        }) if trigger_name == "audit_constraint"
+    ));
 }
 
 #[test]
@@ -7091,6 +7111,7 @@ fn parse_create_trigger_statement_with_referencing_and_truncate() {
         stmt,
         Statement::CreateTrigger(CreateTriggerStatement {
             replace_existing: false,
+            is_constraint: false,
             trigger_name: "audit_stmt".into(),
             schema_name: None,
             table_name: "people".into(),
@@ -15748,6 +15769,54 @@ fn parse_foreign_data_wrapper_statements() {
         )]
     );
     assert_eq!(create_table.create_table.elements.len(), 2);
+
+    let Statement::CreateForeignTable(create_table) = parse_statement(
+        "create foreign table ft_child (a int options (column_name 'remote_a')) inherits (ft_parent) server srv",
+    )
+    .unwrap() else {
+        panic!("expected inherited create foreign table");
+    };
+    assert_eq!(create_table.create_table.table_name, "ft_child");
+    assert_eq!(create_table.create_table.inherits, vec!["ft_parent"]);
+    assert_eq!(create_table.server_name, "srv");
+    assert_eq!(create_table.column_options.len(), 1);
+
+    let Statement::CreateForeignTable(create_table) = parse_statement(
+        "create foreign table ft_part partition of parted for values in (1) server srv options (delimiter ',')",
+    )
+    .unwrap() else {
+        panic!("expected foreign partition");
+    };
+    assert_eq!(create_table.create_table.table_name, "ft_part");
+    assert_eq!(
+        create_table.create_table.partition_of.as_deref(),
+        Some("parted")
+    );
+    assert!(matches!(
+        create_table.create_table.partition_bound,
+        Some(RawPartitionBoundSpec::List { .. })
+    ));
+    assert_eq!(create_table.options[0].name, "delimiter");
+
+    let Statement::CreateForeignTable(create_table) = parse_statement(
+        "create foreign table if not exists ft_part partition of parted (a options (column_name 'remote_a')) default server srv",
+    )
+    .unwrap() else {
+        panic!("expected if not exists foreign default partition");
+    };
+    assert!(create_table.create_table.if_not_exists);
+    assert_eq!(
+        create_table.create_table.partition_of.as_deref(),
+        Some("parted")
+    );
+    assert!(matches!(
+        create_table.create_table.partition_bound,
+        Some(RawPartitionBoundSpec::List {
+            is_default: true,
+            ..
+        })
+    ));
+    assert_eq!(create_table.column_options.len(), 1);
 
     let Statement::AlterTableAddColumn(add_column) = parse_statement(
         "alter foreign table ft add column if not exists c int options (column_name 'remote_c')",

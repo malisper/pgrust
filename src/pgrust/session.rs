@@ -2839,6 +2839,10 @@ impl Session {
         &self.datetime_config
     }
 
+    pub(crate) fn client_min_messages(&self) -> Option<&str> {
+        self.gucs.get("client_min_messages").map(String::as_str)
+    }
+
     pub fn standard_conforming_strings(&self) -> bool {
         !matches!(
             self.gucs
@@ -13348,6 +13352,32 @@ impl Session {
                     db.execute_alter_sequence_rename_stmt_in_transaction_with_search_path(
                         client_id,
                         rename_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
+                    )
+                }
+                Statement::AlterSequenceSetSchema(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let relation = catalog
+                        .lookup_any_relation(&alter_stmt.relation_name)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(
+                                alter_stmt.relation_name.clone(),
+                            ))
+                        })?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_sequence_set_schema_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
                         xid,
                         cid,
                         search_path.as_deref(),

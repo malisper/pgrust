@@ -1,4 +1,5 @@
 use super::super::*;
+use super::alter_table_work_queue::build_alter_table_work_queue;
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
@@ -74,12 +75,6 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        let (column_name, statistics_target) = validate_alter_table_alter_column_statistics(
-            &relation.desc,
-            &alter_stmt.column_name,
-            alter_stmt.statistics_target,
-        )?;
-
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -89,18 +84,28 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let effect = self
-            .catalog
-            .write()
-            .alter_table_set_column_statistics_mvcc(
-                relation.relation_oid,
-                &column_name,
-                statistics_target.value,
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
-        if let Some(warning) = statistics_target.warning {
+        let work_queue = build_alter_table_work_queue(&catalog, &relation, alter_stmt.only)?;
+        let mut warning = None;
+        for item in work_queue {
+            let (column_name, statistics_target) = validate_alter_table_alter_column_statistics(
+                &item.relation.desc,
+                &alter_stmt.column_name,
+                alter_stmt.statistics_target,
+            )?;
+            warning = warning.or(statistics_target.warning);
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_set_column_statistics_mvcc(
+                    item.relation.relation_oid,
+                    &column_name,
+                    statistics_target.value,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
+        if let Some(warning) = warning {
             push_warning(warning);
         }
         Ok(StatementResult::AffectedRows(0))
