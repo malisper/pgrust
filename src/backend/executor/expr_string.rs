@@ -1070,18 +1070,12 @@ fn value_output_text_with_config(
         Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
         Value::Array(values) => format_array_text(values),
         Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
-        Value::Record(record) => crate::backend::executor::expr_json::eval_json_builtin_function(
-            crate::include::nodes::primnodes::BuiltinScalarFunction::RowToJson,
-            &[Value::Record(record.clone())],
-            None,
-            false,
-            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-            None,
-        )
-        .expect("row_to_json is a json builtin")?
-        .as_text()
-        .unwrap_or_default()
-        .to_string(),
+        Value::Record(record) => {
+            crate::backend::executor::value_io::format_record_text_with_config(
+                record,
+                datetime_config,
+            )
+        }
         Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => String::new(),
     })
 }

@@ -24433,8 +24433,11 @@ fn alter_table_drop_column_inheritance_metadata() {
     db.execute(1, "alter table drop_c1 drop column name")
         .unwrap();
     match db.execute(1, "alter table drop_gc1 drop column name") {
-        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
-            assert_eq!(column, "name");
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "column \"name\" of relation \"drop_gc1\" does not exist"
+            );
         }
         other => panic!("expected grandchild column to be dropped with parent, got {other:?}"),
     }

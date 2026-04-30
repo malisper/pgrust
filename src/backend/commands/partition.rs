@@ -1395,7 +1395,7 @@ pub(crate) fn validate_partition_relation_compatibility(
             sqlstate: "42809",
         });
     }
-    if !matches!(child.relkind, 'r' | 'p') {
+    if !matches!(child.relkind, 'r' | 'p' | 'f') {
         return Err(ExecError::Parse(
             crate::backend::parser::ParseError::WrongObjectType {
                 name: child_name.to_string(),
@@ -1419,7 +1419,9 @@ pub(crate) fn validate_partition_relation_compatibility(
             sqlstate: "42P16",
         });
     }
-    if child.relkind == 'r' && !catalog.inheritance_children(child.relation_oid).is_empty() {
+    if matches!(child.relkind, 'r' | 'f')
+        && !catalog.inheritance_children(child.relation_oid).is_empty()
+    {
         return Err(ExecError::DetailedError {
             message: "cannot attach inheritance parent as partition".into(),
             detail: None,

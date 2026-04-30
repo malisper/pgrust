@@ -551,7 +551,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
     object_oids.extend(rows.triggers.iter().map(|row| row.oid));
     object_oids.extend(rows.policies.iter().map(|row| row.oid));
 
-    if entry.relkind == 'r' {
+    if matches!(entry.relkind, 'r' | 'f') {
         rows.constraints.extend(
             catalog
                 .constraint_rows()

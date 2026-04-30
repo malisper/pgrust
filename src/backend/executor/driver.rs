@@ -974,6 +974,10 @@ fn execute_statement_with_source(
             expected: "ALTER SEQUENCE RENAME handled by database/session layer",
             actual: "ALTER SEQUENCE RENAME".into(),
         })),
+        Statement::AlterSequenceSetSchema(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER SEQUENCE SET SCHEMA handled by database/session layer",
+            actual: "ALTER SEQUENCE SET SCHEMA".into(),
+        })),
         Statement::RefreshMaterializedView(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "REFRESH MATERIALIZED VIEW handled by database/session layer",

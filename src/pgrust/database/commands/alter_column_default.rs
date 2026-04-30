@@ -1,4 +1,5 @@
 use super::super::*;
+use super::alter_table_work_queue::{build_alter_table_work_queue, relation_name_for_alter_error};
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table,
@@ -94,15 +95,6 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        let plan = validate_alter_table_alter_column_default(
-            &catalog,
-            &relation.desc,
-            &alter_stmt.table_name,
-            &alter_stmt.column_name,
-            alter_stmt.default_expr.as_ref(),
-            alter_stmt.default_expr_sql.as_deref(),
-        )?;
-
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -112,37 +104,49 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let default_expr_sql = plan.default_expr_sql.clone();
-        let default_sequence_oid = plan.default_sequence_oid;
-        let effect = self
-            .catalog
-            .write()
-            .alter_table_set_column_default_mvcc(
-                relation.relation_oid,
-                &plan.column_name,
-                default_expr_sql.clone(),
-                default_sequence_oid,
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        if relation.relpersistence == 't' {
-            let mut temp_desc = relation.desc.clone();
-            let column = temp_desc
-                .columns
-                .iter_mut()
-                .find(|column| column.name.eq_ignore_ascii_case(&plan.column_name))
-                .ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnknownColumn(plan.column_name.clone()))
-                })?;
-            column.default_expr = default_expr_sql;
-            column.default_sequence_oid = default_sequence_oid;
-            if column.default_expr.is_none() {
-                column.attrdef_oid = None;
-                column.missing_default_value = None;
+        let work_queue = build_alter_table_work_queue(&catalog, &relation, alter_stmt.only)?;
+        for item in work_queue {
+            let relation_name = relation_name_for_alter_error(&catalog, item.relation.relation_oid);
+            let plan = validate_alter_table_alter_column_default(
+                &catalog,
+                &item.relation.desc,
+                &relation_name,
+                &alter_stmt.column_name,
+                alter_stmt.default_expr.as_ref(),
+                alter_stmt.default_expr_sql.as_deref(),
+            )?;
+            let default_expr_sql = plan.default_expr_sql.clone();
+            let default_sequence_oid = plan.default_sequence_oid;
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_set_column_default_mvcc(
+                    item.relation.relation_oid,
+                    &plan.column_name,
+                    default_expr_sql.clone(),
+                    default_sequence_oid,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            if item.relation.relpersistence == 't' {
+                let mut temp_desc = item.relation.desc.clone();
+                let column = temp_desc
+                    .columns
+                    .iter_mut()
+                    .find(|column| column.name.eq_ignore_ascii_case(&plan.column_name))
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownColumn(plan.column_name.clone()))
+                    })?;
+                column.default_expr = default_expr_sql;
+                column.default_sequence_oid = default_sequence_oid;
+                if column.default_expr.is_none() {
+                    column.attrdef_oid = None;
+                    column.missing_default_value = None;
+                }
+                self.replace_temp_entry_desc(client_id, item.relation.relation_oid, temp_desc)?;
             }
-            self.replace_temp_entry_desc(client_id, relation.relation_oid, temp_desc)?;
+            catalog_effects.push(effect);
         }
-        catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
 
