@@ -9005,18 +9005,7 @@ fn array_literal_element_type_oid(element_type: SqlType, values: &[Value]) -> u3
 }
 
 fn concrete_array_literal_element_type_oid(sql_type: SqlType) -> Option<u32> {
-    if matches!(
-        sql_type.kind,
-        SqlTypeKind::AnyArray
-            | SqlTypeKind::AnyElement
-            | SqlTypeKind::AnyRange
-            | SqlTypeKind::AnyMultirange
-            | SqlTypeKind::AnyCompatible
-            | SqlTypeKind::AnyCompatibleArray
-            | SqlTypeKind::AnyCompatibleRange
-            | SqlTypeKind::AnyCompatibleMultirange
-            | SqlTypeKind::AnyEnum
-    ) {
+    if !sql_type.is_multirange() {
         return None;
     }
     let oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
