@@ -1246,7 +1246,8 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
 }
 
 pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, CatalogError> {
-    let has_new_type_columns = values.len() >= pg_type_desc().columns.len();
+    let has_current_type_columns = values.len() >= pg_type_desc().columns.len();
+    let has_new_type_columns = has_current_type_columns || values.len() >= 25;
     let has_typtype = has_new_type_columns || values.len() >= 16;
     let typbyval_idx = has_new_type_columns.then_some(5);
     let typtype_idx = if has_new_type_columns { 6 } else { 5 };
@@ -1314,9 +1315,13 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
     let typdelim_idx = has_new_type_columns.then_some(20);
     let typanalyze_idx = has_new_type_columns.then_some(21);
     let typbasetype_idx = has_new_type_columns.then_some(22);
-    let typcollation_idx = has_new_type_columns.then_some(23);
+    let typcollation_idx = if has_current_type_columns {
+        Some(24)
+    } else {
+        has_new_type_columns.then_some(23)
+    };
     let typacl_idx = if has_new_type_columns {
-        24
+        if has_current_type_columns { 27 } else { 24 }
     } else if has_typtype {
         15
     } else {
@@ -2099,7 +2104,10 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::InternalChar(row.typdelim as u8),
         Value::Int32(row.typanalyze as i32),
         Value::Int32(row.typbasetype as i32),
+        Value::Int32(row.sql_type.typmod),
         Value::Int32(row.typcollation as i32),
+        Value::Bool(false),
+        Value::Null,
         nullable_array_value(row.typacl.map(text_array_value)),
     ]
 }
