@@ -1383,6 +1383,7 @@ pub(crate) fn execute_bound_delete_with_rules(
                     RuleEvent::Delete,
                     &target.desc,
                     catalog,
+                    ctx.session_replication_role,
                 )?;
                 if rules_are_unconditional_row_independent_instead(&rules) {
                     let (target_affected_rows, mut target_returned_rows) =
