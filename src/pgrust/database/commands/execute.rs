@@ -1213,9 +1213,7 @@ impl Database {
             let truncate_targets = if entry.relkind == 'p' {
                 partitioned_truncate_targets(&catalog, entry.relation_oid)
             } else if catalog.has_subclass(entry.relation_oid) {
-                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                    "TRUNCATE on inherited parents is not supported yet".into(),
-                )));
+                inherited_truncate_targets(&catalog, entry.relation_oid)
             } else {
                 vec![entry]
             };
@@ -4550,6 +4548,18 @@ fn partitioned_truncate_targets(
         .find_all_inheritors(root_oid)
         .into_iter()
         .filter(|oid| *oid != root_oid)
+        .filter_map(|oid| catalog.relation_by_oid(oid))
+        .filter(|entry| entry.relkind == 'r')
+        .collect()
+}
+
+fn inherited_truncate_targets(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    root_oid: u32,
+) -> Vec<crate::backend::parser::BoundRelation> {
+    catalog
+        .find_all_inheritors(root_oid)
+        .into_iter()
         .filter_map(|oid| catalog.relation_by_oid(oid))
         .filter(|entry| entry.relkind == 'r')
         .collect()
