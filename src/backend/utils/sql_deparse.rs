@@ -39,7 +39,7 @@ fn normalize_simple_text_equality(sql: &str, desc: &RelationDesc) -> Option<Stri
     if !is_simple_string_literal(right) || right.contains("::") {
         return None;
     }
-    Some(format!("{left} = {right}::text"))
+    Some(format!("{left} = {right}"))
 }
 
 fn is_simple_string_literal(sql: &str) -> bool {
@@ -226,7 +226,7 @@ mod tests {
         };
         assert_eq!(
             normalize_index_predicate_sql("(f1='a')", Some(&desc)),
-            "f1 = 'a'::text"
+            "f1 = 'a'"
         );
         assert_eq!(
             normalize_index_predicate_sql("f1>='a'", Some(&desc)),

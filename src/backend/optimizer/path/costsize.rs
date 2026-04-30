@@ -1839,12 +1839,7 @@ fn estimate_brin_bitmap_candidate(
     let pages_per_range = brin_pages_per_range(&spec.index, catalog) as f64;
     let index_ranges = (stats.relpages / pages_per_range).ceil().max(1.0);
     let revmap_pages = brin_revmap_page_count(index_ranges);
-    let qual_selectivity = spec
-        .used_quals
-        .iter()
-        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
-        .product::<f64>()
-        .clamp(0.0, 1.0);
+    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
     let minimal_ranges = (index_ranges * qual_selectivity).ceil();
     let index_correlation = brin_index_correlation(stats, &spec);
     let estimated_ranges = if index_correlation < 1.0e-10 {
@@ -1953,12 +1948,7 @@ fn estimate_gin_bitmap_candidate(
         .class_row_by_oid(spec.index.relation_oid)
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
-    let qual_selectivity = spec
-        .used_quals
-        .iter()
-        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
-        .product::<f64>()
-        .clamp(0.0, 1.0);
+    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
     let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
     let index_startup_cost = spec
         .used_quals
@@ -2090,12 +2080,7 @@ pub(super) fn estimate_bitmap_candidate(
         .class_row_by_oid(spec.index.relation_oid)
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
-    let qual_selectivity = spec
-        .used_quals
-        .iter()
-        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
-        .product::<f64>()
-        .clamp(0.0, 1.0);
+    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
     let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
     let mut index_startup_cost = spec
         .used_quals
@@ -2287,7 +2272,7 @@ pub(super) fn estimate_index_candidate(
         // seq-scan outer side in memoize regression plans.
         base_cost += stats.relpages * RANDOM_PAGE_COST + index_scan_rows * RANDOM_PAGE_COST;
     }
-    if spec.index.index_meta.am_oid == BTREE_AM_OID {
+    let unused_btree_column_cost = if spec.index.index_meta.am_oid == BTREE_AM_OID {
         let order_columns = if spec.removes_order {
             order_items.as_ref().map(Vec::len).unwrap_or_default()
         } else {
@@ -2297,14 +2282,19 @@ pub(super) fn estimate_index_candidate(
             .btree_prefix_columns
             .max(btree_ordering_equality_prefix(&spec.keys) + order_columns);
         let unused_columns = index_key_count(&spec.index).saturating_sub(matched_columns);
-        base_cost += unused_columns as f64 * RANDOM_PAGE_COST;
-    }
+        unused_columns as f64 * RANDOM_PAGE_COST
+    } else {
+        0.0
+    };
+    base_cost += unused_btree_column_cost;
     let full_index_only =
         config.enable_indexonlyscan && index_supports_index_only_scan(&desc, &spec.index);
     let index_only = full_index_only || (config.enable_indexonlyscan && target_index_only);
     if index_only {
         if spec.keys.is_empty() {
-            base_cost = index_pages * SEQ_PAGE_COST + index_rows * CPU_INDEX_TUPLE_COST;
+            base_cost = index_pages * SEQ_PAGE_COST
+                + index_rows * CPU_INDEX_TUPLE_COST
+                + unused_btree_column_cost;
         } else {
             base_cost -= index_rows * CPU_TUPLE_COST;
         }
@@ -6539,19 +6529,30 @@ pub(super) fn build_index_path_spec(
     if !predicate_implies_index_predicate(filter, index.index_predicate.as_ref()) {
         return None;
     }
-    let mut conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
-    if index.index_meta.am_oid == BTREE_AM_OID {
-        conjuncts = conjuncts
-            .into_iter()
+    let original_conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
+    let conjuncts = if index.index_meta.am_oid == BTREE_AM_OID {
+        original_conjuncts
+            .iter()
+            .cloned()
             .map(btree_or_clause_to_scalar_array)
-            .collect();
-    }
+            .collect()
+    } else {
+        original_conjuncts.clone()
+    };
     let parsed_quals = conjuncts
         .iter()
-        .filter_map(if is_gist_like_am(index.index_meta.am_oid) {
-            gist_indexable_qual
-        } else {
-            indexable_qual
+        .zip(original_conjuncts.iter())
+        .filter_map(|(conjunct, original)| {
+            let mut qual = if is_gist_like_am(index.index_meta.am_oid) {
+                gist_indexable_qual(conjunct)
+            } else {
+                indexable_qual(conjunct)
+            }?;
+            if conjunct != original {
+                qual.expr = original.clone();
+                qual.recheck_expr = Some(original.clone());
+            }
+            Some(qual)
         })
         .collect::<Vec<_>>();
     let non_null_columns = parsed_quals
@@ -6586,7 +6587,7 @@ pub(super) fn build_index_path_spec(
         };
     let used_quals = used_indexes
         .iter()
-        .filter_map(|idx| parsed_quals.get(*idx).map(|qual| qual.index_expr.clone()))
+        .filter_map(|idx| parsed_quals.get(*idx).map(|qual| qual.expr.clone()))
         .collect::<Vec<_>>();
     let scan_quals = scan_indexes
         .iter()
@@ -6670,7 +6671,7 @@ pub(super) fn build_index_path_spec(
         }));
     }
     filter_quals.extend(
-        conjuncts
+        original_conjuncts
             .iter()
             .filter(|expr| !used_exprs.iter().any(|used_expr| *used_expr == *expr))
             .filter(|expr| {
@@ -9832,7 +9833,7 @@ fn qual_strategy(
 }
 
 fn index_argument_type_oid_for_qual(qual: &IndexableQual) -> Option<u32> {
-    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.expr)
+    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.index_expr)
         && saop.use_or
     {
         return Some(sql_type_oid(expr_sql_type(&saop.right).element_type()));
@@ -9841,7 +9842,7 @@ fn index_argument_type_oid_for_qual(qual: &IndexableQual) -> Option<u32> {
 }
 
 fn index_argument_sql_type_for_qual(qual: &IndexableQual) -> Option<SqlType> {
-    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.expr)
+    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.index_expr)
         && saop.use_or
     {
         return Some(expr_sql_type(&saop.right).element_type());

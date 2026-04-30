@@ -2678,15 +2678,17 @@ fn render_nonverbose_sort_item(
 }
 
 fn sort_item_needs_extra_expression_parens(expr: &Expr, rendered: &str) -> bool {
-    rendered.starts_with('(')
-        || matches!(
-            expr,
-            Expr::Func(func)
-                if matches!(
-                    func.implementation,
-                    ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoDistance)
-                )
-        )
+    let already_wrapped = rendered.starts_with('(') && rendered.ends_with(')');
+    (rendered.starts_with('(') && !already_wrapped)
+        || (!already_wrapped
+            && matches!(
+                expr,
+                Expr::Func(func)
+                    if matches!(
+                        func.implementation,
+                        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoDistance)
+                    )
+            ))
 }
 
 fn render_nonverbose_aggregate_group_key(

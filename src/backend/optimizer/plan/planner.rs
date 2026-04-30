@@ -2498,11 +2498,13 @@ fn make_ordered_rel(
         .chain(extra_presorted_paths.iter())
         .filter(|path| required_matches(path))
         .min_by(|left, right| {
-            left.plan_info()
-                .total_cost
-                .as_f64()
-                .partial_cmp(&right.plan_info().total_cost.as_f64())
-                .unwrap_or(Ordering::Equal)
+            if bestpath::cheaper_than(left, Some(*right), bestpath::CostSelector::Total) {
+                Ordering::Less
+            } else if bestpath::cheaper_than(right, Some(*left), bestpath::CostSelector::Total) {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
         });
     let suppress_sort_fallback = cheapest_presorted.is_some_and(ordered_append_path);
     if let Some(path) = cheapest_presorted {
@@ -2516,11 +2518,17 @@ fn make_ordered_rel(
             .chain(extra_presorted_paths.iter())
             .filter(|path| required_matches(path))
             .min_by(|left, right| {
-                left.plan_info()
-                    .startup_cost
-                    .as_f64()
-                    .partial_cmp(&right.plan_info().startup_cost.as_f64())
-                    .unwrap_or(Ordering::Equal)
+                if bestpath::cheaper_than(left, Some(*right), bestpath::CostSelector::Startup) {
+                    Ordering::Less
+                } else if bestpath::cheaper_than(
+                    right,
+                    Some(*left),
+                    bestpath::CostSelector::Startup,
+                ) {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
             });
         if let Some(path) = cheapest_presorted_startup
             && !rel.pathlist.iter().any(|existing| existing == path)
