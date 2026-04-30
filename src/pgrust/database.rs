@@ -902,12 +902,25 @@ impl Database {
         name: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<(String, String, u32), ParseError> {
+        let temp_namespace = self.owned_temp_namespace(client_id);
+        let is_temp_schema_name = |schema: &str| {
+            schema.eq_ignore_ascii_case("pg_temp")
+                || temp_namespace
+                    .as_ref()
+                    .is_some_and(|ns| ns.name.eq_ignore_ascii_case(schema))
+        };
         match name.split_once('.') {
             Some((schema, object)) if !object.is_empty() => {
                 let schema = schema.to_ascii_lowercase();
                 let object = object.to_ascii_lowercase();
                 if schema == "pg_catalog" {
                     return Err(ParseError::UnsupportedQualifiedName(name.to_string()));
+                }
+                if is_temp_schema_name(&schema) {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "permanent type",
+                        actual: "temporary type".into(),
+                    });
                 }
                 let namespace_oid = self
                     .visible_namespace_oid_by_name(client_id, None, &schema)
@@ -927,7 +940,11 @@ impl Database {
                 let object = name.to_ascii_lowercase();
                 let search_path = self.effective_search_path(client_id, configured_search_path);
                 for schema in search_path {
-                    if schema.is_empty() || schema == "$user" || schema == "pg_catalog" {
+                    if schema.is_empty()
+                        || schema == "$user"
+                        || schema == "pg_catalog"
+                        || is_temp_schema_name(&schema)
+                    {
                         continue;
                     }
                     if let Some(namespace_oid) =

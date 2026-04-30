@@ -55833,6 +55833,134 @@ fn alter_type_rename_domain_then_drop() {
 }
 
 #[test]
+fn drop_json_table_view_preserves_referenced_domain() {
+    let dir = temp_dir("drop_json_table_view_preserves_domain");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+    fn assert_domain_visible(session: &mut Session, db: &Database) {
+        session
+            .execute(db, "comment on domain jsonb_test_domain is null")
+            .unwrap();
+    }
+
+    session
+        .execute(
+            &db,
+            "create domain jsonb_test_domain as text check (value <> 'foo')",
+        )
+        .unwrap();
+    assert_domain_visible(&mut session, &db);
+    session
+        .execute(
+            &db,
+            "select * from json_table(jsonb '{\"d1\": \"H\"}', '$' \
+         columns (js1 jsonb_test_domain path '$.a2' default '\"foo1\"'::jsonb::text on empty))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "select * from json_table(jsonb '{\"d1\": \"H\"}', '$' \
+         columns (js1 jsonb_test_domain path '$.a2' default 'foo'::jsonb_test_domain on empty))",
+        )
+        .unwrap_err();
+    assert_domain_visible(&mut session, &db);
+    session
+        .execute(
+            &db,
+            "select * from json_table(jsonb '{\"d1\": \"H\"}', '$' \
+         columns (js1 jsonb_test_domain path '$.a2' default 'foo1'::jsonb_test_domain on empty))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "select * from json_table(jsonb '{\"d1\": \"foo\"}', '$' \
+         columns (js1 jsonb_test_domain path '$.d1' default 'foo2'::jsonb_test_domain on error))",
+        )
+        .unwrap();
+    assert_domain_visible(&mut session, &db);
+    session
+        .execute(
+            &db,
+            "create view jsonb_table_view2 as \
+         select * from json_table(jsonb 'null', 'lax $[*]' passing 1 + 2 as a, json '\"foo\"' as \"b c\" \
+         columns (\"int\" int path '$', \"text\" text path '$', \"char(4)\" char(4) path '$', \
+                  \"bool\" bool path '$', \"numeric\" numeric path '$', \"domain\" jsonb_test_domain path '$'))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view jsonb_table_view3 as \
+         select * from json_table(jsonb 'null', 'lax $[*]' passing 1 + 2 as a, json '\"foo\"' as \"b c\" \
+         columns (js json path '$', jb jsonb path '$', jst text format json path '$', \
+                  jsc char(4) format json path '$', jsv varchar(4) format json path '$'))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view jsonb_table_view4 as \
+         select * from json_table(jsonb 'null', 'lax $[*]' passing 1 + 2 as a, json '\"foo\"' as \"b c\" \
+         columns (jsb jsonb format json path '$', jsbq jsonb format json path '$' omit quotes, \
+                  aaa int, aaa1 int path '$.aaa'))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view jsonb_table_view5 as \
+         select * from json_table(jsonb 'null', 'lax $[*]' passing 1 + 2 as a, json '\"foo\"' as \"b c\" \
+         columns (exists1 bool exists path '$.aaa', exists2 int exists path '$.aaa' true on error, \
+                  exists3 text exists path 'strict $.aaa' unknown on error))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view jsonb_table_view6 as \
+         select * from json_table(jsonb 'null', 'lax $[*]' passing 1 + 2 as a, json '\"foo\"' as \"b c\" \
+         columns (js2 json path '$', jsb2w jsonb path '$' with wrapper, \
+                  jsb2q jsonb path '$' omit quotes, ia int[] path '$', ta text[] path '$', jba jsonb[] path '$'))",
+        )
+        .unwrap();
+    for view in [
+        "jsonb_table_view2",
+        "jsonb_table_view3",
+        "jsonb_table_view4",
+        "jsonb_table_view5",
+        "jsonb_table_view6",
+    ] {
+        session
+            .execute(
+                &db,
+                &format!("select pg_get_viewdef('{view}'::regclass, true)"),
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                &format!("explain (costs off, verbose) select * from {view}"),
+            )
+            .unwrap();
+    }
+    session.execute(&db, "drop view jsonb_table_view2").unwrap();
+    assert_domain_visible(&mut session, &db);
+    session.execute(&db, "drop view jsonb_table_view3").unwrap();
+    assert_domain_visible(&mut session, &db);
+    session.execute(&db, "drop view jsonb_table_view4").unwrap();
+    assert_domain_visible(&mut session, &db);
+    session.execute(&db, "drop view jsonb_table_view5").unwrap();
+    assert_domain_visible(&mut session, &db);
+    session.execute(&db, "drop view jsonb_table_view6").unwrap();
+    assert_domain_visible(&mut session, &db);
+    session
+        .execute(&db, "drop domain jsonb_test_domain")
+        .unwrap();
+}
+
+#[test]
 fn create_domain_rejects_invalid_ddl_forms() {
     let dir = temp_dir("create_domain_invalid_ddl");
     let db = Database::open(&dir, 64).unwrap();

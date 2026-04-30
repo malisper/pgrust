@@ -80,6 +80,13 @@ pub(super) fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostS
     let Some(current) = current else {
         return true;
     };
+    if let (Some(candidate_left_relid), Some(current_left_relid)) = (
+        cross_function_join_left_relid(candidate),
+        cross_function_join_left_relid(current),
+    ) && candidate_left_relid != current_left_relid
+    {
+        return candidate_left_relid > current_left_relid;
+    }
     if let (Some(candidate_left_relids), Some(current_left_relids)) = (
         cross_join_left_relid_count(candidate),
         cross_join_left_relid_count(current),
@@ -786,6 +793,39 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
         _ => None,
+    }
+}
+
+fn cross_function_join_left_relid(path: &Path) -> Option<usize> {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind: JoinType::Cross,
+            ..
+        } if path_is_function_scan_leaf(left) && path_is_function_scan_leaf(right) => {
+            super::path_relids(left).first().copied()
+        }
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => cross_function_join_left_relid(input),
+        _ => None,
+    }
+}
+
+fn path_is_function_scan_leaf(path: &Path) -> bool {
+    match path {
+        Path::FunctionScan { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => path_is_function_scan_leaf(input),
+        _ => false,
     }
 }
 
