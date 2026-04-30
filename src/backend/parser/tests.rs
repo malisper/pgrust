@@ -396,7 +396,10 @@ fn parse_drop_and_comment_on_subscription() {
 fn parse_set_session_authorization_string_literal() {
     assert!(matches!(
         parse_statement("set session authorization 'tenant'").unwrap(),
-        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement { role_name })
+        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
+            role_name,
+            is_local: false,
+        })
             if role_name == "tenant"
     ));
 }
@@ -5557,6 +5560,7 @@ fn parse_set_session_authorization_statement() {
         stmt,
         Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
             role_name: "regress_tenant".into(),
+            is_local: false,
         })
     );
 }

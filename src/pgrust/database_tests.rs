@@ -22801,7 +22801,7 @@ fn alter_table_add_column_serial_backfills_existing_rows_and_keeps_sequence_adva
     );
     assert_eq!(
         query_rows(&db, 1, "select pg_get_serial_sequence('items', 'id')"),
-        vec![vec![Value::Text("items_id_seq".into())]]
+        vec![vec![Value::Text("public.items_id_seq".into())]]
     );
 
     db.execute(1, "insert into items values ('manual', 10)")
@@ -32759,7 +32759,7 @@ fn create_table_serial_creates_sequence_defaults_and_persists_state() {
         .unwrap();
     assert_eq!(
         query_rows(&db, 1, "select pg_get_serial_sequence('items', 'id')"),
-        vec![vec![Value::Text("items_id_seq".into())]]
+        vec![vec![Value::Text("public.items_id_seq".into())]]
     );
 
     db.execute(1, "insert into items (note) values ('a'), ('b')")
@@ -32784,7 +32784,7 @@ fn create_table_serial_creates_sequence_defaults_and_persists_state() {
             1,
             "select last_value, log_cnt, is_called from items_id_seq"
         ),
-        vec![vec![Value::Int64(3), Value::Int64(0), Value::Bool(true)]]
+        vec![vec![Value::Int64(3), Value::Int64(32), Value::Bool(true)]]
     );
 
     drop(db);
@@ -32795,7 +32795,7 @@ fn create_table_serial_creates_sequence_defaults_and_persists_state() {
             1,
             "select last_value, log_cnt, is_called from items_id_seq",
         ),
-        vec![vec![Value::Int64(3), Value::Int64(0), Value::Bool(true)]]
+        vec![vec![Value::Int64(3), Value::Int64(32), Value::Bool(true)]]
     );
 }
 
@@ -32839,7 +32839,7 @@ fn create_table_serial_is_visible_inside_same_transaction_before_commit() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Int64(2), Value::Int64(0), Value::Bool(true)]]
+                vec![vec![Value::Int64(2), Value::Int64(32), Value::Bool(true)]]
             );
         }
         other => panic!("expected query, got {:?}", other),
@@ -32879,7 +32879,7 @@ fn create_table_serial_is_visible_inside_same_transaction_before_commit() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Int64(2), Value::Int64(0), Value::Bool(true)]]
+                vec![vec![Value::Int64(2), Value::Int64(32), Value::Bool(true)]]
             );
         }
         other => panic!("expected query, got {:?}", other),

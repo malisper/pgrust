@@ -1863,8 +1863,11 @@ pub(super) fn validate_alter_table_alter_column_default(
     Ok(AlterColumnDefaultPlan {
         column_name: current_column.name.clone(),
         default_expr_sql: normalized_default_expr_sql,
-        default_sequence_oid: default_expr_sql
-            .and_then(crate::pgrust::database::default_sequence_oid_from_default_expr),
+        default_sequence_oid: default_expr_sql.and_then(|expr| {
+            crate::pgrust::database::default_sequence_oid_from_default_expr_with_catalog(
+                expr, catalog,
+            )
+        }),
     })
 }
 

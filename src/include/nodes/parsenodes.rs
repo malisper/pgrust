@@ -461,6 +461,7 @@ pub enum Statement {
     CommentOnColumn(CommentOnColumnStatement),
     CommentOnView(CommentOnViewStatement),
     CommentOnIndex(CommentOnIndexStatement),
+    CommentOnSequence(CommentOnSequenceStatement),
     CommentOnType(CommentOnTypeStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
@@ -578,6 +579,7 @@ pub struct DiscardStatement {
 pub enum DiscardTarget {
     All,
     Temp,
+    Sequences,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2721,6 +2723,7 @@ pub struct AlterTableSetRowSecurityStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterSequenceStatement {
+    pub if_exists: bool,
     pub sequence_name: String,
     pub options: SequenceOptionsPatchSpec,
 }
@@ -3148,6 +3151,12 @@ pub struct CommentOnViewStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnIndexStatement {
     pub index_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnSequenceStatement {
+    pub sequence_name: String,
     pub comment: Option<String>,
 }
 
@@ -3668,6 +3677,7 @@ pub struct AlterAggregateRenameStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetSessionAuthorizationStatement {
     pub role_name: String,
+    pub is_local: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4890,6 +4900,8 @@ impl RawTypeName {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SequenceOptionsSpec {
+    pub as_type: Option<RawTypeName>,
+    pub persistence: Option<TablePersistence>,
     pub increment: Option<i64>,
     pub minvalue: Option<Option<i64>>,
     pub maxvalue: Option<Option<i64>>,
@@ -4901,6 +4913,8 @@ pub struct SequenceOptionsSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SequenceOptionsPatchSpec {
+    pub as_type: Option<RawTypeName>,
+    pub persistence: Option<TablePersistence>,
     pub increment: Option<i64>,
     pub minvalue: Option<Option<i64>>,
     pub maxvalue: Option<Option<i64>>,

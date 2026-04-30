@@ -8268,6 +8268,30 @@ fn eval_implicit_insert_defaults(
     Ok((slot, values))
 }
 
+fn eval_missing_insert_defaults(
+    defaults: &[crate::backend::executor::Expr],
+    targets: &[BoundAssignmentTarget],
+    values: &mut [Value],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    slot.tts_values = values.to_vec();
+    let mut targeted = vec![false; values.len()];
+    for target in targets {
+        if let Some(mark) = targeted.get_mut(target.column_index) {
+            *mark = true;
+        }
+    }
+    for (column_index, expr) in defaults.iter().enumerate() {
+        if targeted.get(column_index).copied().unwrap_or(false) {
+            continue;
+        }
+        values[column_index] = eval_expr(expr, slot, ctx)?;
+        slot.tts_values[column_index] = values[column_index].clone();
+    }
+    Ok(())
+}
+
 fn apply_overriding_user_identity_defaults(
     stmt: &BoundInsertStatement,
     values: &mut [Value],
@@ -8309,12 +8333,8 @@ pub(crate) fn materialize_insert_rows(
         BoundInsertSource::Values(rows) => rows
             .iter()
             .map(|row| {
-                let (mut slot, mut values) = eval_implicit_insert_defaults(
-                    &stmt.column_defaults,
-                    &stmt.target_columns,
-                    stmt.desc.columns.len(),
-                    ctx,
-                )?;
+                let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
+                let mut values = vec![Value::Null; stmt.desc.columns.len()];
                 for (target, expr) in stmt.target_columns.iter().zip(row.iter()) {
                     let value = eval_expr(expr, &mut slot, ctx)?;
                     apply_assignment_target(
@@ -8326,6 +8346,13 @@ pub(crate) fn materialize_insert_rows(
                         ctx,
                     )?;
                 }
+                eval_missing_insert_defaults(
+                    &stmt.column_defaults,
+                    &stmt.target_columns,
+                    &mut values,
+                    &mut slot,
+                    ctx,
+                )?;
                 enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                 Ok(values)
             })
@@ -8336,12 +8363,7 @@ pub(crate) fn materialize_insert_rows(
                 for (row_values, mut slot) in
                     execute_insert_project_set_row(row, stmt, catalog, ctx)?
                 {
-                    let (_, mut values) = eval_implicit_insert_defaults(
-                        &stmt.column_defaults,
-                        &stmt.target_columns,
-                        stmt.desc.columns.len(),
-                        ctx,
-                    )?;
+                    let mut values = vec![Value::Null; stmt.desc.columns.len()];
                     for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
                         apply_assignment_target(
                             &stmt.desc,
@@ -8352,6 +8374,13 @@ pub(crate) fn materialize_insert_rows(
                             ctx,
                         )?;
                     }
+                    eval_missing_insert_defaults(
+                        &stmt.column_defaults,
+                        &stmt.target_columns,
+                        &mut values,
+                        &mut slot,
+                        ctx,
+                    )?;
                     apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
                     enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                     materialized.push(values);
@@ -8385,15 +8414,17 @@ pub(crate) fn materialize_insert_rows(
                 while let Some(slot) = state.exec_proc_node(ctx)? {
                     ctx.check_for_interrupts()?;
                     let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                    let (_, mut values) = eval_implicit_insert_defaults(
-                        &stmt.column_defaults,
-                        &stmt.target_columns,
-                        stmt.desc.columns.len(),
-                        ctx,
-                    )?;
+                    let mut values = vec![Value::Null; stmt.desc.columns.len()];
                     for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
                         apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
                     }
+                    eval_missing_insert_defaults(
+                        &stmt.column_defaults,
+                        &stmt.target_columns,
+                        &mut values,
+                        slot,
+                        ctx,
+                    )?;
                     apply_overriding_user_identity_defaults(stmt, &mut values, ctx)?;
                     enforce_insert_domain_constraints(&stmt.desc, &values, ctx)?;
                     rows.push(values);

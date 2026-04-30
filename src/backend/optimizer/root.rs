@@ -626,6 +626,20 @@ fn prepare_set_returning_call_for_locking(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::PgSequences {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgSequences {
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::InformationSchemaSequences {
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::InformationSchemaSequences {
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::TxidSnapshotXip {
             func_oid,
             func_variadic,
@@ -2883,7 +2897,9 @@ fn collect_set_returning_call_outer_refs(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             collect_query_outer_refs_expr(relid, levelsup, exprs);
         }
-        SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {
             collect_query_outer_refs_expr(arg, levelsup, exprs);
         }

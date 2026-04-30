@@ -2416,9 +2416,13 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgControlRecovery
             | BuiltinScalarFunction::PgControlInit
             | BuiltinScalarFunction::TestRelpath => args.is_empty(),
+            BuiltinScalarFunction::LastVal => args.is_empty(),
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
+            BuiltinScalarFunction::PgSequenceParameters
+            | BuiltinScalarFunction::PgSequenceLastValue
+            | BuiltinScalarFunction::PgGetSequenceData => args.len() == 1,
             BuiltinScalarFunction::PgGetAcl => args.len() == 3,
             BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
@@ -4092,6 +4096,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("test_relpath", BuiltinScalarFunction::TestRelpath),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
+        ("lastval", BuiltinScalarFunction::LastVal),
         ("setval", BuiltinScalarFunction::SetVal),
         ("setval_oid", BuiltinScalarFunction::SetVal),
         ("setval_text", BuiltinScalarFunction::SetVal),
@@ -4100,6 +4105,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
+        ),
+        (
+            "pg_sequence_parameters",
+            BuiltinScalarFunction::PgSequenceParameters,
+        ),
+        (
+            "pg_sequence_last_value",
+            BuiltinScalarFunction::PgSequenceLastValue,
+        ),
+        (
+            "pg_get_sequence_data",
+            BuiltinScalarFunction::PgGetSequenceData,
         ),
         ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
         (
@@ -5576,8 +5593,12 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgTsConfigIsVisible
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
+            | BuiltinScalarFunction::LastVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
+            | BuiltinScalarFunction::PgSequenceParameters
+            | BuiltinScalarFunction::PgSequenceLastValue
+            | BuiltinScalarFunction::PgGetSequenceData
             | BuiltinScalarFunction::PgGetAcl
             | BuiltinScalarFunction::MakeAclItem
             | BuiltinScalarFunction::PgGetUserById

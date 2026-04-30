@@ -33,8 +33,8 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
-    CommentOnIndexStatement, CommentOnOperatorStatement, CommentOnViewStatement, MaintenanceTarget,
-    VacuumStatement,
+    CommentOnIndexStatement, CommentOnOperatorStatement, CommentOnSequenceStatement,
+    CommentOnViewStatement, MaintenanceTarget, VacuumStatement,
 };
 use crate::include::nodes::primnodes::user_attrno;
 use crate::pgrust::auth::AuthState;
@@ -314,9 +314,31 @@ fn lookup_table_or_partitioned_relation_for_comment(
             name: name.to_string(),
             expected: "table",
         })),
-        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
-            name.to_string(),
-        ))),
+        None => Err(ExecError::DetailedError {
+            message: format!("relation \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P01",
+        }),
+    }
+}
+
+fn lookup_sequence_relation_for_comment(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<crate::backend::parser::BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if entry.relkind == 'S' => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "sequence",
+        })),
+        None => Err(ExecError::DetailedError {
+            message: format!("relation \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P01",
+        }),
     }
 }
 
@@ -1985,6 +2007,39 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_comment_on_sequence_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnSequenceStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_sequence_relation_for_comment(&catalog, &comment_stmt.sequence_name)?;
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
+        self.table_locks.lock_table_interruptible(
+            lock_tag,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_sequence_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(lock_tag, client_id);
+        result
+    }
+
     pub(crate) fn execute_comment_on_column_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -2730,6 +2785,44 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &comment_stmt.table_name)?;
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_relation_mvcc(relation.relation_oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_sequence_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnSequenceStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_sequence_relation_for_comment(&catalog, &comment_stmt.sequence_name)?;
+        if relation.relpersistence == 't' {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "permanent sequence for COMMENT ON SEQUENCE",
+                actual: "temporary sequence".into(),
+            }));
+        }
+        ensure_relation_owner(self, client_id, &relation, &comment_stmt.sequence_name)?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
