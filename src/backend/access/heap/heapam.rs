@@ -1,7 +1,8 @@
 use parking_lot::RwLock;
 
+use super::HeapWalPolicy;
 use super::visibilitymap::{
-    VisibilityMapBuffer, VisibilityMapError, visibilitymap_clear, visibilitymap_pin,
+    VisibilityMapBuffer, VisibilityMapError, visibilitymap_clear_with_wal_policy, visibilitymap_pin,
 };
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager, TransactionStatus,
@@ -21,6 +22,7 @@ use crate::include::access::htup::{
 use crate::include::access::visibilitymapdefs::{
     VISIBILITYMAP_ALL_FROZEN, VISIBILITYMAP_ALL_VISIBLE,
 };
+use crate::include::storage::buf_internals::BufferId;
 use crate::pgrust::database::TransactionWaiter;
 use crate::{
     BufferPool, ClientId, Error, OwnedBufferPin, PinnedBuffer, RequestPageResult,
@@ -97,19 +99,55 @@ fn clear_page_visibility_if_needed(
     page: &mut Page,
     vmbuf: &Option<VisibilityMapBuffer>,
 ) -> Result<bool, HeapError> {
+    clear_page_visibility_if_needed_with_wal_policy(
+        pool,
+        client_id,
+        rel,
+        block,
+        page,
+        vmbuf,
+        HeapWalPolicy::Wal,
+    )
+}
+
+fn clear_page_visibility_if_needed_with_wal_policy(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    block: u32,
+    page: &mut Page,
+    vmbuf: &Option<VisibilityMapBuffer>,
+    wal_policy: HeapWalPolicy,
+) -> Result<bool, HeapError> {
     if !page_is_all_visible(page)? {
         return Ok(false);
     }
     page_clear_all_visible(page)?;
-    let _ = visibilitymap_clear(
+    let _ = visibilitymap_clear_with_wal_policy(
         pool,
         client_id,
         rel,
         block,
         vmbuf,
         VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN,
+        wal_policy,
     )?;
     Ok(true)
+}
+
+fn write_heap_page_locked(
+    pool: &BufferPool<SmgrStorageBackend>,
+    buffer_id: BufferId,
+    xid: TransactionId,
+    page: &Page,
+    guard: &mut parking_lot::RwLockWriteGuard<'_, Page>,
+    wal_policy: HeapWalPolicy,
+) -> Result<(), HeapError> {
+    match wal_policy {
+        HeapWalPolicy::Wal => pool.write_page_image_locked(buffer_id, xid, page, guard)?,
+        HeapWalPolicy::NoWal => pool.write_page_no_wal_locked(buffer_id, page, guard)?,
+    }
+    Ok(())
 }
 
 /// Maximum tuples per 8kB page: 8160 usable / 28 min per tuple = 291.
@@ -746,6 +784,34 @@ pub fn heap_delete_with_waiter(
         &crate::backend::utils::misc::interrupts::InterruptState,
     )>,
 ) -> Result<(), HeapError> {
+    heap_delete_with_waiter_with_wal_policy(
+        pool,
+        client_id,
+        rel,
+        txns,
+        xid,
+        tid,
+        snapshot,
+        waiter,
+        HeapWalPolicy::Wal,
+    )
+}
+
+pub fn heap_delete_with_waiter_with_wal_policy(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    txns: &RwLock<TransactionManager>,
+    xid: TransactionId,
+    tid: ItemPointerData,
+    snapshot: &Snapshot,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+    wal_policy: HeapWalPolicy,
+) -> Result<(), HeapError> {
     loop {
         let txns_guard = txns.read();
         let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
@@ -764,18 +830,19 @@ pub fn heap_delete_with_waiter(
 
         let xmax = tuple.header.xmax;
         if xmax == 0 {
-            let _ = clear_page_visibility_if_needed(
+            let _ = clear_page_visibility_if_needed_with_wal_policy(
                 pool,
                 client_id,
                 rel,
                 tid.block_number,
                 &mut new_page,
                 &vmbuf,
+                wal_policy,
             )?;
             tuple.header.xmax = xid;
             tuple.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
-            pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
+            write_heap_page_locked(pool, buffer_id, xid, &new_page, &mut guard, wal_policy)?;
             return Ok(());
         }
         if xmax == xid {
@@ -817,18 +884,19 @@ pub fn heap_delete_with_waiter(
                     drop(pin2);
                     continue;
                 }
-                let _ = clear_page_visibility_if_needed(
+                let _ = clear_page_visibility_if_needed_with_wal_policy(
                     pool,
                     client_id,
                     rel,
                     tid.block_number,
                     &mut new_page,
                     &vmbuf2,
+                    wal_policy,
                 )?;
                 recheck.header.xmax = xid;
                 recheck.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
                 heap_page_replace_tuple(&mut new_page, tid.offset_number, &recheck)?;
-                pool.write_page_image_locked(buffer_id2, xid, &new_page, &mut guard)?;
+                write_heap_page_locked(pool, buffer_id2, xid, &new_page, &mut guard, wal_policy)?;
                 return Ok(());
             }
             Some(TransactionStatus::Committed) => {
