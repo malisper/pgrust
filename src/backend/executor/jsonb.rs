@@ -614,7 +614,7 @@ impl<'a> JsonDiagnosticParser<'a> {
                 ch if ch.is_control() => return Err(self.error_unescaped_control(ch)),
                 _ => {
                     if hi_surrogate.is_some() {
-                        return Err(self.error_unicode_low_surrogate());
+                        return Err(self.error_unicode_low_surrogate_through(self.pos + 1));
                     }
                     self.bump();
                 }
@@ -734,10 +734,14 @@ impl<'a> JsonDiagnosticParser<'a> {
     }
 
     fn error_unicode_low_surrogate(&self) -> JsonInputDiagnostic {
+        self.error_unicode_low_surrogate_through(self.pos)
+    }
+
+    fn error_unicode_low_surrogate_through(&self, end: usize) -> JsonInputDiagnostic {
         self.error_with_range(
             "Unicode low surrogate must follow a high surrogate.".into(),
             self.pos.saturating_sub(6),
-            self.pos,
+            end,
         )
     }
 
