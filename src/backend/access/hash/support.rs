@@ -166,10 +166,9 @@ pub(crate) fn hash_value_extended(
             hash_bytes_extended(&bytes, seed)
         }
         Value::Interval(value) => {
+            let key = value.cmp_key();
             let mut bytes = Vec::with_capacity(16);
-            bytes.extend_from_slice(&value.time_micros.to_le_bytes());
-            bytes.extend_from_slice(&value.days.to_le_bytes());
-            bytes.extend_from_slice(&value.months.to_le_bytes());
+            bytes.extend_from_slice(&key.to_le_bytes());
             hash_bytes_extended(&bytes, seed)
         }
         Value::Float64(value) if *value == 0.0 => seed,

@@ -2777,14 +2777,18 @@ fn nonverbose_sort_items(
     display_items: &[String],
     ctx: &VerboseExplainContext,
 ) -> Vec<String> {
-    if !context_has_relation_aliases(ctx)
+    let should_use_display_items = !context_has_relation_aliases(ctx)
         && (!plan_has_explicit_relation_alias(input)
             || sort_display_items_preserve_aliases(display_items, items))
         && !display_items.is_empty()
         && !display_items
             .iter()
             .any(|item| explain_display_item_is_debug(item))
-    {
+        && !((context_has_relation_aliases(ctx) || ctx.force_qualified_sort_keys)
+            && display_items
+                .iter()
+                .all(|item| explain_display_item_is_bare_identifier(item)));
+    if should_use_display_items {
         return display_items
             .iter()
             .zip(items.iter())
@@ -2804,10 +2808,15 @@ fn nonverbose_sort_items(
             .collect();
     }
     let input_names = if !context_has_relation_aliases(ctx)
+        && !ctx.force_qualified_sort_keys
         && !plan_has_explicit_relation_alias(input)
         && leaf_relation_bases(input).len() == 1
     {
         input.column_names()
+    } else if ctx.force_qualified_sort_keys {
+        qualified_scan_output_names(input)
+            .or_else(|| sort_input_column_names(input))
+            .unwrap_or_else(|| verbose_plan_output_exprs(input, ctx, true))
     } else {
         sort_input_column_names(input)
             .or_else(|| qualified_scan_output_names(input))
@@ -2832,6 +2841,13 @@ fn nonverbose_sort_items(
             });
     }
     rendered
+}
+
+fn explain_display_item_is_bare_identifier(item: &str) -> bool {
+    !item.is_empty()
+        && item
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn sort_display_items_preserve_aliases(
@@ -3915,15 +3931,18 @@ fn nonverbose_index_scan_label(
     alias: Option<&str>,
 ) -> Option<String> {
     let direction = scan_direction_label(direction);
-    if let Some(alias) = alias {
-        let relation_name = relation_base_without_temp_schema(relation_name);
-        return Some(format!(
-            "{scan_name}{direction} using {index_name} on {relation_name} {alias}"
-        ));
-    }
-    relation_name_with_temp_schema_stripped(relation_name).map(|relation_name| {
-        format!("{scan_name}{direction} using {index_name} on {relation_name}")
-    })
+    let relation_name = if let Some(alias) = alias {
+        format!(
+            "{} {alias}",
+            relation_base_without_temp_schema(relation_name)
+        )
+    } else {
+        relation_name_with_temp_schema_stripped(relation_name)
+            .unwrap_or_else(|| relation_name.to_string())
+    };
+    Some(format!(
+        "{scan_name}{direction} using {index_name} on {relation_name}"
+    ))
 }
 
 fn nonverbose_relation_scan_label(
@@ -5043,6 +5062,7 @@ struct VerboseExplainContext {
     relation_scan_aliases: BTreeMap<String, String>,
     preserve_partition_child_aliases: bool,
     alias_through_aggregate_children: bool,
+    force_qualified_sort_keys: bool,
     type_names: BTreeMap<u32, String>,
     function_names: BTreeMap<u32, String>,
 }
@@ -5753,7 +5773,11 @@ fn explain_plan_children_with_context(
             let child_indent = indent + 1;
             let children = direct_plan_children(plan);
             for child in &children {
-                let child_ctx = if children.len() == 1
+                let child_ctx = if matches!(plan, Plan::SubqueryScan { .. }) {
+                    let mut child_ctx = ctx.clone();
+                    child_ctx.force_qualified_sort_keys = true;
+                    child_ctx
+                } else if children.len() == 1
                     && matches!(plan, Plan::OrderBy { .. } | Plan::IncrementalSort { .. })
                 {
                     sorted_single_child_inherited_alias_context(ctx, child)

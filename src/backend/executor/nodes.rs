@@ -1479,6 +1479,25 @@ fn renumber_relation_alias(relation_name: &str, ordinal: usize) -> String {
     format!("{relation} {prefix}_{ordinal}")
 }
 
+fn explain_relation_name(relation_name: &str) -> String {
+    let (base_name, alias) = relation_name
+        .rsplit_once(' ')
+        .map(|(name, alias)| (name, Some(alias)))
+        .unwrap_or((relation_name, None));
+    let display_base = if let Some((schema_name, local_name)) = base_name.split_once('.')
+        && schema_name.starts_with("pg_temp_")
+    {
+        local_name
+    } else {
+        base_name
+    };
+    if let Some(alias) = alias {
+        format!("{display_base} {alias}")
+    } else {
+        display_base.to_string()
+    }
+}
+
 fn ensure_append_runtime_pruned(
     children: &mut [PlanState],
     active_children: &mut Option<Vec<usize>>,
@@ -2240,7 +2259,7 @@ impl PlanNode for SeqScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        format!("Seq Scan on {}", self.relation_name)
+        format!("Seq Scan on {}", explain_relation_name(&self.relation_name))
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
         self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
@@ -2544,7 +2563,8 @@ impl PlanNode for IndexOnlyScanState {
         };
         format!(
             "Index Only Scan{direction} using {} on {}",
-            self.index_name, self.relation_name
+            self.index_name,
+            explain_relation_name(&self.relation_name)
         )
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
@@ -3804,7 +3824,10 @@ impl PlanNode for BitmapHeapScanState {
     }
 
     fn node_label(&self) -> String {
-        format!("Bitmap Heap Scan on {}", self.relation_name)
+        format!(
+            "Bitmap Heap Scan on {}",
+            explain_relation_name(&self.relation_name)
+        )
     }
     fn renumber_append_child_aliases(&mut self, ordinal: usize) {
         self.relation_name = renumber_relation_alias(&self.relation_name, ordinal);
@@ -4156,6 +4179,12 @@ fn render_explain_expr_inner_with_qualifier(
                     return format!("{left} {op_text} {right}");
                 }
                 let display_type = comparison_display_type(left, right, op.collation_oid);
+                let right_collation_oid =
+                    if text_pattern_operator_suppresses_explain_collation(op.opno) {
+                        None
+                    } else {
+                        op.collation_oid
+                    };
                 format!(
                     "{} {} {}",
                     render_explain_infix_operand_with_display_type(
@@ -4169,7 +4198,7 @@ fn render_explain_expr_inner_with_qualifier(
                     render_explain_infix_operand_with_display_type(
                         right,
                         display_type,
-                        op.collation_oid,
+                        right_collation_oid,
                         qualifier,
                         column_names
                     )
@@ -5422,6 +5451,16 @@ fn infix_operator_text(
         crate::include::nodes::primnodes::OpExprKind::JsonGetText => Some("->>"),
         _ => None,
     }
+}
+
+fn text_pattern_operator_suppresses_explain_collation(opno: u32) -> bool {
+    matches!(
+        opno,
+        crate::include::catalog::TEXT_PATTERN_LT_OPERATOR_OID
+            | crate::include::catalog::TEXT_PATTERN_LE_OPERATOR_OID
+            | crate::include::catalog::TEXT_PATTERN_GE_OPERATOR_OID
+            | crate::include::catalog::TEXT_PATTERN_GT_OPERATOR_OID
+    )
 }
 
 fn collect_bool_explain_args<'a>(
