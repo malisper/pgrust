@@ -1989,12 +1989,18 @@ fn exec_function_block(
     } else {
         None
     };
-    if let Some((_, subxid)) = &subxact {
-        ctx.snapshot = ctx
+    if let Some((parent_snapshot, subxid)) = &subxact {
+        let mut sub_snapshot = ctx
             .txns
             .read()
             .snapshot_for_command(*subxid, CommandId::MAX)
             .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+        sub_snapshot
+            .own_xids
+            .extend(parent_snapshot.own_xids.iter().copied());
+        sub_snapshot.own_xids.insert(*subxid);
+        ctx.snapshot = sub_snapshot;
+        sync_plpgsql_catalog_snapshot_override(ctx);
     }
 
     for local in &block.local_slots {
@@ -2036,6 +2042,7 @@ fn exec_function_block(
                         .abort(subxid)
                         .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
                     ctx.snapshot = parent_snapshot;
+                    sync_plpgsql_catalog_snapshot_override(ctx);
                 }
                 return match exec_function_exception_handlers(
                     &block.exception_handlers,
@@ -2078,7 +2085,27 @@ fn finish_function_block_subxact(
             .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
     }
     ctx.snapshot = parent_snapshot;
+    sync_plpgsql_catalog_snapshot_override(ctx);
     Ok(())
+}
+
+fn sync_plpgsql_catalog_snapshot_override(ctx: &ExecutorContext) {
+    let Some(db) = ctx.database.clone() else {
+        return;
+    };
+    if ctx.snapshot.current_xid != INVALID_TRANSACTION_ID {
+        crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+            &db,
+            ctx.client_id,
+            ctx.snapshot.current_xid,
+            ctx.snapshot.clone(),
+        );
+    } else {
+        crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
+            &db,
+            ctx.client_id,
+        );
+    }
 }
 
 fn exec_function_exception_handlers(

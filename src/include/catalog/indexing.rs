@@ -27,6 +27,8 @@ const PG_TYPE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TYPE_TYPNAME_NSP_INDEX_KEYS: [i16; 2] = [2, 3];
 const PG_PROC_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_PROC_PRONAME_ARGS_NSP_INDEX_KEYS: [i16; 3] = [2, 20, 3];
+const PG_DEFAULT_ACL_ROLE_NSP_OBJ_INDEX_KEYS: [i16; 3] = [2, 3, 4];
+const PG_DEFAULT_ACL_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AGGREGATE_FNOID_INDEX_KEYS: [i16; 1] = [1];
 const PG_LANGUAGE_NAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_LANGUAGE_OID_INDEX_KEYS: [i16; 1] = [1];
@@ -43,6 +45,8 @@ const PG_OPERATOR_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_OPERATOR_OPRNAME_L_R_N_INDEX_KEYS: [i16; 4] = [2, 8, 9, 3];
 const PG_DATABASE_DATNAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_DATABASE_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_EXTENSION_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_EXTENSION_NAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_AUTHID_ROLNAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_AUTHID_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AUTH_MEMBERS_OID_INDEX_KEYS: [i16; 1] = [1];
@@ -98,6 +102,8 @@ const PG_AMOP_OPR_FAM_INDEX_KEYS: [i16; 3] = [7, 6, 2];
 const PG_AMOP_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AMPROC_FAM_PROC_INDEX_KEYS: [i16; 4] = [2, 3, 4, 5];
 const PG_AMPROC_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_TRANSFORM_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_TRANSFORM_TYPE_LANG_INDEX_KEYS: [i16; 2] = [2, 3];
 const PG_OPCLASS_AM_NAME_NSP_INDEX_KEYS: [i16; 3] = [2, 3, 4];
 const PG_OPCLASS_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_OPFAMILY_AM_NAME_NSP_INDEX_KEYS: [i16; 3] = [2, 3, 4];
@@ -106,6 +112,12 @@ const PG_COLLATION_NAME_ENC_NSP_INDEX_KEYS: [i16; 3] = [2, 7, 3];
 const PG_COLLATION_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TABLESPACE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TABLESPACE_SPCNAME_INDEX_KEYS: [i16; 1] = [2];
+const PG_SHDESCRIPTION_O_C_INDEX_KEYS: [i16; 2] = [1, 2];
+const PG_SEQUENCE_SEQRELID_INDEX_KEYS: [i16; 1] = [1];
+const PG_SUBSCRIPTION_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_SUBSCRIPTION_SUBNAME_INDEX_KEYS: [i16; 2] = [2, 4];
+const PG_PARAMETER_ACL_PARNAME_INDEX_KEYS: [i16; 1] = [2];
+const PG_PARAMETER_ACL_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_STATISTIC_RELID_ATTNUM_INH_INDEX_KEYS: [i16; 3] = [1, 2, 3];
 const PG_STATISTIC_EXT_RELID_INDEX_KEYS: [i16; 1] = [2];
 const PG_STATISTIC_EXT_OID_INDEX_KEYS: [i16; 1] = [1];
@@ -121,6 +133,11 @@ const OID_OPCLASS_3: [u32; 3] = [
     OID_BTREE_OPCLASS_OID,
     OID_BTREE_OPCLASS_OID,
     OID_BTREE_OPCLASS_OID,
+];
+const OID_OID_CHAR_OPCLASS_3: [u32; 3] = [
+    OID_BTREE_OPCLASS_OID,
+    OID_BTREE_OPCLASS_OID,
+    CHAR_BTREE_OPCLASS_OID,
 ];
 const NAME_OID_OPCLASS_2: [u32; 2] = [NAME_BTREE_OPCLASS_OID, OID_BTREE_OPCLASS_OID];
 const OID_NAME_OPCLASS_2: [u32; 2] = [OID_BTREE_OPCLASS_OID, NAME_BTREE_OPCLASS_OID];
@@ -186,7 +203,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 97] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 109] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -290,6 +307,22 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 97] = [
         unique: true,
         key_attnums: &PG_PROC_PRONAME_ARGS_NSP_INDEX_KEYS,
         opclass_oids: &NAME_OIDVECTOR_OID_OPCLASS_3,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 827,
+        relation_name: "pg_default_acl_role_nsp_obj_index",
+        heap_kind: BootstrapCatalogKind::PgDefaultAcl,
+        unique: true,
+        key_attnums: &PG_DEFAULT_ACL_ROLE_NSP_OBJ_INDEX_KEYS,
+        opclass_oids: &OID_OID_CHAR_OPCLASS_3,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 828,
+        relation_name: "pg_default_acl_oid_index",
+        heap_kind: BootstrapCatalogKind::PgDefaultAcl,
+        unique: true,
+        key_attnums: &PG_DEFAULT_ACL_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {
         relation_oid: 2650,
@@ -418,6 +451,22 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 97] = [
         unique: true,
         key_attnums: &PG_DATABASE_OID_INDEX_KEYS,
         opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3080,
+        relation_name: "pg_extension_oid_index",
+        heap_kind: BootstrapCatalogKind::PgExtension,
+        unique: true,
+        key_attnums: &PG_EXTENSION_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3081,
+        relation_name: "pg_extension_name_index",
+        heap_kind: BootstrapCatalogKind::PgExtension,
+        unique: true,
+        key_attnums: &PG_EXTENSION_NAME_INDEX_KEYS,
+        opclass_oids: &NAME_OPCLASS_1,
     },
     CatalogIndexDescriptor {
         relation_oid: 2676,
@@ -668,6 +717,14 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 97] = [
         opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {
+        relation_oid: 5002,
+        relation_name: "pg_sequence_seqrelid_index",
+        heap_kind: BootstrapCatalogKind::PgSequence,
+        unique: true,
+        key_attnums: &PG_SEQUENCE_SEQRELID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
         relation_oid: 2692,
         relation_name: "pg_rewrite_oid_index",
         heap_kind: BootstrapCatalogKind::PgRewrite,
@@ -788,6 +845,38 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 97] = [
         opclass_oids: &OID_OPCLASS_2,
     },
     CatalogIndexDescriptor {
+        relation_oid: 6114,
+        relation_name: "pg_subscription_oid_index",
+        heap_kind: BootstrapCatalogKind::PgSubscription,
+        unique: true,
+        key_attnums: &PG_SUBSCRIPTION_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 6115,
+        relation_name: "pg_subscription_subname_index",
+        heap_kind: BootstrapCatalogKind::PgSubscription,
+        unique: true,
+        key_attnums: &PG_SUBSCRIPTION_SUBNAME_INDEX_KEYS,
+        opclass_oids: &OID_NAME_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 6246,
+        relation_name: "pg_parameter_acl_parname_index",
+        heap_kind: BootstrapCatalogKind::PgParameterAcl,
+        unique: true,
+        key_attnums: &PG_PARAMETER_ACL_PARNAME_INDEX_KEYS,
+        opclass_oids: &TEXT_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 6247,
+        relation_name: "pg_parameter_acl_oid_index",
+        heap_kind: BootstrapCatalogKind::PgParameterAcl,
+        unique: true,
+        key_attnums: &PG_PARAMETER_ACL_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
         relation_oid: 3257,
         relation_name: "pg_policy_oid_index",
         heap_kind: BootstrapCatalogKind::PgPolicy,
@@ -860,6 +949,22 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 97] = [
         opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {
+        relation_oid: 3574,
+        relation_name: "pg_transform_oid_index",
+        heap_kind: BootstrapCatalogKind::PgTransform,
+        unique: true,
+        key_attnums: &PG_TRANSFORM_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3575,
+        relation_name: "pg_transform_type_lang_index",
+        heap_kind: BootstrapCatalogKind::PgTransform,
+        unique: true,
+        key_attnums: &PG_TRANSFORM_TYPE_LANG_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
         relation_oid: 2686,
         relation_name: "pg_opclass_am_name_nsp_index",
         heap_kind: BootstrapCatalogKind::PgOpclass,
@@ -922,6 +1027,14 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 97] = [
         unique: true,
         key_attnums: &PG_TABLESPACE_SPCNAME_INDEX_KEYS,
         opclass_oids: &NAME_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 2397,
+        relation_name: "pg_shdescription_o_c_index",
+        heap_kind: BootstrapCatalogKind::PgShdescription,
+        unique: true,
+        key_attnums: &PG_SHDESCRIPTION_O_C_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_2,
     },
     CatalogIndexDescriptor {
         relation_oid: 2696,
@@ -1000,7 +1113,10 @@ pub fn system_catalog_index_is_primary(descriptor: &CatalogIndexDescriptor) -> b
             | "pg_constraint_oid_index"
             | "pg_conversion_oid_index"
             | "pg_database_oid_index"
+            | "pg_default_acl_oid_index"
             | "pg_description_o_c_o_index"
+            | "pg_event_trigger_oid_index"
+            | "pg_extension_oid_index"
             | "pg_foreign_data_wrapper_oid_index"
             | "pg_foreign_server_oid_index"
             | "pg_foreign_table_relid_index"
@@ -1013,6 +1129,7 @@ pub fn system_catalog_index_is_primary(descriptor: &CatalogIndexDescriptor) -> b
             | "pg_opclass_oid_index"
             | "pg_operator_oid_index"
             | "pg_opfamily_oid_index"
+            | "pg_parameter_acl_oid_index"
             | "pg_partitioned_table_partrelid_index"
             | "pg_policy_oid_index"
             | "pg_proc_oid_index"
@@ -1021,10 +1138,14 @@ pub fn system_catalog_index_is_primary(descriptor: &CatalogIndexDescriptor) -> b
             | "pg_publication_rel_oid_index"
             | "pg_replication_origin_roiident_index"
             | "pg_rewrite_oid_index"
+            | "pg_sequence_seqrelid_index"
+            | "pg_shdescription_o_c_index"
             | "pg_statistic_ext_data_stxoid_inh_index"
             | "pg_statistic_ext_oid_index"
             | "pg_statistic_relid_att_inh_index"
+            | "pg_subscription_oid_index"
             | "pg_tablespace_oid_index"
+            | "pg_transform_oid_index"
             | "pg_trigger_oid_index"
             | "pg_ts_config_map_index"
             | "pg_ts_config_oid_index"
