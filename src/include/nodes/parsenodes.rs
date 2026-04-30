@@ -2367,6 +2367,7 @@ pub struct PrepareStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreparedStatementQuery {
     Select(SelectStatement),
+    Insert(InsertStatement),
     Update(UpdateStatement),
 }
 
