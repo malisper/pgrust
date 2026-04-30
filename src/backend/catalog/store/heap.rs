@@ -8055,6 +8055,24 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_relation_persistence_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relpersistence: char,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, _control| {
+                entry.relpersistence = relpersistence;
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn alter_attribute_acl_mvcc(
         &mut self,
         relation_oid: u32,

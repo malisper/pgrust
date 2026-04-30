@@ -1477,9 +1477,11 @@ struct ActiveTransaction {
     advisory_scope_id: u64,
     failed: bool,
     auth_at_start: AuthState,
+    local_auth_active: bool,
     held_table_locks: BTreeMap<RelFileLocator, TableLockMode>,
     next_command_id: u32,
     isolation_level: crate::backend::parser::TransactionIsolationLevel,
+    read_only: bool,
     snapshot_taken: bool,
     transaction_snapshot: Option<Snapshot>,
     catalog_effects: Vec<CatalogMutationEffect>,
@@ -1514,6 +1516,8 @@ struct SavepointState {
     temp_effect_len: usize,
     sequence_effect_len: usize,
     deferred_foreign_key_snapshot: DeferredConstraintSnapshot,
+    auth_effective_state: AuthState,
+    local_auth_active: bool,
     guc_effective_state: GucState,
     guc_commit_state: GucState,
     stats_state: crate::backend::utils::activity::SessionStatsState,
@@ -2235,7 +2239,9 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
     match name {
         "default_toast_compression" => Some("pglz"),
         "default_transaction_isolation" => Some("read committed"),
+        "default_transaction_read_only" => Some("off"),
         "transaction_isolation" => Some("read committed"),
+        "transaction_read_only" => Some("off"),
         "vacuum_cost_delay" => Some("0"),
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
@@ -3428,11 +3434,19 @@ impl Session {
             advisory_scope_id: db.allocate_statement_lock_scope_id(),
             failed: false,
             auth_at_start: self.auth.clone(),
+            local_auth_active: false,
             held_table_locks: BTreeMap::new(),
             next_command_id: 0,
             isolation_level: options
                 .isolation_level
                 .unwrap_or_else(|| self.default_transaction_isolation_level()),
+            read_only: options.read_only.unwrap_or_else(|| {
+                self.gucs
+                    .get("default_transaction_read_only")
+                    .is_some_and(|value| {
+                        value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true")
+                    })
+            }),
             snapshot_taken: false,
             transaction_snapshot: None,
             catalog_effects: Vec::new(),
@@ -3510,11 +3524,33 @@ impl Session {
             .unwrap_or_else(|| self.default_transaction_isolation_level())
     }
 
+    fn current_transaction_read_only(&self) -> bool {
+        self.active_txn.as_ref().map_or_else(
+            || {
+                self.gucs
+                    .get("default_transaction_read_only")
+                    .is_some_and(|value| {
+                        value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true")
+                    })
+            },
+            |txn| txn.read_only,
+        )
+    }
+
     fn effective_gucs_for_execution(&self) -> HashMap<String, String> {
         let mut gucs = self.gucs.clone();
         gucs.insert(
             "transaction_isolation".into(),
             self.current_transaction_isolation_level().as_str().into(),
+        );
+        gucs.insert(
+            "transaction_read_only".into(),
+            if self.current_transaction_read_only() {
+                "on"
+            } else {
+                "off"
+            }
+            .into(),
         );
         gucs.entry("default_transaction_isolation".into())
             .or_insert_with(|| self.default_transaction_isolation_level().as_str().into());
@@ -3548,10 +3584,22 @@ impl Session {
         &mut self,
         options: &crate::backend::parser::TransactionOptions,
     ) -> Result<(), ExecError> {
-        // :HACK: READ ONLY and DEFERRABLE are parsed for compatibility, but
-        // enforcement belongs with broader transaction access-mode support.
         if let Some(level) = options.isolation_level {
             self.set_active_transaction_isolation(level)?;
+        }
+        if let Some(read_only) = options.read_only {
+            if let Some(txn) = self.active_txn.as_mut() {
+                if txn.snapshot_taken {
+                    return Err(ExecError::Parse(ParseError::DetailedError {
+                        message: "SET TRANSACTION READ WRITE must be called before any query"
+                            .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "25001",
+                    }));
+                }
+                txn.read_only = read_only;
+            }
         }
         Ok(())
     }
@@ -3762,6 +3810,7 @@ impl Session {
             | Statement::CommentOnColumn(_)
             | Statement::CommentOnView(_)
             | Statement::CommentOnIndex(_)
+            | Statement::CommentOnSequence(_)
             | Statement::CommentOnType(_)
             | Statement::CommentOnConstraint(_)
             | Statement::CommentOnRule(_)
@@ -4811,6 +4860,11 @@ impl Session {
         };
         for rel in held_locks {
             db.table_locks.unlock_table(rel, self.client_id);
+        }
+        if result.is_ok() && txn.local_auth_active && self.auth != txn.auth_at_start {
+            self.auth = txn.auth_at_start.clone();
+            db.install_auth_state(self.client_id, self.auth.clone());
+            db.plan_cache.invalidate_all();
         }
         let guc_state = if result.is_ok() {
             txn.guc_commit_state
@@ -6803,6 +6857,11 @@ impl Session {
                     }
                     result
                 } else {
+                    if set_stmt.is_local {
+                        return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(
+                            "SET LOCAL SESSION AUTHORIZATION",
+                        )));
+                    }
                     self.auth =
                         db.execute_set_session_authorization_stmt(self.client_id, set_stmt)?;
                     Ok(StatementResult::AffectedRows(0))
@@ -6909,6 +6968,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_comment_on_table_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::CommentOnSequence(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_sequence_stmt_with_search_path(
                         self.client_id,
                         comment_stmt,
                         search_path.as_deref(),
@@ -7359,6 +7436,8 @@ impl Session {
                     temp_effect_len: txn.temp_effects.len(),
                     sequence_effect_len: txn.sequence_effects.len(),
                     deferred_foreign_key_snapshot: txn.deferred_foreign_keys.snapshot(),
+                    auth_effective_state: self.auth.clone(),
+                    local_auth_active: txn.local_auth_active,
                     guc_effective_state,
                     guc_commit_state: txn.guc_commit_state.clone(),
                     stats_state: self.stats_state.read().clone(),
@@ -7389,7 +7468,13 @@ impl Session {
             }
             Statement::RollbackTo(ref name) => {
                 let client_id = self.client_id;
-                let (dynamic_type_snapshot, guc_effective_state, stats_state) = {
+                let (
+                    dynamic_type_snapshot,
+                    auth_effective_state,
+                    local_auth_active,
+                    guc_effective_state,
+                    stats_state,
+                ) = {
                     let Some(txn) = self.active_txn.as_mut() else {
                         return Err(ExecError::Parse(ParseError::UnexpectedToken {
                             expected: "active transaction",
@@ -7458,6 +7543,7 @@ impl Session {
                     txn.sequence_effects.truncate(savepoint.sequence_effect_len);
                     txn.deferred_foreign_keys
                         .restore(savepoint.deferred_foreign_key_snapshot.clone());
+                    txn.local_auth_active = savepoint.local_auth_active;
                     let repair_invalidation =
                         Database::catalog_invalidation_from_effect(&repair_effect);
                     if !repair_invalidation.is_empty() {
@@ -7474,11 +7560,21 @@ impl Session {
                     txn.failed = false;
                     (
                         savepoint.dynamic_type_snapshot,
+                        savepoint.auth_effective_state,
+                        savepoint.local_auth_active,
                         savepoint.guc_effective_state,
                         savepoint.stats_state,
                     )
                 };
                 db.restore_dynamic_type_snapshot(&dynamic_type_snapshot);
+                if self.auth != auth_effective_state {
+                    self.auth = auth_effective_state;
+                    db.install_auth_state(self.client_id, self.auth.clone());
+                    db.plan_cache.invalidate_all();
+                }
+                if let Some(txn) = self.active_txn.as_mut() {
+                    txn.local_auth_active = local_auth_active;
+                }
                 self.restore_guc_state(db, guc_effective_state);
                 self.stats_state
                     .write()
@@ -10768,13 +10864,27 @@ impl Session {
                 }
                 Statement::AlterSequence(ref alter_stmt) => {
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    let relation = catalog
-                        .lookup_any_relation(&alter_stmt.sequence_name)
-                        .ok_or_else(|| {
-                            ExecError::Parse(ParseError::TableDoesNotExist(
+                    let relation = match catalog.lookup_any_relation(&alter_stmt.sequence_name) {
+                        Some(relation) => relation,
+                        None if alter_stmt.if_exists => {
+                            let search_path = self.configured_search_path();
+                            let txn = self.active_txn.as_mut().unwrap();
+                            return db.execute_alter_sequence_stmt_in_transaction_with_search_path(
+                                client_id,
+                                alter_stmt,
+                                xid,
+                                cid,
+                                search_path.as_deref(),
+                                &mut txn.catalog_effects,
+                                &mut txn.sequence_effects,
+                            );
+                        }
+                        None => {
+                            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
                                 alter_stmt.sequence_name.clone(),
-                            ))
-                        })?;
+                            )));
+                        }
+                    };
                     self.lock_table_if_needed(
                         db,
                         crate::pgrust::database::relation_lock_tag(&relation),
@@ -11868,6 +11978,9 @@ impl Session {
                     self.auth = db.execute_set_session_authorization_stmt_in_transaction(
                         client_id, set_stmt, xid, cid,
                     )?;
+                    if set_stmt.is_local {
+                        self.active_txn.as_mut().unwrap().local_auth_active = true;
+                    }
                     Ok(StatementResult::AffectedRows(0))
                 }
                 Statement::ResetSessionAuthorization(ref reset_stmt) => {
@@ -11981,6 +12094,36 @@ impl Session {
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_table_stmt_in_transaction_with_search_path(
+                        client_id,
+                        comment_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::CommentOnSequence(ref comment_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let relation = catalog
+                        .lookup_any_relation(&comment_stmt.sequence_name)
+                        .filter(|relation| relation.relkind == 'S')
+                        .ok_or_else(|| ExecError::DetailedError {
+                            message: format!(
+                                "relation \"{}\" does not exist",
+                                comment_stmt.sequence_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P01",
+                        })?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_comment_on_sequence_stmt_in_transaction_with_search_path(
                         client_id,
                         comment_stmt,
                         xid,
@@ -13473,6 +13616,21 @@ impl Session {
                 })?;
             self.set_active_transaction_isolation(level)?;
         }
+        if normalized == "transaction_read_only"
+            && let Some(value) = &stmt.value
+            && let Some(txn) = self.active_txn.as_mut()
+        {
+            if txn.snapshot_taken {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: "SET TRANSACTION READ WRITE must be called before any query".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "25001",
+                }));
+            }
+            txn.read_only = parse_pg_bool_text(value)
+                .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.clone())))?;
+        }
 
         self.install_guc_state(effective_state);
         if let Some(commit_state) = commit_state
@@ -13497,6 +13655,12 @@ impl Session {
                     self.gucs.insert(
                         "default_transaction_isolation".into(),
                         level.as_str().into(),
+                    );
+                }
+                if let Some(read_only) = stmt.options.read_only {
+                    self.gucs.insert(
+                        "default_transaction_read_only".into(),
+                        if read_only { "on" } else { "off" }.into(),
                     );
                 }
             }
@@ -13667,11 +13831,27 @@ impl Session {
                     .as_str()
                     .to_string(),
             ),
+            "transaction_read_only" => (
+                "transaction_read_only".to_string(),
+                if self.current_transaction_read_only() {
+                    "on"
+                } else {
+                    "off"
+                }
+                .to_string(),
+            ),
             "default_transaction_isolation" => (
                 "default_transaction_isolation".to_string(),
                 self.default_transaction_isolation_level()
                     .as_str()
                     .to_string(),
+            ),
+            "default_transaction_read_only" => (
+                "default_transaction_read_only".to_string(),
+                self.gucs
+                    .get("default_transaction_read_only")
+                    .cloned()
+                    .unwrap_or_else(|| "off".to_string()),
             ),
             _ if is_checkpoint_guc(&name) => (
                 stmt.name.clone(),
@@ -13739,6 +13919,7 @@ impl Session {
             let stmt = match target {
                 DiscardTarget::All => "DISCARD ALL",
                 DiscardTarget::Temp => "DISCARD TEMP",
+                DiscardTarget::Sequences => "DISCARD SEQUENCES",
             };
             return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(stmt)));
         }
@@ -13747,6 +13928,9 @@ impl Session {
             DiscardTarget::Temp => {
                 db.cleanup_client_temp_relations(self.client_id)?;
             }
+            DiscardTarget::Sequences => {
+                db.sequences.clear_session_sequence_state(self.client_id);
+            }
             DiscardTarget::All => {
                 self.close_all_cursors();
                 self.prepared_selects.clear();
@@ -13754,6 +13938,7 @@ impl Session {
                 db.async_notify_runtime.disconnect(self.client_id);
                 db.advisory_locks.unlock_all_session(self.client_id);
                 db.row_locks.unlock_all_session(self.client_id);
+                db.sequences.clear_session_sequence_state(self.client_id);
 
                 let mut state = self.capture_guc_state();
                 reset_all_gucs_in_state(&mut state, &self.reset_datetime_config);
@@ -15722,6 +15907,15 @@ fn apply_guc_value_to_state(
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;
             stored_value = level.as_str().to_string();
+        }
+        "default_transaction_read_only" | "transaction_read_only" => {
+            stored_value = if parse_pg_bool_text(value).map_err(|_| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+            })? {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            };
         }
         "xmlbinary" => {
             let Some(binary) = parse_xmlbinary(value) else {

@@ -296,7 +296,6 @@ fn collapse_relation_acl_defaults(
 ) -> Option<Vec<String>> {
     let default_owner = table_owner_default_acl(owner_name, relkind)?;
     match acl.as_slice() {
-        [] => None,
         [only] if only == &default_owner => None,
         _ => Some(acl),
     }
@@ -1435,7 +1434,11 @@ impl Database {
             let mut acl = catcache
                 .class_by_oid(relation.relation_oid)
                 .and_then(|row| row.relacl.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    table_owner_default_acl(&owner_name, relation.relkind)
+                        .into_iter()
+                        .collect()
+                });
             for grantee_name in &stmt.grantee_names {
                 let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
                     String::new()

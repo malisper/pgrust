@@ -6075,7 +6075,9 @@ fn render_verbose_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             vec![render_verbose_function_arg(relid, ctx)]
         }
-        SetReturningCall::PgLockStatus { .. } => Vec::new(),
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => Vec::new(),
         SetReturningCall::TxidSnapshotXip { arg, .. } => {
             vec![render_verbose_function_arg(arg, ctx)]
         }
@@ -8078,7 +8080,9 @@ fn collect_direct_set_returning_call_subplans<'a>(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             collect_direct_expr_subplans(relid, out);
         }
-        SetReturningCall::PgLockStatus { .. } => {}
+        SetReturningCall::PgLockStatus { .. }
+        | SetReturningCall::PgSequences { .. }
+        | SetReturningCall::InformationSchemaSequences { .. } => {}
         SetReturningCall::TxidSnapshotXip { arg, .. } => {
             collect_direct_expr_subplans(arg, out);
         }

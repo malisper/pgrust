@@ -184,6 +184,7 @@ use crate::include::nodes::primnodes::{
     attrno_index, is_executor_special_varno, is_system_attr,
 };
 use crate::pgrust::compact_string::CompactString;
+use crate::pgrust::database::SequenceData;
 use crate::pl::plpgsql::current_event_trigger_table_rewrite;
 
 mod arrays;
@@ -7430,12 +7431,6 @@ fn sequence_runtime(
 
 fn sequence_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> Option<String> {
     let class = catalog.class_row_by_oid(relation_oid)?;
-    if catalog
-        .lookup_any_relation(&class.relname)
-        .is_some_and(|relation| relation.relation_oid == relation_oid)
-    {
-        return Some(quote_identifier_if_needed(&class.relname));
-    }
     let namespace = catalog
         .namespace_row_by_oid(class.relnamespace)
         .map(|row| row.nspname)?;
@@ -7459,10 +7454,17 @@ fn large_object_runtime(
         })
 }
 
+struct SequenceCallTarget {
+    relation_oid: u32,
+    class_row: PgClassRow,
+    persistent: bool,
+    display_name: String,
+}
+
 fn resolve_sequence_call_target(
     ctx: &ExecutorContext,
     value: &Value,
-) -> Result<(u32, bool), ExecError> {
+) -> Result<SequenceCallTarget, ExecError> {
     let catalog = sequence_catalog(ctx)?;
     let relation = match value {
         Value::Int32(oid) => {
@@ -7508,7 +7510,184 @@ fn resolve_sequence_call_target(
             expected: "sequence",
         }));
     }
-    Ok((relation.relation_oid, relation.relpersistence != 't'))
+    let class_row = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(
+                relation.relation_oid.to_string(),
+            ))
+        })?;
+    let display_name = quote_identifier_if_needed(&class_row.relname);
+    Ok(SequenceCallTarget {
+        relation_oid: relation.relation_oid,
+        class_row,
+        persistent: relation.relpersistence != 't',
+        display_name,
+    })
+}
+
+fn sequence_acl_allows_any(
+    catalog: &dyn CatalogLookup,
+    role_oid: u32,
+    class_row: &PgClassRow,
+    acl_chars: &[char],
+) -> bool {
+    let authid_rows = catalog.authid_rows();
+    if role_is_superuser(&authid_rows, role_oid) {
+        return true;
+    }
+    let auth_members_rows = catalog.auth_members_rows();
+    if class_row.relacl.is_none()
+        && role_has_effective_membership(
+            role_oid,
+            class_row.relowner,
+            &authid_rows,
+            &auth_members_rows,
+        )
+    {
+        return true;
+    }
+    let effective_names = effective_role_names_for_oid(catalog, role_oid);
+    acl_chars.iter().any(|acl_char| {
+        let spec = PrivilegeSpec {
+            acl_char: *acl_char,
+            grant_option: false,
+        };
+        if *acl_char == 'r'
+            && role_has_effective_membership(
+                role_oid,
+                PG_READ_ALL_DATA_OID,
+                &authid_rows,
+                &auth_members_rows,
+            )
+        {
+            return true;
+        }
+        if *acl_char == 'w'
+            && role_has_effective_membership(
+                role_oid,
+                PG_WRITE_ALL_DATA_OID,
+                &authid_rows,
+                &auth_members_rows,
+            )
+        {
+            return true;
+        }
+        class_row
+            .relacl
+            .as_deref()
+            .is_some_and(|acl| acl_grants_privilege_to_names(acl, &effective_names, spec))
+    })
+}
+
+fn ensure_sequence_privilege(
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+    target: &SequenceCallTarget,
+    acl_chars: &[char],
+) -> Result<(), ExecError> {
+    if sequence_acl_allows_any(catalog, ctx.current_user_oid, &target.class_row, acl_chars) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("permission denied for sequence {}", target.display_name),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+fn ensure_sequence_write_allowed(
+    ctx: &ExecutorContext,
+    target: &SequenceCallTarget,
+    function_name: &str,
+) -> Result<(), ExecError> {
+    let transaction_read_only = ctx.gucs.get("transaction_read_only").is_some_and(|value| {
+        value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true")
+    });
+    if transaction_read_only && target.persistent {
+        return Err(ExecError::DetailedError {
+            message: format!("cannot execute {function_name}() in a read-only transaction"),
+            detail: None,
+            hint: None,
+            sqlstate: "25006",
+        });
+    }
+    Ok(())
+}
+
+fn currval_not_defined_error(target: &SequenceCallTarget) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "currval of sequence \"{}\" is not yet defined in this session",
+            target.display_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    }
+}
+
+fn nextval_bounds_error(target: &SequenceCallTarget, data: &SequenceData) -> ExecError {
+    let (bound_name, bound_value) = if data.options.increment < 0 {
+        ("minimum", data.options.minvalue)
+    } else {
+        ("maximum", data.options.maxvalue)
+    };
+    ExecError::DetailedError {
+        message: format!(
+            "nextval: reached {bound_name} value of sequence \"{}\" ({bound_value})",
+            target.display_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "2200H",
+    }
+}
+
+fn setval_bounds_error_for_target(
+    target: &SequenceCallTarget,
+    data: &SequenceData,
+    value: i64,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "setval: value {value} is out of bounds for sequence \"{}\" ({}..{})",
+            target.display_name, data.options.minvalue, data.options.maxvalue
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "2200H",
+    }
+}
+
+fn check_setval_bounds(
+    ctx: &ExecutorContext,
+    target: &SequenceCallTarget,
+    value: i64,
+) -> Result<(), ExecError> {
+    let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+        return Ok(());
+    };
+    if value < data.options.minvalue || value > data.options.maxvalue {
+        return Err(setval_bounds_error_for_target(target, &data, value));
+    }
+    Ok(())
+}
+
+fn map_nextval_sequence_error(
+    ctx: &ExecutorContext,
+    target: &SequenceCallTarget,
+    error: ExecError,
+) -> ExecError {
+    if let ExecError::DetailedError { message, .. } = &error
+        && message.starts_with("nextval: reached")
+        && let Ok(runtime) = sequence_runtime(ctx)
+        && let Some(data) = runtime.sequence_data(target.relation_oid)
+    {
+        return nextval_bounds_error(target, &data);
+    }
+    error
 }
 
 fn eval_sequence_builtin_function(
@@ -7521,59 +7700,150 @@ fn eval_sequence_builtin_function(
             Ok(Value::Null)
         }
         (BuiltinScalarFunction::NextVal, [target]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
-            let value =
-                sequence_runtime(ctx)?.next_value(ctx.client_id, relation_oid, persistent)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "nextval")?;
+            let value = sequence_runtime(ctx)
+                .and_then(|runtime| {
+                    runtime.next_value(ctx.client_id, target.relation_oid, target.persistent)
+                })
+                .map_err(|error| map_nextval_sequence_error(ctx, &target, error))?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::CurrVal, [target]) => {
-            let (relation_oid, _) = resolve_sequence_call_target(ctx, target)?;
-            let value = sequence_runtime(ctx)?.curr_value(ctx.client_id, relation_oid)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
+            let value = sequence_runtime(ctx)
+                .and_then(|runtime| runtime.curr_value(ctx.client_id, target.relation_oid))
+                .map_err(|error| {
+                    if matches!(error, ExecError::DetailedError { .. }) {
+                        currval_not_defined_error(&target)
+                    } else {
+                        error
+                    }
+                })?;
+            Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::LastVal, []) => {
+            let (relation_oid, value) = sequence_runtime(ctx)?.last_value(ctx.client_id)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, &Value::Int64(i64::from(relation_oid)))?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int64(value)]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "setval")?;
+            check_setval_bounds(ctx, &target, *value)?;
             let value = sequence_runtime(ctx)?.set_value(
                 ctx.client_id,
-                relation_oid,
+                target.relation_oid,
                 *value,
                 true,
-                persistent,
+                target.persistent,
             )?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int32(value)]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "setval")?;
+            check_setval_bounds(ctx, &target, i64::from(*value))?;
             let value = sequence_runtime(ctx)?.set_value(
                 ctx.client_id,
-                relation_oid,
+                target.relation_oid,
                 i64::from(*value),
                 true,
-                persistent,
+                target.persistent,
             )?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int64(value), Value::Bool(is_called)]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "setval")?;
+            check_setval_bounds(ctx, &target, *value)?;
             let value = sequence_runtime(ctx)?.set_value(
                 ctx.client_id,
-                relation_oid,
+                target.relation_oid,
                 *value,
                 *is_called,
-                persistent,
+                target.persistent,
             )?;
             Ok(Value::Int64(value))
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int32(value), Value::Bool(is_called)]) => {
-            let (relation_oid, persistent) = resolve_sequence_call_target(ctx, target)?;
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['w'])?;
+            ensure_sequence_write_allowed(ctx, &target, "setval")?;
+            check_setval_bounds(ctx, &target, i64::from(*value))?;
             let value = sequence_runtime(ctx)?.set_value(
                 ctx.client_id,
-                relation_oid,
+                target.relation_oid,
                 i64::from(*value),
                 *is_called,
-                persistent,
+                target.persistent,
             )?;
             Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::PgSequenceParameters, [target]) => {
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
+            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Record(RecordValue::anonymous(vec![
+                ("start_value".into(), Value::Int64(data.options.start)),
+                ("minimum_value".into(), Value::Int64(data.options.minvalue)),
+                ("maximum_value".into(), Value::Int64(data.options.maxvalue)),
+                ("increment".into(), Value::Int64(data.options.increment)),
+                ("cycle_option".into(), Value::Bool(data.options.cycle)),
+                ("cache_size".into(), Value::Int64(data.options.cache)),
+                (
+                    "data_type".into(),
+                    Value::Int64(i64::from(data.options.type_oid)),
+                ),
+            ])))
+        }
+        (BuiltinScalarFunction::PgSequenceLastValue, [target]) => {
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            if !sequence_acl_allows_any(
+                catalog,
+                ctx.current_user_oid,
+                &target.class_row,
+                &['U', 'r'],
+            ) {
+                return Ok(Value::Null);
+            }
+            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+                return Ok(Value::Null);
+            };
+            if data.state.is_called {
+                Ok(Value::Int64(data.state.last_value))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        (BuiltinScalarFunction::PgGetSequenceData, [target]) => {
+            let catalog = sequence_catalog(ctx)?;
+            let target = resolve_sequence_call_target(ctx, target)?;
+            ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
+            let Some(data) = sequence_runtime(ctx)?.sequence_data(target.relation_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Record(RecordValue::anonymous(vec![
+                ("last_value".into(), Value::Int64(data.state.last_value)),
+                ("is_called".into(), Value::Bool(data.state.is_called)),
+            ])))
         }
         (BuiltinScalarFunction::PgGetSerialSequence, [table, column]) => {
             let table_name = table.as_text().ok_or_else(|| ExecError::TypeMismatch {
@@ -11128,6 +11398,16 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
         }
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Bool(false)),
+        BuiltinScalarFunction::NextVal
+        | BuiltinScalarFunction::CurrVal
+        | BuiltinScalarFunction::LastVal
+        | BuiltinScalarFunction::SetVal
+        | BuiltinScalarFunction::PgGetSerialSequence
+        | BuiltinScalarFunction::PgSequenceParameters
+        | BuiltinScalarFunction::PgSequenceLastValue
+        | BuiltinScalarFunction::PgGetSequenceData => {
+            eval_sequence_builtin_function(func, values, ctx)
+        }
         func if is_text_search_builtin_function(func) => {
             eval_text_search_builtin_function(func, values, Some(ctx))
         }
@@ -11334,8 +11614,12 @@ pub(crate) fn eval_builtin_function(
         func,
         BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
+            | BuiltinScalarFunction::LastVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
+            | BuiltinScalarFunction::PgSequenceParameters
+            | BuiltinScalarFunction::PgSequenceLastValue
+            | BuiltinScalarFunction::PgGetSequenceData
     ) {
         return eval_sequence_builtin_function(func, &values, ctx);
     }
@@ -11541,8 +11825,12 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::NextVal
         | BuiltinScalarFunction::CurrVal
+        | BuiltinScalarFunction::LastVal
         | BuiltinScalarFunction::SetVal
-        | BuiltinScalarFunction::PgGetSerialSequence => {
+        | BuiltinScalarFunction::PgGetSerialSequence
+        | BuiltinScalarFunction::PgSequenceParameters
+        | BuiltinScalarFunction::PgSequenceLastValue
+        | BuiltinScalarFunction::PgGetSequenceData => {
             unreachable!("sequence builtins handled earlier");
         }
         BuiltinScalarFunction::DatePart => {

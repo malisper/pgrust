@@ -1446,6 +1446,16 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
         SetReturningCall::PgLockStatus {
             with_ordinality, ..
         } => ("pg_lock_status".to_string(), Vec::new(), *with_ordinality),
+        SetReturningCall::PgSequences {
+            with_ordinality, ..
+        } => ("pg_sequences".to_string(), Vec::new(), *with_ordinality),
+        SetReturningCall::InformationSchemaSequences {
+            with_ordinality, ..
+        } => (
+            "information_schema.sequences".to_string(),
+            Vec::new(),
+            *with_ordinality,
+        ),
         SetReturningCall::TxidSnapshotXip {
             arg,
             with_ordinality,
