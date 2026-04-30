@@ -61,3 +61,9 @@ with output file section,
 which is unrelated to the \df has_database_privilege memory spike. The latest
 psql regression memory sampler recorded peak_rss_kb=277808, and both
 \df has_database_privilege oid text variants completed with expected rows.
+
+CI follow-up:
+Unqualified pg_type stays on the synthetic dynamic system view, because enum
+and domain DDL still expose fresh type rows there. Qualified pg_catalog.pg_type
+uses the physical catalog relation so the psql describe query keeps the indexed
+planning path.

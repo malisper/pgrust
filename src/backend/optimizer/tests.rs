@@ -4454,7 +4454,7 @@ fn planner_uses_runtime_index_key_for_array_subscript_join() {
     let planned = planned_stmt_for_sql_with_catalog_and_config(
         "select t0.typname \
          from pg_proc p \
-         left join pg_type t0 on t0.oid = p.proargtypes[0] \
+         left join pg_catalog.pg_type t0 on t0.oid = p.proargtypes[0] \
          where p.proname = 'has_database_privilege'",
         &catalog,
         PlannerConfig {

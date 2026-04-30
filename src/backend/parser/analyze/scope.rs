@@ -782,8 +782,11 @@ fn bind_relation_from_entry(
     ))
 }
 
-fn is_pg_type_relation_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("pg_type") || name.eq_ignore_ascii_case("pg_catalog.pg_type")
+fn is_physical_pg_type_relation_name(name: &str) -> bool {
+    // :HACK: Dynamic type DDL is still exposed through the synthetic pg_type
+    // alias; qualified catalog references can use physical storage for indexed
+    // catalog joins.
+    name.eq_ignore_ascii_case("pg_catalog.pg_type")
 }
 
 pub(super) fn bind_from_item_with_ctes(
@@ -826,7 +829,7 @@ pub(super) fn bind_from_item_with_ctes(
                     ),
                 ));
             }
-            if is_pg_type_relation_name(name)
+            if is_physical_pg_type_relation_name(name)
                 && let Some(entry) = catalog.lookup_relation_by_oid(PG_TYPE_RELATION_OID)
             {
                 return bind_relation_from_entry(name, *only, catalog, entry);
