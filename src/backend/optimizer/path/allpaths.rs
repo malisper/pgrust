@@ -427,12 +427,21 @@ fn restrict_info_with_nullability_simplification(
     root: &PlannerInfo,
     restrict: RestrictInfo,
 ) -> Option<RestrictInfo> {
+    if is_minmax_null_boundary_restriction(root, &restrict.clause) {
+        return Some(restrict);
+    }
     let clause = simplify_nullability_restriction(root, restrict.clause.clone());
     if matches!(clause, Expr::Const(Value::Bool(true))) {
         None
     } else {
         Some(joininfo::translated_restrict_info(clause, &restrict))
     }
+}
+
+fn is_minmax_null_boundary_restriction(root: &PlannerInfo, expr: &Expr) -> bool {
+    matches!(expr, Expr::IsNotNull(_))
+        && root.parse.limit_count == Some(1)
+        && !root.parse.sort_clause.is_empty()
 }
 
 fn simplify_base_restrictinfo(root: &mut PlannerInfo) {
