@@ -890,6 +890,16 @@ pub(super) fn bind_from_item_with_ctes(
             ctes,
         ),
         FromItem::DerivedTable(select) => {
+            if select
+                .with
+                .iter()
+                .any(|cte| super::cte_body_is_modifying(&cte.body))
+            {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "WITH clause containing a data-modifying statement must be at the top level"
+                        .into(),
+                ));
+            }
             let visible_agg_scope = current_visible_aggregate_scope();
             let (plan, _) = if select.set_operation.is_some() {
                 analyze_select_query_with_outer(
@@ -921,6 +931,16 @@ pub(super) fn bind_from_item_with_ctes(
         }
         FromItem::Lateral(source) => match source.as_ref() {
             FromItem::DerivedTable(select) => {
+                if select
+                    .with
+                    .iter()
+                    .any(|cte| super::cte_body_is_modifying(&cte.body))
+                {
+                    return Err(ParseError::FeatureNotSupportedMessage(
+                        "WITH clause containing a data-modifying statement must be at the top level"
+                            .into(),
+                    ));
+                }
                 let visible_agg_scope = current_visible_aggregate_scope();
                 let (plan, _) = analyze_select_query_with_outer(
                     select,

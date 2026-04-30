@@ -1332,6 +1332,9 @@ fn rule_action_has_returning(action: &crate::backend::parser::BoundRuleAction) -
         crate::backend::parser::BoundRuleAction::Delete(stmt) => !stmt.returning.is_empty(),
         crate::backend::parser::BoundRuleAction::Select(_)
         | crate::backend::parser::BoundRuleAction::Notify(_) => false,
+        crate::backend::parser::BoundRuleAction::Sequence(actions) => {
+            actions.last().is_some_and(rule_action_has_returning)
+        }
     }
 }
 
@@ -1444,13 +1447,16 @@ fn execute_rule_action(
 ) -> Result<StatementResult, ExecError> {
     match action {
         crate::backend::parser::BoundRuleAction::Insert(stmt) => {
-            execute_bound_insert_with_rules(stmt.clone(), catalog, ctx, xid, cid)
+            let prepared = prepare_bound_insert_for_execution(stmt.clone(), catalog)?;
+            execute_bound_insert_with_rules(prepared.stmt, catalog, ctx, xid, cid)
         }
         crate::backend::parser::BoundRuleAction::Update(stmt) => {
-            execute_bound_update_with_rules(stmt.clone(), catalog, ctx, xid, cid, waiter)
+            let prepared = prepare_bound_update_for_execution(stmt.clone(), catalog)?;
+            execute_bound_update_with_rules(prepared.stmt, catalog, ctx, xid, cid, waiter)
         }
         crate::backend::parser::BoundRuleAction::Delete(stmt) => {
-            execute_bound_delete_with_rules(stmt.clone(), catalog, ctx, xid, waiter)
+            let prepared = prepare_bound_delete_for_execution(stmt.clone(), catalog)?;
+            execute_bound_delete_with_rules(prepared.stmt, catalog, ctx, xid, waiter)
         }
         crate::backend::parser::BoundRuleAction::Select(stmt) => {
             execute_planned_stmt(stmt.clone(), ctx)
@@ -1462,6 +1468,13 @@ fn execute_rule_action(
                 stmt.payload.as_deref().unwrap_or(""),
             )?;
             Ok(StatementResult::AffectedRows(0))
+        }
+        crate::backend::parser::BoundRuleAction::Sequence(actions) => {
+            let mut result = StatementResult::AffectedRows(0);
+            for action in actions {
+                result = execute_rule_action(action, catalog, ctx, xid, cid, waiter)?;
+            }
+            Ok(result)
         }
     }
 }

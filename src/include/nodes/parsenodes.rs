@@ -1716,6 +1716,7 @@ pub enum CteBody {
     Merge(Box<MergeStatement>),
     RecursiveUnion {
         all: bool,
+        left_nested: bool,
         anchor: Box<CteBody>,
         recursive: Box<SelectStatement>,
     },

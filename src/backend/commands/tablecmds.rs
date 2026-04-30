@@ -25,14 +25,15 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundRuleAction, BoundTemporalConstraint, BoundUpdateStatement,
-    BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement, DeleteStatement,
-    DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction, InsertStatement,
-    MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent, SelectStatement,
-    SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement, UpdateStatement,
-    VacuumStatement, bind_create_table, bind_delete, bind_generated_expr, bind_insert,
-    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_rule_action_statement,
-    bind_scalar_expr_in_scope, bind_update, parse_expr, rewrite_bound_delete_auto_view_target,
-    rewrite_bound_insert_auto_view_target, rewrite_local_vars_for_output_exprs,
+    BoundUpdateTarget, Catalog, CatalogLookup, CommonTableExpr, CreateTableAsStatement, CteBody,
+    DeleteStatement, DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction,
+    InsertStatement, MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent,
+    SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_delete, bind_generated_expr,
+    bind_insert, bind_referenced_by_foreign_keys, bind_relation_constraints,
+    bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update, parse_expr,
+    rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
+    rewrite_local_vars_for_output_exprs,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -522,6 +523,9 @@ pub(crate) fn execute_explain(
         statement,
     } = stmt;
     let statement = *statement;
+    if !analyze && explain_statement_has_writable_ctes(&statement) {
+        return Ok(explain_placeholder_result("Result"));
+    }
     if let Statement::Update(update) = statement {
         return execute_explain_update(update, analyze, costs, verbose, catalog, ctx);
     }
@@ -764,6 +768,49 @@ fn execute_explain_analyze_create_table_as(
         .saturating_add(consumed_catalog_cids as u32);
     ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
     Ok(())
+}
+
+fn explain_placeholder_result(label: &str) -> StatementResult {
+    StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: vec![vec![Value::Text(label.into())]],
+    }
+}
+
+fn explain_statement_has_writable_ctes(statement: &Statement) -> bool {
+    match statement {
+        Statement::Select(stmt) => select_statement_has_writable_ctes(stmt),
+        Statement::Insert(stmt) => ctes_have_writable_body(&stmt.with),
+        Statement::Update(stmt) => ctes_have_writable_body(&stmt.with),
+        Statement::Delete(stmt) => ctes_have_writable_body(&stmt.with),
+        Statement::Merge(stmt) => ctes_have_writable_body(&stmt.with),
+        Statement::Values(stmt) => ctes_have_writable_body(&stmt.with),
+        _ => false,
+    }
+}
+
+fn ctes_have_writable_body(ctes: &[CommonTableExpr]) -> bool {
+    ctes.iter().any(|cte| cte_body_is_writable(&cte.body))
+}
+
+fn select_statement_has_writable_ctes(stmt: &SelectStatement) -> bool {
+    ctes_have_writable_body(&stmt.with)
+        || stmt
+            .set_operation
+            .as_ref()
+            .is_some_and(|setop| setop.inputs.iter().any(select_statement_has_writable_ctes))
+}
+
+fn cte_body_is_writable(body: &CteBody) -> bool {
+    match body {
+        CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => true,
+        CteBody::Select(stmt) => select_statement_has_writable_ctes(stmt),
+        CteBody::Values(stmt) => ctes_have_writable_body(&stmt.with),
+        CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => cte_body_is_writable(anchor) || select_statement_has_writable_ctes(recursive),
+    }
 }
 
 enum EitherExplainTarget {

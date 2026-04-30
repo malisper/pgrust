@@ -3955,6 +3955,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
         }
         CteBody::RecursiveUnion {
             all,
+            left_nested: _,
             anchor,
             recursive,
         } => Ok(SelectStatement {
@@ -4044,6 +4045,7 @@ fn bind_ctes(
         let (plan, desc) = match &cte.body {
             CteBody::RecursiveUnion {
                 all,
+                left_nested,
                 anchor,
                 recursive,
             } if with_recursive && self_references_cte => {
@@ -4066,7 +4068,12 @@ fn bind_ctes(
                 validate_cte_search_cycle_clauses(cte, &base_desc, catalog)?;
                 let (anchor_query, recursive_stmt, desc) =
                     if cte.search.is_some() || cte.cycle.is_some() {
-                        validate_search_cycle_recursive_shape(&cte.name, anchor, recursive)?;
+                        validate_search_cycle_recursive_shape(
+                            &cte.name,
+                            *left_nested,
+                            anchor,
+                            recursive,
+                        )?;
                         let (rewritten_anchor, rewritten_recursive) =
                             rewrite_search_cycle_recursive_cte(cte, anchor, recursive, &base_desc)?;
                         let (anchor_query, desc) = analyze_non_recursive_cte_body(
@@ -4307,7 +4314,7 @@ fn recursive_cte_dependencies(ctes: &[CommonTableExpr], index: usize) -> Vec<usi
         .collect()
 }
 
-fn cte_body_is_modifying(body: &CteBody) -> bool {
+pub(super) fn cte_body_is_modifying(body: &CteBody) -> bool {
     match body {
         CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => true,
         CteBody::Select(_) | CteBody::Values(_) => false,
@@ -4376,10 +4383,11 @@ fn validate_cte_search_cycle_clauses(
 
 fn validate_search_cycle_recursive_shape(
     cte_name: &str,
+    left_nested: bool,
     anchor: &CteBody,
     recursive: &SelectStatement,
 ) -> Result<(), ParseError> {
-    if matches!(anchor, CteBody::RecursiveUnion { .. }) {
+    if left_nested || matches!(anchor, CteBody::RecursiveUnion { .. }) {
         return Err(ParseError::FeatureNotSupportedMessage(
             "with a SEARCH or CYCLE clause, the left side of the UNION must be a SELECT".into(),
         ));
@@ -5122,6 +5130,20 @@ impl<'a> RecursiveReferenceChecker<'a> {
         stmt: &SetOperationStatement,
         context: RecursiveReferenceContext,
     ) -> Result<(), ParseError> {
+        if matches!(stmt.op, SetOperator::Intersect { .. })
+            && stmt
+                .inputs
+                .iter()
+                .filter(|input| select_statement_references_table(input, self.cte_name))
+                .take(2)
+                .count()
+                > 1
+        {
+            return Err(ParseError::InvalidRecursion(format!(
+                "recursive reference to query \"{}\" must not appear more than once",
+                self.cte_name
+            )));
+        }
         let input_context = match stmt.op {
             SetOperator::Union { .. } => context,
             SetOperator::Intersect { .. } => RecursiveReferenceContext::Intersect,
@@ -5978,8 +6000,12 @@ fn xml_table_column_references_table(column: &XmlTableColumn, table_name: &str) 
 
 fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
     match expr {
-        SqlExpr::Column(_)
-        | SqlExpr::Parameter(_)
+        SqlExpr::Column(name) => name
+            .split('.')
+            .rev()
+            .skip(1)
+            .any(|qualifier| qualifier.eq_ignore_ascii_case(table_name)),
+        SqlExpr::Parameter(_)
         | SqlExpr::ParamRef(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
@@ -6826,6 +6852,9 @@ fn bind_select_query_with_outer(
                                 .iter()
                                 .map(|arg| arg.value.clone())
                                 .collect();
+                            for arg in &arg_values {
+                                reject_nested_local_ctes_in_raw_agg_expr(arg)?;
+                            }
                             if !hypothetical && !ordered_set {
                                 validate_distinct_aggregate_order_by(
                                     &arg_values,
@@ -6891,6 +6920,9 @@ fn bind_select_query_with_outer(
                                 }
                             }
                             let bound_direct_args = if hypothetical || ordered_set {
+                                for arg in &agg.direct_args {
+                                    reject_nested_local_ctes_in_raw_agg_expr(&arg.value)?;
+                                }
                                 agg.direct_args
                                     .iter()
                                     .map(|arg| {
@@ -6920,6 +6952,7 @@ fn bind_select_query_with_outer(
                                 .filter
                                 .as_ref()
                                 .map(|expr| {
+                                    reject_nested_local_ctes_in_raw_agg_expr(expr)?;
                                     bind_expr_with_outer_and_ctes(
                                         expr,
                                         &scope,
@@ -6943,6 +6976,7 @@ fn bind_select_query_with_outer(
                                 .order_by
                                 .iter()
                                 .map(|item| {
+                                    reject_nested_local_ctes_in_raw_agg_expr(&item.expr)?;
                                     bind_expr_with_outer_and_ctes(
                                         &item.expr,
                                         &scope,

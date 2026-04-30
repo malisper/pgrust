@@ -2138,6 +2138,9 @@ fn bind_visible_outer_aggregate_call(
         .iter()
         .map(|arg| arg.value.clone())
         .collect::<Vec<_>>();
+    for arg in &arg_values {
+        reject_nested_local_ctes_in_raw_agg_expr(arg)?;
+    }
     if !hypothetical
         && !ordered_set
         && let Some(func) = resolve_builtin_aggregate(name)
@@ -2209,6 +2212,9 @@ fn bind_visible_outer_aggregate_call(
                 actual: name.to_string(),
             });
         }
+        for arg in direct_args {
+            reject_nested_local_ctes_in_raw_agg_expr(&arg.value)?;
+        }
         direct_args
             .iter()
             .map(|arg| {
@@ -2235,6 +2241,7 @@ fn bind_visible_outer_aggregate_call(
     }
     let bound_filter = filter
         .map(|expr| {
+            reject_nested_local_ctes_in_raw_agg_expr(expr)?;
             bind_expr_with_outer_and_ctes(
                 expr,
                 owner_scope,
@@ -2254,6 +2261,7 @@ fn bind_visible_outer_aggregate_call(
     let bound_order_exprs = order_by
         .iter()
         .map(|item| {
+            reject_nested_local_ctes_in_raw_agg_expr(&item.expr)?;
             bind_expr_with_outer_and_ctes(
                 &item.expr,
                 owner_scope,

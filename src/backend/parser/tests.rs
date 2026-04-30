@@ -11857,6 +11857,38 @@ fn parse_merge_joined_source() {
 }
 
 #[test]
+fn parse_top_level_with_merge_statement() {
+    let stmt = parse_statement(
+        "with merge_source_cte as materialized (select 15 a, 'val' b) \
+         merge into target using (select * from merge_source_cte) o on target.k = o.a \
+         when not matched then insert values(o.a, o.b)",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert_eq!(stmt.with.len(), 1);
+    assert!(matches!(stmt.source, FromItem::Alias { ref alias, .. } if alias == "o"));
+}
+
+#[test]
+fn parse_qualified_star_cast_expression() {
+    let stmt = parse_statement("select merge_source_cte.*::text from merge_source_cte").unwrap();
+    match stmt {
+        Statement::Select(select) => {
+            assert_eq!(select.targets.len(), 1);
+            assert!(matches!(
+                select.targets[0].expr,
+                SqlExpr::Cast(ref inner, _)
+                    if matches!(inner.as_ref(), SqlExpr::Column(name) if name == "merge_source_cte.*")
+            ));
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_merge_rejects_invalid_when_actions() {
     for sql in [
         "merge into target t using source s on t.id = s.id when matched then insert default values",
@@ -13680,10 +13712,12 @@ fn parse_with_recursive_cte_union_all() {
             match &with[0].body {
                 crate::backend::parser::CteBody::RecursiveUnion {
                     all,
+                    left_nested,
                     anchor,
                     recursive,
                 } => {
                     assert!(*all);
+                    assert!(!*left_nested);
                     assert!(matches!(
                         anchor.as_ref(),
                         crate::backend::parser::CteBody::Values(_)

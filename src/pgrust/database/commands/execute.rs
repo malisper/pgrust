@@ -413,20 +413,7 @@ fn apply_writable_cte_column_aliases(
 fn cte_body_has_writable(body: &CteBody) -> bool {
     match body {
         CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_) => true,
-        CteBody::Select(select) => {
-            select
-                .with
-                .iter()
-                .any(|cte| cte_body_has_writable(&cte.body))
-                || select.set_operation.as_ref().is_some_and(|setop| {
-                    setop.inputs.iter().any(|input| {
-                        input
-                            .with
-                            .iter()
-                            .any(|cte| cte_body_has_writable(&cte.body))
-                    })
-                })
-        }
+        CteBody::Select(select) => select_has_writable_ctes(select),
         CteBody::Values(values) => values
             .with
             .iter()
@@ -441,6 +428,17 @@ fn cte_body_has_writable(body: &CteBody) -> bool {
                     .any(|cte| cte_body_has_writable(&cte.body))
         }
     }
+}
+
+fn select_has_writable_ctes(select: &SelectStatement) -> bool {
+    select
+        .with
+        .iter()
+        .any(|cte| cte_body_has_writable(&cte.body))
+        || select
+            .set_operation
+            .as_ref()
+            .is_some_and(|setop| setop.inputs.iter().any(select_has_writable_ctes))
 }
 
 fn cte_body_is_modifying(body: &CteBody) -> bool {
@@ -2701,7 +2699,7 @@ impl Database {
                         let mut planned_select = None;
                         let mut planned_select_for_update = false;
                         match &stmt {
-                            Statement::Select(select) => {
+                            Statement::Select(select) if !select_has_writable_ctes(select) => {
                                 let planned_stmt =
                                     crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
                                         restrict_nonsystem_view_enabled(gucs),
@@ -2715,9 +2713,12 @@ impl Database {
                                 planned_select_for_update = select.locking_clause.is_some();
                                 planned_select = Some(planned_stmt);
                             }
+                            Statement::Select(_) => {}
                             Statement::Values(_) => {}
                             Statement::Explain(explain) => {
-                                if let Statement::Select(select) = explain.statement.as_ref() {
+                                if let Statement::Select(select) = explain.statement.as_ref()
+                                    && !select_has_writable_ctes(select)
+                                {
                                     let planned_stmt =
                                         crate::backend::rewrite::with_restrict_nonsystem_view_expansion(
                                             restrict_nonsystem_view_enabled(gucs),

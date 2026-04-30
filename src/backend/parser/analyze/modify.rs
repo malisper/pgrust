@@ -3069,6 +3069,18 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         !stmt.returning.is_empty(),
         catalog,
     )?;
+    let base_column_defaults =
+        bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])
+            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
+    let source = match stmt.source {
+        BoundInsertSource::DefaultValues(_) => BoundInsertSource::DefaultValues(
+            target_columns
+                .iter()
+                .map(|target| base_column_defaults[target.column_index].clone())
+                .collect(),
+        ),
+        other => other,
+    };
 
     Ok(BoundInsertStatement {
         relation_name: relation_name.clone(),
@@ -3093,11 +3105,10 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         )
         .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?,
         indexes: catalog.index_relations_for_heap(resolved.base_relation.relation_oid),
-        column_defaults: bind_insert_column_defaults(&resolved.base_relation.desc, catalog, &[])
-            .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?,
+        column_defaults: base_column_defaults,
         target_columns,
         overriding: stmt.overriding,
-        source: stmt.source,
+        source,
         on_conflict,
         raw_on_conflict: None,
         returning: rewrite_auto_view_returning_targets(

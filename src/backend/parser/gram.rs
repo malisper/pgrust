@@ -18725,9 +18725,10 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
 }
 
 fn select_statement_as_cte_body(stmt: SelectStatement) -> CteBody {
-    if let Some((all, anchor, recursive)) = split_leftmost_union(stmt.clone()) {
+    if let Some((all, left_nested, anchor, recursive)) = split_leftmost_union(stmt.clone()) {
         return CteBody::RecursiveUnion {
             all,
+            left_nested,
             anchor: Box::new(select_term_as_cte_body(anchor)),
             recursive: Box::new(recursive),
         };
@@ -18737,7 +18738,7 @@ fn select_statement_as_cte_body(stmt: SelectStatement) -> CteBody {
 
 fn split_leftmost_union(
     mut stmt: SelectStatement,
-) -> Option<(bool, SelectStatement, SelectStatement)> {
+) -> Option<(bool, bool, SelectStatement, SelectStatement)> {
     let outer_with_recursive = stmt.with_recursive;
     let outer_with = std::mem::take(&mut stmt.with);
     let outer_order_by = std::mem::take(&mut stmt.order_by);
@@ -18754,7 +18755,7 @@ fn split_leftmost_union(
     let right = inputs.remove(0);
 
     if left.set_operation.is_some() {
-        let (all, anchor, recursive_tail) = split_leftmost_union(left)?;
+        let (all, _left_nested, anchor, recursive_tail) = split_leftmost_union(left)?;
         let mut recursive =
             select_statement_for_set_operation(set_operation.op, recursive_tail, right);
         attach_cte_body_select_context(
@@ -18767,7 +18768,7 @@ fn split_leftmost_union(
             outer_locking_clause,
             outer_locking_targets,
         );
-        return Some((all, anchor, recursive));
+        return Some((all, true, anchor, recursive));
     }
 
     match set_operation.op {
@@ -18794,7 +18795,7 @@ fn split_leftmost_union(
                 outer_locking_clause,
                 outer_locking_targets,
             );
-            Some((all, anchor, recursive))
+            Some((all, false, anchor, recursive))
         }
         SetOperator::Intersect { .. } | SetOperator::Except { .. } => None,
     }

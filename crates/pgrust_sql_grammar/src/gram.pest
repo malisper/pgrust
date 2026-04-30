@@ -386,7 +386,7 @@ release_savepoint_stmt = { kw_release ~ kw_savepoint? ~ identifier }
 savepoint_stmt = { kw_savepoint ~ identifier }
 
 select_list = { select_item ~ ("," ~ select_item)* }
-select_item = { star | qualified_star | expr ~ alias? }
+select_item = { star | expr ~ alias? }
 alias = { kw_as ~ identifier | bare_select_alias }
 bare_select_alias = { !kw_as ~ !kw_from ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_window ~ !kw_order ~ !kw_limit ~ !kw_offset ~ !kw_for ~ !kw_share ~ !kw_update ~ !kw_returning ~ !kw_union ~ !kw_intersect ~ !kw_except ~ !kw_with ~ identifier }
 values_row = { "(" ~ expr_list ~ ")" }
