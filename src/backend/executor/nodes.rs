@@ -3302,7 +3302,8 @@ impl BitmapIndexScanState {
             return Ok(());
         };
         let mut tuples = 0;
-        for key_data in expand_array_equality_scan_keys(key_data, true) {
+        let allow_array_expansion = self.am_oid == BTREE_AM_OID;
+        for key_data in expand_array_equality_scan_keys(key_data, allow_array_expansion) {
             let begin = crate::include::access::amapi::IndexBeginScanContext {
                 pool: ctx.pool.clone(),
                 client_id: ctx.client_id,
