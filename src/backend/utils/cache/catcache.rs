@@ -1584,9 +1584,10 @@ mod tests {
         C_COLLATION_OID, CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID,
         DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID,
         INT4_CMP_EQ_PROC_OID, INT4_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID,
-        PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
-        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID,
-        VARCHAR_TYPE_OID,
+        PG_C_UTF8_COLLATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TYPE_RELATION_OID, PG_UNICODE_FAST_COLLATION_OID, POSIX_COLLATION_OID,
+        PUBLIC_NAMESPACE_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID, UCS_BASIC_COLLATION_OID,
+        UNICODE_COLLATION_OID, VARCHAR_TYPE_OID,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2011,8 +2012,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (DEFAULT_COLLATION_OID, "default", 'd'),
+                (PG_C_UTF8_COLLATION_OID, "pg_c_utf8", 'b'),
                 (C_COLLATION_OID, "C", 'c'),
                 (POSIX_COLLATION_OID, "POSIX", 'c'),
+                (UCS_BASIC_COLLATION_OID, "ucs_basic", 'b'),
+                (UNICODE_COLLATION_OID, "unicode", 'i'),
+                (PG_UNICODE_FAST_COLLATION_OID, "pg_unicode_fast", 'b'),
             ]
         );
         assert!(cache.tablespace_rows().iter().any(|row| {

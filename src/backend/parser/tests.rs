@@ -3,10 +3,10 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, JSON_TYPE_OID,
-    PUBLIC_NAMESPACE_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPolicyRow,
-    PgProcRow, PgRangeRow, PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEFAULT_COLLATION_OID,
+    JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID,
     bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
@@ -17179,7 +17179,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
         varattno: 2,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Text),
-        collation_oid: None,
+        collation_oid: Some(DEFAULT_COLLATION_OID),
     });
 
     assert_eq!(query.group_by, vec![name_var.clone()]);
@@ -17192,7 +17192,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varattno: 2,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
-            collation_oid: None,
+            collation_oid: Some(DEFAULT_COLLATION_OID),
         }))))
     );
     assert_eq!(query.sort_clause.len(), 1);
@@ -17203,7 +17203,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varattno: 2,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
-            collation_oid: None,
+            collation_oid: Some(DEFAULT_COLLATION_OID),
         })
     );
 }
@@ -17575,7 +17575,7 @@ fn analyze_group_by_prefers_input_column_over_select_alias() {
                 varattno: 2,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Text),
-                collation_oid: None,
+                collation_oid: Some(DEFAULT_COLLATION_OID),
             }),
             Expr::Var(Var {
                 varno: 1,
