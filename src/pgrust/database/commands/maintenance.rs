@@ -3636,6 +3636,12 @@ impl Database {
             )?;
 
             for action in &check_actions {
+                if target.direct_parent_count > 1 && !action.no_inherit {
+                    push_notice(format!(
+                        "merging constraint \"{}\" with inherited definition",
+                        action.constraint_name
+                    ));
+                }
                 crate::backend::parser::bind_check_constraint_expr(
                     &action.expr_sql,
                     Some(&target_name),

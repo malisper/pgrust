@@ -8842,6 +8842,39 @@ fn check_constraint_null_literal_coerces_to_peer_type() {
 }
 
 #[test]
+fn catalog_relname_in_filter_applies_to_joined_constraint_rows() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table ac (aa text)").unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ac add constraint ac_check check (aa is not null)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table bc (bb text) inherits (ac)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pc.relname, pgc.conname \
+             from pg_class as pc \
+             inner join pg_constraint as pgc on (pgc.conrelid = pc.oid) \
+             where pc.relname in ('ac', 'bc') \
+             order by 1,2"
+        ),
+        vec![
+            vec![Value::Text("ac".into()), Value::Text("ac_check".into())],
+            vec![Value::Text("bc".into()), Value::Text("ac_check".into())],
+        ]
+    );
+}
+
+#[test]
 fn partitioned_table_parent_defaults_not_null_and_checks_are_cataloged_and_inherited() {
     let base = temp_dir("partition_parent_column_metadata");
     let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
@@ -12370,6 +12403,46 @@ fn create_table_inherits_notices_column_check_constraint_merge() {
 }
 
 #[test]
+fn alter_table_add_column_check_notices_multi_parent_constraint_merge() {
+    let dir = temp_dir("alter_add_column_check_merge_notice");
+    let db = Database::open(&dir, 32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table pp1_merge_notice (f1 int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table cc1_merge_notice (f2 text) inherits (pp1_merge_notice)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table cc2_merge_notice (f4 float8) inherits (pp1_merge_notice, cc1_merge_notice)",
+        )
+        .unwrap();
+
+    clear_backend_notices();
+    session
+        .execute(
+            &db,
+            "alter table pp1_merge_notice add column a2 int4 check (a2 > 0)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            r#"merging definition of column "a2" for child "cc2_merge_notice""#.to_string(),
+            r#"merging constraint "pp1_merge_notice_a2_check" with inherited definition"#
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
 fn dropping_inherited_child_removes_pg_inherits_rows() {
     let dir = temp_dir("inheritance_drop_cleanup");
     let db = Database::open(&dir, 128).unwrap();
@@ -12596,6 +12669,77 @@ fn alter_table_drop_check_constraint_updates_inherited_children() {
             Value::Bool(true),
             Value::Int16(0),
         ]]
+    );
+}
+
+#[test]
+fn alter_table_drop_check_constraint_updates_multi_parent_grandchildren() {
+    let dir = temp_dir("alter_table_drop_check_multi_parent_grandchildren");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table p1 (f1 int constraint f1_pos check (f1 > 0))",
+    )
+    .unwrap();
+    db.execute(1, "create table p1_c1 () inherits (p1)")
+        .unwrap();
+    db.execute(1, "create table p1_c2 () inherits (p1)")
+        .unwrap();
+    db.execute(1, "create table p1_c1c2 () inherits (p1_c1, p1_c2)")
+        .unwrap();
+
+    db.execute(1, "alter table p1 drop constraint f1_pos")
+        .unwrap();
+
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_constraint pgc
+                 join pg_class c on c.oid = pgc.conrelid
+                 where c.relname = 'p1_c1c2'
+                   and pgc.conname = 'f1_pos'",
+            )[0][0],
+        ),
+        0
+    );
+
+    db.execute(
+        1,
+        "create table q1 (f1 int constraint f1_pos check (f1 > 0))",
+    )
+    .unwrap();
+    db.execute(1, "create table q1_c1 () inherits (q1)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table q1_c2 (constraint f1_pos check (f1 > 0)) inherits (q1)",
+    )
+    .unwrap();
+    db.execute(1, "create table q1_c1c2 () inherits (q1_c1, q1_c2, q1)")
+        .unwrap();
+
+    db.execute(1, "alter table q1 drop constraint f1_pos")
+        .unwrap();
+    db.execute(1, "alter table q1_c2 drop constraint f1_pos")
+        .unwrap();
+
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_constraint pgc
+                 join pg_class c on c.oid = pgc.conrelid
+                 where c.relname = 'q1_c1c2'
+                   and pgc.conname = 'f1_pos'",
+            )[0][0],
+        ),
+        0
     );
 }
 
@@ -13108,6 +13252,12 @@ fn explain_update_accepts_inherited_update_statement() {
             line.contains("Index Scan using") && line.contains("on some_tab_child")
         }),
         "expected EXPLAIN UPDATE to show inherited child index scan, got {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("Seq Scan on some_tab ")),
+        "expected parent-local NO INHERIT check to prune parent scan, got {lines:?}"
     );
     assert!(
         lines.iter().any(|line| line.contains("f1 =")
@@ -35321,6 +35471,26 @@ fn inherited_table_level_not_null_remains_local() {
             ],
         ]
     );
+
+    match db.execute(
+        1,
+        "alter table inh_nn1 alter constraint inh_nn1_f1_not_null inherit",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot change NO INHERIT status of NOT NULL constraint \"nn3_f1\" on relation \"inh_nn3\""
+            );
+            assert_eq!(hint.as_deref(), None);
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected descendant NO INHERIT conflict, got {other:?}"),
+    }
 }
 
 #[test]

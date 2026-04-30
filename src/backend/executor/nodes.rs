@@ -3301,31 +3301,34 @@ impl BitmapIndexScanState {
             finish_eof(&mut self.stats, start, ctx);
             return Ok(());
         };
-        let begin = crate::include::access::amapi::IndexBeginScanContext {
-            pool: ctx.pool.clone(),
-            client_id: ctx.client_id,
-            snapshot: ctx.snapshot.clone(),
-            heap_relation: self.rel,
-            index_relation: self.index_rel,
-            index_desc: (*self.index_desc).clone(),
-            index_meta: self.index_meta.clone(),
-            key_data,
-            order_by_data: Vec::new(),
-            direction: crate::include::access::relscan::ScanDirection::Forward,
-            want_itup: false,
-        };
-        let mut scan = indexam::index_beginscan(&begin, self.am_oid)
-            .map_err(|err| bitmap_am_error("index access method begin bitmap scan", err))?;
-        {
-            let mut session_stats = ctx.session_stats.write();
-            session_stats.note_relation_scan(self.index_meta.indexrelid);
-            session_stats.note_io_read("client backend", "relation", "normal", 8192);
-            session_stats.note_io_hit("client backend", "relation", "normal");
+        let mut tuples = 0;
+        for key_data in expand_array_equality_scan_keys(key_data, true) {
+            let begin = crate::include::access::amapi::IndexBeginScanContext {
+                pool: ctx.pool.clone(),
+                client_id: ctx.client_id,
+                snapshot: ctx.snapshot.clone(),
+                heap_relation: self.rel,
+                index_relation: self.index_rel,
+                index_desc: (*self.index_desc).clone(),
+                index_meta: self.index_meta.clone(),
+                key_data,
+                order_by_data: Vec::new(),
+                direction: crate::include::access::relscan::ScanDirection::Forward,
+                want_itup: false,
+            };
+            let mut scan = indexam::index_beginscan(&begin, self.am_oid)
+                .map_err(|err| bitmap_am_error("index access method begin bitmap scan", err))?;
+            {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_scan(self.index_meta.indexrelid);
+                session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
+            }
+            tuples += indexam::index_getbitmap(&mut scan, self.am_oid, &mut self.bitmap)
+                .map_err(|err| bitmap_am_error("index access method bitmap scan", err))?;
+            indexam::index_endscan(scan, self.am_oid)
+                .map_err(|err| bitmap_am_error("index access method end bitmap scan", err))?;
         }
-        let tuples = indexam::index_getbitmap(&mut scan, self.am_oid, &mut self.bitmap)
-            .map_err(|err| bitmap_am_error("index access method bitmap scan", err))?;
-        indexam::index_endscan(scan, self.am_oid)
-            .map_err(|err| bitmap_am_error("index access method end bitmap scan", err))?;
 
         self.executed = true;
         self.stats.rows = tuples.max(0) as u64;
