@@ -7,8 +7,9 @@ use parking_lot::RwLock;
 use crate::backend::access::heap::HeapWalPolicy;
 use crate::backend::access::heap::heapam::{
     HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
-    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid, heap_scan_begin_visible,
-    heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_update_with_waiter,
+    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid_and_fillfactor,
+    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+    heap_update_with_waiter,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -407,7 +408,11 @@ fn finalize_bound_delete(
     mut stmt: BoundDeleteStatement,
     catalog: &dyn CatalogLookup,
 ) -> BoundDeleteStatement {
-    let mut subplans = Vec::new();
+    let mut subplans = stmt
+        .input_plan
+        .as_mut()
+        .map(|plan| std::mem::take(&mut plan.subplans))
+        .unwrap_or_default();
     stmt.targets = stmt
         .targets
         .into_iter()
@@ -540,7 +545,15 @@ pub(crate) fn execute_explain(
     } = stmt;
     let statement = *statement;
     if !analyze && explain_statement_has_writable_ctes(&statement) {
-        return Ok(explain_placeholder_result("Result"));
+        return execute_explain_writable_ctes(
+            statement,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        );
     }
     if let Statement::Update(update) = statement {
         return execute_explain_update(
@@ -977,6 +990,137 @@ fn explain_placeholder_result(label: &str) -> StatementResult {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
         rows: vec![vec![Value::Text(label.into())]],
+    }
+}
+
+fn execute_explain_writable_ctes(
+    statement: Statement,
+    costs: bool,
+    format: ExplainFormat,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    let ctes = statement_top_level_ctes(&statement);
+    let mut lines = Vec::new();
+    for cte in ctes.iter().filter(|cte| cte_body_is_writable(&cte.body)) {
+        if !matches!(
+            cte.body,
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_)
+        ) {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "WITH clause containing a data-modifying statement must be at the top level".into(),
+            )));
+        }
+        lines.push(format!("CTE {}", cte.name));
+        let producer_lines = explain_writable_cte_producer_lines(
+            &cte.body,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?;
+        for (index, line) in producer_lines.into_iter().enumerate() {
+            if index == 0 {
+                lines.push(format!("  ->  {line}"));
+            } else {
+                lines.push(format!("    {line}"));
+            }
+        }
+    }
+    if let Some(cte) = ctes.iter().find(|cte| cte_body_is_writable(&cte.body)) {
+        lines.push(format!("  ->  CTE Scan on {}", cte.name));
+    }
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn explain_writable_cte_producer_lines(
+    body: &CteBody,
+    costs: bool,
+    format: ExplainFormat,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<Vec<String>, ExecError> {
+    let result = match body {
+        CteBody::Insert(stmt) => execute_explain_insert(
+            (**stmt).clone(),
+            false,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?,
+        CteBody::Update(stmt) => execute_explain_update(
+            (**stmt).clone(),
+            false,
+            costs,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?,
+        CteBody::Delete(stmt) => execute_explain_delete(
+            (**stmt).clone(),
+            false,
+            costs,
+            verbose,
+            catalog,
+            planner_config,
+        )?,
+        CteBody::Merge(stmt) => {
+            let bound = crate::backend::parser::plan_merge(stmt, catalog)?;
+            let mut lines = Vec::new();
+            let state = executor_start(bound.input_plan.plan_tree);
+            push_explain_line(
+                &format!("Merge on {}", bound.explain_target_name),
+                state.plan_info(),
+                costs,
+                &mut lines,
+            );
+            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, true, &mut lines);
+            return Ok(lines);
+        }
+        _ => return Ok(vec!["Result".into()]),
+    };
+    Ok(statement_result_text_lines(result))
+}
+
+fn statement_result_text_lines(result: StatementResult) -> Vec<String> {
+    match result {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .filter_map(|row| match row.into_iter().next() {
+                Some(Value::Text(text)) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect(),
+        StatementResult::AffectedRows(_) => Vec::new(),
+    }
+}
+
+fn statement_top_level_ctes(statement: &Statement) -> Vec<CommonTableExpr> {
+    match statement {
+        Statement::Select(stmt) => stmt.with.clone(),
+        Statement::Insert(stmt) => stmt.with.clone(),
+        Statement::Update(stmt) => stmt.with.clone(),
+        Statement::Delete(stmt) => stmt.with.clone(),
+        Statement::Merge(stmt) => stmt.with.clone(),
+        Statement::Values(stmt) => stmt.with.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -5399,6 +5543,7 @@ pub(crate) fn cleanup_toast_attempt(
 pub(crate) fn write_insert_heap_row(
     relation_name: &str,
     rls_relation_name: &str,
+    relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
@@ -5453,7 +5598,34 @@ pub(crate) fn write_insert_heap_row(
         ctx,
     )?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
-    heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple).map_err(Into::into)
+    let fillfactor = heap_fillfactor_for_relation(relation_oid, ctx);
+    heap_insert_mvcc_with_cid_and_fillfactor(
+        &*ctx.pool,
+        ctx.client_id,
+        rel,
+        xid,
+        cid,
+        &tuple,
+        fillfactor,
+    )
+    .map_err(Into::into)
+}
+
+fn heap_fillfactor_for_relation(relation_oid: u32, ctx: &ExecutorContext) -> u16 {
+    ctx.catalog
+        .as_deref()
+        .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
+        .and_then(|row| row.reloptions)
+        .and_then(|options| {
+            options.into_iter().find_map(|option| {
+                let (name, value) = option.split_once('=')?;
+                name.eq_ignore_ascii_case("fillfactor")
+                    .then(|| value.parse::<u16>().ok())
+                    .flatten()
+            })
+        })
+        .filter(|fillfactor| (10..=100).contains(fillfactor))
+        .unwrap_or(100)
 }
 
 pub(crate) fn rollback_inserted_row(
@@ -5731,6 +5903,7 @@ fn move_updated_row_to_partition(
     let inserted_tid = write_insert_heap_row(
         &destination.relation_info.relation_name,
         &destination.relation_info.relation_name,
+        destination.relation_info.relation.relation_oid,
         destination.relation_info.relation.rel,
         destination.relation_info.relation.toast,
         destination.relation_info.toast_index.as_ref(),
@@ -11061,6 +11234,7 @@ fn execute_merge_insert_action(
         let heap_tid = write_insert_heap_row(
             &stmt.relation_name,
             &stmt.relation_name,
+            stmt.relation_oid,
             stmt.rel,
             stmt.toast,
             stmt.toast_index.as_ref(),
@@ -13949,6 +14123,7 @@ pub(crate) fn execute_insert_rows(
             let heap_tid = write_insert_heap_row(
                 relation_name,
                 rls_relation_name,
+                relation_oid,
                 rel,
                 toast,
                 toast_index,
@@ -14220,6 +14395,7 @@ pub fn execute_prepared_insert_row(
     let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
         &prepared.relation_name,
+        prepared.relation_oid,
         prepared.rel,
         prepared.toast,
         prepared.toast_index.as_ref(),

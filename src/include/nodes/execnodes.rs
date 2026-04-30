@@ -7,6 +7,7 @@ use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::tidbitmap::TidBitmap;
+use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::plannodes::{
     IndexScanKey, PartitionPrunePlan, PlanEstimate, TidScanCond,
 };
@@ -446,6 +447,7 @@ pub struct SeqScanState {
     pub(crate) desc: Rc<RelationDesc>,
     pub(crate) attr_descs: Rc<[AttributeDesc]>,
     pub(crate) scan: Option<VisibleHeapScan>,
+    pub(crate) tablesample: Option<TableSampleState>,
     pub(crate) scan_rows: Vec<Vec<Value>>,
     pub(crate) scan_index: usize,
     pub(crate) sequence_emitted: bool,
@@ -463,6 +465,36 @@ pub struct SeqScanState {
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableSampleMethod {
+    Bernoulli,
+    System,
+}
+
+pub struct TableSampleState {
+    pub(crate) clause: TableSampleClause,
+    pub(crate) method: Option<TableSampleMethod>,
+    pub(crate) initialized: bool,
+    pub(crate) cutoff: u64,
+    pub(crate) seed: u32,
+    pub(crate) random_seed: Option<u32>,
+    pub(crate) next_block: u32,
+}
+
+impl TableSampleState {
+    pub(crate) fn new(clause: TableSampleClause) -> Self {
+        Self {
+            clause,
+            method: None,
+            initialized: false,
+            cutoff: 0,
+            seed: 0,
+            random_seed: None,
+            next_block: 0,
+        }
+    }
 }
 
 impl std::fmt::Debug for SeqScanState {
@@ -1052,6 +1084,7 @@ pub struct RecursiveUnionState {
     pub(crate) distinct: bool,
     pub(crate) distinct_hashable: bool,
     pub(crate) recursive_references_worktable: bool,
+    pub(crate) recursive_iteration_cte_ids: Vec<usize>,
     pub(crate) anchor: PlanState,
     pub(crate) recursive_plan: Plan,
     pub(crate) recursive_state: Option<PlanState>,

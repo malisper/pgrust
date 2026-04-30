@@ -52238,8 +52238,18 @@ fn tablesample_system_accepts_lateral_expressions_in_explain() {
     assert!(
         lines
             .iter()
+            .any(|line| line.contains("Sample Scan on sampled_docs_p")),
+        "expected TABLESAMPLE to plan as child sample scans, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Sampling: system")),
+        "expected TABLESAMPLE sampling detail, got {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
             .any(|line| line.contains("PgRustTablesampleBernoulli")),
-        "expected lowered TABLESAMPLE SYSTEM predicate, got {lines:?}"
+        "TABLESAMPLE should not be lowered to a filter predicate, got {lines:?}"
     );
 }
 

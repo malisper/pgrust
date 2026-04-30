@@ -412,7 +412,23 @@ fn expr_contains_prune_volatile(expr: &Expr, catalog: &dyn CatalogLookup) -> boo
             .into_iter()
             .any(|expr| expr_contains_prune_volatile(expr, catalog)),
         Expr::SetReturning(_) => true,
-        Expr::SubLink(_) | Expr::SubPlan(_) => true,
+        Expr::SubLink(sublink) => {
+            sublink
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_prune_volatile(expr, catalog))
+                || query_contains_prune_volatile(&sublink.subselect, catalog)
+        }
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_prune_volatile(expr, catalog))
+                || subplan
+                    .args
+                    .iter()
+                    .any(|arg| expr_contains_prune_volatile(arg, catalog))
+        }
         Expr::ScalarArrayOp(saop) => {
             expr_contains_prune_volatile(&saop.left, catalog)
                 || expr_contains_prune_volatile(&saop.right, catalog)
@@ -480,6 +496,79 @@ fn expr_contains_prune_volatile(expr: &Expr, catalog: &dyn CatalogLookup) -> boo
         | Expr::CurrentCatalog
         | Expr::CurrentSchema => false,
     }
+}
+
+fn query_contains_prune_volatile(query: &Query, catalog: &dyn CatalogLookup) -> bool {
+    query
+        .target_list
+        .iter()
+        .any(|target| expr_contains_prune_volatile(&target.expr, catalog))
+        || query
+            .where_qual
+            .as_ref()
+            .is_some_and(|expr| expr_contains_prune_volatile(expr, catalog))
+        || query
+            .group_by
+            .iter()
+            .any(|expr| expr_contains_prune_volatile(expr, catalog))
+        || query
+            .accumulators
+            .iter()
+            .any(|accum| agg_accum_contains_prune_volatile(accum, catalog))
+        || query
+            .having_qual
+            .as_ref()
+            .is_some_and(|expr| expr_contains_prune_volatile(expr, catalog))
+        || query
+            .sort_clause
+            .iter()
+            .chain(query.distinct_on.iter())
+            .any(|item| expr_contains_prune_volatile(&item.expr, catalog))
+        || query.rtable.iter().any(|rte| match &rte.kind {
+            RangeTblEntryKind::Values { rows, .. } => rows
+                .iter()
+                .flatten()
+                .any(|expr| expr_contains_prune_volatile(expr, catalog)),
+            RangeTblEntryKind::Function { call } => set_returning_call_exprs(call)
+                .into_iter()
+                .any(|expr| expr_contains_prune_volatile(&expr, catalog)),
+            RangeTblEntryKind::Cte { query, .. } | RangeTblEntryKind::Subquery { query } => {
+                query_contains_prune_volatile(query, catalog)
+            }
+            RangeTblEntryKind::Result
+            | RangeTblEntryKind::Relation { .. }
+            | RangeTblEntryKind::Join { .. }
+            | RangeTblEntryKind::WorkTable { .. } => false,
+        })
+        || query.recursive_union.as_ref().is_some_and(|recursive| {
+            query_contains_prune_volatile(&recursive.anchor, catalog)
+                || query_contains_prune_volatile(&recursive.recursive, catalog)
+        })
+        || query.set_operation.as_ref().is_some_and(|set_operation| {
+            set_operation
+                .inputs
+                .iter()
+                .any(|input| query_contains_prune_volatile(input, catalog))
+        })
+}
+
+fn agg_accum_contains_prune_volatile(
+    accum: &crate::include::nodes::primnodes::AggAccum,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    accum
+        .direct_args
+        .iter()
+        .chain(accum.args.iter())
+        .any(|arg| expr_contains_prune_volatile(arg, catalog))
+        || accum
+            .order_by
+            .iter()
+            .any(|item| expr_contains_prune_volatile(&item.expr, catalog))
+        || accum
+            .filter
+            .as_ref()
+            .is_some_and(|filter| expr_contains_prune_volatile(filter, catalog))
 }
 
 fn proc_is_volatile(proc_oid: u32, catalog: &dyn CatalogLookup) -> bool {

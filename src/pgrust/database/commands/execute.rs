@@ -1,20 +1,21 @@
 use super::super::*;
 use crate::backend::commands::rolecmds::PasswordSettings;
 use crate::backend::executor::{
-    ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot,
-    cast_value_with_config, eval_expr, execute_planned_stmt,
-    execute_readonly_statement_with_config,
+    ExecutorTransactionState, Expr, MaterializedCteTable, MaterializedRow,
+    SharedExecutorTransactionState, TupleSlot, cast_value_with_config, eval_expr,
+    execute_planned_stmt, execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
-    BoundCte, CatalogLookup, CommonTableExpr, CteBody, DeleteStatement, FromItem, InsertSource,
-    InsertStatement, ParseOptions, PreparedExternalParam, RuleEvent, SelectStatement,
-    UpdateStatement, bind_delete_with_outer_scopes_and_ctes,
+    BoundCte, BoundModifyingCte, BoundWritableCte, CatalogLookup, CommonTableExpr, CteBody,
+    DeleteStatement, FromItem, InsertSource, InsertStatement, ParseOptions, PreparedExternalParam,
+    RuleEvent, SelectStatement, UpdateStatement, bind_delete_with_outer_scopes_and_ctes,
     bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope,
-    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_rows, cte_body_references_table,
-    delete_statement_references_table, insert_statement_references_table,
-    merge_statement_references_table, pg_plan_values_query_with_outer_scopes_and_ctes,
-    plan_merge_with_outer_ctes, resolve_raw_type_name, update_statement_references_table,
-    with_external_param_types,
+    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_columns,
+    cte_body_references_table, delete_statement_references_table,
+    insert_statement_references_table, merge_statement_references_table,
+    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
+    plan_merge_with_outer_ctes, resolve_raw_type_name, select_statement_references_table,
+    update_statement_references_table, with_external_param_types,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::push_warning_with_hint;
@@ -22,8 +23,10 @@ use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::ReplicaIdentityKind;
 use crate::include::nodes::pathnodes::PlannerConfig;
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
 use crate::pl::plpgsql::execute_do_with_gucs;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 fn restrict_nonsystem_view_enabled(gucs: &std::collections::HashMap<String, String>) -> bool {
     gucs.get("restrict_nonsystem_relation_kind")
@@ -555,9 +558,43 @@ fn select_has_writable_ctes(select: &SelectStatement) -> bool {
         .iter()
         .any(|cte| cte_body_has_writable(&cte.body))
         || select
+            .from
+            .as_ref()
+            .is_some_and(from_item_has_writable_ctes)
+        || select
             .set_operation
             .as_ref()
             .is_some_and(|setop| setop.inputs.iter().any(select_has_writable_ctes))
+}
+
+fn select_has_non_top_level_writable_ctes(select: &SelectStatement) -> bool {
+    select
+        .from
+        .as_ref()
+        .is_some_and(from_item_has_writable_ctes)
+        || select
+            .set_operation
+            .as_ref()
+            .is_some_and(|setop| setop.inputs.iter().any(select_has_writable_ctes))
+}
+
+fn from_item_has_writable_ctes(item: &FromItem) -> bool {
+    match item {
+        FromItem::Table { .. }
+        | FromItem::Values { .. }
+        | FromItem::Expression { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_) => false,
+        FromItem::TableSample { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::Alias { source, .. } => from_item_has_writable_ctes(source),
+        FromItem::DerivedTable(select) => select_has_writable_ctes(select),
+        FromItem::Join { left, right, .. } => {
+            from_item_has_writable_ctes(left) || from_item_has_writable_ctes(right)
+        }
+    }
 }
 
 fn cte_body_is_modifying(body: &CteBody) -> bool {
@@ -588,13 +625,18 @@ fn modifying_cte_body_has_nested_modifying_ctes(body: &CteBody) -> bool {
     nested.iter().any(|cte| cte_body_has_writable(&cte.body))
 }
 
-fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> CteBody {
+fn prepend_ctes_to_modifying_body(
+    body: &CteBody,
+    ctes: &[CommonTableExpr],
+    with_recursive: bool,
+) -> CteBody {
     match body {
         CteBody::Insert(insert) => {
             let mut insert = (**insert).clone();
             let mut with = ctes.to_vec();
             with.extend(insert.with);
             insert.with = with;
+            insert.with_recursive |= with_recursive;
             CteBody::Insert(Box::new(insert))
         }
         CteBody::Update(update) => {
@@ -602,6 +644,7 @@ fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> C
             let mut with = ctes.to_vec();
             with.extend(update.with);
             update.with = with;
+            update.with_recursive |= with_recursive;
             CteBody::Update(Box::new(update))
         }
         CteBody::Delete(delete) => {
@@ -609,6 +652,7 @@ fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> C
             let mut with = ctes.to_vec();
             with.extend(delete.with);
             delete.with = with;
+            delete.with_recursive |= with_recursive;
             CteBody::Delete(Box::new(delete))
         }
         CteBody::Merge(merge) => {
@@ -616,6 +660,7 @@ fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> C
             let mut with = ctes.to_vec();
             with.extend(merge.with);
             merge.with = with;
+            merge.with_recursive |= with_recursive;
             CteBody::Merge(Box::new(merge))
         }
         _ => body.clone(),
@@ -724,21 +769,78 @@ fn visible_select_ctes_for_modifying_body(
         .collect()
 }
 
-fn materialized_cte_from_dml_result(
+fn bound_returning_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+    targets
+        .iter()
+        .map(|target| QueryColumn {
+            name: target.name.clone(),
+            sql_type: target.sql_type,
+            wire_type_oid: None,
+        })
+        .collect()
+}
+
+fn returning_columns_for_modifying_cte(
     cte: &CommonTableExpr,
-    result: StatementResult,
-) -> Result<Option<BoundCte>, ExecError> {
-    match result {
-        StatementResult::Query { columns, rows, .. } => {
-            let columns = apply_writable_cte_column_aliases(cte, columns)?;
-            Ok(Some(bound_cte_from_query_rows(
-                cte.name.clone(),
-                columns,
-                &rows,
-            )))
-        }
-        StatementResult::AffectedRows(_) => Ok(None),
+    source: &BoundModifyingCte,
+) -> Result<Vec<QueryColumn>, ExecError> {
+    let targets = match source {
+        BoundModifyingCte::Insert(stmt) => &stmt.returning,
+        BoundModifyingCte::Update(stmt) => &stmt.returning,
+        BoundModifyingCte::Delete(stmt) => &stmt.returning,
+        BoundModifyingCte::Merge(stmt) => &stmt.returning,
+    };
+    apply_writable_cte_column_aliases(cte, bound_returning_columns(targets))
+}
+
+fn bind_modifying_cte_body(
+    cte: &CommonTableExpr,
+    catalog: &dyn CatalogLookup,
+    materialized_ctes: &[BoundCte],
+) -> Result<BoundModifyingCte, ExecError> {
+    match &cte.body {
+        CteBody::Insert(cte_insert) => Ok(BoundModifyingCte::Insert(
+            bind_insert_with_outer_scopes_and_ctes(cte_insert, catalog, &[], materialized_ctes)?,
+        )),
+        CteBody::Update(cte_update) => Ok(BoundModifyingCte::Update(
+            bind_update_with_outer_scopes_and_ctes(cte_update, catalog, &[], materialized_ctes)?,
+        )),
+        CteBody::Delete(cte_delete) => Ok(BoundModifyingCte::Delete(
+            bind_delete_with_outer_scopes_and_ctes(cte_delete, catalog, &[], materialized_ctes)?,
+        )),
+        CteBody::Merge(cte_merge) => Ok(BoundModifyingCte::Merge(plan_merge_with_outer_ctes(
+            cte_merge,
+            catalog,
+            materialized_ctes,
+        )?)),
+        _ => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "expected a data-modifying CTE".into(),
+        ))),
     }
+}
+
+fn pin_bound_writable_cte_result(
+    ctx: &mut ExecutorContext,
+    bound: &BoundWritableCte,
+    result: StatementResult,
+) {
+    if bound.cte.desc.columns.is_empty() {
+        return;
+    }
+    let StatementResult::Query { rows, .. } = result else {
+        return;
+    };
+    let rows = rows
+        .into_iter()
+        .map(|mut row| {
+            Value::materialize_all(&mut row);
+            MaterializedRow::new(TupleSlot::virtual_row(row), Vec::new())
+        })
+        .collect();
+    ctx.pinned_cte_tables.insert(
+        bound.cte.cte_id,
+        Rc::new(RefCell::new(MaterializedCteTable { rows, eof: true })),
+    );
 }
 
 fn oa_sql_tokens(sql: &str) -> Vec<String> {
@@ -804,27 +906,21 @@ fn oa_unsupported_ddl(feature: &str, sql: &str) -> ExecError {
 }
 
 impl Database {
-    fn execute_modifying_cte_body_autocommit(
+    fn execute_bound_modifying_cte_autocommit(
         &self,
         client_id: ClientId,
         interrupts: &Arc<crate::backend::utils::misc::interrupts::InterruptState>,
         locked_rels: &mut Vec<crate::backend::storage::smgr::RelFileLocator>,
-        cte: &CommonTableExpr,
+        source: &BoundModifyingCte,
         catalog: &dyn CatalogLookup,
         ctx: &mut ExecutorContext,
         xid: TransactionId,
         cid: CommandId,
-        materialized_ctes: &[BoundCte],
-    ) -> Result<Option<BoundCte>, ExecError> {
-        let result = match &cte.body {
-            CteBody::Insert(cte_insert) => {
-                let bound = bind_insert_with_outer_scopes_and_ctes(
-                    cte_insert,
-                    catalog,
-                    &[],
-                    materialized_ctes,
-                )?;
-                let prepared = super::rules::prepare_bound_insert_for_execution(bound, catalog)?;
+    ) -> Result<StatementResult, ExecError> {
+        match source {
+            BoundModifyingCte::Insert(bound) => {
+                let prepared =
+                    super::rules::prepare_bound_insert_for_execution(bound.clone(), catalog)?;
                 super::rules::enforce_modifying_cte_rule_restrictions(
                     prepared.stmt.relation_oid,
                     RuleEvent::Insert,
@@ -843,22 +939,11 @@ impl Database {
                     )?;
                 locked_rels.extend(table_lock_relations(&lock_requests));
                 refresh_autocommit_snapshot_after_lock_wait(self, ctx, xid, cid, waited_for_lock)?;
-                super::rules::execute_bound_insert_with_rules(
-                    prepared.stmt,
-                    catalog,
-                    ctx,
-                    xid,
-                    cid,
-                )?
+                super::rules::execute_bound_insert_with_rules(prepared.stmt, catalog, ctx, xid, cid)
             }
-            CteBody::Update(cte_update) => {
-                let bound = bind_update_with_outer_scopes_and_ctes(
-                    cte_update,
-                    catalog,
-                    &[],
-                    materialized_ctes,
-                )?;
-                let prepared = super::rules::prepare_bound_update_for_execution(bound, catalog)?;
+            BoundModifyingCte::Update(bound) => {
+                let prepared =
+                    super::rules::prepare_bound_update_for_execution(bound.clone(), catalog)?;
                 for target in &prepared.stmt.targets {
                     super::rules::enforce_modifying_cte_rule_restrictions(
                         target.relation_oid,
@@ -886,16 +971,11 @@ impl Database {
                     xid,
                     cid,
                     Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
-                )?
+                )
             }
-            CteBody::Delete(cte_delete) => {
-                let bound = bind_delete_with_outer_scopes_and_ctes(
-                    cte_delete,
-                    catalog,
-                    &[],
-                    materialized_ctes,
-                )?;
-                let prepared = super::rules::prepare_bound_delete_for_execution(bound, catalog)?;
+            BoundModifyingCte::Delete(bound) => {
+                let prepared =
+                    super::rules::prepare_bound_delete_for_execution(bound.clone(), catalog)?;
                 for target in &prepared.stmt.targets {
                     super::rules::enforce_modifying_cte_rule_restrictions(
                         target.relation_oid,
@@ -922,33 +1002,57 @@ impl Database {
                     ctx,
                     xid,
                     Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
-                )?
+                )
             }
-            CteBody::Merge(cte_merge) => {
-                let bound = plan_merge_with_outer_ctes(cte_merge, catalog, materialized_ctes)?;
-                crate::backend::commands::tablecmds::execute_merge(bound, catalog, ctx, xid, cid)?
-            }
-            _ => return Ok(None),
-        };
-        materialized_cte_from_dml_result(cte, result)
+            BoundModifyingCte::Merge(bound) => crate::backend::commands::tablecmds::execute_merge(
+                bound.clone(),
+                catalog,
+                ctx,
+                xid,
+                cid,
+            ),
+        }
     }
 
-    fn materialize_modifying_ctes_autocommit<F>(
+    fn execute_bound_modifying_ctes_autocommit(
         &self,
         client_id: ClientId,
         interrupts: &Arc<crate::backend::utils::misc::interrupts::InterruptState>,
         locked_rels: &mut Vec<crate::backend::storage::smgr::RelFileLocator>,
-        ctes: &[CommonTableExpr],
-        with_recursive: bool,
+        bound_ctes: &[BoundWritableCte],
         catalog: &dyn CatalogLookup,
         ctx: &mut ExecutorContext,
         xid: TransactionId,
         cid: CommandId,
+    ) -> Result<(), ExecError> {
+        ctx.pinned_cte_tables.clear();
+        for bound in bound_ctes {
+            let result = self.execute_bound_modifying_cte_autocommit(
+                client_id,
+                interrupts,
+                locked_rels,
+                &bound.source,
+                catalog,
+                ctx,
+                xid,
+                cid,
+            )?;
+            pin_bound_writable_cte_result(ctx, bound, result);
+        }
+        Ok(())
+    }
+
+    fn bind_modifying_ctes_autocommit<F>(
+        &self,
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+        catalog: &dyn CatalogLookup,
         outer_references: F,
-    ) -> Result<(Vec<BoundCte>, Vec<CommonTableExpr>), ExecError>
+    ) -> Result<(Vec<BoundWritableCte>, Vec<BoundCte>, Vec<CommonTableExpr>), ExecError>
     where
         F: Fn(&str) -> bool,
     {
+        let mut bound_writable_ctes = Vec::new();
         let mut materialized_ctes = Vec::new();
         let mut remaining_ctes = Vec::new();
 
@@ -984,23 +1088,21 @@ impl Database {
                 with_recursive,
                 &remaining_ctes,
             );
-            executable.body = prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes);
-            if let Some(bound) = self.execute_modifying_cte_body_autocommit(
-                client_id,
-                interrupts,
-                locked_rels,
-                &executable,
-                catalog,
-                ctx,
-                xid,
-                cid,
-                &materialized_ctes,
-            )? {
-                materialized_ctes.push(bound);
+            executable.body =
+                prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes, with_recursive);
+            let source = bind_modifying_cte_body(&executable, catalog, &materialized_ctes)?;
+            let columns = returning_columns_for_modifying_cte(cte, &source)?;
+            let bound_cte = bound_cte_from_query_columns(cte.name.clone(), columns);
+            if !bound_cte.desc.columns.is_empty() {
+                materialized_ctes.push(bound_cte.clone());
             }
+            bound_writable_ctes.push(BoundWritableCte {
+                cte: bound_cte,
+                source,
+            });
         }
 
-        Ok((materialized_ctes, remaining_ctes))
+        Ok((bound_writable_ctes, materialized_ctes, remaining_ctes))
     }
 
     fn execute_object_address_unsupported_stmt(
@@ -2546,22 +2648,26 @@ impl Database {
                     let mut outer_merge = merge_stmt.clone();
                     outer_merge.with.clear();
                     let refs_merge = outer_merge.clone();
-                    let (materialized_ctes, remaining_ctes) = self
-                        .materialize_modifying_ctes_autocommit(
-                            client_id,
-                            &interrupts,
-                            &mut locked_rels,
+                    let (bound_writable_ctes, materialized_ctes, remaining_ctes) = self
+                        .bind_modifying_ctes_autocommit(
                             &merge_stmt.with,
                             merge_stmt.with_recursive,
                             &catalog,
-                            &mut ctx,
-                            xid,
-                            0,
                             |name| merge_statement_references_table(&refs_merge, name),
                         )?;
                     outer_merge.with = remaining_ctes;
                     let bound =
                         plan_merge_with_outer_ctes(&outer_merge, &catalog, &materialized_ctes)?;
+                    self.execute_bound_modifying_ctes_autocommit(
+                        client_id,
+                        &interrupts,
+                        &mut locked_rels,
+                        &bound_writable_ctes,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        0,
+                    )?;
                     crate::backend::commands::tablecmds::execute_merge(
                         bound, &catalog, &mut ctx, xid, 0,
                     )
@@ -2782,6 +2888,152 @@ impl Database {
             Statement::DropUserMapping(ref drop_stmt) => {
                 self.execute_drop_user_mapping_stmt(client_id, drop_stmt)
             }
+            Statement::Select(ref select_stmt) if select_has_writable_ctes(select_stmt) => {
+                if select_has_non_top_level_writable_ctes(select_stmt) {
+                    return Err(nested_modifying_cte_error());
+                }
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let external_bindings = bind_prepared_external_params(external_params, &catalog)?;
+                let external_types = prepared_external_types(&external_bindings);
+                if restrict_nonsystem_view_enabled(gucs) {
+                    reject_restricted_views_in_select(select_stmt, &catalog)?;
+                    reject_restricted_bound_view_refs_in_select(select_stmt, &catalog)?;
+                }
+
+                let xid = self.txns.write().begin();
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
+                let deferred_foreign_keys =
+                    crate::backend::executor::DeferredForeignKeyTracker::default();
+                let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
+                let mut ctx = ExecutorContext {
+                    pool: std::sync::Arc::clone(&self.pool),
+                    data_dir: Some(self.cluster.base_dir.clone()),
+                    txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
+                    sequences: Some(self.sequences.clone()),
+                    large_objects: Some(self.large_objects.clone()),
+                    stats_import_runtime: Some(std::sync::Arc::new(self.clone())),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+                    row_locks: std::sync::Arc::clone(&self.row_locks),
+                    checkpoint_stats: self.checkpoint_stats_snapshot(),
+                    datetime_config: datetime_config.clone(),
+                    statement_timestamp_usecs: statement_timestamp_usecs(datetime_config),
+                    gucs: gucs.clone(),
+                    interrupts: Arc::clone(&interrupts),
+                    stats: std::sync::Arc::clone(&self.stats),
+                    session_stats: self.session_stats_state(client_id),
+                    snapshot,
+                    transaction_state: None,
+                    client_id,
+                    current_database_name: self.current_database_name(),
+                    session_user_oid: self.auth_state(client_id).session_user_oid(),
+                    current_user_oid: self.auth_state(client_id).current_user_oid(),
+                    active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    session_replication_role,
+                    statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
+                    next_command_id: 0,
+                    default_toast_compression:
+                        crate::include::access::htup::AttributeCompression::Pglz,
+                    random_state: std::sync::Arc::clone(&random_state),
+                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+                    case_test_values: Vec::new(),
+                    system_bindings: Vec::new(),
+                    active_grouping_refs: Vec::new(),
+                    subplans: Vec::new(),
+                    timed: false,
+                    allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
+                    catalog_effects: Vec::new(),
+                    temp_effects: Vec::new(),
+                    database: Some(self.clone()),
+                    pending_catalog_effects: Vec::new(),
+                    pending_table_locks: Vec::new(),
+                    pending_portals: Vec::new(),
+                    catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                    scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
+                    plpgsql_function_cache: self.plpgsql_function_cache(client_id),
+                    pinned_cte_tables: std::collections::HashMap::new(),
+                    cte_tables: std::collections::HashMap::new(),
+                    cte_producers: std::collections::HashMap::new(),
+                    recursive_worktables: std::collections::HashMap::new(),
+                    deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
+                    trigger_depth: 0,
+                };
+                install_prepared_external_params(&external_bindings, &mut ctx)?;
+                let mut locked_rels = Vec::new();
+                let result = with_external_param_types(&external_types, || {
+                    let mut outer_select = select_stmt.clone();
+                    outer_select.with.clear();
+                    let refs_select = outer_select.clone();
+                    let (bound_writable_ctes, materialized_ctes, remaining_ctes) = self
+                        .bind_modifying_ctes_autocommit(
+                            &select_stmt.with,
+                            select_stmt.with_recursive,
+                            &catalog,
+                            |name| select_statement_references_table(&refs_select, name),
+                        )?;
+                    outer_select.with = remaining_ctes;
+                    let planned = pg_plan_query_with_outer_scopes_and_ctes(
+                        &outer_select,
+                        &catalog,
+                        &[],
+                        &materialized_ctes,
+                    )?;
+                    if select_stmt.locking_clause.is_some() {
+                        check_planned_stmt_select_for_update_privileges(&planned, &ctx)?;
+                    } else {
+                        check_planned_stmt_select_privileges(&planned, &ctx)?;
+                    }
+                    self.execute_bound_modifying_ctes_autocommit(
+                        client_id,
+                        &interrupts,
+                        &mut locked_rels,
+                        &bound_writable_ctes,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        0,
+                    )?;
+                    let result = execute_planned_stmt(planned, &mut ctx);
+                    ctx.pinned_cte_tables.clear();
+                    result
+                });
+                let pending_async_notifications =
+                    std::mem::take(&mut ctx.pending_async_notifications);
+                drop(ctx);
+                let validation_catalog =
+                    self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
+                let result = result.and_then(|result| {
+                    crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                        self,
+                        client_id,
+                        &validation_catalog,
+                        xid,
+                        1,
+                        Arc::clone(&interrupts),
+                        datetime_config,
+                        &deferred_foreign_keys,
+                    )?;
+                    Ok(result)
+                });
+                let result = self.finish_txn_with_async_notifications(
+                    client_id,
+                    xid,
+                    result,
+                    &[],
+                    &[],
+                    &[],
+                    pending_async_notifications,
+                );
+                guard.disarm();
+                unlock_relations(&self.table_locks, client_id, &locked_rels);
+                result
+            }
             Statement::Values(ref values_stmt)
                 if values_stmt
                     .with
@@ -2858,17 +3110,11 @@ impl Database {
                     let mut outer_values = values_stmt.clone();
                     outer_values.with.clear();
                     let refs_body = CteBody::Values(outer_values.clone());
-                    let (materialized_ctes, remaining_ctes) = self
-                        .materialize_modifying_ctes_autocommit(
-                            client_id,
-                            &interrupts,
-                            &mut locked_rels,
+                    let (bound_writable_ctes, materialized_ctes, remaining_ctes) = self
+                        .bind_modifying_ctes_autocommit(
                             &values_stmt.with,
                             values_stmt.with_recursive,
                             &catalog,
-                            &mut ctx,
-                            xid,
-                            0,
                             |name| cte_body_references_table(&refs_body, name),
                         )?;
                     outer_values.with = remaining_ctes;
@@ -2878,7 +3124,19 @@ impl Database {
                         &[],
                         &materialized_ctes,
                     )?;
-                    execute_planned_stmt(planned, &mut ctx)
+                    self.execute_bound_modifying_ctes_autocommit(
+                        client_id,
+                        &interrupts,
+                        &mut locked_rels,
+                        &bound_writable_ctes,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        0,
+                    )?;
+                    let result = execute_planned_stmt(planned, &mut ctx);
+                    ctx.pinned_cte_tables.clear();
+                    result
                 })();
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
@@ -3238,188 +3496,17 @@ impl Database {
                         );
                     }
 
-                    let mut materialized_ctes = Vec::new();
                     let mut outer_insert = insert_stmt.clone();
                     outer_insert.with.clear();
                     let refs_insert = outer_insert.clone();
-                    let mut preceding_select_ctes = Vec::new();
-
-                    for (index, cte) in insert_stmt.with.iter().enumerate() {
-                        if !cte_body_is_modifying(&cte.body) {
-                            if cte_body_has_writable(&cte.body) {
-                                return Err(nested_modifying_cte_error());
-                            }
-                            outer_insert.with.push(cte.clone());
-                            preceding_select_ctes.push(cte.clone());
-                            continue;
-                        }
-
-                        if cte_body_references_table(&cte.body, &cte.name) {
-                            return Err(recursive_modifying_cte_error(&cte.name));
-                        }
-                        if !modifying_cte_body_has_returning(&cte.body)
-                            && (insert_stmt
-                                .with
-                                .iter()
-                                .skip(index + 1)
-                                .any(|later| cte_body_references_table(&later.body, &cte.name))
-                                || insert_statement_references_table(&refs_insert, &cte.name))
-                        {
-                            return Err(modifying_cte_reference_error(&cte.name));
-                        }
-
-                        let mut executable = cte.clone();
-                        executable.body =
-                            prepend_ctes_to_modifying_body(&cte.body, &preceding_select_ctes);
-                        let result = match &executable.body {
-                            CteBody::Insert(cte_insert) => {
-                                let bound = bind_insert_with_outer_scopes_and_ctes(
-                                    cte_insert,
-                                    &catalog,
-                                    &[],
-                                    &materialized_ctes,
-                                )?;
-                                let prepared = super::rules::prepare_bound_insert_for_execution(
-                                    bound, &catalog,
-                                )?;
-                                super::rules::enforce_modifying_cte_rule_restrictions(
-                                    prepared.stmt.relation_oid,
-                                    RuleEvent::Insert,
-                                    &catalog,
-                                )?;
-                                let lock_requests = merge_table_lock_requests(
-                                    &insert_foreign_key_lock_requests(&prepared.stmt),
-                                    &prepared.extra_lock_requests,
-                                );
-                                let waited_for_lock =
-                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                                    &self.table_locks,
-                                    client_id,
-                                    &lock_requests,
-                                    interrupts.as_ref(),
-                                )?;
-                                locked_rels.extend(table_lock_relations(&lock_requests));
-                                refresh_autocommit_snapshot_after_lock_wait(
-                                    self,
-                                    &mut ctx,
-                                    xid,
-                                    0,
-                                    waited_for_lock,
-                                )?;
-                                super::rules::execute_bound_insert_with_rules(
-                                    prepared.stmt,
-                                    &catalog,
-                                    &mut ctx,
-                                    xid,
-                                    0,
-                                )?
-                            }
-                            CteBody::Update(cte_update) => {
-                                let bound = bind_update_with_outer_scopes_and_ctes(
-                                    cte_update,
-                                    &catalog,
-                                    &[],
-                                    &materialized_ctes,
-                                )?;
-                                let prepared = super::rules::prepare_bound_update_for_execution(
-                                    bound, &catalog,
-                                )?;
-                                for target in &prepared.stmt.targets {
-                                    super::rules::enforce_modifying_cte_rule_restrictions(
-                                        target.relation_oid,
-                                        RuleEvent::Update,
-                                        &catalog,
-                                    )?;
-                                }
-                                let lock_requests = merge_table_lock_requests(
-                                    &update_foreign_key_lock_requests(&prepared.stmt),
-                                    &prepared.extra_lock_requests,
-                                );
-                                let waited_for_lock =
-                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                                    &self.table_locks,
-                                    client_id,
-                                    &lock_requests,
-                                    interrupts.as_ref(),
-                                )?;
-                                locked_rels.extend(table_lock_relations(&lock_requests));
-                                refresh_autocommit_snapshot_after_lock_wait(
-                                    self,
-                                    &mut ctx,
-                                    xid,
-                                    0,
-                                    waited_for_lock,
-                                )?;
-                                super::rules::execute_bound_update_with_rules(
-                                    prepared.stmt,
-                                    &catalog,
-                                    &mut ctx,
-                                    xid,
-                                    0,
-                                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
-                                )?
-                            }
-                            CteBody::Delete(cte_delete) => {
-                                let bound = bind_delete_with_outer_scopes_and_ctes(
-                                    cte_delete,
-                                    &catalog,
-                                    &[],
-                                    &materialized_ctes,
-                                )?;
-                                let prepared = super::rules::prepare_bound_delete_for_execution(
-                                    bound, &catalog,
-                                )?;
-                                for target in &prepared.stmt.targets {
-                                    super::rules::enforce_modifying_cte_rule_restrictions(
-                                        target.relation_oid,
-                                        RuleEvent::Delete,
-                                        &catalog,
-                                    )?;
-                                }
-                                let lock_requests = merge_table_lock_requests(
-                                    &delete_foreign_key_lock_requests(&prepared.stmt),
-                                    &prepared.extra_lock_requests,
-                                );
-                                let waited_for_lock =
-                                    crate::backend::storage::lmgr::lock_table_requests_interruptible(
-                                    &self.table_locks,
-                                    client_id,
-                                    &lock_requests,
-                                    interrupts.as_ref(),
-                                )?;
-                                locked_rels.extend(table_lock_relations(&lock_requests));
-                                refresh_autocommit_snapshot_after_lock_wait(
-                                    self,
-                                    &mut ctx,
-                                    xid,
-                                    0,
-                                    waited_for_lock,
-                                )?;
-                                super::rules::execute_bound_delete_with_rules(
-                                    prepared.stmt,
-                                    &catalog,
-                                    &mut ctx,
-                                    xid,
-                                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
-                                )?
-                            }
-                            CteBody::Merge(cte_merge) => {
-                                let bound = plan_merge_with_outer_ctes(
-                                    cte_merge,
-                                    &catalog,
-                                    &materialized_ctes,
-                                )?;
-                                crate::backend::commands::tablecmds::execute_merge(
-                                    bound, &catalog, &mut ctx, xid, 0,
-                                )?
-                            }
-                            _ => continue,
-                        };
-                        if let Some(bound) = materialized_cte_from_dml_result(&executable, result)?
-                        {
-                            materialized_ctes.push(bound);
-                        }
-                    }
+                    let (bound_writable_ctes, materialized_ctes, remaining_ctes) = self
+                        .bind_modifying_ctes_autocommit(
+                            &insert_stmt.with,
+                            insert_stmt.with_recursive,
+                            &catalog,
+                            |name| insert_statement_references_table(&refs_insert, name),
+                        )?;
+                    outer_insert.with = remaining_ctes;
 
                     let bound = bind_insert_with_outer_scopes_and_ctes(
                         &outer_insert,
@@ -3452,6 +3539,16 @@ impl Database {
                         xid,
                         0,
                         waited_for_lock,
+                    )?;
+                    self.execute_bound_modifying_ctes_autocommit(
+                        client_id,
+                        &interrupts,
+                        &mut locked_rels,
+                        &bound_writable_ctes,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        0,
                     )?;
                     super::rules::execute_bound_insert_with_rules(
                         prepared.stmt,
@@ -3603,17 +3700,11 @@ impl Database {
                     let mut outer_update = update_stmt.clone();
                     outer_update.with.clear();
                     let refs_update = outer_update.clone();
-                    let (materialized_ctes, remaining_ctes) = self
-                        .materialize_modifying_ctes_autocommit(
-                            client_id,
-                            &interrupts,
-                            &mut locked_rels,
+                    let (bound_writable_ctes, materialized_ctes, remaining_ctes) = self
+                        .bind_modifying_ctes_autocommit(
                             &update_stmt.with,
                             update_stmt.with_recursive,
                             &catalog,
-                            &mut ctx,
-                            xid,
-                            0,
                             |name| update_statement_references_table(&refs_update, name),
                         )?;
                     outer_update.with = remaining_ctes;
@@ -3650,6 +3741,16 @@ impl Database {
                         xid,
                         0,
                         waited_for_lock,
+                    )?;
+                    self.execute_bound_modifying_ctes_autocommit(
+                        client_id,
+                        &interrupts,
+                        &mut locked_rels,
+                        &bound_writable_ctes,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        0,
                     )?;
                     super::rules::execute_bound_update_with_rules(
                         prepared.stmt,
@@ -3798,17 +3899,11 @@ impl Database {
                     let mut outer_delete = delete_stmt.clone();
                     outer_delete.with.clear();
                     let refs_delete = outer_delete.clone();
-                    let (materialized_ctes, remaining_ctes) = self
-                        .materialize_modifying_ctes_autocommit(
-                            client_id,
-                            &interrupts,
-                            &mut locked_rels,
+                    let (bound_writable_ctes, materialized_ctes, remaining_ctes) = self
+                        .bind_modifying_ctes_autocommit(
                             &delete_stmt.with,
                             delete_stmt.with_recursive,
                             &catalog,
-                            &mut ctx,
-                            xid,
-                            0,
                             |name| delete_statement_references_table(&refs_delete, name),
                         )?;
                     outer_delete.with = remaining_ctes;
@@ -3845,6 +3940,16 @@ impl Database {
                         xid,
                         0,
                         waited_for_lock,
+                    )?;
+                    self.execute_bound_modifying_ctes_autocommit(
+                        client_id,
+                        &interrupts,
+                        &mut locked_rels,
+                        &bound_writable_ctes,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        0,
                     )?;
                     super::rules::execute_bound_delete_with_rules(
                         prepared.stmt,

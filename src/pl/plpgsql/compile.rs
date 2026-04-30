@@ -5496,11 +5496,13 @@ fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
         CteBody::RecursiveUnion {
             all,
             left_nested,
+            anchor_with_is_subquery,
             anchor,
             recursive,
         } => CteBody::RecursiveUnion {
             all,
             left_nested,
+            anchor_with_is_subquery,
             anchor: Box::new(normalize_plpgsql_cte_body(*anchor, env)),
             recursive: Box::new(normalize_plpgsql_select(*recursive, env)),
         },

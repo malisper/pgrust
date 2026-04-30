@@ -5,6 +5,7 @@ use std::io::Write as _;
 use std::mem;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -29,28 +30,29 @@ use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredConstraintSnapshot, DeferredForeignKeyTracker, ExecError, ExecutorContext,
-    ExecutorTransactionState, Expr, RelationDesc, SessionReplicationRole, StatementResult, Value,
-    cast_value, cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
+    ExecutorTransactionState, Expr, MaterializedCteTable, MaterializedRow, RelationDesc,
+    SessionReplicationRole, StatementResult, TupleSlot, Value, cast_value,
+    cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text, render_sql_literal,
     substitute_named_arg, substitute_positional_args,
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, BoundCte, CallStatement, CatalogLookup, CommonTableExpr,
-    CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
-    CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
-    CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause, DeallocateStatement,
-    DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource,
-    InsertStatement, MergeAction, MergeInsertSource, MergeStatement, OrderByItem, ParseError,
-    ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert, PreparedStatementQuery,
-    RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem,
-    SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType, SqlTypeKind, Statement,
-    TransactionOptions, UpdateStatement, ValuesStatement, analyze_select_query_with_outer,
-    bind_delete, bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
-    bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope, bind_update,
-    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_rows, cte_body_references_table,
-    delete_statement_references_table, insert_statement_references_table,
-    merge_statement_references_table, pg_plan_query_with_config,
+    AlterTableAddColumnStatement, BoundCte, BoundModifyingCte, BoundWritableCte, CallStatement,
+    CatalogLookup, CommonTableExpr, CopyFormat as ParserCopyFormat, CopyFromStatement,
+    CopyOptions as ParserCopyOptions, CopySource, CopyToDestination, CopyToSource, CopyToStatement,
+    CreateFunctionStatement, CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause,
+    DeallocateStatement, DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem,
+    GroupByItem, InsertSource, InsertStatement, MergeAction, MergeInsertSource, MergeStatement,
+    OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
+    PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
+    RuleEvent, SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType,
+    SqlTypeKind, Statement, TransactionOptions, UpdateStatement, ValuesStatement,
+    analyze_select_query_with_outer, bind_delete, bind_delete_with_outer_scopes_and_ctes,
+    bind_insert, bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes,
+    bind_scalar_expr_in_named_slot_scope, bind_update, bind_update_with_outer_scopes_and_ctes,
+    bound_cte_from_query_columns, cte_body_references_table, delete_statement_references_table,
+    insert_statement_references_table, merge_statement_references_table, pg_plan_query_with_config,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
     plan_merge, plan_merge_with_outer_ctes, raw_type_name_is_unknown, resolve_raw_type_name,
     select_statement_references_table, update_statement_references_table,
@@ -4472,13 +4474,18 @@ impl Session {
             .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
     }
 
-    fn prepend_ctes_to_modifying_body(body: &CteBody, ctes: &[CommonTableExpr]) -> CteBody {
+    fn prepend_ctes_to_modifying_body(
+        body: &CteBody,
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+    ) -> CteBody {
         match body {
             CteBody::Insert(insert) => {
                 let mut insert = (**insert).clone();
                 let mut with = ctes.to_vec();
                 with.extend(insert.with);
                 insert.with = with;
+                insert.with_recursive |= with_recursive;
                 CteBody::Insert(Box::new(insert))
             }
             CteBody::Update(update) => {
@@ -4486,6 +4493,7 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(update.with);
                 update.with = with;
+                update.with_recursive |= with_recursive;
                 CteBody::Update(Box::new(update))
             }
             CteBody::Delete(delete) => {
@@ -4493,6 +4501,7 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(delete.with);
                 delete.with = with;
+                delete.with_recursive |= with_recursive;
                 CteBody::Delete(Box::new(delete))
             }
             CteBody::Merge(merge) => {
@@ -4500,6 +4509,7 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(merge.with);
                 merge.with = with;
+                merge.with_recursive |= with_recursive;
                 CteBody::Merge(Box::new(merge))
             }
             _ => body.clone(),
@@ -4621,49 +4631,125 @@ impl Session {
             .iter()
             .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
             || select
+                .from
+                .as_ref()
+                .is_some_and(Self::from_item_has_writable_ctes)
+            || select
                 .set_operation
                 .as_ref()
                 .is_some_and(|setop| setop.inputs.iter().any(Self::select_has_writable_ctes))
     }
 
-    fn materialized_cte_from_dml_result(
-        cte: &CommonTableExpr,
-        result: StatementResult,
-    ) -> Result<Option<BoundCte>, ExecError> {
-        match result {
-            StatementResult::Query { columns, rows, .. } => {
-                let columns = Self::apply_writable_cte_column_aliases(cte, columns)?;
-                Ok(Some(bound_cte_from_query_rows(
-                    cte.name.clone(),
-                    columns,
-                    &rows,
-                )))
+    fn select_has_non_top_level_writable_ctes(select: &SelectStatement) -> bool {
+        select
+            .from
+            .as_ref()
+            .is_some_and(Self::from_item_has_writable_ctes)
+            || select
+                .set_operation
+                .as_ref()
+                .is_some_and(|setop| setop.inputs.iter().any(Self::select_has_writable_ctes))
+    }
+
+    fn from_item_has_writable_ctes(item: &FromItem) -> bool {
+        match item {
+            FromItem::Table { .. }
+            | FromItem::Values { .. }
+            | FromItem::Expression { .. }
+            | FromItem::FunctionCall { .. }
+            | FromItem::RowsFrom { .. }
+            | FromItem::JsonTable(_)
+            | FromItem::XmlTable(_) => false,
+            FromItem::TableSample { source, .. }
+            | FromItem::Lateral(source)
+            | FromItem::Alias { source, .. } => Self::from_item_has_writable_ctes(source),
+            FromItem::DerivedTable(select) => Self::select_has_writable_ctes(select),
+            FromItem::Join { left, right, .. } => {
+                Self::from_item_has_writable_ctes(left) || Self::from_item_has_writable_ctes(right)
             }
-            StatementResult::AffectedRows(_) => Ok(None),
         }
     }
 
-    fn execute_modifying_cte_body(
-        &mut self,
-        db: &Database,
+    fn bound_returning_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+        targets
+            .iter()
+            .map(|target| QueryColumn {
+                name: target.name.clone(),
+                sql_type: target.sql_type,
+                wire_type_oid: None,
+            })
+            .collect()
+    }
+
+    fn returning_columns_for_modifying_cte(
+        cte: &CommonTableExpr,
+        source: &BoundModifyingCte,
+    ) -> Result<Vec<QueryColumn>, ExecError> {
+        let targets = match source {
+            BoundModifyingCte::Insert(stmt) => &stmt.returning,
+            BoundModifyingCte::Update(stmt) => &stmt.returning,
+            BoundModifyingCte::Delete(stmt) => &stmt.returning,
+            BoundModifyingCte::Merge(stmt) => &stmt.returning,
+        };
+        Self::apply_writable_cte_column_aliases(cte, Self::bound_returning_columns(targets))
+    }
+
+    fn bind_modifying_cte_body(
         cte: &CommonTableExpr,
         catalog: &dyn CatalogLookup,
-        ctx: &mut ExecutorContext,
-        xid: TransactionId,
-        cid: CommandId,
         materialized_ctes: &[BoundCte],
-    ) -> Result<Option<BoundCte>, ExecError> {
-        let result = match &cte.body {
-            CteBody::Insert(cte_insert) => {
-                let bound = bind_insert_with_outer_scopes_and_ctes(
+    ) -> Result<BoundModifyingCte, ExecError> {
+        match &cte.body {
+            CteBody::Insert(cte_insert) => Ok(BoundModifyingCte::Insert(
+                bind_insert_with_outer_scopes_and_ctes(
                     cte_insert,
                     catalog,
                     &[],
                     materialized_ctes,
-                )?;
+                )?,
+            )),
+            CteBody::Update(cte_update) => Ok(BoundModifyingCte::Update(
+                bind_update_with_outer_scopes_and_ctes(
+                    cte_update,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?,
+            )),
+            CteBody::Delete(cte_delete) => Ok(BoundModifyingCte::Delete(
+                bind_delete_with_outer_scopes_and_ctes(
+                    cte_delete,
+                    catalog,
+                    &[],
+                    materialized_ctes,
+                )?,
+            )),
+            CteBody::Merge(cte_merge) => Ok(BoundModifyingCte::Merge(plan_merge_with_outer_ctes(
+                cte_merge,
+                catalog,
+                materialized_ctes,
+            )?)),
+            _ => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "expected a data-modifying CTE".into(),
+            ))),
+        }
+    }
+
+    fn execute_bound_modifying_cte(
+        &mut self,
+        db: &Database,
+        source: &BoundModifyingCte,
+        catalog: &dyn CatalogLookup,
+        ctx: &mut ExecutorContext,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<StatementResult, ExecError> {
+        match source {
+            BoundModifyingCte::Insert(bound) => {
                 let prepared =
                     crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
-                        bound, catalog,
+                        bound.clone(),
+                        catalog,
                     )?;
                 crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
                     prepared.stmt.relation_oid,
@@ -4682,18 +4768,13 @@ impl Session {
                     ctx,
                     xid,
                     cid,
-                )?
+                )
             }
-            CteBody::Update(cte_update) => {
-                let bound = bind_update_with_outer_scopes_and_ctes(
-                    cte_update,
-                    catalog,
-                    &[],
-                    materialized_ctes,
-                )?;
+            BoundModifyingCte::Update(bound) => {
                 let prepared =
                     crate::pgrust::database::commands::rules::prepare_bound_update_for_execution(
-                        bound, catalog,
+                        bound.clone(),
+                        catalog,
                     )?;
                 for target in &prepared.stmt.targets {
                     crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
@@ -4717,18 +4798,13 @@ impl Session {
                     xid,
                     cid,
                     Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
-                )?
+                )
             }
-            CteBody::Delete(cte_delete) => {
-                let bound = bind_delete_with_outer_scopes_and_ctes(
-                    cte_delete,
-                    catalog,
-                    &[],
-                    materialized_ctes,
-                )?;
+            BoundModifyingCte::Delete(bound) => {
                 let prepared =
                     crate::pgrust::database::commands::rules::prepare_bound_delete_for_execution(
-                        bound, catalog,
+                        bound.clone(),
+                        catalog,
                     )?;
                 for target in &prepared.stmt.targets {
                     crate::pgrust::database::commands::rules::enforce_modifying_cte_rule_restrictions(
@@ -4751,31 +4827,64 @@ impl Session {
                     ctx,
                     xid,
                     Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
-                )?
+                )
             }
-            CteBody::Merge(cte_merge) => {
-                let bound = plan_merge_with_outer_ctes(cte_merge, catalog, materialized_ctes)?;
-                execute_merge(bound, catalog, ctx, xid, cid)?
-            }
-            _ => return Ok(None),
-        };
-        Self::materialized_cte_from_dml_result(cte, result)
+            BoundModifyingCte::Merge(bound) => execute_merge(bound.clone(), catalog, ctx, xid, cid),
+        }
     }
 
-    fn materialize_modifying_ctes<F>(
+    fn pin_bound_writable_cte_result(
+        ctx: &mut ExecutorContext,
+        bound: &BoundWritableCte,
+        result: StatementResult,
+    ) {
+        if bound.cte.desc.columns.is_empty() {
+            return;
+        }
+        let StatementResult::Query { rows, .. } = result else {
+            return;
+        };
+        let rows = rows
+            .into_iter()
+            .map(|mut row| {
+                Value::materialize_all(&mut row);
+                MaterializedRow::new(TupleSlot::virtual_row(row), Vec::new())
+            })
+            .collect();
+        ctx.pinned_cte_tables.insert(
+            bound.cte.cte_id,
+            Rc::new(RefCell::new(MaterializedCteTable { rows, eof: true })),
+        );
+    }
+
+    fn execute_bound_modifying_ctes(
         &mut self,
         db: &Database,
-        ctes: &[CommonTableExpr],
-        with_recursive: bool,
+        bound_ctes: &[BoundWritableCte],
         catalog: &dyn CatalogLookup,
         ctx: &mut ExecutorContext,
         xid: TransactionId,
         cid: CommandId,
+    ) -> Result<(), ExecError> {
+        ctx.pinned_cte_tables.clear();
+        for bound in bound_ctes {
+            let result =
+                self.execute_bound_modifying_cte(db, &bound.source, catalog, ctx, xid, cid)?;
+            Self::pin_bound_writable_cte_result(ctx, bound, result);
+        }
+        Ok(())
+    }
+
+    fn bind_modifying_ctes<F>(
+        ctes: &[CommonTableExpr],
+        with_recursive: bool,
+        catalog: &dyn CatalogLookup,
         outer_references: F,
-    ) -> Result<(Vec<BoundCte>, Vec<CommonTableExpr>), ExecError>
+    ) -> Result<(Vec<BoundWritableCte>, Vec<BoundCte>, Vec<CommonTableExpr>), ExecError>
     where
         F: Fn(&str) -> bool,
     {
+        let mut bound_writable_ctes = Vec::new();
         let mut materialized_ctes = Vec::new();
         let mut remaining_ctes = Vec::new();
 
@@ -4817,21 +4926,24 @@ impl Session {
                 with_recursive,
                 &remaining_ctes,
             );
-            executable.body = Self::prepend_ctes_to_modifying_body(&cte.body, &visible_select_ctes);
-            if let Some(bound) = self.execute_modifying_cte_body(
-                db,
-                &executable,
-                catalog,
-                ctx,
-                xid,
-                cid,
-                &materialized_ctes,
-            )? {
-                materialized_ctes.push(bound);
+            executable.body = Self::prepend_ctes_to_modifying_body(
+                &cte.body,
+                &visible_select_ctes,
+                with_recursive,
+            );
+            let source = Self::bind_modifying_cte_body(&executable, catalog, &materialized_ctes)?;
+            let columns = Self::returning_columns_for_modifying_cte(cte, &source)?;
+            let bound_cte = bound_cte_from_query_columns(cte.name.clone(), columns);
+            if !bound_cte.desc.columns.is_empty() {
+                materialized_ctes.push(bound_cte.clone());
             }
+            bound_writable_ctes.push(BoundWritableCte {
+                cte: bound_cte,
+                source,
+            });
         }
 
-        Ok((materialized_ctes, remaining_ctes))
+        Ok((bound_writable_ctes, materialized_ctes, remaining_ctes))
     }
 
     fn read_only_write_error(command: &'static str) -> ExecError {
@@ -11670,11 +11782,13 @@ impl Session {
                 CteBody::RecursiveUnion {
                     all,
                     left_nested,
+                    anchor_with_is_subquery,
                     anchor,
                     recursive,
                 } => CteBody::RecursiveUnion {
                     all: *all,
                     left_nested: *left_nested,
+                    anchor_with_is_subquery: *anchor_with_is_subquery,
                     anchor: Box::new(Self::substitute_cte_body(anchor, subst)?),
                     recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
                 },
@@ -11730,11 +11844,13 @@ impl Session {
             CteBody::RecursiveUnion {
                 all,
                 left_nested,
+                anchor_with_is_subquery,
                 anchor,
                 recursive,
             } => CteBody::RecursiveUnion {
                 all: *all,
                 left_nested: *left_nested,
+                anchor_with_is_subquery: *anchor_with_is_subquery,
                 anchor: Box::new(Self::substitute_cte_body(anchor, subst)?),
                 recursive: Box::new(Self::substitute_select_statement(recursive, subst)?),
             },
@@ -17155,19 +17271,24 @@ impl Session {
                         let mut outer_merge = merge_stmt.clone();
                         outer_merge.with.clear();
                         let refs_merge = outer_merge.clone();
-                        let (materialized_ctes, remaining_ctes) = self.materialize_modifying_ctes(
+                        let (bound_writable_ctes, materialized_ctes, remaining_ctes) =
+                            Self::bind_modifying_ctes(
+                                &merge_stmt.with,
+                                merge_stmt.with_recursive,
+                                &catalog,
+                                |name| merge_statement_references_table(&refs_merge, name),
+                            )?;
+                        outer_merge.with = remaining_ctes;
+                        let bound =
+                            plan_merge_with_outer_ctes(&outer_merge, &catalog, &materialized_ctes)?;
+                        self.execute_bound_modifying_ctes(
                             db,
-                            &merge_stmt.with,
-                            merge_stmt.with_recursive,
+                            &bound_writable_ctes,
                             &catalog,
                             &mut ctx,
                             xid,
                             cid,
-                            |name| merge_statement_references_table(&refs_merge, name),
                         )?;
-                        outer_merge.with = remaining_ctes;
-                        let bound =
-                            plan_merge_with_outer_ctes(&outer_merge, &catalog, &materialized_ctes)?;
                         execute_merge(bound, &catalog, &mut ctx, xid, cid)
                     })();
                     self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
@@ -17201,18 +17322,17 @@ impl Session {
                     let result = match stmt {
                         Statement::Select(select) if Self::select_has_writable_ctes(&select) => {
                             (|| {
+                                if Self::select_has_non_top_level_writable_ctes(&select) {
+                                    return Err(Self::nested_modifying_cte_error());
+                                }
                                 let mut outer_select = select.clone();
                                 outer_select.with.clear();
                                 let refs_select = outer_select.clone();
-                                let (materialized_ctes, remaining_ctes) = self
-                                    .materialize_modifying_ctes(
-                                        db,
+                                let (bound_writable_ctes, materialized_ctes, remaining_ctes) =
+                                    Self::bind_modifying_ctes(
                                         &select.with,
                                         select.with_recursive,
                                         &catalog,
-                                        &mut ctx,
-                                        xid,
-                                        cid,
                                         |name| {
                                             select_statement_references_table(&refs_select, name)
                                         },
@@ -17225,7 +17345,17 @@ impl Session {
                                     &materialized_ctes,
                                 )?;
                                 check_planned_stmt_select_privileges(&planned, &ctx)?;
-                                execute_planned_stmt(planned, &mut ctx)
+                                self.execute_bound_modifying_ctes(
+                                    db,
+                                    &bound_writable_ctes,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    cid,
+                                )?;
+                                let result = execute_planned_stmt(planned, &mut ctx);
+                                ctx.pinned_cte_tables.clear();
+                                result
                             })()
                         }
                         Statement::Values(values) if Self::values_has_writable_ctes(&values) => {
@@ -17233,15 +17363,11 @@ impl Session {
                                 let mut outer_values = values.clone();
                                 outer_values.with.clear();
                                 let refs_body = CteBody::Values(outer_values.clone());
-                                let (materialized_ctes, remaining_ctes) = self
-                                    .materialize_modifying_ctes(
-                                        db,
+                                let (bound_writable_ctes, materialized_ctes, remaining_ctes) =
+                                    Self::bind_modifying_ctes(
                                         &values.with,
                                         values.with_recursive,
                                         &catalog,
-                                        &mut ctx,
-                                        xid,
-                                        cid,
                                         |name| cte_body_references_table(&refs_body, name),
                                     )?;
                                 outer_values.with = remaining_ctes;
@@ -17251,7 +17377,17 @@ impl Session {
                                     &[],
                                     &materialized_ctes,
                                 )?;
-                                execute_planned_stmt(planned, &mut ctx)
+                                self.execute_bound_modifying_ctes(
+                                    db,
+                                    &bound_writable_ctes,
+                                    &catalog,
+                                    &mut ctx,
+                                    xid,
+                                    cid,
+                                )?;
+                                let result = execute_planned_stmt(planned, &mut ctx);
+                                ctx.pinned_cte_tables.clear();
+                                result
                             })()
                         }
                         Statement::Select(select) if select.locking_clause.is_some() => {
@@ -17343,16 +17479,13 @@ impl Session {
                         let mut outer_insert = insert_stmt.clone();
                         outer_insert.with.clear();
                         let refs_insert = outer_insert.clone();
-                        let (materialized_ctes, remaining_ctes) = self.materialize_modifying_ctes(
-                            db,
-                            &insert_stmt.with,
-                            insert_stmt.with_recursive,
-                            &catalog,
-                            &mut ctx,
-                            xid,
-                            cid,
-                            |name| insert_statement_references_table(&refs_insert, name),
-                        )?;
+                        let (bound_writable_ctes, materialized_ctes, remaining_ctes) =
+                            Self::bind_modifying_ctes(
+                                &insert_stmt.with,
+                                insert_stmt.with_recursive,
+                                &catalog,
+                                |name| insert_statement_references_table(&refs_insert, name),
+                            )?;
                         outer_insert.with = remaining_ctes;
 
                         let bound = bind_insert_with_outer_scopes_and_ctes(
@@ -17382,6 +17515,14 @@ impl Session {
                             cid,
                             &mut ctx,
                             waited_for_lock,
+                        )?;
+                        self.execute_bound_modifying_ctes(
+                            db,
+                            &bound_writable_ctes,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            cid,
                         )?;
                         crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
                             prepared.stmt,
@@ -17418,21 +17559,19 @@ impl Session {
                             .with
                             .iter()
                             .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
+                        let mut bound_writable_ctes = Vec::new();
                         let bound = if has_writable_ctes {
                             let mut outer_update = update_stmt.clone();
                             outer_update.with.clear();
                             let refs_update = outer_update.clone();
-                            let (materialized_ctes, remaining_ctes) = self
-                                .materialize_modifying_ctes(
-                                    db,
+                            let (writable_ctes, materialized_ctes, remaining_ctes) =
+                                Self::bind_modifying_ctes(
                                     &update_stmt.with,
                                     update_stmt.with_recursive,
                                     &catalog,
-                                    &mut ctx,
-                                    xid,
-                                    cid,
                                     |name| update_statement_references_table(&refs_update, name),
                                 )?;
+                            bound_writable_ctes = writable_ctes;
                             outer_update.with = remaining_ctes;
                             bind_update_with_outer_scopes_and_ctes(
                                 &outer_update,
@@ -17469,6 +17608,16 @@ impl Session {
                             &mut ctx,
                             waited_for_lock,
                         )?;
+                        if has_writable_ctes {
+                            self.execute_bound_modifying_ctes(
+                                db,
+                                &bound_writable_ctes,
+                                &catalog,
+                                &mut ctx,
+                                xid,
+                                cid,
+                            )?;
+                        }
                         crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -17505,21 +17654,19 @@ impl Session {
                             .with
                             .iter()
                             .any(|cte| Self::cte_body_has_writable_insert(&cte.body));
+                        let mut bound_writable_ctes = Vec::new();
                         let bound = if has_writable_ctes {
                             let mut outer_delete = delete_stmt.clone();
                             outer_delete.with.clear();
                             let refs_delete = outer_delete.clone();
-                            let (materialized_ctes, remaining_ctes) = self
-                                .materialize_modifying_ctes(
-                                    db,
+                            let (writable_ctes, materialized_ctes, remaining_ctes) =
+                                Self::bind_modifying_ctes(
                                     &delete_stmt.with,
                                     delete_stmt.with_recursive,
                                     &catalog,
-                                    &mut ctx,
-                                    xid,
-                                    cid,
                                     |name| delete_statement_references_table(&refs_delete, name),
                                 )?;
+                            bound_writable_ctes = writable_ctes;
                             outer_delete.with = remaining_ctes;
                             bind_delete_with_outer_scopes_and_ctes(
                                 &outer_delete,
@@ -17556,6 +17703,16 @@ impl Session {
                             &mut ctx,
                             waited_for_lock,
                         )?;
+                        if has_writable_ctes {
+                            self.execute_bound_modifying_ctes(
+                                db,
+                                &bound_writable_ctes,
+                                &catalog,
+                                &mut ctx,
+                                xid,
+                                cid,
+                            )?;
+                        }
                         crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
                             prepared.stmt,
                             &catalog,
@@ -22890,6 +23047,416 @@ mod tests {
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int32(11), Value::Int32(12)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_with_writable_delete_cte_materializes_returning_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_delete_select");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session
+            .execute(&db, "insert into src values (1), (2), (3)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with del(id) as (delete from src where id <= 2 returning id) \
+                 select count(*), sum(id) from del",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(2), Value::Int64(3)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select id from src").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unreferenced_writable_cte_runs_to_completion() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_unreferenced");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        match session
+            .execute(
+                &db,
+                "with ins as (insert into src values (1), (2), (3) returning id) \
+                 select 99",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(99)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select count(*) from src").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(3)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outer_limit_does_not_stop_writable_cte_completion() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_outer_limit");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session
+            .execute(&db, "insert into src values (1), (2), (3), (4)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with upd(id) as (update src set id = id * 10 returning id) \
+                 select id from upd order by id limit 1",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(10)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(id), max(id) from src")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(4), Value::Int32(10), Value::Int32(40)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_base_table_write_is_not_visible_to_outer_scan() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_visibility");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session.execute(&db, "insert into src values (1)").unwrap();
+        match session
+            .execute(
+                &db,
+                "with ins(id) as (insert into src values (2) returning id) \
+                 select id from src order by id",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select id from src order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recursive_writable_cte_forward_dependency_runs_in_dependency_order() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_forward_dep");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table y (a int4)").unwrap();
+        session.execute(&db, "create table yy (a int4)").unwrap();
+        session
+            .execute(&db, "insert into y values (1), (2), (3)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with recursive t1 as ( \
+                   insert into yy select * from t2 returning * \
+                 ), t2 as ( \
+                   insert into y select * from y returning * \
+                 ) \
+                 select 1",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(a), max(a) from y")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(6), Value::Int32(1), Value::Int32(3)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(a), max(a) from yy")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(3), Value::Int32(1), Value::Int32(3)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn referenced_writable_cte_without_returning_is_rejected() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_no_returning");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        let err = session
+            .execute(
+                &db,
+                "with ins as (insert into src values (1)) select * from ins",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::Parse(err) => {
+                assert_eq!(
+                    err.to_string(),
+                    "WITH query \"ins\" does not have a RETURNING clause"
+                );
+            }
+            other => panic!("expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_writable_cte_is_rejected_as_not_top_level() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_nested");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        let err = session
+            .execute(
+                &db,
+                "select * from ( \
+                   with upd as (update src set id = id + 1 returning *) \
+                   select * from upd \
+                 ) ss",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::Parse(err) => {
+                assert_eq!(
+                    err.to_string(),
+                    "WITH clause containing a data-modifying statement must be at the top level"
+                );
+            }
+            other => panic!("expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn database_execute_select_with_writable_cte_autocommit_materializes_returning_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_db_execute");
+        let db = Database::open(&base, 16).unwrap();
+
+        db.execute(1, "create table src (id int4)").unwrap();
+        match db
+            .execute(
+                1,
+                "with ins(id) as (insert into src values (7) returning id) select id from ins",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(7)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match db.execute(1, "select id from src").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(7)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_delete_statement_level_instead_rule_runs_once() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_delete_rule");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table y (a int4)").unwrap();
+        session
+            .execute(&db, "insert into y values (1), (2), (3)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule y_rule as on delete to y do instead \
+                 insert into y values (42) returning *",
+            )
+            .unwrap();
+
+        match session
+            .execute(&db, "with t as (delete from y returning *) select * from t")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(42)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select a from y order by a").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(42)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_insert_instead_select_rule_joins_original_source() {
+        let base = crate::pgrust::test_support::seeded_temp_dir(
+            "session",
+            "writable_cte_insert_select_rule",
+        );
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table y (i int4)").unwrap();
+        session
+            .execute(&db, "create table rule_rows (i int4)")
+            .unwrap();
+        session
+            .execute(&db, "insert into y values (10), (20), (30)")
+            .unwrap();
+        session
+            .execute(&db, "insert into rule_rows values (1), (2), (3)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule y_ins as on insert to y do instead select i from rule_rows",
+            )
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "with t as (delete from y returning *) insert into y select * from t",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select i from y").unwrap() {
+            StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_on_conflict_update_same_row_returns_no_outer_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_on_conflict");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table withz (k int4 unique, v text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into withz values (2, 'seed')")
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "with simpletup as (select 2 k, 'Green' v), \
+                 upsert_cte as ( \
+                   insert into withz values (2, 'Blue') on conflict (k) do \
+                   update set (k, v) = (select k, v from simpletup where simpletup.k = withz.k) \
+                   returning k, v \
+                 ) \
+                 insert into withz values (2, 'Red') on conflict (k) do \
+                 update set (k, v) = (select k, v from upsert_cte where upsert_cte.k = withz.k) \
+                 returning k, v",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session.execute(&db, "select k, v from withz").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(2), Value::Text("Green".into())]]
+                );
             }
             other => panic!("expected query result, got {other:?}"),
         }

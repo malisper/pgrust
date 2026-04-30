@@ -2200,7 +2200,7 @@ fn collect_relation_access_paths(
         }
         disabled_seq_paths
     };
-    if relkind != 'r' || relation_uses_virtual_scan(relation_oid) {
+    if tablesample.is_some() || relkind != 'r' || relation_uses_virtual_scan(relation_oid) {
         return paths;
     }
     let visible_user_attrs = visible_user_attr_indexes(&desc);
@@ -2538,8 +2538,8 @@ pub(super) fn relation_ordered_index_paths(
             relkind,
             relispopulated: _,
             toast,
-            ..
-        } if *relkind == 'r' => {
+            tablesample,
+        } if *relkind == 'r' && tablesample.is_none() => {
             let filter = base_filter_expr(rel);
             let required_index_only_attrs = collect_required_index_only_attrs_for_root(
                 root,
@@ -2584,12 +2584,13 @@ pub(super) fn relation_index_only_full_scan_paths(
         relation_oid,
         relkind,
         toast,
+        tablesample,
         ..
     } = &rte.kind
     else {
         return Vec::new();
     };
-    if *relkind != 'r' {
+    if *relkind != 'r' || tablesample.is_some() {
         return Vec::new();
     }
     let stats = relation_stats(catalog, *relation_oid, &rte.desc);
@@ -4198,7 +4199,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         let mut child_prune_bounds = Vec::new();
         let mut ordered_child_prune_bounds = Vec::new();
         let mut ordered_child_bounds = Vec::new();
-        let mut ordered_ok = query_order_items.is_some();
+        let mut ordered_ok = query_order_items.is_some() && tablesample.is_none();
         let partition_spec = (relkind == 'p')
             .then(|| partition_cache::partition_spec(root, catalog, relation_oid))
             .flatten();
@@ -4241,7 +4242,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 ),
                 catalog,
             ));
-            if let Some(order_items) = query_order_items.as_ref() {
+            if tablesample.is_none()
+                && let Some(order_items) = query_order_items.as_ref()
+            {
                 let ordered_parent = cheapest_path_by_total(collect_relation_ordered_index_paths(
                     rtindex,
                     heap_rel,

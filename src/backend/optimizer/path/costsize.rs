@@ -5205,8 +5205,31 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
     }
 }
 
+fn table_sample_uses_immediate_outer_columns(sample: Option<&TableSampleClause>) -> bool {
+    sample.is_some_and(|sample| {
+        sample.args.iter().any(expr_uses_immediate_outer_columns)
+            || sample
+                .repeatable
+                .as_ref()
+                .is_some_and(expr_uses_immediate_outer_columns)
+    })
+}
+
 fn expr_uses_outer_relids(expr: &Expr, relids: &[usize]) -> bool {
     expr_uses_outer_relids_at_level(expr, relids, 0)
+}
+
+fn table_sample_uses_outer_relids(sample: Option<&TableSampleClause>, relids: &[usize]) -> bool {
+    sample.is_some_and(|sample| {
+        sample
+            .args
+            .iter()
+            .any(|expr| expr_uses_outer_relids(expr, relids))
+            || sample
+                .repeatable
+                .as_ref()
+                .is_some_and(|expr| expr_uses_outer_relids(expr, relids))
+    })
 }
 
 fn var_uses_outer_relids_at_level(var: &Var, relids: &[usize], sublevels_up: usize) -> bool {
@@ -5359,9 +5382,18 @@ fn query_uses_outer_relids_at_level(query: &Query, relids: &[usize], sublevels_u
             RangeTblEntryKind::Cte { query, .. } | RangeTblEntryKind::Subquery { query } => {
                 query_uses_outer_relids_at_level(query, relids, sublevels_up + 1)
             }
-            RangeTblEntryKind::Result
-            | RangeTblEntryKind::Relation { .. }
-            | RangeTblEntryKind::WorkTable { .. } => false,
+            RangeTblEntryKind::Relation { tablesample, .. } => {
+                tablesample.as_ref().is_some_and(|sample| {
+                    sample
+                        .args
+                        .iter()
+                        .any(|expr| expr_uses_outer_relids_at_level(expr, relids, sublevels_up))
+                        || sample.repeatable.as_ref().is_some_and(|expr| {
+                            expr_uses_outer_relids_at_level(expr, relids, sublevels_up)
+                        })
+                })
+            }
+            RangeTblEntryKind::Result | RangeTblEntryKind::WorkTable { .. } => false,
         })
 }
 
@@ -5540,11 +5572,13 @@ fn project_set_target_uses_outer_relids(target: &ProjectSetTarget, relids: &[usi
 fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
     match path {
         Path::Result { .. }
-        | Path::SeqScan { .. }
         | Path::IndexOnlyScan { .. }
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
+        Path::SeqScan { tablesample, .. } => {
+            table_sample_uses_outer_relids(tablesample.as_ref(), relids)
+        }
         Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => children
             .iter()
             .any(|child| path_uses_outer_relids(child, relids)),
@@ -5762,11 +5796,13 @@ fn project_set_target_uses_immediate_outer_columns(target: &ProjectSetTarget) ->
 fn path_uses_immediate_outer_columns(path: &Path) -> bool {
     match path {
         Path::Result { .. }
-        | Path::SeqScan { .. }
         | Path::IndexOnlyScan { .. }
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
+        Path::SeqScan { tablesample, .. } => {
+            table_sample_uses_immediate_outer_columns(tablesample.as_ref())
+        }
         Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
             children.iter().any(path_uses_immediate_outer_columns)
         }

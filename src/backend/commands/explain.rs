@@ -983,6 +983,14 @@ fn push_verbose_json_plan_with_output(
             let (relation, alias) = explain_relation_and_alias(relation_name);
             let node_type = if matches!(plan, Plan::TidScan { .. }) {
                 "Tid Scan"
+            } else if matches!(
+                plan,
+                Plan::SeqScan {
+                    tablesample: Some(_),
+                    ..
+                }
+            ) {
+                "Sample Scan"
             } else {
                 "Seq Scan"
             };
@@ -2668,14 +2676,14 @@ fn push_nonverbose_plan_details(
                 let args = sample
                     .args
                     .iter()
-                    .map(|expr| render_verbose_expr(expr, &[], ctx))
+                    .map(|expr| render_tablesample_verbose_arg(expr, "real", ctx))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let mut detail = format!("{} ({})", sample.method.to_ascii_lowercase(), args);
                 if let Some(repeatable) = &sample.repeatable {
                     detail.push_str(&format!(
                         " REPEATABLE ({})",
-                        render_verbose_expr(repeatable, &[], ctx)
+                        render_tablesample_verbose_arg(repeatable, "double precision", ctx)
                     ));
                 }
                 lines.push(format!("{prefix}Sampling: {detail}"));
@@ -9015,6 +9023,26 @@ fn aggregate_call_starts_at(chars: &[char], index: usize) -> bool {
                 .get(index..index.saturating_add(prefix.len()))
                 .is_some_and(|candidate| candidate == prefix.as_slice())
         })
+}
+
+fn render_tablesample_verbose_arg(
+    expr: &Expr,
+    type_name: &'static str,
+    ctx: &VerboseExplainContext,
+) -> String {
+    match expr {
+        Expr::Const(value) => format!("'{}'::{type_name}", render_explain_literal(value)),
+        Expr::Cast(inner, ty)
+            if matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
+                && matches!(inner.as_ref(), Expr::Const(_)) =>
+        {
+            render_verbose_expr(expr, &[], ctx)
+        }
+        Expr::Cast(inner, ty) if matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) => {
+            render_verbose_expr(inner, &[], ctx)
+        }
+        _ => render_verbose_expr(expr, &[], ctx),
+    }
 }
 
 fn render_verbose_op_arg(
