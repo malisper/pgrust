@@ -2,13 +2,19 @@ use std::collections::BTreeSet;
 
 use crate::RelFileLocator;
 use crate::backend::executor::{Expr, Plan};
-use crate::backend::parser::{CatalogLookup, FromItem, JoinConstraint, SqlExpr};
+use crate::backend::parser::{CatalogLookup, FromItem, GroupByItem, JoinConstraint, SqlExpr};
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::plannodes::PlannedStmt;
 use crate::include::nodes::primnodes::{RowsFromSource, set_returning_call_exprs};
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
+        Expr::GroupingKey(grouping_key) => collect_rels_from_expr(&grouping_key.expr, rels),
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_rels_from_expr(arg, rels);
+            }
+        }
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_rels_from_expr(arg, rels);
@@ -317,6 +323,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
         Plan::Result { .. } | Plan::WorkTableScan { .. } => {}
         Plan::Append { children, .. }
         | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
             for child in children {
@@ -594,8 +601,8 @@ pub(super) fn collect_direct_relation_oids_from_select(
     if let Some(expr) = &select.where_clause {
         collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
     }
-    for expr in &select.group_by {
-        collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+    for item in &select.group_by {
+        collect_direct_relation_oids_from_group_by_item(item, catalog, visible_ctes, rels);
     }
     if let Some(expr) = &select.having {
         collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
@@ -605,6 +612,30 @@ pub(super) fn collect_direct_relation_oids_from_select(
     }
 
     visible_ctes.truncate(cte_base);
+}
+
+fn collect_direct_relation_oids_from_group_by_item(
+    item: &GroupByItem,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    match item {
+        GroupByItem::Expr(expr) => {
+            collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+        }
+        GroupByItem::List(exprs) => {
+            for expr in exprs {
+                collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+            }
+        }
+        GroupByItem::Empty => {}
+        GroupByItem::Rollup(items) | GroupByItem::Cube(items) | GroupByItem::Sets(items) => {
+            for item in items {
+                collect_direct_relation_oids_from_group_by_item(item, catalog, visible_ctes, rels);
+            }
+        }
+    }
 }
 
 fn collect_direct_relation_oids_from_values(

@@ -2469,6 +2469,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgColumnToastChunkId
             | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
             BuiltinScalarFunction::PgRelationSize => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::BrinSummarizeNewValues => args.len() == 1,
+            BuiltinScalarFunction::BrinSummarizeRange
+            | BuiltinScalarFunction::BrinDesummarizeRange => args.len() == 2,
             BuiltinScalarFunction::PgTableSize | BuiltinScalarFunction::PgTablespaceLocation => {
                 args.len() == 1
             }
@@ -3920,6 +3923,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
+        (
+            "brin_summarize_new_values",
+            BuiltinScalarFunction::BrinSummarizeNewValues,
+        ),
+        (
+            "brin_summarize_range",
+            BuiltinScalarFunction::BrinSummarizeRange,
+        ),
+        (
+            "brin_desummarize_range",
+            BuiltinScalarFunction::BrinDesummarizeRange,
+        ),
         ("pg_table_size", BuiltinScalarFunction::PgTableSize),
         ("pg_num_nulls", BuiltinScalarFunction::NumNulls),
         ("num_nulls", BuiltinScalarFunction::NumNulls),
@@ -4261,6 +4276,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_viewdef_name", BuiltinScalarFunction::PgGetViewDef),
+        (
+            "pg_get_viewdef_name_ext",
+            BuiltinScalarFunction::PgGetViewDef,
+        ),
+        ("pg_get_viewdef_ext", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_viewdef_wrap", BuiltinScalarFunction::PgGetViewDef),
         (
             "pg_get_statisticsobjdef",
             BuiltinScalarFunction::PgGetStatisticsObjDef,
@@ -5729,6 +5751,9 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RowSecurityActive
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationSize
+            | BuiltinScalarFunction::BrinSummarizeNewValues
+            | BuiltinScalarFunction::BrinSummarizeRange
+            | BuiltinScalarFunction::BrinDesummarizeRange
             | BuiltinScalarFunction::PgTableSize
             | BuiltinScalarFunction::PgTablespaceLocation
             | BuiltinScalarFunction::PgRelationIsPublishable

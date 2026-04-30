@@ -5,6 +5,7 @@ use std::collections::HashMap;
 mod bestpath;
 mod constfold;
 mod groupby_rewrite;
+mod grouping_sets;
 mod inherit;
 mod joininfo;
 mod partition_cache;
@@ -238,7 +239,9 @@ fn path_relids(path: &Path) -> Vec<usize> {
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => vec![*source_id],
-        Path::BitmapOr { children, .. } => children.iter().flat_map(path_relids).collect(),
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
+            children.iter().flat_map(path_relids).collect()
+        }
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }

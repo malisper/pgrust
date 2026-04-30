@@ -1661,6 +1661,23 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                 ..*aggref
             }))
         }
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(
+            crate::include::nodes::primnodes::GroupingKeyExpr {
+                expr: Box::new(raise_expr_varlevels(*grouping_key.expr, levels)),
+                ref_id: grouping_key.ref_id,
+            },
+        )),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(
+            crate::include::nodes::primnodes::GroupingFuncExpr {
+                args: grouping_func
+                    .args
+                    .into_iter()
+                    .map(|arg| raise_expr_varlevels(arg, levels))
+                    .collect(),
+                agglevelsup: grouping_func.agglevelsup + levels,
+                ..*grouping_func
+            },
+        )),
         Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
             args: op
                 .args
@@ -5167,6 +5184,32 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 );
+            }
+            if name.eq_ignore_ascii_case("grouping") {
+                if !order_by.is_empty()
+                    || within_group.is_some()
+                    || *distinct
+                    || *func_variadic
+                    || filter.is_some()
+                    || null_treatment.is_some()
+                    || over.is_some()
+                    || args.is_star()
+                {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "GROUPING arguments",
+                        actual: name.clone(),
+                    });
+                }
+                if let Some(grouping_expr) = bind_visible_grouping_func_call(
+                    args_list,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )? {
+                    return Ok(grouping_expr);
+                }
             }
             let (direct_args, aggregate_args, aggregate_order_by) =
                 normalize_aggregate_call(args, order_by, within_group.as_deref());

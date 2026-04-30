@@ -76,7 +76,7 @@ pub(super) fn choose_final_path<'a>(
     }
 }
 
-fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) -> bool {
+pub(super) fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) -> bool {
     let Some(current) = current else {
         return true;
     };
@@ -161,6 +161,18 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
         if preferred_unqualified_left_join_above_nulltest(current, candidate) {
             return false;
         }
+        if preferred_bitmap_and_heap(candidate) && !preferred_bitmap_and_heap(current) {
+            return true;
+        }
+        if preferred_bitmap_and_heap(current) && !preferred_bitmap_and_heap(candidate) {
+            return false;
+        }
+        if preferred_narrow_order_only_index(candidate, current) {
+            return true;
+        }
+        if preferred_narrow_order_only_index(current, candidate) {
+            return false;
+        }
         if preferred_reassociated_lateral_values_hash_join(candidate, current) {
             return true;
         }
@@ -177,6 +189,49 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
     let cmp = compare_path_costs(candidate, current, cost);
     cmp == Ordering::Less
         || (cmp == Ordering::Equal && better_pathkeys(&candidate.pathkeys(), &current.pathkeys()))
+}
+
+fn preferred_narrow_order_only_index(preferred: &Path, other: &Path) -> bool {
+    let Some((preferred_keys, preferred_pathkeys)) = order_only_btree_index_path(preferred) else {
+        return false;
+    };
+    let Some((other_keys, other_pathkeys)) = order_only_btree_index_path(other) else {
+        return false;
+    };
+    preferred_pathkeys == other_pathkeys && preferred_keys < other_keys
+}
+
+fn order_only_btree_index_path(path: &Path) -> Option<(usize, &[PathKey])> {
+    match path {
+        Path::Projection { input, .. } | Path::Filter { input, .. } => {
+            order_only_btree_index_path(input)
+        }
+        Path::IndexOnlyScan {
+            am_oid,
+            keys,
+            index_meta,
+            pathkeys,
+            ..
+        }
+        | Path::IndexScan {
+            am_oid,
+            keys,
+            index_meta,
+            pathkeys,
+            ..
+        } if *am_oid == crate::include::catalog::BTREE_AM_OID
+            && keys.is_empty()
+            && !pathkeys.is_empty() =>
+        {
+            let key_count = if index_meta.indnkeyatts > 0 {
+                index_meta.indnkeyatts as usize
+            } else {
+                index_meta.indkey.len()
+            };
+            Some((key_count, pathkeys))
+        }
+        _ => None,
+    }
 }
 
 fn preferred_partitionwise_join_append(path: &Path) -> bool {
@@ -293,8 +348,23 @@ fn expr_contains_null_test(expr: &Expr) -> bool {
     }
 }
 
+fn preferred_bitmap_and_heap(path: &Path) -> bool {
+    match path {
+        Path::BitmapHeapScan { bitmapqual, .. } => bitmap_tree_contains_and(bitmapqual),
+        _ => false,
+    }
+}
+
 fn path_rows_at_most(path: &Path, max_rows: f64) -> bool {
     path.plan_info().plan_rows.as_f64() <= max_rows
+}
+
+fn bitmap_tree_contains_and(path: &Path) -> bool {
+    match path {
+        Path::BitmapAnd { .. } => true,
+        Path::BitmapOr { children, .. } => children.iter().any(bitmap_tree_contains_and),
+        _ => false,
+    }
 }
 
 fn preferred_parameterized_append_inner_nested_loop(path: &Path) -> bool {
@@ -638,6 +708,7 @@ fn contains_seq_scan(path: &Path) -> bool {
         } => contains_seq_scan(input),
         Path::Append { children, .. }
         | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
         | Path::MergeAppend { children, .. }
         | Path::SetOp { children, .. } => children.iter().any(contains_seq_scan),
         Path::NestedLoopJoin { left, right, .. }
@@ -680,6 +751,7 @@ fn contains_disabled_seq_scan(path: &Path) -> bool {
         } => contains_disabled_seq_scan(input),
         Path::Append { children, .. }
         | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
         | Path::MergeAppend { children, .. }
         | Path::SetOp { children, .. } => children.iter().any(contains_disabled_seq_scan),
         Path::NestedLoopJoin { left, right, .. }

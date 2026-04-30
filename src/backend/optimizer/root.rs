@@ -1096,8 +1096,10 @@ impl PlannerInfo {
 }
 
 fn rewrite_minmax_aggregate_query(query: Query) -> Query {
+    let scalar_empty_grouping_set =
+        query.grouping_sets.len() == 1 && query.grouping_sets[0].is_empty();
     if !query.group_by.is_empty()
-        || !query.grouping_sets.is_empty()
+        || (!query.grouping_sets.is_empty() && !scalar_empty_grouping_set)
         || query.having_qual.is_some()
         || !query.window_clauses.is_empty()
         || query.has_target_srfs
@@ -1144,6 +1146,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         distinct_on: query.distinct_on,
         where_qual: None,
         group_by: Vec::new(),
+        group_by_refs: Vec::new(),
         grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
@@ -1337,6 +1340,13 @@ fn unique_lookup_column_match(local: &Expr, other: &Expr) -> Option<i16> {
 fn expr_contains_local_var_for_unique_lookup(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 0,
+        Expr::GroupingKey(grouping_key) => {
+            expr_contains_local_var_for_unique_lookup(&grouping_key.expr)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(expr_contains_local_var_for_unique_lookup),
         Expr::Aggref(aggref) => {
             aggref
                 .args
@@ -1514,6 +1524,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         distinct_on: Vec::new(),
         where_qual,
         group_by: Vec::new(),
+        group_by_refs: Vec::new(),
         grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
@@ -1609,6 +1620,13 @@ fn raise_outer_varlevels_for_minmax_rewrite(expr: Expr) -> Expr {
 fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
     match expr {
         Expr::SubLink(_) | Expr::SubPlan(_) => true,
+        Expr::GroupingKey(grouping_key) => {
+            expr_contains_sublink_for_minmax_rewrite(&grouping_key.expr)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(expr_contains_sublink_for_minmax_rewrite),
         Expr::Aggref(aggref) => {
             aggref
                 .args
@@ -1953,6 +1971,13 @@ fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
 fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 0,
+        Expr::GroupingKey(grouping_key) => {
+            expr_contains_local_var_outside_subquery(&grouping_key.expr)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
         Expr::Aggref(aggref) => {
             aggref
                 .args
@@ -2269,7 +2294,11 @@ fn build_grouped_target(layout: &AggregateLayout, accumulators: &[AggAccum]) -> 
             aggno,
         }))
     }));
-    PathTarget::new(exprs)
+    let mut sortgrouprefs = Vec::with_capacity(exprs.len());
+    sortgrouprefs.extend(layout.group_by_refs.iter().copied());
+    sortgrouprefs
+        .extend(std::iter::repeat(0).take(layout.passthrough_exprs.len() + accumulators.len()));
+    PathTarget::with_sortgrouprefs(exprs, sortgrouprefs)
 }
 
 fn build_scanjoin_target(
@@ -2362,6 +2391,10 @@ fn collect_window_input_exprs(expr: &Expr, preserve_expr: bool, target: &mut Pat
 fn expr_contains_window_func(expr: &Expr) -> bool {
     match expr {
         Expr::WindowFunc(_) => true,
+        Expr::GroupingKey(grouping_key) => expr_contains_window_func(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => {
+            grouping_func.args.iter().any(expr_contains_window_func)
+        }
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_window_func)
                 || aggref
@@ -2480,6 +2513,14 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
     match expr {
         Expr::Var(_) => push_expr(exprs, expr.clone()),
         Expr::Param(_) => {}
+        Expr::GroupingKey(grouping_key) => {
+            collect_group_input_exprs(&grouping_key.expr, group_by, exprs);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_group_input_exprs(arg, group_by, exprs);
+            }
+        }
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_group_input_exprs(arg, group_by, exprs);
@@ -2627,6 +2668,14 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
     match expr {
         Expr::Var(_) => push_expr(exprs, expr.clone()),
         Expr::Param(_) => {}
+        Expr::GroupingKey(grouping_key) => {
+            collect_supporting_inputs(&grouping_key.expr, exprs);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_supporting_inputs(arg, exprs);
+            }
+        }
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_supporting_inputs(arg, exprs);
@@ -2932,6 +2981,14 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
             }),
         ),
         Expr::Var(_) | Expr::Param(_) | Expr::Const(_) | Expr::Random => {}
+        Expr::GroupingKey(grouping_key) => {
+            collect_query_outer_refs_expr(&grouping_key.expr, levelsup, exprs);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+        }
         Expr::CurrentDate
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

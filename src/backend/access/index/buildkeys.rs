@@ -2,15 +2,16 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::commands::tablecmds::{
     coerce_index_key_to_opckeytype, index_key_values_for_row,
 };
-use crate::backend::executor::value_io::{decode_value, missing_column_value};
-use crate::backend::executor::{ExecError, ExecutorContext};
+use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
+use crate::backend::executor::{ExecError, ExecutorContext, cast_value};
 use crate::backend::parser::{
-    BoundIndexRelation, RelationGetIndexExpressions, RelationGetIndexPredicate,
+    BoundIndexRelation, RelationGetIndexExpressions, RelationGetIndexPredicate, SqlTypeKind,
 };
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::include::access::amapi::IndexBuildContext;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::primnodes::RelationDesc;
 
@@ -24,11 +25,25 @@ pub(crate) fn materialize_heap_row_values(
     heap_desc: &RelationDesc,
     datums: &[Option<&[u8]>],
 ) -> Result<Vec<Value>, CatalogError> {
+    materialize_heap_row_values_with_toast(heap_desc, datums, None)
+}
+
+pub(crate) fn materialize_heap_row_values_with_toast(
+    heap_desc: &RelationDesc,
+    datums: &[Option<&[u8]>],
+    toast: Option<&ToastFetchContext>,
+) -> Result<Vec<Value>, CatalogError> {
     let mut row_values = Vec::with_capacity(heap_desc.columns.len());
     for (index, column) in heap_desc.columns.iter().enumerate() {
         row_values.push(if let Some(datum) = datums.get(index) {
-            decode_value(column, *datum)
-                .map_err(|err| CatalogError::Io(format!("heap decode failed: {err:?}")))?
+            let value = decode_value_with_toast(column, *datum, toast)
+                .map_err(|err| CatalogError::Io(format!("heap decode failed: {err:?}")))?;
+            if column.sql_type.kind == SqlTypeKind::Tid {
+                cast_value(value, column.sql_type)
+                    .map_err(|err| CatalogError::Io(format!("heap tid decode failed: {err:?}")))?
+            } else {
+                value
+            }
         } else {
             missing_column_value(column)
         });
@@ -156,6 +171,7 @@ impl IndexBuildKeyProjector {
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
+                active_grouping_refs: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,

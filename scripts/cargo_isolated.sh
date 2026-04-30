@@ -37,7 +37,7 @@ if [[ "${1:-}" == "--print-target-dir" ]]; then
 fi
 
 if [[ -z "${RUSTC_WRAPPER:-}" ]] && command -v sccache >/dev/null 2>&1; then
-  export RUSTC_WRAPPER=sccache
+  export RUSTC_WRAPPER="$PGRUST_DIR/scripts/rustc_sccache_wrapper.sh"
 fi
 
 exec cargo "$@"

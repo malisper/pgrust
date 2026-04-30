@@ -37,12 +37,12 @@ use crate::backend::parser::{
     CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
     CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
     CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause, DeallocateStatement,
-    DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, InsertSource, InsertStatement,
-    OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
-    PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
-    RuleEvent, SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement,
-    TransactionOptions, UpdateStatement, ValuesStatement, bind_delete,
-    bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
+    DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource,
+    InsertStatement, OrderByItem, ParseError, ParseOptions, PrepareStatement,
+    PreparedExternalParam, PreparedInsert, PreparedStatementQuery, RawTypeName, RawWindowFrame,
+    RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem, SelectStatement, SqlCallArgs,
+    SqlExpr, SqlFunctionArg, Statement, TransactionOptions, UpdateStatement, ValuesStatement,
+    bind_delete, bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
     bind_insert_with_outer_scopes_and_ctes, bind_update, bind_update_with_outer_scopes_and_ctes,
     bound_cte_from_query_rows, cte_body_references_table, delete_statement_references_table,
     insert_statement_references_table, merge_statement_references_table, pg_plan_query_with_config,
@@ -3474,6 +3474,7 @@ impl Session {
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
+            active_grouping_refs: Vec::new(),
             subplans: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
@@ -4549,6 +4550,37 @@ impl Session {
             crate::backend::parser::ReindexTargetKind::Index
             | crate::backend::parser::ReindexTargetKind::Table => None,
         }
+    }
+
+    fn reindex_partitioned_relation_transaction_error(
+        &self,
+        catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
+        stmt: &crate::backend::parser::ReindexIndexStatement,
+    ) -> Option<ExecError> {
+        let relation = catalog.lookup_any_relation(&stmt.index_name)?;
+        let (command, kind) = match (&stmt.kind, relation.relkind) {
+            (crate::backend::parser::ReindexTargetKind::Index, 'I') => {
+                ("REINDEX INDEX", "partitioned index")
+            }
+            (crate::backend::parser::ReindexTargetKind::Table, 'p') => {
+                ("REINDEX TABLE", "partitioned table")
+            }
+            _ => return None,
+        };
+        let name = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .map(|row| {
+                let schema = catalog
+                    .namespace_row_by_oid(row.relnamespace)
+                    .map(|namespace| namespace.nspname)
+                    .unwrap_or_else(|| "public".into());
+                format!("{schema}.{}", row.relname)
+            })
+            .unwrap_or_else(|| stmt.index_name.clone());
+        Some(ExecError::Parse(
+            ParseError::ActiveSqlTransaction(command)
+                .with_context(format!("while reindexing {kind} \"{name}\"")),
+        ))
     }
 
     fn event_trigger_command_tag(stmt: &Statement) -> Option<&'static str> {
@@ -9275,7 +9307,8 @@ impl Session {
                 .as_ref()
                 .map(|expr| Self::substitute_sql_expr(expr, subst))
                 .transpose()?,
-            group_by: Self::substitute_exprs(&select.group_by, subst)?,
+            group_by: Self::substitute_group_by_items(&select.group_by, subst)?,
+            group_by_distinct: select.group_by_distinct,
             having: select
                 .having
                 .as_ref()
@@ -9864,6 +9897,36 @@ impl Session {
             .iter()
             .map(|expr| Self::substitute_sql_expr(expr, subst))
             .collect()
+    }
+
+    fn substitute_group_by_items(
+        items: &[GroupByItem],
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<Vec<GroupByItem>, ExecError> {
+        items
+            .iter()
+            .map(|item| Self::substitute_group_by_item(item, subst))
+            .collect()
+    }
+
+    fn substitute_group_by_item(
+        item: &GroupByItem,
+        subst: &mut PreparedParamSubstitution<'_>,
+    ) -> Result<GroupByItem, ExecError> {
+        Ok(match item {
+            GroupByItem::Expr(expr) => GroupByItem::Expr(Self::substitute_sql_expr(expr, subst)?),
+            GroupByItem::Empty => GroupByItem::Empty,
+            GroupByItem::List(exprs) => GroupByItem::List(Self::substitute_exprs(exprs, subst)?),
+            GroupByItem::Rollup(items) => {
+                GroupByItem::Rollup(Self::substitute_group_by_items(items, subst)?)
+            }
+            GroupByItem::Cube(items) => {
+                GroupByItem::Cube(Self::substitute_group_by_items(items, subst)?)
+            }
+            GroupByItem::Sets(items) => {
+                GroupByItem::Sets(Self::substitute_group_by_items(items, subst)?)
+            }
+        })
     }
 
     fn substitute_param_ref(
@@ -11576,6 +11639,11 @@ impl Session {
                         return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(command)));
                     }
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    if let Some(err) =
+                        self.reindex_partitioned_relation_transaction_error(&catalog, reindex_stmt)
+                    {
+                        return Err(err);
+                    }
                     match reindex_stmt.kind {
                         crate::backend::parser::ReindexTargetKind::Index => {
                             if let Some(index) =

@@ -7,9 +7,9 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
 use crate::include::nodes::plannodes::{AggregatePhase, AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
-    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, WindowClause,
-    XmlExpr, user_attrno,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, GroupingFuncExpr, JoinType,
+    OpExpr, ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var,
+    WindowClause, XmlExpr, user_attrno,
 };
 
 use super::inherit::{append_translation, translate_append_rel_expr};
@@ -59,6 +59,7 @@ impl Path {
             | Self::IndexScan { plan_info, .. }
             | Self::BitmapIndexScan { plan_info, .. }
             | Self::BitmapOr { plan_info, .. }
+            | Self::BitmapAnd { plan_info, .. }
             | Self::BitmapHeapScan { plan_info, .. }
             | Self::Filter { plan_info, .. }
             | Self::NestedLoopJoin { plan_info, .. }
@@ -106,7 +107,9 @@ impl Path {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
+            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } | Self::BitmapAnd { .. } => {
+                Vec::new()
+            }
             Self::BitmapHeapScan { desc, .. } => desc
                 .columns
                 .iter()
@@ -181,7 +184,9 @@ impl Path {
             | Self::BitmapHeapScan {
                 source_id, desc, ..
             } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
-            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } => Vec::new(),
+            Self::BitmapIndexScan { .. } | Self::BitmapOr { .. } | Self::BitmapAnd { .. } => {
+                Vec::new()
+            }
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
             | Self::IncrementalSort { input, .. }
@@ -198,10 +203,18 @@ impl Path {
                 slot_id,
                 phase,
                 group_by,
+                group_by_refs,
                 passthrough_exprs,
                 accumulators,
                 ..
-            } => aggregate_output_vars(*slot_id, *phase, group_by, passthrough_exprs, accumulators),
+            } => aggregate_output_vars(
+                *slot_id,
+                *phase,
+                group_by,
+                group_by_refs,
+                passthrough_exprs,
+                accumulators,
+            ),
             Self::WindowAgg {
                 slot_id,
                 output_columns,
@@ -327,6 +340,7 @@ impl Path {
             | Self::IndexScan { pathtarget, .. }
             | Self::BitmapIndexScan { pathtarget, .. }
             | Self::BitmapOr { pathtarget, .. }
+            | Self::BitmapAnd { pathtarget, .. }
             | Self::BitmapHeapScan { pathtarget, .. }
             | Self::Filter { pathtarget, .. }
             | Self::NestedLoopJoin { pathtarget, .. }
@@ -356,6 +370,7 @@ impl Path {
             | Self::SeqScan { .. }
             | Self::BitmapIndexScan { .. }
             | Self::BitmapOr { .. }
+            | Self::BitmapAnd { .. }
             | Self::BitmapHeapScan { .. }
             | Self::CteScan { .. }
             | Self::WorkTableScan { .. }
@@ -731,7 +746,9 @@ fn project_set_output_target(targets: &[ProjectSetTarget]) -> PathTarget {
             .iter()
             .map(|target| match target {
                 ProjectSetTarget::Scalar(entry) => entry.ressortgroupref,
-                ProjectSetTarget::Set { .. } => 0,
+                ProjectSetTarget::Set {
+                    ressortgroupref, ..
+                } => *ressortgroupref,
             })
             .collect(),
     )
@@ -761,13 +778,28 @@ pub(super) fn aggregate_output_vars(
     slot_id: usize,
     phase: AggregatePhase,
     group_by: &[Expr],
+    group_by_refs: &[usize],
     passthrough_exprs: &[Expr],
     accumulators: &[AggAccum],
 ) -> Vec<Expr> {
     let mut vars =
         Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
-        vars.push(slot_var(slot_id, user_attrno(index), expr_sql_type(expr)));
+        let var = slot_var(slot_id, user_attrno(index), expr_sql_type(expr));
+        if let Some(ref_id) = group_by_refs
+            .get(index)
+            .copied()
+            .filter(|ref_id| *ref_id != 0)
+        {
+            vars.push(Expr::GroupingKey(Box::new(
+                crate::include::nodes::primnodes::GroupingKeyExpr {
+                    expr: Box::new(var),
+                    ref_id,
+                },
+            )));
+        } else {
+            vars.push(var);
+        }
     }
     for (index, expr) in passthrough_exprs.iter().enumerate() {
         vars.push(slot_var(
@@ -796,9 +828,24 @@ fn aggregate_expr_index(
     group_by: &[Expr],
     passthrough_exprs: &[Expr],
 ) -> Option<usize> {
+    if let Expr::GroupingKey(grouping_key) = expr {
+        return group_by
+            .iter()
+            .position(|group_expr| group_expr == expr)
+            .or_else(|| {
+                group_by.iter().position(|group_expr| {
+                    matches!(group_expr, Expr::GroupingKey(group_expr)
+                        if group_expr.ref_id == grouping_key.ref_id)
+                })
+            });
+    }
     group_by
         .iter()
-        .position(|group_expr| group_expr == expr)
+        .position(|group_expr| {
+            group_expr == expr
+                || matches!(group_expr, Expr::GroupingKey(grouping_key)
+                    if grouping_key.expr.as_ref() == expr)
+        })
         .or_else(|| {
             passthrough_exprs
                 .iter()
@@ -813,6 +860,14 @@ pub(super) fn lower_agg_output_expr(
     passthrough_exprs: &[Expr],
     agg_output_layout: &[Expr],
 ) -> Expr {
+    if let Expr::GroupingKey(grouping_key) = &expr
+        && let Some(layout_expr) = agg_output_layout.iter().find(|layout_expr| {
+            matches!(layout_expr, Expr::GroupingKey(layout_key)
+                if layout_key.ref_id == grouping_key.ref_id)
+        })
+    {
+        return layout_expr.clone();
+    }
     if let Some(index) = aggregate_expr_index(&expr, group_by, passthrough_exprs) {
         return agg_output_layout[index].clone();
     }
@@ -821,6 +876,27 @@ pub(super) fn lower_agg_output_expr(
             .get(group_by.len() + passthrough_exprs.len() + aggref.aggno)
             .cloned()
             .unwrap_or_else(|| panic!("aggregate output slot {} missing", aggref.aggno)),
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(
+            crate::include::nodes::primnodes::GroupingKeyExpr {
+                expr: Box::new(lower_agg_output_expr(
+                    *grouping_key.expr,
+                    group_by,
+                    passthrough_exprs,
+                    agg_output_layout,
+                )),
+                ref_id: grouping_key.ref_id,
+            },
+        )),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: grouping_func
+                .args
+                .into_iter()
+                .map(|arg| {
+                    lower_agg_output_expr(arg, group_by, passthrough_exprs, agg_output_layout)
+                })
+                .collect(),
+            ..*grouping_func
+        })),
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op
                 .args
@@ -1075,6 +1151,8 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::Var(var) => var.vartype,
         Expr::Param(param) => param.paramtype,
         Expr::Aggref(aggref) => aggref.aggtype,
+        Expr::GroupingKey(grouping_key) => expr_sql_type(&grouping_key.expr),
+        Expr::GroupingFunc(_) => SqlType::new(SqlTypeKind::Int4),
         Expr::WindowFunc(window_func) => window_func.result_type,
         Expr::Op(op) => op.opresulttype,
         Expr::Func(func) => func

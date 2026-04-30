@@ -56,8 +56,21 @@ pub(super) fn used_parent_attrs_for_rte(
         collect_parent_expr_used_attrs(root, rtindex, width, expr, &mut used);
     }
     for grouping_set in &root.parse.grouping_sets {
-        for expr in grouping_set {
-            collect_parent_expr_used_attrs(root, rtindex, width, expr, &mut used);
+        for ref_id in grouping_set {
+            if let Some(index) = root
+                .parse
+                .group_by_refs
+                .iter()
+                .position(|candidate| candidate == ref_id)
+            {
+                collect_parent_expr_used_attrs(
+                    root,
+                    rtindex,
+                    width,
+                    &root.parse.group_by[index],
+                    &mut used,
+                );
+            }
         }
     }
     for accum in &root.parse.accumulators {
@@ -157,6 +170,14 @@ fn collect_expr_used_attrs(expr: &Expr, rtindex: usize, width: usize, used: &mut
             }
             if let Some(filter) = aggref.aggfilter.as_ref() {
                 collect_expr_used_attrs(filter, rtindex, width, used);
+            }
+        }
+        Expr::GroupingKey(grouping_key) => {
+            collect_expr_used_attrs(&grouping_key.expr, rtindex, width, used);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for expr in &grouping_func.args {
+                collect_expr_used_attrs(expr, rtindex, width, used);
             }
         }
         Expr::WindowFunc(func) => {
@@ -339,6 +360,13 @@ fn expr_contains_prune_volatile(expr: &Expr, catalog: &dyn CatalogLookup) -> boo
                     .as_ref()
                     .is_some_and(|filter| expr_contains_prune_volatile(filter, catalog))
         }
+        Expr::GroupingKey(grouping_key) => {
+            expr_contains_prune_volatile(&grouping_key.expr, catalog)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|arg| expr_contains_prune_volatile(arg, catalog)),
         Expr::WindowFunc(func) => {
             func.args
                 .iter()

@@ -221,6 +221,7 @@ pub struct ExprEvalBindings {
     pub external_params: HashMap<usize, Value>,
     pub outer_tuple: Option<Vec<Value>>,
     pub outer_system_bindings: Vec<SystemVarBinding>,
+    pub grouping_ref_stack: Vec<Vec<usize>>,
     pub inner_tuple: Option<Vec<Value>>,
     pub inner_system_bindings: Vec<SystemVarBinding>,
     pub index_tuple: Option<Vec<Value>>,
@@ -569,6 +570,7 @@ pub struct ExecutorContext {
     pub expr_bindings: ExprEvalBindings,
     pub case_test_values: Vec<Value>,
     pub system_bindings: Vec<SystemVarBinding>,
+    pub active_grouping_refs: Vec<usize>,
     pub subplans: Vec<Plan>,
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,

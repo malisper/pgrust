@@ -5,7 +5,7 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::CONSTRAINT_PRIMARY;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use crate::include::nodes::primnodes::{
-    AttrNumber, OpExprKind, WindowFuncKind, set_returning_call_exprs,
+    AttrNumber, GroupingFuncExpr, OpExprKind, WindowFuncKind, set_returning_call_exprs,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -219,6 +219,13 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
                     .as_ref()
                     .and_then(|expr| expr_references_local_cte(expr, local_ctes))
             }),
+        Expr::GroupingKey(grouping_key) => {
+            expr_references_local_cte(&grouping_key.expr, local_ctes)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
         Expr::WindowFunc(window) => window
             .args
             .iter()
@@ -1233,6 +1240,180 @@ fn grouped_key_expr(group_key_exprs: &[Expr], index: usize) -> Expr {
     })
 }
 
+fn grouped_output_key_expr(group_key_exprs: &[Expr], index: usize) -> Expr {
+    grouped_key_expr(group_key_exprs, index)
+}
+
+fn grouping_key_ref(expr: &Expr, fallback: usize) -> usize {
+    match expr {
+        Expr::GroupingKey(grouping_key) => grouping_key.ref_id,
+        _ => fallback,
+    }
+}
+
+fn grouping_key_inner(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::GroupingKey(grouping_key) => &grouping_key.expr,
+        _ => expr,
+    }
+}
+
+fn grouping_key_matches_arg(group_key: &Expr, bound_arg: &Expr) -> bool {
+    if grouping_key_inner(group_key) == bound_arg {
+        return true;
+    }
+    matches!(
+        grouping_key_inner(group_key),
+        Expr::Row { fields, .. } if fields.iter().any(|(_, field)| field == bound_arg)
+    )
+}
+
+fn grouping_arg_expr(group_key: &Expr, bound_arg: &Expr) -> Expr {
+    if grouping_key_inner(group_key) == bound_arg {
+        group_key.clone()
+    } else {
+        bound_arg.clone()
+    }
+}
+
+fn bind_grouping_func_call(
+    args: &[SqlFunctionArg],
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    if args.is_empty() || args.len() > 31 || args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "GROUPING arguments",
+            actual: format!("GROUPING with {} arguments", args.len()),
+        });
+    }
+
+    let mut grouping_args = Vec::new();
+    let mut refs = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        let (group_index, key_expr) = if let Some(group_index) = group_by_exprs
+            .iter()
+            .position(|group_expr| group_expr == &arg.value)
+        {
+            (group_index, grouped_key_expr(group_key_exprs, group_index))
+        } else {
+            let bound = bind_grouped_plain_expr(
+                &arg.value,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )?;
+            let Some(group_index) = group_key_exprs
+                .iter()
+                .position(|group_key| grouping_key_matches_arg(group_key, &bound))
+            else {
+                return Err(ParseError::DetailedError {
+                    message: "arguments to GROUPING must be grouping expressions of the associated query level".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42803",
+                });
+            };
+            let key_expr = grouped_key_expr(group_key_exprs, group_index);
+            let arg_expr = grouping_arg_expr(&key_expr, &bound);
+            (group_index, arg_expr)
+        };
+        let _ = index;
+        refs.push(grouping_key_ref(
+            &grouped_key_expr(group_key_exprs, group_index),
+            group_index + 1,
+        ));
+        grouping_args.push(key_expr);
+    }
+    Ok(Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+        args: grouping_args,
+        refs,
+        agglevelsup: 0,
+    })))
+}
+
+pub(super) fn bind_visible_grouping_func_call(
+    args: &[SqlFunctionArg],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    _grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Option<Expr>, ParseError> {
+    let visible_scopes = current_visible_aggregate_scopes();
+    if visible_scopes.is_empty() {
+        return Ok(None);
+    };
+    if args.is_empty() || args.len() > 31 || args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "GROUPING arguments",
+            actual: format!("GROUPING with {} arguments", args.len()),
+        });
+    }
+
+    let bound_args = args
+        .iter()
+        .map(|arg| {
+            bind_expr_with_outer_and_ctes(
+                &arg.value,
+                input_scope,
+                catalog,
+                outer_scopes,
+                None,
+                ctes,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for visible_scope in visible_scopes {
+        if visible_scope.group_key_exprs.is_empty() {
+            continue;
+        }
+        let raised_group_keys = visible_scope
+            .group_key_exprs
+            .iter()
+            .cloned()
+            .map(|expr| raise_expr_varlevels(expr, visible_scope.levelsup))
+            .collect::<Vec<_>>();
+        let mut grouping_args = Vec::new();
+        let mut refs = Vec::new();
+        let mut matched = true;
+        for bound in &bound_args {
+            let Some((group_index, key_expr)) = raised_group_keys
+                .iter()
+                .enumerate()
+                .find(|(_, group_key)| grouping_key_matches_arg(group_key, bound))
+                .map(|(index, group_key)| (index, group_key.clone()))
+            else {
+                matched = false;
+                break;
+            };
+            refs.push(grouping_key_ref(&key_expr, group_index + 1));
+            grouping_args.push(grouping_arg_expr(&key_expr, bound));
+        }
+        if matched {
+            return Ok(Some(Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+                args: grouping_args,
+                refs,
+                agglevelsup: visible_scope.levelsup,
+            }))));
+        }
+    }
+
+    Err(ParseError::DetailedError {
+        message: "arguments to GROUPING must be grouping expressions of the associated query level"
+            .into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42803",
+    })
+}
+
 pub(super) fn bind_agg_output_expr(
     expr: &SqlExpr,
     group_by_exprs: &[SqlExpr],
@@ -1350,16 +1531,16 @@ pub(super) fn bind_agg_output_expr_in_clause(
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
         if gk == expr {
-            return Ok(grouped_key_expr(group_key_exprs, i));
+            return Ok(grouped_output_key_expr(group_key_exprs, i));
         }
     }
     if let Ok(bound_expr) =
         bind_grouped_plain_expr(expr, input_scope, catalog, outer_scopes, grouped_outer)
         && let Some(i) = group_key_exprs
             .iter()
-            .position(|group_key| group_key == &bound_expr)
+            .position(|group_key| grouping_key_matches_arg(group_key, &bound_expr))
     {
-        return Ok(grouped_key_expr(group_key_exprs, i));
+        return Ok(grouped_output_key_expr(group_key_exprs, i));
     }
 
     match expr {
@@ -1549,6 +1730,31 @@ pub(super) fn bind_agg_output_expr_in_clause(
             null_treatment,
             over,
         } => {
+            if name.eq_ignore_ascii_case("grouping") {
+                if !order_by.is_empty()
+                    || within_group.is_some()
+                    || *distinct
+                    || *func_variadic
+                    || filter.is_some()
+                    || null_treatment.is_some()
+                    || over.is_some()
+                    || args.is_star()
+                {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "GROUPING arguments",
+                        actual: name.clone(),
+                    });
+                }
+                return bind_grouping_func_call(
+                    args.args(),
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                );
+            }
             let (direct_args, aggregate_args, aggregate_order_by) =
                 normalize_aggregate_call(args, order_by, within_group.as_deref());
             if over.is_none()
@@ -1954,7 +2160,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         && grouped_system_column.varattno == system_column.varattno
                         && grouped_system_column.varlevelsup == system_column.varlevelsup
                     {
-                        return Ok(grouped_key_expr(group_key_exprs, i));
+                        return Ok(grouped_output_key_expr(group_key_exprs, i));
                     }
                 }
                 return Err(ParseError::UnexpectedToken {
@@ -2606,26 +2812,27 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 "CASE result expressions with a common type",
             )?;
             let (bound_arg, arg_type) = if let Some(arg) = arg {
-                (
-                    Some(bind_agg_output_expr(
+                let bound = bind_agg_output_expr(
+                    arg,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )?;
+                let arg_type = expr_sql_type_hint(&bound).unwrap_or_else(|| {
+                    grouped_infer_sql_expr_type(
                         arg,
-                        group_by_exprs,
-                        group_key_exprs,
                         input_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )?),
-                    Some(grouped_infer_sql_expr_type(
-                        arg,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                    )),
-                )
+                    )
+                });
+                (Some(bound), Some(arg_type))
             } else {
                 (None, None)
             };

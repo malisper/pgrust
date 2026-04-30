@@ -101,6 +101,14 @@ pub(crate) fn compare_order_values(
         (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
         (Value::EnumOid(a), Value::EnumOid(b)) => Ok(a.cmp(b)),
         (Value::InternalChar(a), Value::InternalChar(b)) => Ok(a.cmp(b)),
+        (Value::InternalChar(a), b) if b.as_text().is_some() => {
+            let left = render_internal_char_text(*a);
+            compare_text_values(&left, b.as_text().unwrap(), collation_oid)
+        }
+        (a, Value::InternalChar(b)) if a.as_text().is_some() => {
+            let right = render_internal_char_text(*b);
+            compare_text_values(a.as_text().unwrap(), &right, collation_oid)
+        }
         (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
         (Value::Xid8(a), Value::Xid8(b)) => Ok(a.cmp(b)),
         (Value::PgLsn(a), Value::PgLsn(b)) => Ok(a.cmp(b)),
@@ -123,6 +131,8 @@ pub(crate) fn compare_order_values(
         (Value::TimestampTz(a), Value::TimestampTz(b)) => Ok(a.cmp(b)),
         (Value::Interval(a), Value::Interval(b)) => Ok(a.cmp_key().cmp(&b.cmp_key())),
         (Value::Tid(a), Value::Tid(b)) => Ok(a.cmp(b)),
+        (Value::Tid(a), b) if b.as_text().is_some() => compare_tid_to_text(a, b.as_text().unwrap()),
+        (a, Value::Tid(b)) if a.as_text().is_some() => compare_text_to_tid(a.as_text().unwrap(), b),
         (Value::Bit(a), Value::Bit(b)) => Ok(compare_bit_strings(a, b)),
         (Value::Bytea(a), Value::Bytea(b)) => Ok(a.cmp(b)),
         (Value::Uuid(a), Value::Uuid(b)) => Ok(a.cmp(b)),
@@ -168,6 +178,36 @@ pub(crate) fn compare_order_values(
         }
         _ => Ok(Ordering::Equal),
     }
+}
+
+fn parse_tid_comparison_text(
+    text: &str,
+) -> Result<crate::include::access::itemptr::ItemPointerData, ExecError> {
+    match cast_value(
+        Value::Text(CompactString::new(text)),
+        SqlType::new(SqlTypeKind::Tid),
+    )? {
+        Value::Tid(tid) => Ok(tid),
+        other => Err(ExecError::TypeMismatch {
+            op: "tid",
+            left: other,
+            right: Value::Text(CompactString::new(text)),
+        }),
+    }
+}
+
+fn compare_tid_to_text(
+    left: &crate::include::access::itemptr::ItemPointerData,
+    right: &str,
+) -> Result<Ordering, ExecError> {
+    Ok(left.cmp(&parse_tid_comparison_text(right)?))
+}
+
+fn compare_text_to_tid(
+    left: &str,
+    right: &crate::include::access::itemptr::ItemPointerData,
+) -> Result<Ordering, ExecError> {
+    Ok(parse_tid_comparison_text(left)?.cmp(right))
 }
 
 pub(crate) fn eval_and(left: Value, right: Value) -> Result<Value, ExecError> {
@@ -243,6 +283,12 @@ pub(crate) fn compare_values(
         (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(l == r)),
         (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(l == r)),
         (Value::Tid(l), Value::Tid(r)) => Ok(Value::Bool(l == r)),
+        (Value::Tid(l), r) if r.as_text().is_some() => Ok(Value::Bool(
+            compare_tid_to_text(l, r.as_text().unwrap())? == Ordering::Equal,
+        )),
+        (l, Value::Tid(r)) if l.as_text().is_some() => Ok(Value::Bool(
+            compare_text_to_tid(l.as_text().unwrap(), r)? == Ordering::Equal,
+        )),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(l == r)),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(l == r)),
@@ -1492,6 +1538,16 @@ pub(crate) fn order_values(
         (Value::Xid8(l), Value::Xid8(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::PgLsn(l), Value::PgLsn(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Tid(l), Value::Tid(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Tid(l), r) if r.as_text().is_some() => Ok(Value::Bool(compare_ord(
+            compare_tid_to_text(l, r.as_text().unwrap())?,
+            Ordering::Equal,
+            op,
+        ))),
+        (l, Value::Tid(r)) if l.as_text().is_some() => Ok(Value::Bool(compare_ord(
+            compare_text_to_tid(l.as_text().unwrap(), r)?,
+            Ordering::Equal,
+            op,
+        ))),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Bit(l), Value::Bit(r)) => {
             let ordering = compare_bit_strings(l, r);
@@ -1635,6 +1691,28 @@ pub(crate) fn order_values(
         }
         (Value::Multirange(l), Value::Multirange(r)) => {
             let ordering = compare_multirange_values(l, r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::InternalChar(l), r) if r.as_text().is_some() => {
+            let left_text = render_internal_char_text(*l);
+            let ordering = compare_text_values(&left_text, r.as_text().unwrap(), collation_oid)?;
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (l, Value::InternalChar(r)) if l.as_text().is_some() => {
+            let right_text = render_internal_char_text(*r);
+            let ordering = compare_text_values(l.as_text().unwrap(), &right_text, collation_oid)?;
             Ok(Value::Bool(match op {
                 "<" => ordering == Ordering::Less,
                 "<=" => ordering != Ordering::Greater,

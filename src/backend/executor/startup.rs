@@ -2,13 +2,13 @@ use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanState, GatherState, HashJoinState,
-    HashState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MaterializeState, MemoizeState, MergeAppendState, MergeJoinState, NestedLoopJoinState,
-    NodeExecStats, OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState,
-    RecursiveWorkTable, ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState,
-    ValuesState, WindowAggState, WorkTableScanState,
+    AggregateState, AppendState, BitmapAndState, BitmapHeapScanState, BitmapIndexScanState,
+    BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanState, GatherState,
+    HashJoinState, HashState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState,
+    LockRowsState, MaterializeState, MemoizeState, MergeAppendState, MergeJoinState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
+    RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState, SetOpState,
+    SubqueryScanState, UniqueState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
@@ -60,6 +60,8 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
                     .as_ref()
                     .is_some_and(expr_uses_outer_columns)
         }
+        Expr::GroupingKey(grouping_key) => expr_uses_outer_columns(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_uses_outer_columns),
         Expr::WindowFunc(window_func) => {
             window_func.args.iter().any(expr_uses_outer_columns)
                 || match &window_func.kind {
@@ -296,6 +298,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
         | Plan::WorkTableScan { .. } => false,
         Plan::BitmapHeapScan {
             bitmapqual,
@@ -471,6 +474,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
             slot: TupleSlot::empty(desc.columns.len()),
             current_bindings: Vec::new(),
+            current_grouping_refs: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -504,6 +508,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 next_index: 0,
                 slot: TupleSlot::empty(desc.columns.len()),
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -518,6 +523,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             previous_values: None,
             slot: TupleSlot::empty(0),
             current_bindings: Vec::new(),
+            current_grouping_refs: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -720,6 +726,16 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             children,
         } => Box::new(BitmapOrState {
+            children: children.into_iter().map(build_bitmap_qual_state).collect(),
+            bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
+            executed: false,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::BitmapAnd {
+            plan_info,
+            children,
+        } => Box::new(BitmapAndState {
             children: children.into_iter().map(build_bitmap_qual_state).collect(),
             bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
             executed: false,
@@ -1270,6 +1286,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 rows: None,
                 next_index: 0,
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1332,6 +1349,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 column_names,
                 slot: TupleSlot::empty(ncols),
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1343,6 +1361,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
             disabled,
             input,
             group_by,
+            group_by_refs,
+            grouping_sets,
             passthrough_exprs,
             accumulators,
             semantic_accumulators: _,
@@ -1358,6 +1378,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 phase,
                 disabled,
                 group_by,
+                group_by_refs,
+                grouping_sets,
                 passthrough_exprs,
                 accumulators,
                 having,
@@ -1367,6 +1389,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 key_buffer,
                 runtimes: None,
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1383,6 +1406,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             result_rows: None,
             next_index: 0,
             current_bindings: Vec::new(),
+            current_grouping_refs: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),
@@ -1437,6 +1461,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 next_index: 0,
                 slot: TupleSlot::empty(width),
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1549,6 +1574,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 next_index: 0,
                 slot: TupleSlot::empty(column_names.len()),
                 current_bindings: Vec::new(),
+                current_grouping_refs: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
             })
@@ -1608,6 +1634,16 @@ fn build_bitmap_qual_state(plan: Plan) -> BitmapQualState {
             plan_info,
             children,
         } => BitmapQualState::Or(Box::new(BitmapOrState {
+            children: children.into_iter().map(build_bitmap_qual_state).collect(),
+            bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
+            executed: false,
+            plan_info,
+            stats: NodeExecStats::default(),
+        })),
+        Plan::BitmapAnd {
+            plan_info,
+            children,
+        } => BitmapQualState::And(Box::new(BitmapAndState {
             children: children.into_iter().map(build_bitmap_qual_state).collect(),
             bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
             executed: false,

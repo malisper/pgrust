@@ -16,6 +16,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
+use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, BoolExprType, BuiltinScalarFunction, Expr, INNER_VAR, JoinType, OUTER_VAR,
@@ -201,6 +202,7 @@ fn annotate_modify_subplan_runtime_labels(
             annotate_modify_index_key_runtime_labels(keys, outer_names, inner_names);
         }
         Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
@@ -331,6 +333,14 @@ fn collect_expr_varnos(expr: &Expr, out: &mut BTreeSet<usize>) {
             }
             if let Some(filter) = &aggref.aggfilter {
                 collect_expr_varnos(filter, out);
+            }
+        }
+        Expr::GroupingKey(grouping_key) => {
+            collect_expr_varnos(&grouping_key.expr, out);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_expr_varnos(arg, out);
             }
         }
         Expr::WindowFunc(window_func) => {
@@ -557,7 +567,9 @@ pub(crate) fn apply_runtime_pruning_for_explain_plan(
                 }
             }
         }
-        Plan::BitmapOr { children, .. } | Plan::SetOp { children, .. } => {
+        Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => {
             *children = prune_runtime_explain_children(std::mem::take(children), ctx);
         }
         Plan::BitmapHeapScan { bitmapqual, .. } => prune_runtime_explain_box(bitmapqual, ctx),
@@ -638,6 +650,7 @@ fn renumber_append_child_aliases(plan: &mut Plan, ordinal: usize) {
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
         | Plan::SetOp { children, .. } => {
             for child in children {
                 renumber_append_child_aliases(child, ordinal);
@@ -722,6 +735,10 @@ fn expr_contains_external_param(expr: &Expr) -> bool {
                     .aggfilter
                     .as_ref()
                     .is_some_and(expr_contains_external_param)
+        }
+        Expr::GroupingKey(grouping_key) => expr_contains_external_param(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => {
+            grouping_func.args.iter().any(expr_contains_external_param)
         }
         Expr::WindowFunc(window_func) => window_func.args.iter().any(expr_contains_external_param),
         Expr::Op(op) => op.args.iter().any(expr_contains_external_param),
@@ -1509,6 +1526,8 @@ fn dummy_empty_group_aggregate_display_plan(plan: &Plan) -> Option<Plan> {
             display_items,
         }),
         group_by: group_by[keep_from..].to_vec(),
+        group_by_refs: (1..=group_by.len().saturating_sub(keep_from)).collect(),
+        grouping_sets: Vec::new(),
         passthrough_exprs: passthrough_exprs.clone(),
         accumulators: accumulators.clone(),
         semantic_accumulators: semantic_accumulators.clone(),
@@ -1994,6 +2013,8 @@ fn push_nonverbose_plan_details(
             strategy,
             disabled,
             group_by,
+            group_by_refs,
+            grouping_sets,
             having,
             output_columns,
             semantic_output_names,
@@ -2003,9 +2024,10 @@ fn push_nonverbose_plan_details(
                 lines.push(format!("{prefix}Disabled: true"));
             }
             let suppress_dummy_group_key = *strategy == AggregateStrategy::Sorted
+                && grouping_sets.is_empty()
                 && const_false_filter_result_plan(input).is_some();
-            if !group_by.is_empty() && !suppress_dummy_group_key {
-                let mut group_items = Vec::new();
+            if !suppress_dummy_group_key {
+                let mut group_items_full = Vec::new();
                 let sort_group_names = context_has_relation_aliases(ctx)
                     .then(|| aggregate_group_names_from_input_sort(input, group_by.len(), ctx))
                     .flatten();
@@ -2031,15 +2053,38 @@ fn push_nonverbose_plan_details(
                                 qualify_aggregate_group_keys,
                             )
                         });
-                    if !group_items.contains(&rendered) {
-                        group_items.push(rendered);
+                    group_items_full.push(rendered);
+                }
+                let mut group_items = Vec::new();
+                for rendered in &group_items_full {
+                    if !group_items.contains(rendered) {
+                        group_items.push(rendered.clone());
                     }
                 }
                 group_items = group_items_postgres_display_order(group_items);
-                if *strategy == AggregateStrategy::Mixed {
+                let group_hashable = group_by
+                    .iter()
+                    .map(grouping_expr_hashable)
+                    .collect::<Vec<_>>();
+                if !grouping_sets.is_empty() {
+                    let key_label = if *strategy == AggregateStrategy::Mixed {
+                        "Hash Key"
+                    } else {
+                        "Group Key"
+                    };
+                    push_nonverbose_grouping_set_keys(
+                        &prefix,
+                        key_label,
+                        grouping_sets,
+                        group_by_refs,
+                        &group_items_full,
+                        &group_hashable,
+                        lines,
+                    );
+                } else if !group_items.is_empty() && *strategy == AggregateStrategy::Mixed {
                     lines.push(format!("{prefix}Hash Key: {}", group_items.join(", ")));
                     lines.push(format!("{prefix}Group Key: ()"));
-                } else {
+                } else if !group_items.is_empty() {
                     lines.push(format!("{prefix}Group Key: {}", group_items.join(", ")));
                 }
             }
@@ -2319,6 +2364,175 @@ fn push_nonverbose_plan_details(
     }
 }
 
+fn push_nonverbose_grouping_set_keys(
+    prefix: &str,
+    key_label: &str,
+    grouping_sets: &[Vec<usize>],
+    group_by_refs: &[usize],
+    group_items: &[String],
+    group_hashable: &[bool],
+    lines: &mut Vec<String>,
+) {
+    if key_label == "Group Key" {
+        push_nonverbose_sorted_grouping_set_keys(
+            prefix,
+            grouping_sets,
+            group_by_refs,
+            group_items,
+            lines,
+        );
+        return;
+    }
+
+    let mut empty_sets = 0usize;
+    for set in grouping_sets {
+        if set.is_empty() {
+            empty_sets += 1;
+            continue;
+        }
+        let key_label = if key_label == "Hash Key"
+            && !grouping_set_hashable(set, group_by_refs, group_hashable)
+        {
+            "Group Key"
+        } else {
+            key_label
+        };
+        let rendered = set
+            .iter()
+            .filter_map(|ref_id| {
+                group_by_refs
+                    .iter()
+                    .position(|candidate| candidate == ref_id)
+                    .and_then(|index| group_items.get(index))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !rendered.is_empty() {
+            lines.push(format!("{prefix}{key_label}: {rendered}"));
+        }
+    }
+    for _ in 0..empty_sets {
+        lines.push(format!("{prefix}Group Key: ()"));
+    }
+}
+
+fn push_nonverbose_sorted_grouping_set_keys(
+    prefix: &str,
+    grouping_sets: &[Vec<usize>],
+    group_by_refs: &[usize],
+    group_items: &[String],
+    lines: &mut Vec<String>,
+) {
+    for (chain_index, chain) in grouping_set_display_chains(grouping_sets)
+        .iter()
+        .enumerate()
+    {
+        if chain_index > 0
+            && let Some(sort_set) = chain.first()
+        {
+            let sort_key = render_grouping_set_refs(sort_set, group_by_refs, group_items);
+            if !sort_key.is_empty() {
+                lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+        }
+        let key_prefix = if chain_index == 0 {
+            prefix.to_string()
+        } else {
+            format!("{prefix}  ")
+        };
+        for set in chain {
+            let rendered = if set.is_empty() {
+                "()".to_string()
+            } else {
+                render_grouping_set_refs(set, group_by_refs, group_items)
+            };
+            if !rendered.is_empty() {
+                lines.push(format!("{key_prefix}Group Key: {rendered}"));
+            }
+        }
+    }
+}
+
+fn grouping_set_display_chains(grouping_sets: &[Vec<usize>]) -> Vec<Vec<Vec<usize>>> {
+    let mut chains = Vec::new();
+    let mut current = Vec::<Vec<usize>>::new();
+    for set in grouping_sets {
+        if current
+            .last()
+            .is_some_and(|previous| !grouping_set_refs_subset(set, previous))
+        {
+            chains.push(std::mem::take(&mut current));
+        }
+        current.push(set.clone());
+    }
+    if !current.is_empty() {
+        chains.push(current);
+    }
+    chains
+}
+
+fn grouping_set_refs_subset(smaller: &[usize], larger: &[usize]) -> bool {
+    smaller.iter().all(|ref_id| larger.contains(ref_id))
+}
+
+fn render_grouping_set_refs(
+    set: &[usize],
+    group_by_refs: &[usize],
+    group_items: &[String],
+) -> String {
+    set.iter()
+        .filter_map(|ref_id| {
+            group_by_refs
+                .iter()
+                .position(|candidate| candidate == ref_id)
+                .and_then(|index| group_items.get(index))
+        })
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn grouping_key_inner_expr(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::GroupingKey(grouping_key) => &grouping_key.expr,
+        _ => expr,
+    }
+}
+
+fn grouping_expr_hashable(expr: &Expr) -> bool {
+    expr_sql_type_hint(grouping_key_inner_expr(expr))
+        .map(grouping_type_hashable)
+        .unwrap_or(true)
+}
+
+fn grouping_type_hashable(sql_type: SqlType) -> bool {
+    if sql_type.is_array {
+        return grouping_type_hashable(sql_type.element_type());
+    }
+    !matches!(
+        sql_type.kind,
+        SqlTypeKind::VarBit
+            | SqlTypeKind::Bit
+            | SqlTypeKind::Record
+            | SqlTypeKind::Composite
+            | SqlTypeKind::Json
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::Xml
+    )
+}
+
+fn grouping_set_hashable(set: &[usize], group_by_refs: &[usize], group_hashable: &[bool]) -> bool {
+    set.iter().all(|ref_id| {
+        group_by_refs
+            .iter()
+            .position(|candidate| candidate == ref_id)
+            .and_then(|index| group_hashable.get(index))
+            .copied()
+            .unwrap_or(true)
+    })
+}
+
 fn group_items_postgres_display_order(group_items: Vec<String>) -> Vec<String> {
     if group_items.len() < 3
         || group_items
@@ -2434,12 +2648,24 @@ fn nonverbose_sort_items(
     display_items: &[String],
     ctx: &VerboseExplainContext,
 ) -> Vec<String> {
-    if !display_items.is_empty() {
+    if !display_items.is_empty()
+        && !display_items
+            .iter()
+            .any(|item| explain_display_item_is_debug(item))
+    {
         return display_items
             .iter()
-            .map(|item| {
-                remap_sort_display_item_through_aggregate(input, item)
-                    .unwrap_or_else(|| item.clone())
+            .zip(items.iter())
+            .map(|(display_item, item)| {
+                let mut rendered = remap_sort_display_item_through_aggregate(input, display_item)
+                    .unwrap_or_else(|| display_item.clone());
+                if sort_item_needs_extra_expression_parens(&item.expr, &rendered) {
+                    rendered = format!("({rendered})");
+                }
+                if item.descending && !rendered.ends_with(" DESC") {
+                    rendered.push_str(" DESC");
+                }
+                rendered
             })
             .collect();
     }
@@ -2447,16 +2673,65 @@ fn nonverbose_sort_items(
     {
         input.column_names()
     } else {
-        qualified_scan_output_names(input)
+        sort_input_column_names(input)
+            .or_else(|| qualified_scan_output_names(input))
             .unwrap_or_else(|| verbose_plan_output_exprs(input, ctx, true))
     };
-    items
+    let mut rendered = items
         .iter()
         .map(|item| {
             partial_aggregate_append_sort_item(input, item, ctx)
                 .unwrap_or_else(|| render_nonverbose_sort_item(item, &input_names, ctx))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if matches!(input, Plan::FunctionScan { .. }) {
+        rendered = rendered
+            .into_iter()
+            .map(strip_self_qualified_identifiers)
+            .fold(Vec::new(), |mut items, item| {
+                if !items.contains(&item) {
+                    items.push(item);
+                }
+                items
+            });
+    }
+    rendered
+}
+
+fn explain_display_item_is_debug(item: &str) -> bool {
+    item.contains("Var(Var {")
+        || item.contains("Aggref(")
+        || item.contains("WindowFunc(")
+        || item.contains("GroupingKey(")
+        || item.contains("GroupingFunc(")
+}
+
+fn sort_input_column_names(plan: &Plan) -> Option<Vec<String>> {
+    match plan {
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        } => Some(qualified_scan_output_exprs(relation_name, desc)),
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. } => sort_input_column_names(input),
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children.first().and_then(sort_input_column_names)
+        }
+        _ => None,
+    }
 }
 
 fn partial_aggregate_append_sort_item(
@@ -2618,6 +2893,9 @@ fn render_nonverbose_sort_item(
     ctx: &VerboseExplainContext,
 ) -> String {
     let mut rendered = render_verbose_expr(&item.expr, input_names, ctx);
+    if sort_item_needs_extra_expression_parens(&item.expr, &rendered) {
+        rendered = format!("({rendered})");
+    }
     if item.descending {
         rendered.push_str(" DESC");
     }
@@ -2631,6 +2909,21 @@ fn render_nonverbose_sort_item(
         });
     }
     rendered
+}
+
+fn sort_item_needs_extra_expression_parens(expr: &Expr, rendered: &str) -> bool {
+    let already_wrapped = rendered.starts_with('(') && rendered.ends_with(')');
+    (rendered.starts_with('(') && !already_wrapped)
+        || (!already_wrapped && matches!(expr, Expr::GroupingFunc(_)))
+        || (!already_wrapped
+            && matches!(
+                expr,
+                Expr::Func(func)
+                    if matches!(
+                        func.implementation,
+                        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoDistance)
+                    )
+            ))
 }
 
 fn render_nonverbose_aggregate_group_key(
@@ -3160,13 +3453,20 @@ fn verbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String
         Plan::Aggregate {
             strategy,
             phase,
+            group_by,
+            group_by_refs,
+            grouping_sets,
             accumulators,
             ..
-        } => Some(aggregate_plan_label(
-            *strategy,
-            *phase,
-            accumulators.is_empty(),
-        )),
+        } => {
+            let display_strategy =
+                display_aggregate_strategy(*strategy, group_by, group_by_refs, grouping_sets);
+            Some(aggregate_plan_label(
+                display_strategy,
+                *phase,
+                accumulators.is_empty() && grouping_sets.is_empty(),
+            ))
+        }
         Plan::NestedLoopJoin { .. } => Some("Nested Loop".into()),
         Plan::HashJoin { .. } => Some("Hash Join".into()),
         Plan::MergeJoin { .. } => Some("Merge Join".into()),
@@ -3205,6 +3505,33 @@ fn aggregate_plan_label(
         crate::include::nodes::plannodes::AggregatePhase::Complete => base.to_string(),
         crate::include::nodes::plannodes::AggregatePhase::Partial => format!("Partial {base}"),
         crate::include::nodes::plannodes::AggregatePhase::Finalize => format!("Finalize {base}"),
+    }
+}
+
+fn display_aggregate_strategy(
+    strategy: AggregateStrategy,
+    group_by: &[Expr],
+    group_by_refs: &[usize],
+    grouping_sets: &[Vec<usize>],
+) -> AggregateStrategy {
+    if group_by.is_empty() && !grouping_sets.is_empty() && grouping_sets.iter().all(Vec::is_empty) {
+        AggregateStrategy::Plain
+    } else if strategy == AggregateStrategy::Mixed
+        && !grouping_sets.is_empty()
+        && grouping_sets.iter().all(|set| !set.is_empty())
+        && {
+            let group_hashable = group_by
+                .iter()
+                .map(grouping_expr_hashable)
+                .collect::<Vec<_>>();
+            grouping_sets
+                .iter()
+                .all(|set| grouping_set_hashable(set, group_by_refs, &group_hashable))
+        }
+    {
+        AggregateStrategy::Hashed
+    } else {
+        strategy
     }
 }
 
@@ -3254,6 +3581,19 @@ fn nonverbose_plan_label(
         Plan::Values { .. } => Some(format!(
             "Values Scan on {}",
             ctx.values_scan_name.as_deref().unwrap_or("\"*VALUES*\"")
+        )),
+        Plan::Aggregate {
+            strategy,
+            phase,
+            group_by,
+            group_by_refs,
+            grouping_sets,
+            accumulators,
+            ..
+        } => Some(aggregate_plan_label(
+            display_aggregate_strategy(*strategy, group_by, group_by_refs, grouping_sets),
+            *phase,
+            accumulators.is_empty() && grouping_sets.is_empty(),
         )),
         Plan::FunctionScan {
             call,
@@ -4427,23 +4767,48 @@ fn push_verbose_plan_details(
             input,
             strategy,
             group_by,
+            group_by_refs,
+            grouping_sets,
             having,
             ..
         } => {
             let input_names = verbose_plan_output_exprs(input, ctx, true);
-            if !group_by.is_empty() {
-                let mut group_items = Vec::new();
+            if !group_by.is_empty() || !grouping_sets.is_empty() {
+                let mut group_items_full = Vec::new();
                 for expr in group_by {
                     let rendered = render_verbose_expr(expr, &input_names, ctx);
-                    if !group_items.contains(&rendered) {
-                        group_items.push(rendered);
+                    group_items_full.push(rendered);
+                }
+                let mut group_items = Vec::new();
+                for rendered in &group_items_full {
+                    if !group_items.contains(rendered) {
+                        group_items.push(rendered.clone());
                     }
                 }
                 let group_key = group_items.join(", ");
-                if *strategy == AggregateStrategy::Mixed {
+                let group_hashable = group_by
+                    .iter()
+                    .map(grouping_expr_hashable)
+                    .collect::<Vec<_>>();
+                if !grouping_sets.is_empty() {
+                    let key_label = if *strategy == AggregateStrategy::Mixed {
+                        "Hash Key"
+                    } else {
+                        "Group Key"
+                    };
+                    push_nonverbose_grouping_set_keys(
+                        &prefix,
+                        key_label,
+                        grouping_sets,
+                        group_by_refs,
+                        &group_items_full,
+                        &group_hashable,
+                        lines,
+                    );
+                } else if !group_items.is_empty() && *strategy == AggregateStrategy::Mixed {
                     lines.push(format!("{prefix}Hash Key: {group_key}"));
                     lines.push(format!("{prefix}Group Key: ()"));
-                } else {
+                } else if !group_items.is_empty() {
                     lines.push(format!("{prefix}Group Key: {group_key}"));
                 }
             }
@@ -5045,6 +5410,7 @@ fn collect_leaf_relation_bases(plan: &Plan, bases: &mut Vec<String>) {
         }
         Plan::BitmapIndexScan { .. }
         | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
         | Plan::FunctionScan { .. }
         | Plan::Result { .. }
         | Plan::Values { .. }
@@ -5192,7 +5558,8 @@ fn collect_inherited_relation_leaf_sources(
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. }
-        | Plan::BitmapOr { children, .. } => {
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => {
             for child in children {
                 collect_inherited_relation_leaf_sources(
                     child,
@@ -5542,7 +5909,7 @@ fn plan_join_output_exprs(
             desc,
             ..
         } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
-        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } | Plan::BitmapAnd { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
@@ -5947,7 +6314,7 @@ fn verbose_plan_output_exprs(
             desc,
             ..
         } => qualified_base_scan_output_exprs(relation_name, desc),
-        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
+        Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } | Plan::BitmapAnd { .. } => Vec::new(),
         Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
         | Plan::Memoize { input, .. }
@@ -6648,6 +7015,26 @@ fn render_verbose_aggref(
     format!("{name}({})", args.join(", "))
 }
 
+fn render_verbose_window_func(
+    window_func: &crate::include::nodes::primnodes::WindowFuncExpr,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = match &window_func.kind {
+        WindowFuncKind::Aggregate(aggref) => render_verbose_aggref(aggref, column_names, ctx),
+        WindowFuncKind::Builtin(func) => {
+            let args = window_func
+                .args
+                .iter()
+                .map(|arg| render_verbose_expr(arg, column_names, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({args})", func.name())
+        }
+    };
+    format!("({rendered} OVER w{})", window_func.winref)
+}
+
 fn render_verbose_join_expr(
     expr: &Expr,
     left_names: &[String],
@@ -6857,6 +7244,18 @@ fn render_verbose_expr(
         return rendered;
     }
     match expr {
+        Expr::GroupingKey(grouping_key) => {
+            render_verbose_expr(&grouping_key.expr, column_names, ctx)
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            let args = grouping_func
+                .args
+                .iter()
+                .map(|arg| render_verbose_expr(arg, column_names, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("GROUPING({args})")
+        }
         Expr::Var(var) => render_var_name(var.varattno, column_names)
             .or_else(|| render_system_var_name(var.varattno, column_names))
             .unwrap_or_else(|| {
@@ -6986,6 +7385,7 @@ fn render_verbose_expr(
             }
         },
         Expr::Aggref(aggref) => render_verbose_aggref(aggref, column_names, ctx),
+        Expr::WindowFunc(window_func) => render_verbose_window_func(window_func, column_names, ctx),
         Expr::SetReturning(srf) => render_verbose_set_returning_call(&srf.call, ctx),
         Expr::ScalarArrayOp(_) => render_explain_expr(expr, column_names),
         _ => strip_outer_parens(&render_explain_expr(expr, column_names)),
@@ -7367,7 +7767,9 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => Vec::new(),
-        Plan::BitmapOr { children, .. } => children.iter().collect(),
+        Plan::BitmapOr { children, .. } | Plan::BitmapAnd { children, .. } => {
+            children.iter().collect()
+        }
         Plan::BitmapHeapScan { bitmapqual, .. } => vec![bitmapqual.as_ref()],
         Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
             flattened_append_children(children)
@@ -7550,6 +7952,7 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
         | Plan::BitmapHeapScan { .. }
         | Plan::Limit { .. }
         | Plan::LockRows { .. }
@@ -7711,6 +8114,12 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
 fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) {
     match expr {
         Expr::SubPlan(subplan) => out.push(subplan),
+        Expr::GroupingKey(grouping_key) => collect_direct_expr_subplans(&grouping_key.expr, out),
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_direct_expr_subplans(arg, out);
+            }
+        }
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_direct_expr_subplans(arg, out);
@@ -7954,6 +8363,10 @@ fn expr_column_name<'a>(expr: &Expr, column_names: &'a [String]) -> Option<&'a s
 fn expr_contains_exec_param(expr: &Expr) -> bool {
     match expr {
         Expr::Param(param) if param.paramkind == ParamKind::Exec => true,
+        Expr::GroupingKey(grouping_key) => expr_contains_exec_param(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => {
+            grouping_func.args.iter().any(expr_contains_exec_param)
+        }
         Expr::Op(op) => op.args.iter().any(expr_contains_exec_param),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_exec_param),
         Expr::Case(case_expr) => {

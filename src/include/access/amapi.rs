@@ -16,6 +16,7 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::tidbitmap::TidBitmap;
+use crate::include::nodes::primnodes::ToastRelationRef;
 use crate::pgrust::database::{LargeObjectRuntime, SequenceRuntime, TransactionWaiter};
 use crate::{BufferPool, ClientId};
 
@@ -60,6 +61,7 @@ pub struct IndexBuildContext {
     pub snapshot: Snapshot,
     pub heap_relation: RelFileLocator,
     pub heap_desc: RelationDesc,
+    pub heap_toast: Option<ToastRelationRef>,
     pub index_relation: RelFileLocator,
     pub index_name: String,
     pub index_desc: RelationDesc,
@@ -123,6 +125,7 @@ pub struct IndexVacuumContext {
     pub interrupts: Arc<InterruptState>,
     pub heap_relation: RelFileLocator,
     pub heap_desc: RelationDesc,
+    pub heap_toast: Option<ToastRelationRef>,
     pub index_relation: RelFileLocator,
     pub index_name: String,
     pub index_desc: RelationDesc,

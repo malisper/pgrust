@@ -11,7 +11,9 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::backend::utils::misc::notices::{push_notice, push_warning};
+use crate::backend::utils::misc::notices::{
+    push_backend_notice, push_notice, push_warning, push_warning_with_hint,
+};
 use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
@@ -22,9 +24,8 @@ use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
-    GIST_RANGE_FAMILY_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, RANGE_GIST_OPCLASS_OID,
-    SPGIST_AM_OID, builtin_range_rows, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
+    builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::RelOption;
@@ -70,6 +71,82 @@ fn cannot_reindex_system_catalogs_concurrently_error() -> ExecError {
     }
 }
 
+fn cannot_reindex_exclusion_index_concurrently_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "concurrent index creation for exclusion constraints is not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn push_reindex_verbose_notice(index_name: &str) {
+    push_backend_notice(
+        "INFO",
+        "00000",
+        format!("index \"{index_name}\" was reindexed"),
+        None,
+        None,
+    );
+}
+
+fn missing_catalog_toast_index_reindex_error(
+    kind: &crate::backend::parser::ReindexTargetKind,
+    index_name: &str,
+    concurrently: bool,
+) -> Option<ExecError> {
+    if !matches!(kind, crate::backend::parser::ReindexTargetKind::Index) {
+        return None;
+    }
+    let basename = catalog_toast_relation_basename(index_name)?;
+    let lower = basename.to_ascii_lowercase();
+    if !lower.ends_with("_index") {
+        return None;
+    }
+    if concurrently {
+        return Some(cannot_reindex_system_catalogs_concurrently_error());
+    }
+    // :HACK: Some bootstrap catalog toast indexes are not materialized as
+    // normal relcache entries yet. Match PostgreSQL's SQL-visible permission
+    // error for REINDEX until those toast indexes exist in the catalog.
+    Some(ExecError::DetailedError {
+        message: format!("permission denied for index {basename}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+fn catalog_toast_relation_basename(name: &str) -> Option<&str> {
+    let (schema, basename) = name.split_once('.')?;
+    if !schema.eq_ignore_ascii_case("pg_toast") {
+        return None;
+    }
+    basename
+        .to_ascii_lowercase()
+        .starts_with("pg_toast_")
+        .then_some(basename)
+}
+
+fn permission_denied_for_catalog_toast_table_error(name: &str) -> Option<ExecError> {
+    let basename = catalog_toast_relation_basename(name)?;
+    Some(ExecError::DetailedError {
+        message: format!("permission denied for table {basename}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+fn reindex_missing_relation_error(name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("relation \"{name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P01",
+    }
+}
+
 fn relation_name_for_reindex_notice(
     catalog: &dyn crate::backend::parser::CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
@@ -78,6 +155,55 @@ fn relation_name_for_reindex_notice(
         .class_row_by_oid(relation.relation_oid)
         .map(|row| row.relname)
         .unwrap_or_else(|| relation.relation_oid.to_string())
+}
+
+fn qualified_index_name_for_reindex_warning(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    index: &crate::backend::parser::BoundIndexRelation,
+) -> String {
+    catalog
+        .class_row_by_oid(index.relation_oid)
+        .and_then(|row| {
+            catalog
+                .namespace_row_by_oid(row.relnamespace)
+                .map(|namespace| format!("{}.{}", namespace.nspname, row.relname))
+        })
+        .unwrap_or_else(|| index.name.clone())
+}
+
+fn ensure_reindex_schema_owner(
+    db: &Database,
+    client_id: ClientId,
+    namespace_oid: u32,
+    schema_name: &str,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<(), ExecError> {
+    let catalog = db.lazy_catalog_lookup(client_id, Some((xid, cid)), None);
+    let Some(namespace) = catalog.namespace_row_by_oid(namespace_oid) else {
+        return Err(ExecError::DetailedError {
+            message: format!("schema \"{schema_name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "3F000",
+        });
+    };
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db.txn_auth_catalog(client_id, xid, cid).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "authorization catalog",
+            actual: format!("{err:?}"),
+        })
+    })?;
+    if auth.has_effective_membership(namespace.nspowner, &auth_catalog) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be owner of schema {schema_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
 }
 
 fn map_unique_index_build_violation(
@@ -123,6 +249,10 @@ fn ensure_index_expression_immutable(
 ) -> Result<(), ExecError> {
     match expr {
         Expr::Var(_) | Expr::Const(_) | Expr::Param(_) | Expr::CaseTest(_) => Ok(()),
+        Expr::GroupingKey(grouping_key) => {
+            ensure_index_expression_immutable(&grouping_key.expr, catalog)
+        }
+        Expr::GroupingFunc(_) => Err(index_expression_immutable_error()),
         Expr::Aggref(_) | Expr::WindowFunc(_) | Expr::SubLink(_) | Expr::SubPlan(_) => {
             Err(index_expression_immutable_error())
         }
@@ -692,6 +822,34 @@ fn btree_opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
         ) && matches!(type_oid, TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID))
 }
 
+fn index_opclass_accepts_type(
+    access_method_oid: u32,
+    opcintype: u32,
+    opcfamily: u32,
+    type_oid: u32,
+    sql_type: crate::backend::parser::SqlType,
+) -> bool {
+    use crate::include::catalog::{
+        ANYARRAYOID, ANYMULTIRANGEOID, ANYRANGEOID, BPCHAR_TYPE_OID, BTREE_AM_OID, CIDR_TYPE_OID,
+        GIST_RANGE_FAMILY_OID, INET_TYPE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    };
+
+    let is_range_type = builtin_range_rows()
+        .iter()
+        .any(|row| row.rngtypid == type_oid);
+    opcintype == type_oid
+        || (opcintype == INET_TYPE_OID && type_oid == CIDR_TYPE_OID)
+        || (matches!(
+            opcintype,
+            TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
+        ) && matches!(type_oid, TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID))
+        || (opcintype == ANYARRAYOID && sql_type.is_array)
+        || (opcintype == ANYRANGEOID && (is_range_type || sql_type.is_range()))
+        || (opcintype == ANYMULTIRANGEOID && sql_type.is_multirange())
+        || (is_range_type && opcfamily == GIST_RANGE_FAMILY_OID)
+        || (access_method_oid == BTREE_AM_OID && btree_opclass_accepts_type(opcintype, type_oid))
+}
+
 fn catalog_type_oid(
     catalog: &dyn crate::backend::parser::CatalogLookup,
     sql_type: crate::backend::parser::SqlType,
@@ -1226,9 +1384,6 @@ impl Database {
                 })?;
             let type_name = index_type_name_for_oid(self, client_id, txn_ctx, type_oid);
             let opclass = if let Some(opclass_name) = column.opclass.as_deref() {
-                let is_range_type = builtin_range_rows()
-                    .iter()
-                    .any(|row| row.rngtypid == type_oid);
                 let opclass_lookup_name = opclass_name
                     .rsplit_once('.')
                     .map(|(_, name)| name)
@@ -1238,12 +1393,13 @@ impl Database {
                     .find(|row| {
                         row.opcmethod == access_method.oid
                             && row.opcname.eq_ignore_ascii_case(opclass_lookup_name)
-                            && (row.opcintype == type_oid
-                                || (row.opcintype == crate::include::catalog::INET_TYPE_OID
-                                    && type_oid == crate::include::catalog::CIDR_TYPE_OID)
-                                || (is_range_type && row.opcfamily == GIST_RANGE_FAMILY_OID)
-                                || (access_method.oid == BTREE_AM_OID
-                                    && btree_opclass_accepts_type(row.opcintype, type_oid)))
+                            && index_opclass_accepts_type(
+                                access_method.oid,
+                                row.opcintype,
+                                row.opcfamily,
+                                type_oid,
+                                sql_type,
+                            )
                     })
                     .cloned()
             } else {
@@ -1859,6 +2015,7 @@ impl Database {
             snapshot,
             heap_relation: relation.rel,
             heap_desc: relation.desc.clone(),
+            heap_toast: relation.toast,
             index_relation: index_entry.rel,
             index_name: index_name.to_string(),
             index_desc: index_entry.desc.clone(),
@@ -2153,6 +2310,7 @@ impl Database {
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
+                active_grouping_refs: Vec::new(),
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,
@@ -2428,16 +2586,6 @@ impl Database {
         if access_method_name.eq_ignore_ascii_case("rtree") {
             push_notice("substituting access method \"gist\" for obsolete method \"rtree\"");
             access_method_name = "gist".into();
-        }
-        if access_method_name.eq_ignore_ascii_case("brin")
-            && create_stmt
-                .columns
-                .iter()
-                .any(|column| column.expr_sql.is_some())
-        {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "BRIN expression indexes".into(),
-            )));
         }
         let mut key_columns = create_stmt.columns.clone();
         reject_system_columns_in_index(&key_columns, create_stmt.predicate_sql.as_deref())?;
@@ -2754,6 +2902,7 @@ impl Database {
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
+            active_grouping_refs: Vec::new(),
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: false,
@@ -2874,11 +3023,13 @@ impl Database {
             | crate::backend::parser::ReindexTargetKind::Table => {
                 let entry = catalog
                     .lookup_any_relation(&reindex_stmt.index_name)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("relation \"{}\" does not exist", reindex_stmt.index_name),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "42P01",
+                    .ok_or_else(|| {
+                        missing_catalog_toast_index_reindex_error(
+                            &reindex_stmt.kind,
+                            &reindex_stmt.index_name,
+                            reindex_stmt.concurrently,
+                        )
+                        .unwrap_or_else(|| reindex_missing_relation_error(&reindex_stmt.index_name))
                     })?;
                 self.table_locks.lock_table_interruptible(
                     entry.rel,
@@ -2924,6 +3075,7 @@ impl Database {
                     &catalog,
                     &reindex_stmt.index_name,
                     reindex_stmt.concurrently,
+                    reindex_stmt.verbose,
                     xid,
                     cid,
                     catalog_effects,
@@ -2949,12 +3101,21 @@ impl Database {
                 {
                     return Err(cannot_reindex_system_catalogs_concurrently_error());
                 }
-                ensure_relation_owner(self, client_id, &relation, &reindex_stmt.index_name)?;
+                if let Err(err) =
+                    ensure_relation_owner(self, client_id, &relation, &reindex_stmt.index_name)
+                {
+                    return Err(permission_denied_for_catalog_toast_table_error(
+                        &reindex_stmt.index_name,
+                    )
+                    .unwrap_or(err));
+                }
                 if relation.relkind == 'p' {
                     self.reindex_partitioned_table_indexes_in_transaction(
                         client_id,
                         &catalog,
                         &relation,
+                        reindex_stmt.concurrently,
+                        reindex_stmt.verbose,
                         xid,
                         cid,
                         catalog_effects,
@@ -2968,10 +3129,20 @@ impl Database {
                                 client_id,
                                 &catalog,
                                 index.relation_oid,
-                            )
+                            ) && (!reindex_stmt.concurrently || index.index_meta.indisvalid)
                         })
                         .count();
-                    if index_count == 0 {
+                    self.reindex_table_indexes_in_transaction(
+                        client_id,
+                        &catalog,
+                        &relation,
+                        reindex_stmt.concurrently,
+                        reindex_stmt.verbose,
+                        xid,
+                        cid,
+                        catalog_effects,
+                    )?;
+                    if index_count == 0 && relation.relkind != 'm' {
                         if reindex_stmt.concurrently {
                             push_notice(format!(
                                 "table \"{}\" has no indexes that can be reindexed concurrently",
@@ -2984,14 +3155,6 @@ impl Database {
                             ));
                         }
                     }
-                    self.reindex_table_indexes_in_transaction(
-                        client_id,
-                        &catalog,
-                        &relation,
-                        xid,
-                        cid,
-                        catalog_effects,
-                    )?;
                 }
             }
             crate::backend::parser::ReindexTargetKind::Schema => {
@@ -3018,12 +3181,22 @@ impl Database {
                     client_id,
                     &catalog,
                     namespace_oid,
+                    reindex_stmt.concurrently,
+                    reindex_stmt.verbose,
                     xid,
                     cid,
                     catalog_effects,
                 )? {
                     return Ok(StatementResult::AffectedRows(0));
                 }
+                ensure_reindex_schema_owner(
+                    self,
+                    client_id,
+                    namespace_oid,
+                    &reindex_stmt.index_name,
+                    xid,
+                    cid,
+                )?;
                 if reindex_stmt.concurrently {
                     // :HACK: PostgreSQL's concurrent schema reindex is a
                     // multi-transaction catalog dance. The create_index
@@ -3039,6 +3212,7 @@ impl Database {
                     Some(namespace_oid),
                     ReindexCatalogFilter::All,
                     reindex_stmt.concurrently,
+                    reindex_stmt.verbose,
                     xid,
                     cid,
                     catalog_effects,
@@ -3063,6 +3237,7 @@ impl Database {
                     None,
                     ReindexCatalogFilter::UserOnly,
                     reindex_stmt.concurrently,
+                    reindex_stmt.verbose,
                     xid,
                     cid,
                     catalog_effects,
@@ -3100,6 +3275,7 @@ impl Database {
                     pg_catalog_oid,
                     ReindexCatalogFilter::SystemOnly,
                     reindex_stmt.concurrently,
+                    reindex_stmt.verbose,
                     xid,
                     cid,
                     catalog_effects,
@@ -3115,19 +3291,19 @@ impl Database {
         catalog: &dyn crate::backend::parser::CatalogLookup,
         index_name: &str,
         concurrently: bool,
+        verbose: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<(), ExecError> {
-        let index_entry =
-            catalog
-                .lookup_any_relation(index_name)
-                .ok_or_else(|| ExecError::DetailedError {
-                    message: format!("relation \"{}\" does not exist", index_name),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42P01",
-                })?;
+        let index_entry = catalog.lookup_any_relation(index_name).ok_or_else(|| {
+            missing_catalog_toast_index_reindex_error(
+                &crate::backend::parser::ReindexTargetKind::Index,
+                index_name,
+                concurrently,
+            )
+            .unwrap_or_else(|| reindex_missing_relation_error(index_name))
+        })?;
         if index_entry.relkind == 'I' {
             ensure_relation_owner(self, client_id, &index_entry, index_name)?;
             return self.reindex_partitioned_index_in_transaction(
@@ -3158,6 +3334,9 @@ impl Database {
         if concurrently && is_system_catalog_relation_oid(heap.relation_oid) {
             return Err(cannot_reindex_system_catalogs_concurrently_error());
         }
+        if concurrently && index.index_meta.indisexclusion {
+            return Err(cannot_reindex_exclusion_index_concurrently_error());
+        }
         self.rebuild_index_relation_in_transaction(
             client_id,
             &heap,
@@ -3167,6 +3346,9 @@ impl Database {
             cid,
             catalog_effects,
         )?;
+        if verbose {
+            push_reindex_verbose_notice(&index.name);
+        }
         if concurrently {
             // :HACK: pgrust rebuilds the existing index catalog row for
             // REINDEX CONCURRENTLY instead of swapping to a freshly assigned
@@ -3185,12 +3367,31 @@ impl Database {
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,
         relation: &crate::backend::parser::BoundRelation,
+        concurrently: bool,
+        verbose: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<(), ExecError> {
         for index in catalog.index_relations_for_heap(relation.relation_oid) {
             if self.is_stale_owned_temp_relation(client_id, catalog, index.relation_oid) {
+                continue;
+            }
+            if concurrently && !index.index_meta.indisvalid {
+                push_warning_with_hint(
+                    format!(
+                        "skipping reindex of invalid index \"{}\"",
+                        qualified_index_name_for_reindex_warning(catalog, &index)
+                    ),
+                    "Use DROP INDEX or REINDEX INDEX.",
+                );
+                continue;
+            }
+            if concurrently && index.index_meta.indisexclusion {
+                push_warning(format!(
+                    "cannot reindex exclusion constraint index \"{}\" concurrently, skipping",
+                    qualified_index_name_for_reindex_warning(catalog, &index)
+                ));
                 continue;
             }
             self.rebuild_index_relation_in_transaction(
@@ -3202,6 +3403,9 @@ impl Database {
                 cid,
                 catalog_effects,
             )?;
+            if verbose {
+                push_reindex_verbose_notice(&index.name);
+            }
         }
         Ok(())
     }
@@ -3255,6 +3459,8 @@ impl Database {
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,
         partitioned_relation: &crate::backend::parser::BoundRelation,
+        concurrently: bool,
+        verbose: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3276,6 +3482,8 @@ impl Database {
                 client_id,
                 catalog,
                 &relation,
+                concurrently,
+                verbose,
                 xid,
                 cid,
                 catalog_effects,
@@ -3289,6 +3497,8 @@ impl Database {
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,
         namespace_oid: u32,
+        concurrently: bool,
+        verbose: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3320,6 +3530,8 @@ impl Database {
                 client_id,
                 catalog,
                 &relation,
+                concurrently,
+                verbose,
                 xid,
                 cid,
                 catalog_effects,
@@ -3354,6 +3566,7 @@ impl Database {
         namespace_oid: Option<u32>,
         catalog_filter: ReindexCatalogFilter,
         concurrently: bool,
+        verbose: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3391,6 +3604,8 @@ impl Database {
                 client_id,
                 catalog,
                 &relation,
+                concurrently,
+                verbose,
                 xid,
                 cid,
                 catalog_effects,

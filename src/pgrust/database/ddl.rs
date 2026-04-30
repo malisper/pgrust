@@ -729,6 +729,13 @@ fn expr_references_relation_column(
 ) -> bool {
     match expr {
         Expr::Var(var) => var_references_relation_column(var, query, relation_oid, attnum),
+        Expr::GroupingKey(grouping_key) => {
+            expr_references_relation_column(&grouping_key.expr, query, relation_oid, attnum)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|arg| expr_references_relation_column(arg, query, relation_oid, attnum)),
         Expr::Aggref(aggref) => {
             aggref
                 .direct_args
@@ -1735,6 +1742,13 @@ pub(super) fn automatic_alter_type_cast_allowed(
         return true;
     }
     if is_text_like_type(from) && is_text_like_type(to) {
+        return true;
+    }
+    if !from.is_array
+        && !to.is_array
+        && matches!(from.kind, SqlTypeKind::Bool)
+        && is_text_like_type(to)
+    {
         return true;
     }
     let Some(source_oid) = catalog.type_oid_for_sql_type(from) else {

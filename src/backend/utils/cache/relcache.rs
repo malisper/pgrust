@@ -18,10 +18,12 @@ use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::PgTypeRow;
 use crate::include::catalog::toasting::toast_relation_name;
 use crate::include::catalog::{
-    ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    PgPartitionedTableRow, bootstrap_catalog_kinds, builtin_range_spec_by_multirange_oid,
-    builtin_range_spec_by_oid, builtin_scalar_function_for_proc_oid, system_catalog_index_by_oid,
+    ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BIT_TYPE_OID, CIDR_TYPE_OID,
+    CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, INET_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CONSTRAINT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PgPartitionedTableRow, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, VARBIT_TYPE_OID, bootstrap_catalog_kinds,
+    builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
+    builtin_scalar_function_for_proc_oid, system_catalog_index_by_oid,
 };
 use crate::include::nodes::primnodes::Expr;
 
@@ -230,10 +232,26 @@ impl IndexRelCacheEntry {
         left_type_oid: Option<u32>,
         right_type_oid: Option<u32>,
     ) -> Option<u8> {
+        fn same_index_type_family(entry_type: u32, actual_type: u32) -> bool {
+            matches!(
+                (entry_type, actual_type),
+                (INET_TYPE_OID | CIDR_TYPE_OID, INET_TYPE_OID | CIDR_TYPE_OID)
+                    | (
+                        BIT_TYPE_OID | VARBIT_TYPE_OID,
+                        BIT_TYPE_OID | VARBIT_TYPE_OID
+                    )
+                    | (
+                        TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID,
+                        TIMESTAMP_TYPE_OID | TIMESTAMPTZ_TYPE_OID
+                    )
+            )
+        }
+
         fn component_score(entry_type: u32, actual_type: Option<u32>) -> Option<u8> {
             match actual_type {
                 None => Some(0),
                 Some(actual) if entry_type == actual => Some(4),
+                Some(actual) if same_index_type_family(entry_type, actual) => Some(3),
                 Some(_) if entry_type == ANYOID => Some(1),
                 Some(actual)
                     if entry_type == ANYRANGEOID && builtin_range_spec_by_oid(actual).is_some() =>

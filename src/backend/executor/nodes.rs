@@ -49,14 +49,14 @@ use crate::include::catalog::{
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState, GatherState,
-    IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState, MergeAppendState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
-    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
-    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState, ValuesState,
-    WindowAggState, WorkTableScanState,
+    AggregateState, AppendState, BitmapAndState, BitmapHeapScanState, BitmapIndexScanState,
+    BitmapOrState, BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
+    GatherState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState,
+    LockRowsState, MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState,
+    MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
+    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan, Plan,
@@ -71,6 +71,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
+const EMPTY_GROUPING_REFS: [usize; 0] = [];
+
+fn set_active_grouping_refs(ctx: &mut ExecutorContext, refs: &[usize]) {
+    ctx.active_grouping_refs.clear();
+    ctx.active_grouping_refs.extend_from_slice(refs);
+}
 
 pub(crate) fn pg_sql_sort_by<T>(
     values: &mut [T],
@@ -965,6 +971,28 @@ fn expand_array_equality_scan_keys(
         .collect()
 }
 
+fn array_scan_expansion_preserves_index_order(keys: &[ScanKeyData]) -> bool {
+    let Some(array_attno) = keys.iter().find_map(|key| {
+        (key.strategy == 3 && key.argument.as_array_value().is_some())
+            .then_some(key.attribute_number)
+    }) else {
+        return true;
+    };
+    if array_attno <= 1 {
+        return true;
+    }
+    (1..array_attno).all(|attno| {
+        keys.iter().any(|key| {
+            key.attribute_number == attno
+                && key.strategy == 3
+                && key.argument.as_array_value().is_none()
+        }) && keys.iter().all(|key| {
+            key.attribute_number != attno
+                || (key.strategy == 3 && key.argument.as_array_value().is_none())
+        })
+    })
+}
+
 fn begin_index_only_scan(
     state: &mut IndexOnlyScanState,
     ctx: &mut ExecutorContext,
@@ -973,14 +1001,13 @@ fn begin_index_only_scan(
         let Some(key_data) = eval_index_scan_keys(&state.keys, ctx, true)? else {
             return Ok(false);
         };
-        let mut scans = expand_array_equality_scan_keys(
-            key_data,
-            state.order_by_keys.is_empty()
-                && matches!(
-                    state.direction,
-                    crate::include::access::relscan::ScanDirection::Forward
-                ),
-        );
+        let allow_array_expansion = state.order_by_keys.is_empty()
+            && matches!(
+                state.direction,
+                crate::include::access::relscan::ScanDirection::Forward
+            )
+            && array_scan_expansion_preserves_index_order(&key_data);
+        let mut scans = expand_array_equality_scan_keys(key_data, allow_array_expansion);
         scans.reverse();
         state.pending_array_scan_keys = scans;
         state.array_scan_seen_tids.clear();
@@ -1028,14 +1055,13 @@ fn begin_index_scan(
         let Some(key_data) = eval_index_scan_keys(&state.keys, ctx, true)? else {
             return Ok(false);
         };
-        let mut scans = expand_array_equality_scan_keys(
-            key_data,
-            state.order_by_keys.is_empty()
-                && matches!(
-                    state.direction,
-                    crate::include::access::relscan::ScanDirection::Forward
-                ),
-        );
+        let allow_array_expansion = state.order_by_keys.is_empty()
+            && matches!(
+                state.direction,
+                crate::include::access::relscan::ScanDirection::Forward
+            )
+            && array_scan_expansion_preserves_index_order(&key_data);
+        let mut scans = expand_array_equality_scan_keys(key_data, allow_array_expansion);
         scans.reverse();
         state.pending_array_scan_keys = scans;
         state.array_scan_seen_tids.clear();
@@ -1617,6 +1643,7 @@ impl PlanNode for MergeAppendState {
             for mut row in rows {
                 ctx.check_for_interrupts()?;
                 set_active_system_bindings(ctx, &row.system_bindings);
+                set_active_grouping_refs(ctx, &row.grouping_refs);
                 set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
                 let mut keys = Vec::with_capacity(self.items.len());
                 for item in &self.items {
@@ -2892,7 +2919,7 @@ fn render_index_scan_key(
     };
     if purpose == 's' && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
         match key.strategy {
-            0 => return Some(format!("{column_name} IS NULL")),
+            0 | 3 => return Some(format!("{column_name} IS NULL")),
             1 => return Some(format!("{column_name} IS NOT NULL")),
             _ => {}
         }
@@ -2935,7 +2962,7 @@ fn render_index_scan_key(
         IndexScanKeyArgument::Const(value) => match display_type {
             Some(sql_type) => format!(
                 "{}::{}",
-                render_explain_literal(value),
+                render_explain_typed_literal(value, sql_type),
                 render_explain_sql_type_name(sql_type)
             ),
             None => render_explain_literal(value),
@@ -3112,7 +3139,12 @@ fn index_key_argument_display_type(
         {
             Some(SqlType::new(column_type.kind))
         }
-        IndexScanKeyArgument::Const(Value::Int32(_)) if column_type.kind == SqlTypeKind::Int4 => {
+        IndexScanKeyArgument::Const(Value::Int32(value))
+            if column_type.kind == SqlTypeKind::Int4 =>
+        {
+            (*value < 0).then_some(column_type)
+        }
+        IndexScanKeyArgument::Const(Value::Bool(_)) if column_type.kind == SqlTypeKind::Bool => {
             None
         }
         IndexScanKeyArgument::Const(value) => value.sql_type_hint(),
@@ -3248,6 +3280,7 @@ impl BitmapQualState {
         match self {
             BitmapQualState::Index(state) => state.fill_bitmap(ctx),
             BitmapQualState::Or(state) => state.fill_bitmap(ctx),
+            BitmapQualState::And(state) => state.fill_bitmap(ctx),
         }
     }
 
@@ -3255,6 +3288,7 @@ impl BitmapQualState {
         match self {
             BitmapQualState::Index(state) => &state.bitmap,
             BitmapQualState::Or(state) => &state.bitmap,
+            BitmapQualState::And(state) => &state.bitmap,
         }
     }
 
@@ -3262,6 +3296,7 @@ impl BitmapQualState {
         match self {
             BitmapQualState::Index(state) => state.stats.rows,
             BitmapQualState::Or(state) => state.stats.rows,
+            BitmapQualState::And(state) => state.stats.rows,
         }
     }
 
@@ -3285,6 +3320,16 @@ impl BitmapQualState {
                 );
             }
             BitmapQualState::Or(state) => {
+                format_explain_lines_with_costs(
+                    state.as_ref(),
+                    indent,
+                    analyze,
+                    show_costs,
+                    timing,
+                    lines,
+                );
+            }
+            BitmapQualState::And(state) => {
                 format_explain_lines_with_costs(
                     state.as_ref(),
                     indent,
@@ -3320,6 +3365,42 @@ impl BitmapOrState {
 
         self.executed = true;
         self.stats.rows = rows;
+        finish_eof(&mut self.stats, start, ctx);
+        Ok(())
+    }
+}
+
+impl BitmapAndState {
+    fn fill_bitmap(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if self.executed {
+            return Ok(());
+        }
+
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+
+        let mut children = self.children.iter_mut();
+        let Some(first) = children.next() else {
+            self.executed = true;
+            self.stats.rows = 0;
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(());
+        };
+        first.fill_bitmap(ctx)?;
+        self.bitmap = first.bitmap().clone();
+        let mut rows = first.rows();
+        for child in children {
+            child.fill_bitmap(ctx)?;
+            rows = rows.min(child.rows());
+            self.bitmap.intersect_with(child.bitmap());
+        }
+
+        self.executed = true;
+        self.stats.rows = rows.min(self.bitmap.len() as u64);
         finish_eof(&mut self.stats, start, ctx);
         Ok(())
     }
@@ -3442,6 +3523,58 @@ impl PlanNode for BitmapOrState {
 
     fn node_label(&self) -> String {
         "BitmapOr".into()
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        for child in &self.children {
+            child.explain(indent + 1, analyze, show_costs, timing, lines);
+        }
+    }
+}
+
+impl PlanNode for BitmapAndState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        _ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        Err(internal_exec_error(
+            "bitmap and cannot produce tuples directly",
+        ))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        None
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &EMPTY_SYSTEM_BINDINGS
+    }
+
+    fn column_names(&self) -> &[String] {
+        &[]
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "BitmapAnd".into()
     }
 
     fn explain_children(
@@ -3862,6 +3995,18 @@ fn render_explain_expr_inner_with_qualifier(
     column_names: &[String],
 ) -> String {
     match expr {
+        Expr::GroupingKey(grouping_key) => {
+            render_explain_expr_inner_with_qualifier(&grouping_key.expr, qualifier, column_names)
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            let args = grouping_func
+                .args
+                .iter()
+                .map(|arg| render_explain_expr_inner_with_qualifier(arg, qualifier, column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("GROUPING({args})")
+        }
         Expr::Var(var) => render_explain_var_name(var, column_names)
             .map(|name| match qualifier {
                 Some(qualifier) => format!("{qualifier}.{name}"),
@@ -4066,6 +4211,7 @@ fn render_explain_expr_inner_with_qualifier(
                 .join(", ");
             format!("ROW({fields})")
         }
+        Expr::Case(case_expr) => render_explain_case_expr(case_expr, qualifier, column_names),
         Expr::FieldSelect {
             expr: inner, field, ..
         } => render_explain_field_select(inner, field, qualifier, column_names),
@@ -4124,6 +4270,44 @@ fn render_explain_expr_inner_with_qualifier(
         }),
         other => format!("{other:?}"),
     }
+}
+
+fn render_explain_case_expr(
+    case_expr: &crate::include::nodes::primnodes::CaseExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let mut rendered = String::from("CASE");
+    if let Some(arg) = &case_expr.arg {
+        rendered.push(' ');
+        rendered.push_str(&render_explain_expr_inner_with_qualifier(
+            arg,
+            qualifier,
+            column_names,
+        ));
+    }
+    for arm in &case_expr.args {
+        rendered.push_str(" WHEN ");
+        rendered.push_str(&render_explain_expr_inner_with_qualifier(
+            &arm.expr,
+            qualifier,
+            column_names,
+        ));
+        rendered.push_str(" THEN ");
+        rendered.push_str(&render_explain_expr_inner_with_qualifier(
+            &arm.result,
+            qualifier,
+            column_names,
+        ));
+    }
+    rendered.push_str(" ELSE ");
+    rendered.push_str(&render_explain_expr_inner_with_qualifier(
+        &case_expr.defresult,
+        qualifier,
+        column_names,
+    ));
+    rendered.push_str(" END");
+    rendered
 }
 
 fn render_explain_sql_datetime_keyword(keyword: &str, precision: Option<i32>) -> String {
@@ -4328,6 +4512,9 @@ fn render_explain_func_expr(
         return render_explain_jsonb_path_query_array_function(func, qualifier, column_names);
     }
     let name = match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPoint) => {
+            func.funcname.clone().unwrap_or_else(|| "point".into())
+        }
         ScalarFunctionImpl::Builtin(builtin) => builtin_scalar_function_name(builtin),
         ScalarFunctionImpl::UserDefined { proc_oid } => func
             .funcname
@@ -5397,7 +5584,11 @@ fn comparison_cast_literal_display_type(left: &Expr, right: &Expr) -> Option<Sql
         }
         _ => return None,
     };
-    matches!(sql_type.kind, SqlTypeKind::Int8 | SqlTypeKind::Numeric).then_some(sql_type)
+    matches!(
+        sql_type.kind,
+        SqlTypeKind::Int2 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+    )
+    .then_some(sql_type)
 }
 
 fn expr_has_bpchar_display_type(expr: &Expr) -> bool {
@@ -6141,7 +6332,7 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
 
 fn render_explain_typed_literal(value: &Value, sql_type: SqlType) -> String {
     match sql_type.kind {
-        SqlTypeKind::Int8 | SqlTypeKind::Numeric => {
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric => {
             format!("'{}'", render_explain_literal(value).trim_matches('\''))
         }
         _ => render_explain_literal(value),
@@ -7377,6 +7568,7 @@ impl PlanNode for OrderByState {
             for mut row in rows {
                 ctx.check_for_interrupts()?;
                 set_active_system_bindings(ctx, &row.system_bindings);
+                set_active_grouping_refs(ctx, &row.grouping_refs);
                 set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
                 let mut keys = Vec::with_capacity(self.items.len());
                 for item in &self.items {
@@ -7433,6 +7625,8 @@ impl PlanNode for OrderByState {
         self.next_index += 1;
         self.current_bindings = rows[idx].system_bindings.clone();
         set_active_system_bindings(ctx, &self.current_bindings);
+        self.current_grouping_refs = rows[idx].grouping_refs.clone();
+        set_active_grouping_refs(ctx, &self.current_grouping_refs);
         finish_row(&mut self.stats, start);
         Ok(Some(&mut rows[idx].slot))
     }
@@ -7443,6 +7637,9 @@ impl PlanNode for OrderByState {
     }
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
+    }
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
     }
     fn column_names(&self) -> &[String] {
         self.input.column_names()
@@ -7526,6 +7723,7 @@ fn materialize_ordered_current_row(
 ) -> Result<(Vec<Value>, MaterializedRow), ExecError> {
     let mut row = input.materialize_current_row()?;
     set_active_system_bindings(ctx, &row.system_bindings);
+    set_active_grouping_refs(ctx, &row.grouping_refs);
     set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
     let mut keys = Vec::with_capacity(items.len());
     for item in items {
@@ -7952,6 +8150,8 @@ impl PlanNode for ProjectionState {
             .store_virtual_row(values, input_slot.tid(), input_slot.table_oid);
         self.current_bindings = self.input.current_system_bindings().to_vec();
         set_active_system_bindings(ctx, &self.current_bindings);
+        self.current_grouping_refs = self.input.current_grouping_refs().to_vec();
+        set_active_grouping_refs(ctx, &self.current_grouping_refs);
         finish_row(&mut self.stats, start);
         Ok(Some(&mut self.slot))
     }
@@ -7960,6 +8160,9 @@ impl PlanNode for ProjectionState {
     }
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
+    }
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
     }
     fn column_names(&self) -> &[String] {
         &self.column_names
@@ -8027,6 +8230,7 @@ fn aggregate_uses_plain_fast_path(state: &AggregateState) -> bool {
         && state.phase == AggregatePhase::Complete
         && !state.disabled
         && state.group_by.is_empty()
+        && state.grouping_sets.is_empty()
         && state.passthrough_exprs.is_empty()
         && state.having.is_none()
         && state.accumulators.iter().all(|accum| {
@@ -8042,6 +8246,10 @@ fn expr_is_plain_aggregate_safe(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 0 && !is_special_varno(var.varno),
         Expr::Const(_) => true,
+        Expr::GroupingKey(grouping_key) => expr_is_plain_aggregate_safe(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => {
+            grouping_func.args.iter().all(expr_is_plain_aggregate_safe)
+        }
         Expr::Op(op) => op.args.iter().all(expr_is_plain_aggregate_safe),
         Expr::Bool(bool_expr) => bool_expr.args.iter().all(expr_is_plain_aggregate_safe),
         Expr::Case(case_expr) => {
@@ -8243,15 +8451,6 @@ fn advance_aggregate_group(
             runtimes[i].combine_partial(accum, &mut group.accum_states[i], &partial, ctx)?;
             continue;
         }
-        if group.direct_arg_values[i].is_none() && !accum.direct_args.is_empty() {
-            group.direct_arg_values[i] = Some(
-                accum
-                    .direct_args
-                    .iter()
-                    .map(|arg| eval_expr(arg, slot, ctx))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
-        }
         if let Some(filter) = accum.filter.as_ref() {
             match eval_expr(filter, slot, ctx)? {
                 Value::Bool(true) => {}
@@ -8327,6 +8526,24 @@ fn finish_ordered_aggregate_inputs(
     Ok(())
 }
 
+fn grouping_set_key_values(
+    full_key_values: &[Value],
+    group_by_refs: &[usize],
+    grouping_set: &[usize],
+) -> Vec<Value> {
+    group_by_refs
+        .iter()
+        .enumerate()
+        .map(|(index, ref_id)| {
+            if grouping_set.contains(ref_id) {
+                full_key_values.get(index).cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            }
+        })
+        .collect()
+}
+
 impl PlanNode for AggregateState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -8364,18 +8581,22 @@ impl PlanNode for AggregateState {
                 self.next_index += 1;
                 self.current_bindings = rows[idx].system_bindings.clone();
                 set_active_system_bindings(ctx, &self.current_bindings);
+                self.current_grouping_refs = rows[idx].grouping_refs.clone();
+                set_active_grouping_refs(ctx, &self.current_grouping_refs);
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut rows[idx].slot));
             }
-            let mut groups: Vec<AggGroup> = Vec::new();
-            let mut mixed_group = (self.strategy == AggregateStrategy::Mixed).then(|| {
-                new_aggregate_group(
-                    vec![Value::Null; self.group_by.len()],
-                    Vec::new(),
-                    &runtimes,
-                    &self.accumulators,
-                )
-            });
+            let mut groups: Vec<(usize, AggGroup)> = Vec::new();
+            let mut mixed_group = (self.grouping_sets.is_empty()
+                && self.strategy == AggregateStrategy::Mixed)
+                .then(|| {
+                    new_aggregate_group(
+                        vec![Value::Null; self.group_by.len()],
+                        Vec::new(),
+                        &runtimes,
+                        &self.accumulators,
+                    )
+                });
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
                 ctx.check_for_interrupts()?;
@@ -8388,38 +8609,63 @@ impl PlanNode for AggregateState {
                     self.key_buffer.push(eval_expr(expr, slot, ctx)?);
                 }
 
-                let group_idx = if let Some(index) = groups
-                    .iter()
-                    .position(|g| aggregate_key_values_equal(&g.key_values, &self.key_buffer))
-                {
-                    index
+                let active_grouping_sets = if self.grouping_sets.is_empty() {
+                    vec![(0, self.group_by_refs.clone())]
                 } else {
-                    let passthrough_values = self
-                        .passthrough_exprs
+                    self.grouping_sets
                         .iter()
-                        .map(|expr| eval_expr(expr, slot, ctx))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    groups.push(new_aggregate_group(
-                        self.key_buffer.clone(),
-                        passthrough_values,
-                        &runtimes,
-                        &self.accumulators,
-                    ));
-                    groups.len() - 1
+                        .cloned()
+                        .enumerate()
+                        .collect::<Vec<_>>()
                 };
 
-                let group = &mut groups[group_idx];
-                advance_aggregate_group(
-                    group,
-                    &self.accumulators,
-                    &runtimes,
-                    self.phase,
-                    self.group_by.len(),
-                    self.passthrough_exprs.len(),
-                    &outer_values,
-                    slot,
-                    ctx,
-                )?;
+                for (grouping_set_index, grouping_set) in active_grouping_sets {
+                    let key_values = if self.grouping_sets.is_empty() {
+                        self.key_buffer.clone()
+                    } else {
+                        grouping_set_key_values(
+                            &self.key_buffer,
+                            &self.group_by_refs,
+                            &grouping_set,
+                        )
+                    };
+                    let group_idx = if let Some(index) =
+                        groups.iter().position(|(set_index, group)| {
+                            *set_index == grouping_set_index
+                                && aggregate_key_values_equal(&group.key_values, &key_values)
+                        }) {
+                        index
+                    } else {
+                        let passthrough_values = self
+                            .passthrough_exprs
+                            .iter()
+                            .map(|expr| eval_expr(expr, slot, ctx))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        groups.push((
+                            grouping_set_index,
+                            new_aggregate_group(
+                                key_values,
+                                passthrough_values,
+                                &runtimes,
+                                &self.accumulators,
+                            ),
+                        ));
+                        groups.len() - 1
+                    };
+
+                    let group = &mut groups[group_idx].1;
+                    advance_aggregate_group(
+                        group,
+                        &self.accumulators,
+                        &runtimes,
+                        self.phase,
+                        self.group_by.len(),
+                        self.passthrough_exprs.len(),
+                        &outer_values,
+                        slot,
+                        ctx,
+                    )?;
+                }
                 if let Some(group) = mixed_group.as_mut() {
                     advance_aggregate_group(
                         group,
@@ -8435,16 +8681,30 @@ impl PlanNode for AggregateState {
                 }
             }
 
-            if groups.is_empty() && self.group_by.is_empty() {
-                groups.push(new_aggregate_group(
-                    Vec::new(),
-                    Vec::new(),
-                    &runtimes,
-                    &self.accumulators,
-                ));
+            if groups.is_empty() {
+                if self.grouping_sets.is_empty() && self.group_by.is_empty() {
+                    groups.push((
+                        0,
+                        new_aggregate_group(Vec::new(), Vec::new(), &runtimes, &self.accumulators),
+                    ));
+                } else {
+                    for (index, grouping_set) in self.grouping_sets.iter().enumerate() {
+                        if grouping_set.is_empty() {
+                            groups.push((
+                                index,
+                                new_aggregate_group(
+                                    vec![Value::Null; self.group_by.len()],
+                                    Vec::new(),
+                                    &runtimes,
+                                    &self.accumulators,
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
 
-            for group in &mut groups {
+            for (_, group) in &mut groups {
                 finish_ordered_aggregate_inputs(
                     group,
                     &self.accumulators,
@@ -8463,9 +8723,21 @@ impl PlanNode for AggregateState {
                 )?;
             }
 
-            let mut result_rows = Vec::new();
-            for group in groups.iter().chain(mixed_group.iter()) {
+            let mut result_rows = Vec::<(usize, MaterializedRow)>::new();
+            for (grouping_set_index, group) in groups
+                .iter()
+                .map(|(set_index, group)| (*set_index, group))
+                .chain(mixed_group.iter().map(|group| (usize::MAX, group)))
+            {
                 ctx.check_for_interrupts()?;
+                let grouping_refs = if self.grouping_sets.is_empty() {
+                    self.group_by_refs.clone()
+                } else {
+                    self.grouping_sets
+                        .get(grouping_set_index)
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 let mut row_values = group.key_values.clone();
                 row_values.extend(group.passthrough_values.iter().cloned());
                 for (i, ((runtime, accum_state), accum)) in runtimes
@@ -8484,12 +8756,20 @@ impl PlanNode for AggregateState {
                         } else if accum.direct_args.is_empty() {
                             Vec::new()
                         } else {
-                            let mut empty_slot = TupleSlot::virtual_row(Vec::new());
-                            accum
+                            let mut direct_slot = TupleSlot::virtual_row(row_values.clone());
+                            let saved_grouping_refs = ctx.active_grouping_refs.clone();
+                            let saved_bindings = ctx.system_bindings.clone();
+                            set_active_grouping_refs(ctx, &grouping_refs);
+                            ctx.system_bindings.clear();
+                            set_outer_expr_bindings(ctx, row_values.clone(), &[]);
+                            let values = accum
                                 .direct_args
                                 .iter()
-                                .map(|expr| eval_expr(expr, &mut empty_slot, ctx))
-                                .collect::<Result<Vec<_>, _>>()?
+                                .map(|expr| eval_expr(expr, &mut direct_slot, ctx))
+                                .collect::<Result<Vec<_>, _>>();
+                            set_active_grouping_refs(ctx, &saved_grouping_refs);
+                            ctx.system_bindings = saved_bindings;
+                            values?
                         };
                     row_values.push(runtime.finalize(
                         accum,
@@ -8502,22 +8782,39 @@ impl PlanNode for AggregateState {
 
                 if let Some(having) = &self.having {
                     let mut having_slot = TupleSlot::virtual_row(row_values.clone());
+                    let saved_grouping_refs = ctx.active_grouping_refs.clone();
+                    let saved_bindings = ctx.system_bindings.clone();
+                    set_active_grouping_refs(ctx, &grouping_refs);
                     ctx.system_bindings.clear();
                     set_outer_expr_bindings(ctx, row_values.clone(), &[]);
-                    match eval_expr(having, &mut having_slot, ctx)? {
+                    let result = eval_expr(having, &mut having_slot, ctx);
+                    set_active_grouping_refs(ctx, &saved_grouping_refs);
+                    ctx.system_bindings = saved_bindings;
+                    match result? {
                         Value::Bool(true) => {}
                         Value::Bool(false) | Value::Null => continue,
                         other => return Err(ExecError::NonBoolQual(other)),
                     }
                 }
 
-                result_rows.push(MaterializedRow::new(
-                    TupleSlot::virtual_row(row_values),
-                    Vec::new(),
+                result_rows.push((
+                    grouping_set_index,
+                    MaterializedRow::new_with_grouping_refs(
+                        TupleSlot::virtual_row(row_values),
+                        Vec::new(),
+                        grouping_refs,
+                    ),
                 ));
             }
 
-            self.result_rows = Some(result_rows);
+            if !self.grouping_sets.is_empty() {
+                sort_grouping_set_result_rows(
+                    &mut result_rows,
+                    &self.grouping_sets,
+                    &self.group_by_refs,
+                )?;
+            }
+            self.result_rows = Some(result_rows.into_iter().map(|(_, row)| row).collect());
         }
 
         let rows = self.result_rows.as_mut().unwrap();
@@ -8530,6 +8827,8 @@ impl PlanNode for AggregateState {
         self.next_index += 1;
         self.current_bindings = rows[idx].system_bindings.clone();
         set_active_system_bindings(ctx, &self.current_bindings);
+        self.current_grouping_refs = rows[idx].grouping_refs.clone();
+        set_active_grouping_refs(ctx, &self.current_grouping_refs);
         finish_row(&mut self.stats, start);
         Ok(Some(&mut rows[idx].slot))
     }
@@ -8540,6 +8839,9 @@ impl PlanNode for AggregateState {
     }
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
+    }
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
     }
     fn column_names(&self) -> &[String] {
         &self.output_columns
@@ -8554,7 +8856,10 @@ impl PlanNode for AggregateState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        if self.accumulators.is_empty() && self.strategy == AggregateStrategy::Sorted {
+        if self.accumulators.is_empty()
+            && self.strategy == AggregateStrategy::Sorted
+            && self.grouping_sets.is_empty()
+        {
             return "Group".into();
         }
         let base = match self.strategy {
@@ -8580,16 +8885,30 @@ impl PlanNode for AggregateState {
         if self.disabled {
             lines.push(format!("{prefix}Disabled: true"));
         }
-        if !self.group_by.is_empty() {
-            let mut group_items = Vec::new();
-            for expr in &self.group_by {
-                let rendered =
-                    render_aggregate_group_key_expr(expr, self.input.column_names(), self.disabled);
-                if !group_items.contains(&rendered) {
-                    group_items.push(rendered);
+        if !self.grouping_sets.is_empty() {
+            for set in &self.grouping_sets {
+                if set.is_empty() {
+                    lines.push(format!("{prefix}Group Key: ()"));
+                    continue;
+                }
+                let set_exprs = grouping_set_exprs(&self.group_by, &self.group_by_refs, set);
+                let group_key = render_aggregate_group_key_list(
+                    &set_exprs,
+                    self.input.column_names(),
+                    self.disabled,
+                );
+                if self.strategy == AggregateStrategy::Mixed {
+                    lines.push(format!("{prefix}Hash Key: {group_key}"));
+                } else {
+                    lines.push(format!("{prefix}Group Key: {group_key}"));
                 }
             }
-            let group_key = group_items.join(", ");
+        } else if !self.group_by.is_empty() {
+            let group_key = render_aggregate_group_key_list(
+                &self.group_by,
+                self.input.column_names(),
+                self.disabled,
+            );
             if self.strategy == AggregateStrategy::Mixed {
                 lines.push(format!("{prefix}Hash Key: {group_key}"));
                 lines.push(format!("{prefix}Group Key: ()"));
@@ -8622,6 +8941,35 @@ impl PlanNode for AggregateState {
             lines,
         );
     }
+}
+
+fn render_aggregate_group_key_list(
+    exprs: &[Expr],
+    input_names: &[String],
+    force_xid_const: bool,
+) -> String {
+    let mut group_items = Vec::new();
+    for expr in exprs {
+        let rendered = render_aggregate_group_key_expr(expr, input_names, force_xid_const);
+        group_items.push(rendered);
+    }
+    group_items.join(", ")
+}
+
+fn grouping_set_exprs(
+    group_by: &[Expr],
+    group_by_refs: &[usize],
+    grouping_set: &[usize],
+) -> Vec<Expr> {
+    grouping_set
+        .iter()
+        .filter_map(|ref_id| {
+            group_by_refs
+                .iter()
+                .position(|candidate| candidate == ref_id)
+                .and_then(|index| group_by.get(index).cloned())
+        })
+        .collect()
 }
 
 fn render_aggregate_group_key_expr(
@@ -8663,6 +9011,96 @@ fn render_xid_group_key_expr(expr: &Expr) -> Option<String> {
     }
 }
 
+#[derive(Clone)]
+struct GroupingSetOutputOrder {
+    chain_index: usize,
+    key_refs: Vec<usize>,
+}
+
+fn sort_grouping_set_result_rows(
+    rows: &mut [(usize, MaterializedRow)],
+    grouping_sets: &[Vec<usize>],
+    group_by_refs: &[usize],
+) -> Result<(), ExecError> {
+    let output_orders = grouping_set_output_orders(grouping_sets);
+    let mut sort_error = None;
+    pg_sql_sort_by(rows, |left, right| {
+        let Some(left_order) = output_orders.get(left.0) else {
+            return left.0.cmp(&right.0);
+        };
+        let Some(right_order) = output_orders.get(right.0) else {
+            return left.0.cmp(&right.0);
+        };
+        match left_order.chain_index.cmp(&right_order.chain_index) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        let key_refs = if left_order.key_refs.len() >= right_order.key_refs.len() {
+            &left_order.key_refs
+        } else {
+            &right_order.key_refs
+        };
+        for ref_id in key_refs {
+            let Some(index) = group_by_refs
+                .iter()
+                .position(|candidate| candidate == ref_id)
+            else {
+                continue;
+            };
+            let left_value = left.1.slot.tts_values.get(index).unwrap_or(&Value::Null);
+            let right_value = right.1.slot.tts_values.get(index).unwrap_or(&Value::Null);
+            match compare_order_values(left_value, right_value, None, Some(false), false) {
+                Ok(std::cmp::Ordering::Equal) => {}
+                Ok(ordering) => return ordering,
+                Err(err) => {
+                    if sort_error.is_none() {
+                        sort_error = Some(err);
+                    }
+                    return std::cmp::Ordering::Equal;
+                }
+            }
+        }
+        left.0.cmp(&right.0)
+    });
+    if let Some(err) = sort_error {
+        Err(err)
+    } else {
+        Ok(())
+    }
+}
+
+fn grouping_set_output_orders(grouping_sets: &[Vec<usize>]) -> Vec<GroupingSetOutputOrder> {
+    let mut orders = vec![
+        GroupingSetOutputOrder {
+            chain_index: usize::MAX,
+            key_refs: Vec::new(),
+        };
+        grouping_sets.len()
+    ];
+    let mut chain_index = 0;
+    let mut chain_key_refs = Vec::new();
+    let mut previous: Option<&[usize]> = None;
+    for (set_index, set) in grouping_sets.iter().enumerate() {
+        if previous.is_some_and(|previous| !grouping_set_refs_subset(set, previous)) {
+            chain_index += 1;
+            chain_key_refs.clear();
+        }
+        if chain_key_refs.is_empty() {
+            chain_key_refs = set.clone();
+        }
+        orders[set_index] = GroupingSetOutputOrder {
+            chain_index,
+            key_refs: chain_key_refs.clone(),
+        };
+        previous = Some(set);
+    }
+    orders
+}
+
+fn grouping_set_refs_subset(smaller: &[usize], larger: &[usize]) -> bool {
+    smaller.iter().all(|ref_id| larger.contains(ref_id))
+}
+
 impl PlanNode for WindowAggState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -8693,6 +9131,8 @@ impl PlanNode for WindowAggState {
         self.next_index += 1;
         self.current_bindings = rows[idx].system_bindings.clone();
         set_active_system_bindings(ctx, &self.current_bindings);
+        self.current_grouping_refs = rows[idx].grouping_refs.clone();
+        set_active_grouping_refs(ctx, &self.current_grouping_refs);
         finish_row(&mut self.stats, start);
         Ok(Some(&mut rows[idx].slot))
     }
@@ -8705,6 +9145,9 @@ impl PlanNode for WindowAggState {
 
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
+    }
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
     }
 
     fn column_names(&self) -> &[String] {
@@ -9501,10 +9944,13 @@ impl PlanNode for ProjectSetState {
                     continue;
                 }
 
-                self.current_input = Some(MaterializedRow::new(
-                    materialized,
-                    self.input.current_system_bindings().to_vec(),
-                ));
+                self.current_input = Some(
+                    MaterializedRow::new(
+                        materialized,
+                        self.input.current_system_bindings().to_vec(),
+                    )
+                    .with_grouping_refs(self.input.current_grouping_refs().to_vec()),
+                );
                 self.current_srf_rows = srf_rows;
                 self.current_row_count = max_rows;
                 self.next_index = 0;
@@ -9520,6 +9966,7 @@ impl PlanNode for ProjectSetState {
                 match target {
                     crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                         set_active_system_bindings(ctx, &input_slot.system_bindings);
+                        set_active_grouping_refs(ctx, &input_slot.grouping_refs);
                         set_outer_expr_bindings(
                             ctx,
                             input_slot.slot.tts_values.clone(),
@@ -9545,6 +9992,8 @@ impl PlanNode for ProjectSetState {
                 .store_virtual_row(values, input_slot.slot.tid(), input_slot.slot.table_oid);
             self.current_bindings = input_slot.system_bindings.clone();
             set_active_system_bindings(ctx, &self.current_bindings);
+            self.current_grouping_refs = input_slot.grouping_refs.clone();
+            set_active_grouping_refs(ctx, &self.current_grouping_refs);
 
             if self.next_index >= self.current_row_count {
                 self.current_input = None;
@@ -9563,6 +10012,9 @@ impl PlanNode for ProjectSetState {
     }
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
+    }
+    fn current_grouping_refs(&self) -> &[usize] {
+        &self.current_grouping_refs
     }
 
     fn column_names(&self) -> &[String] {

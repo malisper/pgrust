@@ -472,10 +472,22 @@ fn value_matches_scan_key_strategy(
     if strategy == 3
         && let Some(array) = argument.as_array_value()
     {
+        if matches!(value, Value::Null) {
+            return false;
+        }
         return array.elements.iter().any(|element| {
+            if matches!(element, Value::Null) {
+                return false;
+            }
             let ord = compare_bt_values_for_type_with_option(value, element, sql_type, option);
             ord == Ordering::Equal
         });
+    }
+    match (value, argument) {
+        (Value::Null, Value::Null) => return strategy == 3,
+        (Value::Null, _) => return false,
+        (_, Value::Null) => return strategy == 1,
+        _ => {}
     }
     let ord = compare_bt_values_for_type_with_option(value, argument, sql_type, option);
     strategy_matches_ordering(strategy, ord)

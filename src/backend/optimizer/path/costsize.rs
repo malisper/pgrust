@@ -24,13 +24,14 @@ use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     ANYARRAYOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BPCHAR_BTREE_OPCLASS_OID, BRIN_AM_OID,
-    BTREE_AM_OID, GIN_AM_OID, GIN_ARRAY_FAMILY_OID, GIST_AM_OID, GIST_CIRCLE_FAMILY_OID,
-    GIST_MULTIRANGE_FAMILY_OID, GIST_POLY_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
-    PG_LARGEOBJECT_METADATA_RELATION_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
-    SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID,
-    SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID,
-    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
+    BTREE_AM_OID, CIRCLE_GIST_OPCLASS_OID, GIN_AM_OID, GIN_ARRAY_FAMILY_OID, GIST_AM_OID,
+    GIST_CIRCLE_FAMILY_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_POLY_FAMILY_OID,
+    GIST_RANGE_FAMILY_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
+    POLY_GIST_OPCLASS_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_KD_CONFIG_PROC_OID,
+    SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID, SPG_RANGE_CONFIG_PROC_OID,
+    SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    range_type_ref_for_sql_type, relkind_has_storage,
 };
 use crate::include::nodes::datetime::{TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND};
 use crate::include::nodes::datum::{
@@ -67,14 +68,6 @@ const SMALL_FULL_MERGE_JOIN_ROW_LIMIT: f64 = 5_000.0;
 
 fn is_gist_like_am(am_oid: u32) -> bool {
     am_oid == GIST_AM_OID || am_oid == SPGIST_AM_OID
-}
-
-fn gist_polygon_circle_family(index: &BoundIndexRelation, index_pos: usize) -> bool {
-    index.index_meta.am_oid == GIST_AM_OID
-        && matches!(
-            index.index_meta.opfamily_oids.get(index_pos).copied(),
-            Some(GIST_POLY_FAMILY_OID | GIST_CIRCLE_FAMILY_OID)
-        )
 }
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
@@ -450,6 +443,35 @@ pub(super) fn optimize_path_with_config(
                     children,
                 }
             }
+            Path::BitmapAnd {
+                pathtarget,
+                children,
+                ..
+            } => {
+                let children = children
+                    .into_iter()
+                    .map(|child| optimize_path_with_config(child, catalog, config))
+                    .collect::<Vec<_>>();
+                let startup_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().startup_cost.as_f64())
+                    .sum::<f64>();
+                let total_cost = children
+                    .iter()
+                    .map(|child| child.plan_info().total_cost.as_f64())
+                    .sum::<f64>();
+                let rows = children
+                    .iter()
+                    .map(|child| child.plan_info().plan_rows.as_f64())
+                    .reduce(f64::min)
+                    .map(clamp_rows)
+                    .unwrap_or(0.0);
+                Path::BitmapAnd {
+                    plan_info: PlanEstimate::new(startup_cost, total_cost, rows, 0),
+                    pathtarget,
+                    children,
+                }
+            }
             Path::BitmapHeapScan {
                 pathtarget,
                 source_id,
@@ -674,6 +696,8 @@ pub(super) fn optimize_path_with_config(
                 pathtarget,
                 input,
                 group_by,
+                group_by_refs,
+                grouping_sets,
                 passthrough_exprs,
                 accumulators,
                 having,
@@ -713,6 +737,8 @@ pub(super) fn optimize_path_with_config(
                     pathkeys,
                     input: Box::new(input),
                     group_by,
+                    group_by_refs,
+                    grouping_sets,
                     passthrough_exprs,
                     accumulators,
                     having,
@@ -1817,12 +1843,7 @@ fn estimate_brin_bitmap_candidate(
     let pages_per_range = brin_pages_per_range(&spec.index, catalog) as f64;
     let index_ranges = (stats.relpages / pages_per_range).ceil().max(1.0);
     let revmap_pages = brin_revmap_page_count(index_ranges);
-    let qual_selectivity = spec
-        .used_quals
-        .iter()
-        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
-        .product::<f64>()
-        .clamp(0.0, 1.0);
+    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
     let minimal_ranges = (index_ranges * qual_selectivity).ceil();
     let index_correlation = brin_index_correlation(stats, &spec);
     let estimated_ranges = if index_correlation < 1.0e-10 {
@@ -1880,6 +1901,12 @@ fn estimate_brin_bitmap_candidate(
         + heap_pages * RANDOM_PAGE_COST
         + rows * CPU_TUPLE_COST
         + recheck_cost;
+    if index_correlation < 0.1 {
+        // BRIN only pays off when the indexed values are clustered enough to
+        // avoid reading most heap ranges. If ANALYZE reports effectively no
+        // heap correlation, prefer the sequential scan unless it is disabled.
+        total_cost += stats.relpages * RANDOM_PAGE_COST + stats.reltuples * CPU_TUPLE_COST;
+    }
     let mut plan = Path::BitmapHeapScan {
         plan_info: PlanEstimate::new(
             bitmap_index.plan_info().startup_cost.as_f64(),
@@ -1931,12 +1958,7 @@ fn estimate_gin_bitmap_candidate(
         .class_row_by_oid(spec.index.relation_oid)
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
-    let qual_selectivity = spec
-        .used_quals
-        .iter()
-        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
-        .product::<f64>()
-        .clamp(0.0, 1.0);
+    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
     let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
     let index_startup_cost = spec
         .used_quals
@@ -2068,12 +2090,7 @@ pub(super) fn estimate_bitmap_candidate(
         .class_row_by_oid(spec.index.relation_oid)
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
-    let qual_selectivity = spec
-        .used_quals
-        .iter()
-        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
-        .product::<f64>()
-        .clamp(0.0, 1.0);
+    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
     let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
     let mut index_startup_cost = spec
         .used_quals
@@ -2265,7 +2282,7 @@ pub(super) fn estimate_index_candidate(
         // seq-scan outer side in memoize regression plans.
         base_cost += stats.relpages * RANDOM_PAGE_COST + index_scan_rows * RANDOM_PAGE_COST;
     }
-    if spec.index.index_meta.am_oid == BTREE_AM_OID {
+    let unused_btree_column_cost = if spec.index.index_meta.am_oid == BTREE_AM_OID {
         let order_columns = if spec.removes_order {
             order_items.as_ref().map(Vec::len).unwrap_or_default()
         } else {
@@ -2275,14 +2292,19 @@ pub(super) fn estimate_index_candidate(
             .btree_prefix_columns
             .max(btree_ordering_equality_prefix(&spec.keys) + order_columns);
         let unused_columns = index_key_count(&spec.index).saturating_sub(matched_columns);
-        base_cost += unused_columns as f64 * RANDOM_PAGE_COST;
-    }
+        unused_columns as f64 * RANDOM_PAGE_COST
+    } else {
+        0.0
+    };
+    base_cost += unused_btree_column_cost;
     let full_index_only =
         config.enable_indexonlyscan && index_supports_index_only_scan(&desc, &spec.index);
     let index_only = full_index_only || (config.enable_indexonlyscan && target_index_only);
     if index_only {
         if spec.keys.is_empty() {
-            base_cost = index_pages * SEQ_PAGE_COST + index_rows * CPU_INDEX_TUPLE_COST;
+            base_cost = index_pages * SEQ_PAGE_COST
+                + index_rows * CPU_INDEX_TUPLE_COST
+                + unused_btree_column_cost;
         } else {
             base_cost -= index_rows * CPU_TUPLE_COST;
         }
@@ -3739,6 +3761,14 @@ fn collect_expr_attrs_for_source(expr: &Expr, source_id: usize, attrs: &mut BTre
                 attrs.insert(index);
             }
         }
+        Expr::GroupingKey(grouping_key) => {
+            collect_expr_attrs_for_source(&grouping_key.expr, source_id, attrs);
+        }
+        Expr::GroupingFunc(grouping_func) => {
+            for arg in &grouping_func.args {
+                collect_expr_attrs_for_source(arg, source_id, attrs);
+            }
+        }
         Expr::Op(op) => op
             .args
             .iter()
@@ -4164,6 +4194,70 @@ fn parameterized_or_clause_to_scalar_array(expr: Expr) -> Expr {
     )
 }
 
+fn btree_or_clause_to_scalar_array(expr: Expr) -> Expr {
+    let original = expr.clone();
+    let mut args = Vec::new();
+    flatten_or_args(&expr, &mut args);
+    if args.len() < 2 {
+        return original;
+    }
+
+    let mut key_expr: Option<Expr> = None;
+    let mut elements = Vec::with_capacity(args.len());
+    let mut element_type = None;
+    let mut collation_oid = None;
+    for arg in args {
+        let Expr::Op(op) = strip_casts(arg) else {
+            return original;
+        };
+        if op.op != OpExprKind::Eq || op.args.len() != 2 {
+            return original;
+        }
+        let left_is_argument = runtime_index_argument_expr(&op.args[0]);
+        let right_is_argument = runtime_index_argument_expr(&op.args[1]);
+        let (key, element) = match (left_is_argument, right_is_argument) {
+            (false, true) => (strip_casts(&op.args[0]).clone(), op.args[1].clone()),
+            (true, false) => (strip_casts(&op.args[1]).clone(), op.args[0].clone()),
+            _ => return original,
+        };
+        let current_element_type = expr_sql_type(&element);
+        if let Some(existing_element_type) = element_type {
+            if existing_element_type != current_element_type {
+                return original;
+            }
+        } else {
+            element_type = Some(current_element_type);
+        }
+        if let Some(existing) = &key_expr {
+            if strip_casts(existing) != strip_casts(&key) {
+                return original;
+            }
+        } else {
+            key_expr = Some(key);
+            collation_oid = op.collation_oid;
+        }
+        elements.push(element);
+    }
+
+    let Some(key_expr) = key_expr else {
+        return original;
+    };
+    let Some(element_type) = element_type else {
+        return original;
+    };
+    let array_type = SqlType::array_of(element_type);
+    Expr::scalar_array_op_with_collation(
+        SubqueryComparisonOp::Eq,
+        true,
+        key_expr,
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        },
+        collation_oid,
+    )
+}
+
 fn flatten_or_args<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     if let Expr::Bool(bool_expr) = expr
         && bool_expr.boolop == BoolExprType::Or
@@ -4291,7 +4385,9 @@ fn path_contains_runtime_index_arg(path: &Path) -> bool {
         Path::BitmapIndexScan { keys, .. } => keys
             .iter()
             .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
-        Path::BitmapOr { children, .. } => children.iter().any(path_contains_runtime_index_arg),
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
+            children.iter().any(path_contains_runtime_index_arg)
+        }
         Path::BitmapHeapScan { bitmapqual, .. } => path_contains_runtime_index_arg(bitmapqual),
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
@@ -4492,6 +4588,7 @@ fn contains_seq_scan(path: &Path) -> bool {
         } => contains_seq_scan(input),
         Path::Append { children, .. }
         | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
         | Path::MergeAppend { children, .. }
         | Path::SetOp { children, .. } => children.iter().any(contains_seq_scan),
         Path::NestedLoopJoin { left, right, .. }
@@ -4719,6 +4816,11 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == 1,
         Expr::Param(_) => true,
+        Expr::GroupingKey(grouping_key) => expr_uses_immediate_outer_columns(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(expr_uses_immediate_outer_columns),
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_uses_immediate_outer_columns)
                 || aggref
@@ -5000,6 +5102,13 @@ fn expr_uses_outer_relids_at_level(expr: &Expr, relids: &[usize], sublevels_up: 
     match expr {
         Expr::Var(var) => var_uses_outer_relids_at_level(var, relids, sublevels_up),
         Expr::Param(_) => false,
+        Expr::GroupingKey(grouping_key) => {
+            expr_uses_outer_relids_at_level(&grouping_key.expr, relids, sublevels_up)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up)),
         Expr::Aggref(aggref) => {
             aggref
                 .direct_args
@@ -5167,7 +5276,7 @@ fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
-        Path::BitmapOr { children, .. } => children
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => children
             .iter()
             .any(|child| path_uses_outer_relids(child, relids)),
         Path::BitmapHeapScan {
@@ -5388,7 +5497,9 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         | Path::IndexScan { .. }
         | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
-        Path::BitmapOr { children, .. } => children.iter().any(path_uses_immediate_outer_columns),
+        Path::BitmapOr { children, .. } | Path::BitmapAnd { children, .. } => {
+            children.iter().any(path_uses_immediate_outer_columns)
+        }
         Path::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
@@ -6448,13 +6559,30 @@ pub(super) fn build_index_path_spec(
     if !predicate_implies_index_predicate(filter, index.index_predicate.as_ref()) {
         return None;
     }
-    let conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
+    let original_conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
+    let conjuncts = if index.index_meta.am_oid == BTREE_AM_OID {
+        original_conjuncts
+            .iter()
+            .cloned()
+            .map(btree_or_clause_to_scalar_array)
+            .collect()
+    } else {
+        original_conjuncts.clone()
+    };
     let parsed_quals = conjuncts
         .iter()
-        .filter_map(if is_gist_like_am(index.index_meta.am_oid) {
-            gist_indexable_qual
-        } else {
-            indexable_qual
+        .zip(original_conjuncts.iter())
+        .filter_map(|(conjunct, original)| {
+            let mut qual = if is_gist_like_am(index.index_meta.am_oid) {
+                gist_indexable_qual(conjunct)
+            } else {
+                indexable_qual(conjunct)
+            }?;
+            if conjunct != original {
+                qual.expr = original.clone();
+                qual.recheck_expr = Some(original.clone());
+            }
+            Some(qual)
         })
         .collect::<Vec<_>>();
     let non_null_columns = parsed_quals
@@ -6489,7 +6617,7 @@ pub(super) fn build_index_path_spec(
         };
     let used_quals = used_indexes
         .iter()
-        .filter_map(|idx| parsed_quals.get(*idx).map(|qual| qual.index_expr.clone()))
+        .filter_map(|idx| parsed_quals.get(*idx).map(|qual| qual.expr.clone()))
         .collect::<Vec<_>>();
     let scan_quals = scan_indexes
         .iter()
@@ -6573,7 +6701,7 @@ pub(super) fn build_index_path_spec(
         }));
     }
     filter_quals.extend(
-        conjuncts
+        original_conjuncts
             .iter()
             .filter(|expr| !used_exprs.iter().any(|used_expr| *used_expr == *expr))
             .filter(|expr| {
@@ -8980,6 +9108,9 @@ fn index_covers_relation(desc: &RelationDesc, index: &BoundIndexRelation) -> boo
 }
 
 fn index_supports_index_only_scan(desc: &RelationDesc, index: &BoundIndexRelation) -> bool {
+    if gist_polygon_circle_heap_key(desc, index) {
+        return false;
+    }
     if !index_covers_relation(desc, index) {
         return false;
     }
@@ -8995,6 +9126,30 @@ fn index_supports_index_only_scan(desc: &RelationDesc, index: &BoundIndexRelatio
                     && index_column_can_return(index, index_pos)
             })
     })
+}
+
+fn gist_polygon_circle_heap_key(desc: &RelationDesc, index: &BoundIndexRelation) -> bool {
+    index.index_meta.am_oid == GIST_AM_OID
+        && index
+            .index_meta
+            .indkey
+            .iter()
+            .enumerate()
+            .any(|(index_pos, _)| {
+                let heap_column = simple_index_column(index, index_pos)
+                    .and_then(|column_index| desc.columns.get(column_index))
+                    .or_else(|| {
+                        (index.index_meta.indkey.len() == desc.columns.len())
+                            .then(|| desc.columns.get(index_pos))
+                            .flatten()
+                    });
+                heap_column.is_some_and(|column| {
+                    matches!(
+                        column.sql_type.kind,
+                        SqlTypeKind::Polygon | SqlTypeKind::Circle
+                    )
+                })
+            })
 }
 
 pub(super) fn index_supports_index_only_attrs(
@@ -9018,7 +9173,22 @@ pub(super) fn index_supports_index_only_attrs(
 fn index_column_can_return(index: &BoundIndexRelation, index_pos: usize) -> bool {
     match index.index_meta.am_oid {
         BTREE_AM_OID => !btree_index_column_requires_bpchar_cast(index, index_pos),
-        GIST_AM_OID => true,
+        GIST_AM_OID => {
+            !matches!(
+                index.index_meta.opfamily_oids.get(index_pos).copied(),
+                Some(GIST_POLY_FAMILY_OID | GIST_CIRCLE_FAMILY_OID)
+            ) && !matches!(
+                index.index_meta.indclass.get(index_pos).copied(),
+                Some(POLY_GIST_OPCLASS_OID | CIRCLE_GIST_OPCLASS_OID)
+            ) && !matches!(
+                index
+                    .desc
+                    .columns
+                    .get(index_pos)
+                    .map(|column| column.sql_type.kind),
+                Some(SqlTypeKind::Polygon | SqlTypeKind::Circle)
+            )
+        }
         SPGIST_AM_OID => spgist_index_column_can_return(index, index_pos),
         _ => false,
     }
@@ -9297,6 +9467,36 @@ fn builtin_btree_strategy_type_compatible(
             SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char
         )
     );
+    let same_name_family = index.index_meta.am_oid == BRIN_AM_OID
+        && matches!(
+            (column.sql_type.kind, argument_type.kind),
+            (
+                SqlTypeKind::Name,
+                SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char | SqlTypeKind::Name
+            ) | (
+                SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char,
+                SqlTypeKind::Name
+            )
+        );
+    let same_oid_integer_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Oid
+                | SqlTypeKind::RegProc
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegCollation
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
+                | SqlTypeKind::Xid,
+            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Oid
+        )
+    );
     let same_numeric_family = matches!(
         (column.sql_type.kind, argument_type.kind),
         (
@@ -9314,7 +9514,34 @@ fn builtin_btree_strategy_type_compatible(
                 | SqlTypeKind::Numeric
         )
     );
-    same_string_family || same_numeric_family
+    let same_network_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Inet | SqlTypeKind::Cidr,
+            SqlTypeKind::Inet | SqlTypeKind::Cidr
+        )
+    );
+    let same_datetime_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz,
+            SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        )
+    );
+    let same_bit_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Bit | SqlTypeKind::VarBit,
+            SqlTypeKind::Bit | SqlTypeKind::VarBit
+        )
+    );
+    same_string_family
+        || same_name_family
+        || same_numeric_family
+        || same_oid_integer_family
+        || same_network_family
+        || same_datetime_family
+        || same_bit_family
 }
 
 fn index_key_argument(expr: &Expr) -> Option<IndexScanKeyArgument> {
@@ -9367,6 +9594,20 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
         Expr::Const(_) | Expr::Param(_) => true,
         Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => true,
         Expr::Var(var) => var.varlevelsup > 0,
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_none_or(|expr| !expr_contains_local_var_outside_subquery(expr)),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_none_or(|expr| !expr_contains_local_var_outside_subquery(expr))
+                && subplan
+                    .args
+                    .iter()
+                    .all(|expr| !expr_contains_local_var_outside_subquery(expr))
+        }
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
             runtime_index_argument_expr(inner)
         }
@@ -9384,6 +9625,99 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
                             .upper
                             .as_ref()
                             .is_none_or(runtime_index_argument_expr)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0,
+        Expr::Op(op) => op.args.iter().any(expr_contains_local_var_outside_subquery),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_local_var_outside_subquery)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_local_var_outside_subquery(&arm.expr)
+                        || expr_contains_local_var_outside_subquery(&arm.result)
+                })
+                || expr_contains_local_var_outside_subquery(&case_expr.defresult)
+        }
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_local_var_outside_subquery),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(expr_contains_local_var_outside_subquery)
+                || subplan
+                    .args
+                    .iter()
+                    .any(expr_contains_local_var_outside_subquery)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_local_var_outside_subquery(&saop.left)
+                || expr_contains_local_var_outside_subquery(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_contains_local_var_outside_subquery(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_local_var_outside_subquery(expr)
+                || expr_contains_local_var_outside_subquery(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_local_var_outside_subquery)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_local_var_outside_subquery(left)
+                || expr_contains_local_var_outside_subquery(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_local_var_outside_subquery(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_local_var_outside_subquery(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_local_var_outside_subquery)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_local_var_outside_subquery)
                 })
         }
         _ => false,
@@ -9526,9 +9860,6 @@ fn qual_strategy(
     index_pos: usize,
     qual: &IndexableQual,
 ) -> Option<u16> {
-    if gist_polygon_circle_family(index, index_pos) {
-        return None;
-    }
     if is_gist_like_am(index.index_meta.am_oid)
         && !matches!(qual.argument, IndexScanKeyArgument::Const(_))
     {
@@ -9537,7 +9868,7 @@ fn qual_strategy(
     let argument_type_oid = index_argument_type_oid_for_qual(qual);
     match qual.lookup {
         super::super::IndexStrategyLookup::Operator { oid, kind } => {
-            if index.index_meta.am_oid == SPGIST_AM_OID
+            if is_gist_like_am(index.index_meta.am_oid)
                 && oid == 0
                 && matches!(qual.argument, IndexScanKeyArgument::Const(Value::Null))
             {
@@ -9589,7 +9920,7 @@ fn qual_strategy(
 }
 
 fn index_argument_type_oid_for_qual(qual: &IndexableQual) -> Option<u32> {
-    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.expr)
+    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.index_expr)
         && saop.use_or
     {
         return Some(sql_type_oid(expr_sql_type(&saop.right).element_type()));
@@ -9598,7 +9929,7 @@ fn index_argument_type_oid_for_qual(qual: &IndexableQual) -> Option<u32> {
 }
 
 fn index_argument_sql_type_for_qual(qual: &IndexableQual) -> Option<SqlType> {
-    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.expr)
+    if let Expr::ScalarArrayOp(saop) = strip_casts(&qual.index_expr)
         && saop.use_or
     {
         return Some(expr_sql_type(&saop.right).element_type());
@@ -9828,9 +10159,18 @@ fn btree_index_scan_key_for_qual(
         super::super::IndexStrategyLookup::RegexPrefix { exact: true } => {
             Some(qual.index_expr.clone())
         }
+        _ if scalar_array_null_display_expr(&qual.expr) => Some(qual.expr.clone()),
         _ => row_prefix_index_expr(index, &qual.expr, strategy),
     };
     IndexScanKey::new((index_pos + 1) as i16, strategy, argument).with_display_expr(display_expr)
+}
+
+fn scalar_array_null_display_expr(expr: &Expr) -> bool {
+    matches!(
+        strip_casts(expr),
+        Expr::ScalarArrayOp(saop)
+            if saop.use_or && matches!(const_argument(&saop.right), Some(Value::Null))
+    )
 }
 
 fn row_prefix_scan_key(
@@ -10150,7 +10490,43 @@ fn indexable_qual_with_argument(
         })
     }
 
+    fn bool_mk(key_expr: &Expr, value: bool, expr: &Expr) -> Option<IndexableQual> {
+        (expr_sql_type(key_expr).kind == SqlTypeKind::Bool).then(|| IndexableQual {
+            column: expr_column_index(key_expr),
+            key_expr: strip_casts(key_expr).clone(),
+            lookup: super::super::IndexStrategyLookup::Operator {
+                oid: 0,
+                kind: OpExprKind::Eq,
+            },
+            argument: IndexScanKeyArgument::Const(Value::Bool(value)),
+            index_expr: expr.clone(),
+            recheck_expr: Some(expr.clone()),
+            expr: expr.clone(),
+            residual_expr: None,
+            is_not_null: false,
+            row_prefix: false,
+        })
+    }
+
     match strip_casts(expr) {
+        key @ Expr::Var(_) => bool_mk(key, true, expr),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Not => {
+            let [inner] = bool_expr.args.as_slice() else {
+                return None;
+            };
+            bool_mk(strip_casts(inner), false, expr)
+        }
+        Expr::IsNotDistinctFrom(left, right) => {
+            match (strip_casts(left), const_argument(right)) {
+                (key, Some(Value::Bool(value))) => return bool_mk(key, value, expr),
+                _ => {}
+            }
+            match (const_argument(left), strip_casts(right)) {
+                (Some(Value::Bool(value)), key) => return bool_mk(key, value, expr),
+                _ => {}
+            }
+            None
+        }
         Expr::Like {
             expr: like_expr,
             pattern,
@@ -10612,13 +10988,10 @@ fn gist_order_match(
             return (Vec::new(), None);
         };
         let Some((index_pos, strategy)) = (0..index_key_count(index)).find_map(|index_pos| {
-            if gist_polygon_circle_family(index, index_pos) {
-                return None;
-            }
             if simple_index_column(index, index_pos) != Some(column) {
                 return None;
             }
-            let right_type_oid = value_type_oid(&argument);
+            let right_type_oid = index_argument_type_oid(&argument);
             let left_type_oid = index_operator_type_oid(index, index_pos);
             let strategy = left_type_oid
                 .zip(right_type_oid)
@@ -10646,7 +11019,7 @@ fn gist_order_match(
         }) else {
             return (Vec::new(), None);
         };
-        keys.push(IndexScanKey::const_value(
+        keys.push(IndexScanKey::new(
             (index_pos + 1) as i16,
             strategy,
             argument,
@@ -10678,26 +11051,35 @@ fn index_operator_type_oid(index: &BoundIndexRelation, index_pos: usize) -> Opti
         })
 }
 
-fn gist_order_item(item: &OrderByEntry) -> Option<(usize, u32, Value)> {
+fn gist_order_item(item: &OrderByEntry) -> Option<(usize, u32, IndexScanKeyArgument)> {
     match strip_casts(&item.expr) {
         Expr::Func(func) if func.args.len() == 2 => {
             let left = strip_casts(&func.args[0]);
             let right = &func.args[1];
-            if let (Some(column), Some(value)) =
-                (expr_column_index(left), const_gist_argument_value(right))
+            if let (Some(column), Some(argument)) =
+                (expr_column_index(left), gist_order_argument(right))
             {
-                return Some((column, func.funcid, value));
+                return Some((column, func.funcid, argument));
             }
-            if let (Some(value), Some(column)) = (
-                const_gist_argument_value(&func.args[0]),
+            if let (Some(argument), Some(column)) = (
+                gist_order_argument(&func.args[0]),
                 expr_column_index(strip_casts(&func.args[1])),
             ) {
-                return Some((column, commuted_function_proc_oid(func.funcid)?, value));
+                return Some((column, commuted_function_proc_oid(func.funcid)?, argument));
             }
             None
         }
         _ => None,
     }
+}
+
+fn gist_order_argument(expr: &Expr) -> Option<IndexScanKeyArgument> {
+    const_gist_argument_value(expr)
+        .map(IndexScanKeyArgument::Const)
+        .or_else(|| {
+            (runtime_index_argument_expr(expr) && expr_contains_runtime_input(expr))
+                .then(|| IndexScanKeyArgument::Runtime(expr.clone()))
+        })
 }
 
 fn expr_column_index(expr: &Expr) -> Option<usize> {

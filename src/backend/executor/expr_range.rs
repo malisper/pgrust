@@ -310,15 +310,10 @@ pub(crate) fn eval_range_function(
             Ok(Value::Bool(range_strict_right(left, right)))
         }),
         RangeOverLeft => binary_range_bool(values, "&<", |left, right| {
-            Ok(Value::Bool(
-                compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref())
-                    != Ordering::Greater,
-            ))
+            Ok(Value::Bool(range_over_left_bounds(left, right)))
         }),
         RangeOverRight => binary_range_bool(values, "&>", |left, right| {
-            Ok(Value::Bool(
-                compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) != Ordering::Less,
-            ))
+            Ok(Value::Bool(range_over_right_bounds(left, right)))
         }),
         RangeAdjacent => binary_range_bool(values, "-|-", |left, right| {
             Ok(Value::Bool(range_adjacent(left, right)))
@@ -1451,6 +1446,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(compare_range_values(&empty, &non_empty), Ordering::Less);
+    }
+
+    #[test]
+    fn range_over_left_and_right_reject_empty_ranges() {
+        let range_type = test_range_type(SqlType::new(SqlTypeKind::Int4Range));
+        let empty = empty_range(range_type);
+        let non_empty = normalize_range(
+            range_type,
+            Some(RangeBound {
+                value: Box::new(Value::Int32(1)),
+                inclusive: true,
+            }),
+            Some(RangeBound {
+                value: Box::new(Value::Int32(4)),
+                inclusive: false,
+            }),
+        )
+        .unwrap();
+
+        assert!(!range_over_left_bounds(&empty, &non_empty));
+        assert!(!range_over_left_bounds(&non_empty, &empty));
+        assert!(!range_over_right_bounds(&empty, &non_empty));
+        assert!(!range_over_right_bounds(&non_empty, &empty));
     }
 
     #[test]

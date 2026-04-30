@@ -4,9 +4,9 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
 };
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, RelationPrivilegeMask,
-    RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr, SubLink, attrno_index,
-    is_system_attr, user_attrno,
+    Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
+    RelationPrivilegeMask, RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr,
+    SubLink, SubPlan, attrno_index, is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -404,6 +404,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        group_by_refs: Vec::new(),
         grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
@@ -540,6 +541,18 @@ pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .aggfilter
                 .map(|expr| shift_expr_rtindexes(expr, offset)),
             ..*aggref
+        })),
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
+            expr: Box::new(shift_expr_rtindexes(*grouping_key.expr, offset)),
+            ..*grouping_key
+        })),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: grouping_func
+                .args
+                .into_iter()
+                .map(|arg| shift_expr_rtindexes(arg, offset))
+                .collect(),
+            ..*grouping_func
         })),
         Expr::WindowFunc(window_func) => {
             Expr::WindowFunc(Box::new(crate::include::nodes::primnodes::WindowFuncExpr {
@@ -756,6 +769,31 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
     source_varno: usize,
     output_exprs: &[Expr],
 ) -> Expr {
+    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, false)
+}
+
+pub(crate) fn rewrite_planned_local_vars_for_output_exprs(
+    expr: Expr,
+    source_varno: usize,
+    output_exprs: &[Expr],
+) -> Expr {
+    rewrite_local_vars_for_output_exprs_impl(expr, source_varno, output_exprs, true)
+}
+
+fn rewrite_local_vars_for_output_exprs_impl(
+    expr: Expr,
+    source_varno: usize,
+    output_exprs: &[Expr],
+    allow_planned_subqueries: bool,
+) -> Expr {
+    let rewrite_local_vars_for_output_exprs = |expr, source_varno, output_exprs| {
+        rewrite_local_vars_for_output_exprs_impl(
+            expr,
+            source_varno,
+            output_exprs,
+            allow_planned_subqueries,
+        )
+    };
     match expr {
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op
@@ -829,6 +867,22 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
                     rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
                 }),
             ..*aggref
+        })),
+        Expr::GroupingKey(grouping_key) => Expr::GroupingKey(Box::new(GroupingKeyExpr {
+            expr: Box::new(rewrite_local_vars_for_output_exprs(
+                *grouping_key.expr,
+                source_varno,
+                output_exprs,
+            )),
+            ..*grouping_key
+        })),
+        Expr::GroupingFunc(grouping_func) => Expr::GroupingFunc(Box::new(GroupingFuncExpr {
+            args: grouping_func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
+                .collect(),
+            ..*grouping_func
         })),
         Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(
             crate::include::nodes::primnodes::WindowFuncExpr {
@@ -994,6 +1048,23 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
                     Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs))
                 }),
             ..*sublink
+        })),
+        Expr::SubPlan(subplan) if allow_planned_subqueries => Expr::SubPlan(Box::new(SubPlan {
+            testexpr: subplan
+                .testexpr
+                .map(|expr| {
+                    Box::new(rewrite_local_vars_for_output_exprs(
+                        *expr,
+                        source_varno,
+                        output_exprs,
+                    ))
+                }),
+            args: subplan
+                .args
+                .into_iter()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs))
+                .collect(),
+            ..*subplan
         })),
         Expr::SubPlan(_) => {
             unreachable!("semantic analyze should not rewrite planned subqueries")

@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::access::index::buildkeys::{
-    materialize_heap_row_values, project_index_key_values,
+    materialize_heap_row_values_with_toast, project_index_key_values,
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
@@ -17,6 +17,7 @@ use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexBulkDeleteResult, IndexInsertContext, IndexVacuumContext,
 };
+use crate::include::access::brin::BRIN_DEFAULT_PAGES_PER_RANGE;
 use crate::include::access::brin_internal::{
     BRIN_PROCNUM_ADDVALUE, BRIN_PROCNUM_CONSISTENT, BRIN_PROCNUM_UNION,
 };
@@ -30,7 +31,12 @@ use crate::include::access::relscan::{
 };
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::tidbitmap::TidBitmap;
+use crate::include::catalog::{
+    BRIN_BOX_INCLUSION_FAMILY_OID, BRIN_MACADDR_BLOOM_FAMILY_OID, BRIN_MACADDR8_BLOOM_FAMILY_OID,
+    BRIN_NETWORK_INCLUSION_FAMILY_OID, BRIN_RANGE_INCLUSION_FAMILY_OID, BRIN_TEXT_BLOOM_FAMILY_OID,
+};
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer};
 
@@ -41,8 +47,8 @@ use super::pageops::{
 };
 use super::pageops::{brin_metapage_data, brin_metapage_init};
 use super::revmap::{
-    BrinRevmap, brin_revmap_extend, brin_revmap_get_location, brin_revmap_get_tuple_bytes,
-    brin_revmap_initialize, brin_revmap_set_location,
+    BrinRevmap, brin_revmap_desummarize_range, brin_revmap_extend, brin_revmap_get_location,
+    brin_revmap_get_tuple_bytes, brin_revmap_initialize, brin_revmap_set_location,
 };
 use super::tuple::{
     brin_build_desc, brin_deform_tuple, brin_form_placeholder_tuple, brin_form_tuple,
@@ -143,9 +149,10 @@ fn brin_pages_per_range_from_meta(
         .brin_options
         .as_ref()
         .map(|options| options.pages_per_range)
-        .ok_or(CatalogError::Corrupt(
-            "BRIN index metadata missing brin_options",
-        ))?;
+        // :HACK: Some rebuild paths currently reconstruct relcache metadata
+        // without persisted BRIN reloptions before the new metapage exists.
+        // PostgreSQL falls back to the access method default in that case.
+        .unwrap_or(BRIN_DEFAULT_PAGES_PER_RANGE);
     if pages_per_range == 0 {
         return Err(CatalogError::Corrupt(
             "BRIN index metadata has invalid pages_per_range",
@@ -267,6 +274,7 @@ fn scan_visible_heap_summaries(
     target_ranges: Option<&BTreeSet<u32>>,
     summaries: &mut BTreeMap<u32, BrinMemTuple>,
     desc: &BrinDesc,
+    toast: Option<&ToastFetchContext>,
 ) -> Result<u64, CatalogError> {
     let mut scan = heap_scan_begin_visible(pool, client_id, heap_relation, snapshot)
         .map_err(|err| CatalogError::Io(format!("brin heap scan begin failed: {err:?}")))?;
@@ -291,7 +299,7 @@ fn scan_visible_heap_summaries(
         let datums = tuple
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("brin heap deform failed: {err:?}")))?;
-        let row_values = materialize_heap_row_values(heap_desc, &datums)?;
+        let row_values = materialize_heap_row_values_with_toast(heap_desc, &datums, toast)?;
         let key_values =
             project_index_key_values(index_desc, &index_meta.indkey, &row_values, &[])?;
         let summary = summaries
@@ -402,6 +410,13 @@ fn summarize_unsummarized_ranges(
         .iter()
         .map(|range_start| (*range_start, BrinMemTuple::new(&desc, *range_start)))
         .collect::<BTreeMap<_, _>>();
+    let toast_ctx = ctx.heap_toast.map(|relation| ToastFetchContext {
+        relation,
+        pool: ctx.pool.clone(),
+        txns: ctx.txns.clone(),
+        snapshot: Snapshot::bootstrap(),
+        client_id: ctx.client_id,
+    });
     let visible = scan_visible_heap_summaries(
         &ctx.pool,
         &ctx.txns,
@@ -416,12 +431,109 @@ fn summarize_unsummarized_ranges(
         Some(&target_ranges),
         &mut summaries,
         &desc,
+        toast_ctx.as_ref(),
     )?;
     for (range_start, summary) in summaries {
         let tuple = brin_form_tuple(&desc, &summary)?;
         upsert_summary_tuple(&mut index_pages, &mut revmap, range_start, &tuple.bytes)?;
     }
     Ok((index_pages, visible))
+}
+
+fn brin_pages_per_range_for_vacuum_context(ctx: &IndexVacuumContext) -> Result<u32, CatalogError> {
+    read_brin_metapage(&ctx.pool, ctx.client_id, ctx.index_relation)
+        .map(|meta| meta.pages_per_range)
+        .or_else(|_| brin_pages_per_range_from_meta(&ctx.index_meta))
+}
+
+pub(crate) fn brin_summarize_new_values(ctx: &IndexVacuumContext) -> Result<i32, CatalogError> {
+    let pages_per_range = brin_pages_per_range_for_vacuum_context(ctx)?;
+    let index_pages = read_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation)?;
+    let revmap = brin_revmap_initialize(&index_pages)?;
+    let heap_blocks = relation_nblocks(&ctx.pool, ctx.heap_relation)?;
+    let mut summarized_ranges = 0i32;
+    for range_start in (0..heap_blocks).step_by(pages_per_range as usize) {
+        if !brin_revmap_get_location(&index_pages, &revmap, range_start)?.is_valid() {
+            summarized_ranges = summarized_ranges.saturating_add(1);
+        }
+    }
+    if summarized_ranges == 0 {
+        return Ok(0);
+    }
+
+    let (index_pages, _visible) = summarize_unsummarized_ranges(ctx, pages_per_range)?;
+    write_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation, &index_pages)?;
+    Ok(summarized_ranges)
+}
+
+pub(crate) fn brin_summarize_range(
+    ctx: &IndexVacuumContext,
+    heap_block: u32,
+) -> Result<i32, CatalogError> {
+    let pages_per_range = brin_pages_per_range_for_vacuum_context(ctx)?;
+    let heap_blocks = relation_nblocks(&ctx.pool, ctx.heap_relation)?;
+    if heap_block >= heap_blocks {
+        return Ok(0);
+    }
+    let range_start = normalize_range_start(pages_per_range, heap_block);
+    let mut index_pages = read_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation)?;
+    let mut revmap = brin_revmap_initialize(&index_pages)?;
+    if brin_revmap_get_location(&index_pages, &revmap, range_start)?.is_valid() {
+        return Ok(0);
+    }
+
+    let desc = brin_build_desc(&ctx.index_desc);
+    let placeholder = brin_form_placeholder_tuple(&desc, range_start)?;
+    upsert_summary_tuple(
+        &mut index_pages,
+        &mut revmap,
+        range_start,
+        &placeholder.bytes,
+    )?;
+
+    let mut target_ranges = BTreeSet::new();
+    target_ranges.insert(range_start);
+    let mut summaries = BTreeMap::from([(range_start, BrinMemTuple::new(&desc, range_start))]);
+    let toast_ctx = ctx.heap_toast.map(|relation| ToastFetchContext {
+        relation,
+        pool: ctx.pool.clone(),
+        txns: ctx.txns.clone(),
+        snapshot: Snapshot::bootstrap(),
+        client_id: ctx.client_id,
+    });
+    let _visible = scan_visible_heap_summaries(
+        &ctx.pool,
+        &ctx.txns,
+        ctx.client_id,
+        &ctx.interrupts,
+        Snapshot::bootstrap(),
+        ctx.heap_relation,
+        &ctx.heap_desc,
+        &ctx.index_desc,
+        &ctx.index_meta,
+        pages_per_range,
+        Some(&target_ranges),
+        &mut summaries,
+        &desc,
+        toast_ctx.as_ref(),
+    )?;
+    let summary = summaries
+        .remove(&range_start)
+        .ok_or(CatalogError::Corrupt("BRIN summary range missing"))?;
+    let tuple = brin_form_tuple(&desc, &summary)?;
+    upsert_summary_tuple(&mut index_pages, &mut revmap, range_start, &tuple.bytes)?;
+    write_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation, &index_pages)?;
+    Ok(1)
+}
+
+pub(crate) fn brin_desummarize_range(
+    ctx: &IndexVacuumContext,
+    heap_block: u32,
+) -> Result<(), CatalogError> {
+    let mut index_pages = read_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation)?;
+    let mut revmap = brin_revmap_initialize(&index_pages)?;
+    brin_revmap_desummarize_range(&mut index_pages, &mut revmap, heap_block)?;
+    write_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation, &index_pages)
 }
 
 fn range_matches_scan(
@@ -447,6 +559,14 @@ fn range_matches_scan(
         if column.all_nulls || matches!(key.argument, Value::Null) {
             return Ok(false);
         }
+        let opfamily_oid = scan.index_meta.opfamily_oids.get(column_index).copied();
+        if is_lossy_brin_family(opfamily_oid) {
+            // :HACK: pgrust only implements BRIN minmax consistency today.
+            // Inclusion and bloom opclasses still build catalog-compatible
+            // indexes, but scans must include the range and let heap recheck
+            // decide until their native summaries are implemented.
+            continue;
+        }
         let strategy = BrinMinmaxStrategy::try_from(key.strategy as i16)?;
         let Some(consistent_proc) = optional_amproc(
             &scan.index_meta,
@@ -462,6 +582,20 @@ fn range_matches_scan(
     }
     let _ = desc;
     Ok(true)
+}
+
+fn is_lossy_brin_family(opfamily_oid: Option<u32>) -> bool {
+    matches!(
+        opfamily_oid,
+        Some(
+            BRIN_NETWORK_INCLUSION_FAMILY_OID
+                | BRIN_RANGE_INCLUSION_FAMILY_OID
+                | BRIN_BOX_INCLUSION_FAMILY_OID
+                | BRIN_TEXT_BLOOM_FAMILY_OID
+                | BRIN_MACADDR_BLOOM_FAMILY_OID
+                | BRIN_MACADDR8_BLOOM_FAMILY_OID
+        )
+    )
 }
 
 pub fn brin_am_handler() -> IndexAmRoutine {
@@ -516,6 +650,13 @@ pub(crate) fn brinbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
         .step_by(pages_per_range as usize)
         .map(|range_start| (range_start, BrinMemTuple::new(&desc, range_start)))
         .collect::<BTreeMap<_, _>>();
+    let toast_ctx = ctx.heap_toast.map(|relation| ToastFetchContext {
+        relation,
+        pool: ctx.pool.clone(),
+        txns: ctx.txns.clone(),
+        snapshot: ctx.snapshot.clone(),
+        client_id: ctx.client_id,
+    });
     let heap_tuples = scan_visible_heap_summaries(
         &ctx.pool,
         &ctx.txns,
@@ -530,6 +671,7 @@ pub(crate) fn brinbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
         None,
         &mut summaries,
         &desc,
+        toast_ctx.as_ref(),
     )?;
 
     let mut index_pages = read_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation)?;
@@ -587,6 +729,19 @@ pub(crate) fn brininsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError>
     let mut revmap = brin_revmap_initialize(&index_pages)?;
     let Some((_location, bytes)) = brin_revmap_get_tuple_bytes(&index_pages, &revmap, range_start)?
     else {
+        if range_start == 0 || ctx.old_heap_tid.is_some() {
+            let mut summary = BrinMemTuple::new(&desc, range_start);
+            add_values_to_summary(
+                &ctx.index_meta,
+                &ctx.index_desc,
+                &desc,
+                &mut summary,
+                &ctx.values,
+            )?;
+            let tuple = brin_form_tuple(&desc, &summary)?;
+            upsert_summary_tuple(&mut index_pages, &mut revmap, range_start, &tuple.bytes)?;
+            write_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation, &index_pages)?;
+        }
         return Ok(false);
     };
     let mut summary = brin_deform_tuple(&desc, bytes)?;
@@ -1020,6 +1175,7 @@ mod tests {
             snapshot: Snapshot::bootstrap(),
             heap_relation: heap_rel,
             heap_desc: heap_desc(),
+            heap_toast: None,
             index_relation: index_rel,
             index_name: "brin_idx".into(),
             index_desc: index_desc(),
@@ -1100,6 +1256,7 @@ mod tests {
             snapshot: Snapshot::bootstrap(),
             heap_relation: heap_rel,
             heap_desc: heap_desc(),
+            heap_toast: None,
             index_relation: index_rel,
             index_name: "brin_idx".into(),
             index_desc: index_desc(),
@@ -1163,6 +1320,7 @@ mod tests {
             snapshot: Snapshot::bootstrap(),
             heap_relation: heap_rel,
             heap_desc: heap_desc(),
+            heap_toast: None,
             index_relation: index_rel,
             index_name: "brin_idx".into(),
             index_desc: index_desc(),
@@ -1206,6 +1364,7 @@ mod tests {
                 interrupts,
                 heap_relation: heap_rel,
                 heap_desc: heap_desc(),
+                heap_toast: None,
                 index_relation: index_rel,
                 index_name: "brin_idx".into(),
                 index_desc: index_desc(),

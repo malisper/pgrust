@@ -38,6 +38,7 @@ use crate::backend::parser::{
     bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update, parse_expr,
     rewrite_bound_delete_auto_view_target, rewrite_bound_insert_auto_view_target,
     rewrite_bound_update_auto_view_target, rewrite_local_vars_for_output_exprs,
+    rewrite_planned_local_vars_for_output_exprs,
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::rewrite::split_stored_rule_action_sql;
@@ -7061,6 +7062,7 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
                 interrupts: ctx.interrupts.clone(),
                 heap_relation: entry.rel,
                 heap_desc: entry.desc.clone(),
+                heap_toast: entry.toast,
                 index_relation: index.rel,
                 index_name: index.name.clone(),
                 index_desc: index.desc.clone(),
@@ -7422,7 +7424,7 @@ fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
         SqlTypeKind::Uuid => opcintype == UUID_TYPE_OID,
         SqlTypeKind::Bit => opcintype == BIT_TYPE_OID,
         SqlTypeKind::VarBit => opcintype == VARBIT_TYPE_OID,
-        SqlTypeKind::Cidr => opcintype == CIDR_TYPE_OID,
+        SqlTypeKind::Cidr => matches!(opcintype, CIDR_TYPE_OID | INET_TYPE_OID),
         SqlTypeKind::Inet => opcintype == INET_TYPE_OID,
         SqlTypeKind::PgLsn => opcintype == PG_LSN_TYPE_OID,
         SqlTypeKind::Composite | SqlTypeKind::Record => opcintype == RECORD_TYPE_OID,
@@ -7656,11 +7658,6 @@ pub fn execute_create_index(
     reject_system_columns_in_index(&key_columns, stmt.predicate_sql.as_deref())?;
     for column in &mut key_columns {
         if let Some(expr_sql) = column.expr_sql.as_deref() {
-            if access_method.oid == BRIN_AM_OID {
-                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                    "BRIN expression indexes".into(),
-                )));
-            }
             column.expr_type = Some(
                 crate::backend::parser::infer_relation_expr_sql_type(
                     expr_sql,
@@ -8464,7 +8461,7 @@ fn remap_partition_write_checks(
     checks
         .iter()
         .map(|check| RlsWriteCheck {
-            expr: rewrite_local_vars_for_output_exprs(
+            expr: rewrite_planned_local_vars_for_output_exprs(
                 check.expr.clone(),
                 source_varno,
                 &output_exprs,
@@ -8486,10 +8483,14 @@ fn remap_partition_conflict_expr(
     parent_desc: &RelationDesc,
     child_desc: &RelationDesc,
 ) -> Result<Expr, ExecError> {
+    let local_exprs = partition_parent_layout_exprs(parent_desc, child_desc, 1);
+    let excluded_exprs = partition_parent_layout_exprs(parent_desc, child_desc, 2);
     let outer_exprs = partition_parent_layout_exprs(parent_desc, child_desc, OUTER_VAR);
     let inner_exprs = partition_parent_layout_exprs(parent_desc, child_desc, INNER_VAR);
-    let expr = rewrite_local_vars_for_output_exprs(expr, OUTER_VAR, &outer_exprs);
-    Ok(rewrite_local_vars_for_output_exprs(
+    let expr = rewrite_planned_local_vars_for_output_exprs(expr, 1, &local_exprs);
+    let expr = rewrite_planned_local_vars_for_output_exprs(expr, 2, &excluded_exprs);
+    let expr = rewrite_planned_local_vars_for_output_exprs(expr, OUTER_VAR, &outer_exprs);
+    Ok(rewrite_planned_local_vars_for_output_exprs(
         expr,
         INNER_VAR,
         &inner_exprs,
@@ -9276,7 +9277,8 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         }
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
-        | Plan::BitmapOr { children, .. } => {
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => {
             for child in children {
                 collect_plan_relation_oids(child, oids);
             }
@@ -9333,7 +9335,8 @@ fn plan_contains_lock_rows(plan: &Plan) -> bool {
         Plan::LockRows { .. } => true,
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
-        | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_lock_rows),
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. } => children.iter().any(plan_contains_lock_rows),
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
         | Plan::Materialize { input, .. }
@@ -10287,6 +10290,7 @@ fn execute_insert_project_set_row(
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        group_by_refs: Vec::new(),
         grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),

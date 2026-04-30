@@ -204,6 +204,7 @@ fn plan_is_exists_membership_safe(plan: &Plan) -> bool {
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::BitmapOr { .. }
+        | Plan::BitmapAnd { .. }
         | Plan::WorkTableScan { .. } => true,
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
@@ -426,6 +427,7 @@ fn with_scoped_subquery_runtime<T>(
 ) -> Result<T, ExecError> {
     let saved_bindings = ctx.expr_bindings.clone();
     let saved_system_bindings = ctx.system_bindings.clone();
+    let saved_grouping_refs = ctx.active_grouping_refs.clone();
     let saved_cte_tables = ctx.cte_tables.clone();
     let saved_cte_producers = ctx.cte_producers.clone();
     let saved_recursive_worktables = ctx.recursive_worktables.clone();
@@ -437,9 +439,13 @@ fn with_scoped_subquery_runtime<T>(
     );
     ctx.cte_producers = saved_cte_producers.clone();
     ctx.recursive_worktables = saved_recursive_worktables.clone();
+    ctx.expr_bindings
+        .grouping_ref_stack
+        .insert(0, saved_grouping_refs.clone());
     let result = f(ctx);
     ctx.expr_bindings = saved_bindings;
     ctx.system_bindings = saved_system_bindings;
+    ctx.active_grouping_refs = saved_grouping_refs;
     ctx.cte_tables = saved_cte_tables;
     ctx.cte_producers = saved_cte_producers;
     ctx.recursive_worktables = saved_recursive_worktables;

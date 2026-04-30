@@ -455,6 +455,13 @@ fn bind_window_frame_offset(
 fn expr_contains_current_level_var(expr: &Expr, sublevels_up: usize) -> bool {
     match expr {
         Expr::Var(var) => var.varlevelsup == sublevels_up,
+        Expr::GroupingKey(grouping_key) => {
+            expr_contains_current_level_var(&grouping_key.expr, sublevels_up)
+        }
+        Expr::GroupingFunc(grouping_func) => grouping_func
+            .args
+            .iter()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
         Expr::Aggref(aggref) => {
             aggref
                 .direct_args

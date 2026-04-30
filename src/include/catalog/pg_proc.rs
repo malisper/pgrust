@@ -116,6 +116,7 @@ pub const GIST_POINT_PENALTY_PROC_OID: u32 = 76032;
 pub const GIST_POINT_PICKSPLIT_PROC_OID: u32 = 76033;
 pub const GIST_POINT_SAME_PROC_OID: u32 = 76034;
 pub const GIST_POINT_SORTSUPPORT_PROC_OID: u32 = 76035;
+pub const GIST_POINT_DISTANCE_PROC_OID: u32 = 76036;
 pub const GIST_POLY_CONSISTENT_PROC_OID: u32 = 76630;
 pub const GIST_POLY_UNION_PROC_OID: u32 = 76631;
 pub const GIST_POLY_PENALTY_PROC_OID: u32 = 76632;
@@ -12569,6 +12570,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
+        (
+            "brin_summarize_new_values",
+            BuiltinScalarFunction::BrinSummarizeNewValues,
+        ),
+        (
+            "brin_summarize_range",
+            BuiltinScalarFunction::BrinSummarizeRange,
+        ),
+        (
+            "brin_desummarize_range",
+            BuiltinScalarFunction::BrinDesummarizeRange,
+        ),
         ("pg_table_size", BuiltinScalarFunction::PgTableSize),
         ("pg_num_nulls", BuiltinScalarFunction::NumNulls),
         ("num_nulls", BuiltinScalarFunction::NumNulls),
@@ -13615,6 +13628,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("parallel", BuiltinScalarFunction::GeoParallel),
         ("perpendicular", BuiltinScalarFunction::GeoPerpendicular),
         ("box_contain", BuiltinScalarFunction::GeoContains),
+        ("box_contain_pt", BuiltinScalarFunction::GeoContains),
         ("contains", BuiltinScalarFunction::GeoContains),
         ("box_contained", BuiltinScalarFunction::GeoContainedBy),
         ("contained", BuiltinScalarFunction::GeoContainedBy),
@@ -13675,7 +13689,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "range_strict_right",
             BuiltinScalarFunction::RangeStrictRight,
         ),
+        ("range_overleft", BuiltinScalarFunction::RangeOverLeft),
         ("range_over_left", BuiltinScalarFunction::RangeOverLeft),
+        ("range_overright", BuiltinScalarFunction::RangeOverRight),
         ("range_over_right", BuiltinScalarFunction::RangeOverRight),
         ("range_adjacent", BuiltinScalarFunction::RangeAdjacent),
         ("range_union", BuiltinScalarFunction::RangeUnion),
@@ -13768,6 +13784,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_viewdef_name", BuiltinScalarFunction::PgGetViewDef),
+        (
+            "pg_get_viewdef_name_ext",
+            BuiltinScalarFunction::PgGetViewDef,
+        ),
+        ("pg_get_viewdef_ext", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_viewdef_wrap", BuiltinScalarFunction::PgGetViewDef),
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         (
@@ -15325,6 +15348,24 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            GIST_POINT_DISTANCE_PROC_OID,
+            "gist_point_distance",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                POINT_TYPE_OID,
+                INT2_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "gist_point_distance",
+            5,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             GIST_POINT_SORTSUPPORT_PROC_OID,
             "gist_point_sortsupport",
             VOID_TYPE_OID,
@@ -16268,6 +16309,42 @@ fn brin_support_proc_rows() -> Vec<PgProcRow> {
             false,
             'f',
             'i',
+        ),
+        proc_row(
+            3952,
+            "brin_summarize_new_values",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID]),
+            "brin_summarize_new_values",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            3999,
+            "brin_summarize_range",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID, INT8_TYPE_OID]),
+            "brin_summarize_range",
+            2,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            4014,
+            "brin_desummarize_range",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID, INT8_TYPE_OID]),
+            "brin_desummarize_range",
+            2,
+            false,
+            false,
+            'f',
+            'v',
         ),
     ]
 }

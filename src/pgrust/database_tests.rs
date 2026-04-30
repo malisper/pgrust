@@ -222,6 +222,7 @@ fn analyze_executor_context(
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
+        active_grouping_refs: Vec::new(),
         subplans: Vec::new(),
         pending_async_notifications: Vec::new(),
         catalog_effects: Vec::new(),
@@ -40756,13 +40757,27 @@ fn index_matrix_non_indexed_predicate_falls_back_to_seqscan() {
 }
 
 #[test]
-fn index_matrix_or_predicate_falls_back_to_seqscan() {
+fn index_matrix_or_predicate_uses_scalar_array_index_scan() {
     let db = setup_index_matrix_db("index_matrix_or");
-    assert_explain_uses_seqscan(
+    assert_explain_uses_index(
         &db,
         1,
         "select note from items where a = 1 or a = 2",
-        "items",
+        "items_a_idx",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select note from items where a = 1 or a = 2 order by note",
+        ),
+        vec![
+            vec![Value::Text("a1".into())],
+            vec![Value::Text("a2".into())],
+            vec![Value::Text("b1".into())],
+            vec![Value::Text("b2".into())],
+            vec![Value::Text("b3".into())],
+        ]
     );
 }
 
@@ -50026,6 +50041,80 @@ fn partitioned_insert_rls_reports_parent_table_name() {
         err,
         "42501",
         "new row violates row-level security policy for table \"part_parent\"",
+    );
+}
+
+#[test]
+fn partitioned_on_conflict_do_update_subquery() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table upsert_test (a int primary key, b text) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table upsert_test_1 partition of upsert_test for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into upsert_test values (1, 'Boo')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "with aaa as (select 1 as a, 'Foo' as b)
+             insert into upsert_test values (1, 'Bar')
+             on conflict(a) do update set (b, a) = (select b, a from aaa)
+             returning a, b",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("Foo".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table upsert_test_2 (b text, a int primary key)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table upsert_test attach partition upsert_test_2 for values in (2)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into upsert_test_2(b, a) values ('Zoo', 2)")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "with aaa as (select 1 as ctea, ' Foo' as cteb)
+             insert into upsert_test values (1, 'Bar'), (2, 'Baz')
+             on conflict(a) do update
+                set b = (select upsert_test.b || cteb from aaa),
+                    a = (select upsert_test.a from aaa)
+             returning a, b",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("Foo Foo".into())],
+            vec![Value::Int32(2), Value::Text("Zoo Foo".into())],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from upsert_test order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Text("Foo Foo".into())],
+            vec![Value::Int32(2), Value::Text("Zoo Foo".into())],
+        ]
     );
 }
 

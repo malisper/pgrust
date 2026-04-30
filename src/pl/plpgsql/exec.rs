@@ -3657,24 +3657,26 @@ fn exec_dynamic_create_table_as(
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
     let effect_start = ctx.catalog_effects.len();
-    db.execute_create_table_as_stmt_in_transaction_with_search_path(
+    let result = db.execute_create_table_as_stmt_in_transaction_with_search_path(
         ctx.client_id,
         stmt,
         xid,
         cid,
         None,
-        crate::include::nodes::pathnodes::PlannerConfig::default(),
+        planner_config_from_executor_gucs(&ctx.gucs),
         &mut ctx.catalog_effects,
         &mut ctx.temp_effects,
-    )?;
-    let consumed_catalog_cids = ctx
-        .catalog_effects
-        .len()
-        .saturating_sub(effect_start)
-        .max(1);
-    advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
-    refresh_plpgsql_executor_catalog(&db, xid, ctx);
-    Ok(StatementResult::AffectedRows(0))
+    );
+    if result.is_ok() {
+        let consumed_catalog_cids = ctx
+            .catalog_effects
+            .len()
+            .saturating_sub(effect_start)
+            .max(1);
+        advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+        refresh_plpgsql_executor_catalog(&db, xid, ctx);
+    }
+    result
 }
 
 fn exec_dynamic_create_table(
