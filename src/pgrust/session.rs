@@ -11842,24 +11842,28 @@ impl Session {
                         xid,
                         cid,
                     )? {
-                        return Ok(result);
-                    }
-                    if unsupported_stmt.feature == "ALTER TABLE form" {
+                        Ok(result)
+                    } else if unsupported_stmt.feature == "ALTER TABLE form" {
                         let lower = unsupported_stmt.sql.to_ascii_lowercase();
                         if lower.contains(" set without oids") {
-                            return Ok(StatementResult::AffectedRows(0));
-                        }
-                        if lower.contains(" set with oids") {
-                            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            Ok(StatementResult::AffectedRows(0))
+                        } else if lower.contains(" set with oids") {
+                            Err(ExecError::Parse(ParseError::UnexpectedToken {
                                 expected: "valid ALTER TABLE form",
                                 actual: "syntax error at or near \"WITH\"".into(),
-                            }));
+                            }))
+                        } else {
+                            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                                "{}: {}",
+                                unsupported_stmt.feature, unsupported_stmt.sql
+                            ))))
                         }
+                    } else {
+                        Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                            "{}: {}",
+                            unsupported_stmt.feature, unsupported_stmt.sql
+                        ))))
                     }
-                    Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-                        "{}: {}",
-                        unsupported_stmt.feature, unsupported_stmt.sql
-                    ))))
                 }
                 Statement::Call(ref call_stmt) => self.execute_call_stmt(db, call_stmt, xid, cid),
                 Statement::AlterSchemaOwner(ref alter_stmt) => {

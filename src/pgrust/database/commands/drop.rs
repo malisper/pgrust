@@ -2989,6 +2989,7 @@ impl Database {
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
         let mut dropped = 0usize;
+        let mut cascade_notice_groups = Vec::new();
         for schema_name in &drop_stmt.schema_names {
             let maybe_schema = catcache
                 .namespace_by_name(schema_name)
@@ -3260,24 +3261,25 @@ impl Database {
                     .into_iter()
                     .filter(|row| row.pronamespace == schema.oid)
                 {
+                    let signature = drop_proc_signature_text(&proc_row, &catalog);
                     tail_notices.push((
                         proc_row.oid,
                         format!(
                             "drop cascades to function {}",
-                            drop_proc_signature_text(&proc_row, &catalog)
+                            drop_schema_display_signature_name(
+                                &catcache,
+                                &visible_namespaces,
+                                proc_row.pronamespace,
+                                &signature
+                            )
                         ),
                     ));
                 }
                 tail_notices.sort_by_key(|(oid, _)| *oid);
                 notices.extend(tail_notices.into_iter().map(|(_, notice)| notice));
 
-                match notices.as_slice() {
-                    [] => {}
-                    [notice] => push_notice(notice.clone()),
-                    notices => push_notice_with_detail(
-                        format!("drop cascades to {} other objects", notices.len()),
-                        notices.join("\n"),
-                    ),
+                if !notices.is_empty() {
+                    cascade_notice_groups.push(notices);
                 }
             }
             let mut namespace_cid = cid;
@@ -3312,6 +3314,19 @@ impl Database {
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             dropped += 1;
+        }
+        let cascade_notices = cascade_notice_groups
+            .into_iter()
+            .rev()
+            .flatten()
+            .collect::<Vec<_>>();
+        match cascade_notices.as_slice() {
+            [] => {}
+            [notice] => push_notice(notice.clone()),
+            notices => push_notice_with_detail(
+                format!("drop cascades to {} other objects", notices.len()),
+                notices.join("\n"),
+            ),
         }
         Ok(StatementResult::AffectedRows(dropped))
     }

@@ -4194,12 +4194,7 @@ fn execute_dynamic_sql_statement(
             }
         })
     });
-    result
-        .map_err(|err| ExecError::WithContext {
-            source: Box::new(err),
-            context: format!("SQL statement \"{sql}\""),
-        })
-        .map_err(|err| with_sql_statement_context(err, Some(sql)))
+    result.map_err(|err| with_sql_statement_context(err, Some(sql)))
 }
 
 fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerConfig {

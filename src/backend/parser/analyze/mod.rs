@@ -2105,6 +2105,10 @@ impl CatalogLookup for Catalog {
         CatCache::from_catalog(self).auth_members_rows()
     }
 
+    fn event_trigger_rows(&self) -> Vec<PgEventTriggerRow> {
+        CatCache::from_catalog(self).event_trigger_rows()
+    }
+
     fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
         CatCache::from_catalog(self).tablespace_rows()
     }

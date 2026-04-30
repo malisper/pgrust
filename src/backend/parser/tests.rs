@@ -17826,6 +17826,45 @@ fn analyze_json_each_uses_pg_proc_out_metadata_for_output_columns() {
 }
 
 #[test]
+fn analyze_alias_for_scalar_record_out_function_exposes_out_columns() {
+    let stmt = parse_select(
+        "select b.type, b.object_names, b.object_args \
+         from pg_identify_object_as_address(1::oid, 2::oid, 0) as b",
+    )
+    .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("type".into(), SqlType::new(SqlTypeKind::Text)),
+            (
+                "object_names".into(),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            ),
+            (
+                "object_args".into(),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            ),
+        ]
+    );
+}
+
+#[test]
+fn analyze_lateral_scalar_record_out_function_can_feed_next_lateral_item() {
+    let stmt = parse_select(
+        "select b.type, b.object_names, b.object_args \
+         from pg_event_trigger as e, \
+         lateral pg_identify_object_as_address('pg_event_trigger'::regclass, e.oid, 0) as b, \
+         lateral pg_get_object_address(b.type, b.object_names, b.object_args) as a",
+    )
+    .unwrap();
+
+    analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+}
+
+#[test]
 fn analyze_pg_locks_uses_expected_columns_and_types() {
     let expected = pg_locks_expected_columns_and_types();
     for sql in ["select * from pg_locks", "select * from pg_lock_status()"] {
