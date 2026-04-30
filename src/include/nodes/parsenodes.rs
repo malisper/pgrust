@@ -287,7 +287,14 @@ impl fmt::Display for ParseError {
                 write!(f, "{message}")
             }
             ParseError::WrongObjectType { name, expected } => {
-                write!(f, "\"{name}\" is not a {expected}")
+                let article = if expected.chars().next().is_some_and(|ch| {
+                    matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u')
+                }) {
+                    "an"
+                } else {
+                    "a"
+                };
+                write!(f, "\"{name}\" is not {article} {expected}")
             }
             ParseError::RecursiveView(name) => {
                 write!(f, "infinite recursion detected in view \"{name}\"")

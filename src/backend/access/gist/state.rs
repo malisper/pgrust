@@ -284,6 +284,22 @@ impl GistState {
         let tuple_value = tuple_values
             .get(attno)
             .ok_or(CatalogError::Corrupt("gist scan key attno out of range"))?;
+        if matches!(key.argument, Value::Null) {
+            return match key.strategy {
+                0 => Ok(GistConsistentResult {
+                    matches: !is_leaf || matches!(tuple_value, Value::Null),
+                    recheck: false,
+                }),
+                1 => Ok(GistConsistentResult {
+                    matches: !is_leaf || !matches!(tuple_value, Value::Null),
+                    recheck: false,
+                }),
+                _ => Ok(GistConsistentResult {
+                    matches: false,
+                    recheck: false,
+                }),
+            };
+        }
         consistent(
             self.columns
                 .get(attno)

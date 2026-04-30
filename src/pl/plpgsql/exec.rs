@@ -3569,6 +3569,41 @@ fn exec_dynamic_create_table(
     result
 }
 
+fn exec_dynamic_create_table_as(
+    stmt: &crate::backend::parser::CreateTableAsStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let db = ctx.database.clone().ok_or_else(|| {
+        function_runtime_error(
+            "PL/pgSQL CREATE TABLE AS requires database execution context",
+            None,
+            "0A000",
+        )
+    })?;
+    let xid = ctx.ensure_write_xid()?;
+    let cid = ctx.next_command_id;
+    let effect_start = ctx.catalog_effects.len();
+    let result = db.execute_create_table_as_stmt_in_transaction_with_search_path(
+        ctx.client_id,
+        stmt,
+        xid,
+        cid,
+        None,
+        planner_config_from_executor_gucs(&ctx.gucs),
+        &mut ctx.catalog_effects,
+        &mut ctx.temp_effects,
+    );
+    if result.is_ok() {
+        let consumed_catalog_cids = ctx
+            .catalog_effects
+            .len()
+            .saturating_sub(effect_start)
+            .max(1);
+        advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+    }
+    result
+}
+
 fn exec_function_create_table(
     stmt: &crate::backend::parser::CreateTableStatement,
     compiled: &CompiledFunction,
@@ -4245,6 +4280,9 @@ fn execute_dynamic_sql_statement(
                 exec_dynamic_create_table(&stmt, ctx)
             }
             crate::backend::parser::Statement::Analyze(stmt) => exec_dynamic_analyze(&stmt, ctx),
+            crate::backend::parser::Statement::CreateTableAs(stmt) => {
+                exec_dynamic_create_table_as(&stmt, ctx)
+            }
             crate::backend::parser::Statement::DropIndex(stmt) => {
                 exec_function_drop_index(&stmt, ctx)
             }

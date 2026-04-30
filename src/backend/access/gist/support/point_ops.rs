@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
 
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::expr_geometry::GEOMETRY_EPSILON;
-use crate::include::nodes::datum::{GeoBox, GeoCircle, GeoPoint, GeoPolygon, Value};
+use crate::backend::executor::expr_geometry::{GEOMETRY_EPSILON, point_in_polygon};
+use crate::include::nodes::datum::{GeoBox, GeoCircle, GeoPoint, Value};
 
-use super::{GistColumnPickSplit, GistConsistentResult};
+use super::{GistColumnPickSplit, GistConsistentResult, GistDistanceResult};
 
 fn expect_point(value: &Value) -> Result<&GeoPoint, CatalogError> {
     match value {
@@ -37,6 +37,22 @@ fn fp_eq(left: f64, right: f64) -> bool {
     left == right || (left - right).abs() <= GEOMETRY_EPSILON
 }
 
+fn fp_lt(left: f64, right: f64) -> bool {
+    left + GEOMETRY_EPSILON < right
+}
+
+fn fp_gt(left: f64, right: f64) -> bool {
+    left > right + GEOMETRY_EPSILON
+}
+
+fn fp_le(left: f64, right: f64) -> bool {
+    left <= right + GEOMETRY_EPSILON
+}
+
+fn fp_ge(left: f64, right: f64) -> bool {
+    left + GEOMETRY_EPSILON >= right
+}
+
 fn point_distance(left: &GeoPoint, right: &GeoPoint) -> f64 {
     (left.x - right.x).hypot(left.y - right.y)
 }
@@ -46,29 +62,13 @@ fn point_in_box(point: &GeoPoint, geo_box: &GeoBox) -> bool {
     point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y
 }
 
-fn point_in_circle(point: &GeoPoint, circle: &GeoCircle) -> bool {
-    point_distance(point, &circle.center) <= circle.radius
+fn point_overlaps_box(point: &GeoPoint, geo_box: &GeoBox) -> bool {
+    let (min_x, max_x, min_y, max_y) = normalize_box(geo_box);
+    fp_le(point.x, max_x) && fp_ge(point.x, min_x) && fp_le(point.y, max_y) && fp_ge(point.y, min_y)
 }
 
-fn point_in_polygon(point: &GeoPoint, polygon: &GeoPolygon) -> bool {
-    if polygon.points.len() < 3 || !point_in_box(point, &polygon.bound_box) {
-        return false;
-    }
-
-    let mut inside = false;
-    let mut prev = polygon.points.last().expect("polygon length checked");
-    for current in &polygon.points {
-        let crosses_y = (current.y > point.y) != (prev.y > point.y);
-        if crosses_y {
-            let x_intersect =
-                (prev.x - current.x) * (point.y - current.y) / (prev.y - current.y) + current.x;
-            if point.x <= x_intersect {
-                inside = !inside;
-            }
-        }
-        prev = current;
-    }
-    inside
+fn point_in_circle(point: &GeoPoint, circle: &GeoCircle) -> bool {
+    fp_le(point_distance(point, &circle.center), circle.radius)
 }
 
 pub(crate) fn consistent(
@@ -95,13 +95,15 @@ pub(crate) fn consistent(
 
     let key = expect_point(key)?;
     let matches = match (strategy, query) {
-        (1, Value::Point(query)) => key.x < query.x,
-        (5, Value::Point(query)) => key.x > query.x,
+        (1, Value::Point(query)) => fp_lt(key.x, query.x),
+        (5, Value::Point(query)) => fp_gt(key.x, query.x),
         (6, Value::Point(query)) => point_same(key, query),
-        (10 | 29, Value::Point(query)) => key.y < query.y,
-        (11 | 30, Value::Point(query)) => key.y > query.y,
+        (10 | 29, Value::Point(query)) => fp_lt(key.y, query.y),
+        (11 | 30, Value::Point(query)) => fp_gt(key.y, query.y),
         (8 | 28, Value::Box(query)) => point_in_box(key, query),
-        (7 | 8 | 48, Value::Polygon(query)) => point_in_polygon(key, query),
+        (7 | 8 | 48, Value::Polygon(query)) => {
+            point_overlaps_box(key, &query.bound_box) && point_in_polygon(key, query) != 0
+        }
         (7 | 8 | 68, Value::Circle(query)) => point_in_circle(key, query),
         _ => return Err(CatalogError::Corrupt("unsupported GiST point strategy")),
     };
@@ -136,6 +138,37 @@ pub(crate) fn penalty(original: &Value, candidate: &Value) -> Result<f32, Catalo
         return Ok(0.0);
     }
     Ok(point_distance(expect_point(original)?, expect_point(candidate)?) as f32)
+}
+
+pub(crate) fn distance(
+    key: &Value,
+    query: &Value,
+    is_leaf: bool,
+) -> Result<GistDistanceResult, CatalogError> {
+    if matches!(key, Value::Null) || matches!(query, Value::Null) {
+        return Ok(GistDistanceResult {
+            value: None,
+            recheck: false,
+        });
+    }
+    let Value::Point(query) = query else {
+        return Err(CatalogError::Corrupt(
+            "unsupported GiST point distance query",
+        ));
+    };
+    let value = if is_leaf {
+        point_distance(expect_point(key)?, query)
+    } else {
+        // :HACK: GiST point internal tuples currently store the point opclass's
+        // approximate union value instead of PostgreSQL's box opckeytype.
+        // Treat internal distances as a zero lower bound so KNN scans preserve
+        // ordering correctness until opckeytype-aware tuple storage lands.
+        0.0
+    };
+    Ok(GistDistanceResult {
+        value: Some(value),
+        recheck: false,
+    })
 }
 
 pub(crate) fn picksplit(values: &[Value]) -> Result<GistColumnPickSplit, CatalogError> {

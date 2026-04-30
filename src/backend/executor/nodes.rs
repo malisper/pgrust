@@ -2837,7 +2837,7 @@ fn render_index_scan_key(
     };
     if purpose == 's' && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
         match key.strategy {
-            0 => return Some(format!("{column_name} IS NULL")),
+            0 | 3 => return Some(format!("{column_name} IS NULL")),
             1 => return Some(format!("{column_name} IS NOT NULL")),
             _ => {}
         }

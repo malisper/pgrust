@@ -293,6 +293,18 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         });
         oid = oid.saturating_add(1);
     }
+    rows.push(PgAmopRow {
+        oid,
+        amopfamily: GIST_POINT_FAMILY_OID,
+        amoplefttype: POINT_TYPE_OID,
+        amoprighttype: POINT_TYPE_OID,
+        amopstrategy: 15,
+        amoppurpose: 'o',
+        amopopr: operator_oid(&operators, "<->", POINT_TYPE_OID, POINT_TYPE_OID),
+        amopmethod: GIST_AM_OID,
+        amopsortfamily: BTREE_FLOAT_FAMILY_OID,
+    });
+    oid = oid.saturating_add(1);
     for (strategy, righttype) in [
         (48_i16, crate::include::catalog::POLYGON_TYPE_OID),
         (68, crate::include::catalog::CIRCLE_TYPE_OID),

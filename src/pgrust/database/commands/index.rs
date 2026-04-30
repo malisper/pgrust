@@ -11,7 +11,7 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::backend::utils::misc::notices::{push_notice, push_warning};
+use crate::backend::utils::misc::notices::{push_notice, push_warning, push_warning_with_hint};
 use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
@@ -70,6 +70,15 @@ fn cannot_reindex_system_catalogs_concurrently_error() -> ExecError {
     }
 }
 
+fn cannot_reindex_exclusion_index_concurrently_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "concurrent index creation for exclusion constraints is not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
 fn relation_name_for_reindex_notice(
     catalog: &dyn crate::backend::parser::CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
@@ -78,6 +87,55 @@ fn relation_name_for_reindex_notice(
         .class_row_by_oid(relation.relation_oid)
         .map(|row| row.relname)
         .unwrap_or_else(|| relation.relation_oid.to_string())
+}
+
+fn qualified_index_name_for_reindex_warning(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    index: &crate::backend::parser::BoundIndexRelation,
+) -> String {
+    catalog
+        .class_row_by_oid(index.relation_oid)
+        .and_then(|row| {
+            catalog
+                .namespace_row_by_oid(row.relnamespace)
+                .map(|namespace| format!("{}.{}", namespace.nspname, row.relname))
+        })
+        .unwrap_or_else(|| index.name.clone())
+}
+
+fn ensure_reindex_schema_owner(
+    db: &Database,
+    client_id: ClientId,
+    namespace_oid: u32,
+    schema_name: &str,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<(), ExecError> {
+    let catalog = db.lazy_catalog_lookup(client_id, Some((xid, cid)), None);
+    let Some(namespace) = catalog.namespace_row_by_oid(namespace_oid) else {
+        return Err(ExecError::DetailedError {
+            message: format!("schema \"{schema_name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "3F000",
+        });
+    };
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db.txn_auth_catalog(client_id, xid, cid).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "authorization catalog",
+            actual: format!("{err:?}"),
+        })
+    })?;
+    if auth.has_effective_membership(namespace.nspowner, &auth_catalog) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be owner of schema {schema_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
 }
 
 fn map_unique_index_build_violation(
@@ -2955,6 +3013,7 @@ impl Database {
                         client_id,
                         &catalog,
                         &relation,
+                        reindex_stmt.concurrently,
                         xid,
                         cid,
                         catalog_effects,
@@ -2968,10 +3027,19 @@ impl Database {
                                 client_id,
                                 &catalog,
                                 index.relation_oid,
-                            )
+                            ) && (!reindex_stmt.concurrently || index.index_meta.indisvalid)
                         })
                         .count();
-                    if index_count == 0 {
+                    self.reindex_table_indexes_in_transaction(
+                        client_id,
+                        &catalog,
+                        &relation,
+                        reindex_stmt.concurrently,
+                        xid,
+                        cid,
+                        catalog_effects,
+                    )?;
+                    if index_count == 0 && relation.relkind != 'm' {
                         if reindex_stmt.concurrently {
                             push_notice(format!(
                                 "table \"{}\" has no indexes that can be reindexed concurrently",
@@ -2984,14 +3052,6 @@ impl Database {
                             ));
                         }
                     }
-                    self.reindex_table_indexes_in_transaction(
-                        client_id,
-                        &catalog,
-                        &relation,
-                        xid,
-                        cid,
-                        catalog_effects,
-                    )?;
                 }
             }
             crate::backend::parser::ReindexTargetKind::Schema => {
@@ -3018,12 +3078,21 @@ impl Database {
                     client_id,
                     &catalog,
                     namespace_oid,
+                    reindex_stmt.concurrently,
                     xid,
                     cid,
                     catalog_effects,
                 )? {
                     return Ok(StatementResult::AffectedRows(0));
                 }
+                ensure_reindex_schema_owner(
+                    self,
+                    client_id,
+                    namespace_oid,
+                    &reindex_stmt.index_name,
+                    xid,
+                    cid,
+                )?;
                 if reindex_stmt.concurrently {
                     // :HACK: PostgreSQL's concurrent schema reindex is a
                     // multi-transaction catalog dance. The create_index
@@ -3158,6 +3227,9 @@ impl Database {
         if concurrently && is_system_catalog_relation_oid(heap.relation_oid) {
             return Err(cannot_reindex_system_catalogs_concurrently_error());
         }
+        if concurrently && index.index_meta.indisexclusion {
+            return Err(cannot_reindex_exclusion_index_concurrently_error());
+        }
         self.rebuild_index_relation_in_transaction(
             client_id,
             &heap,
@@ -3185,12 +3257,30 @@ impl Database {
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,
         relation: &crate::backend::parser::BoundRelation,
+        concurrently: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<(), ExecError> {
         for index in catalog.index_relations_for_heap(relation.relation_oid) {
             if self.is_stale_owned_temp_relation(client_id, catalog, index.relation_oid) {
+                continue;
+            }
+            if concurrently && !index.index_meta.indisvalid {
+                push_warning_with_hint(
+                    format!(
+                        "skipping reindex of invalid index \"{}\"",
+                        qualified_index_name_for_reindex_warning(catalog, &index)
+                    ),
+                    "Use DROP INDEX or REINDEX INDEX.",
+                );
+                continue;
+            }
+            if concurrently && index.index_meta.indisexclusion {
+                push_warning(format!(
+                    "cannot reindex exclusion constraint index \"{}\" concurrently, skipping",
+                    qualified_index_name_for_reindex_warning(catalog, &index)
+                ));
                 continue;
             }
             self.rebuild_index_relation_in_transaction(
@@ -3255,6 +3345,7 @@ impl Database {
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,
         partitioned_relation: &crate::backend::parser::BoundRelation,
+        concurrently: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3276,6 +3367,7 @@ impl Database {
                 client_id,
                 catalog,
                 &relation,
+                concurrently,
                 xid,
                 cid,
                 catalog_effects,
@@ -3289,6 +3381,7 @@ impl Database {
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,
         namespace_oid: u32,
+        concurrently: bool,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -3320,6 +3413,7 @@ impl Database {
                 client_id,
                 catalog,
                 &relation,
+                concurrently,
                 xid,
                 cid,
                 catalog_effects,
@@ -3391,6 +3485,7 @@ impl Database {
                 client_id,
                 catalog,
                 &relation,
+                concurrently,
                 xid,
                 cid,
                 catalog_effects,

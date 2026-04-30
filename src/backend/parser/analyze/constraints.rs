@@ -3640,12 +3640,16 @@ fn index_columns_for_existing_index(
         .iter()
         .position(|option| *option != 0)
     {
-        return Err(ParseError::UnexpectedToken {
-            expected: "default index ordering",
-            actual: format!(
+        return Err(ParseError::DetailedError {
+            message: format!(
                 "index \"{index_name}\" column number {} does not have default sorting behavior",
                 column_index + 1
             ),
+            detail: Some(
+                "Cannot create a primary key or unique constraint using such an index.".into(),
+            ),
+            hint: None,
+            sqlstate: "42809",
         });
     }
     if let Some(column_index) = index
@@ -3654,12 +3658,16 @@ fn index_columns_for_existing_index(
         .iter()
         .position(|collation_oid| *collation_oid != 0)
     {
-        return Err(ParseError::UnexpectedToken {
-            expected: "default index collation",
-            actual: format!(
+        return Err(ParseError::DetailedError {
+            message: format!(
                 "index \"{index_name}\" column number {} does not have default sorting behavior",
                 column_index + 1
             ),
+            detail: Some(
+                "Cannot create a primary key or unique constraint using such an index.".into(),
+            ),
+            hint: None,
+            sqlstate: "42809",
         });
     }
     let mut all_columns = Vec::with_capacity(index.index_meta.indkey.len());

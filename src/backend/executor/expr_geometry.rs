@@ -2079,7 +2079,7 @@ pub(crate) fn polygon_contains_polygon(outer: &GeoPolygon, inner: &GeoPolygon) -
     true
 }
 
-fn point_in_polygon(point: &GeoPoint, poly: &GeoPolygon) -> i32 {
+pub(crate) fn point_in_polygon(point: &GeoPoint, poly: &GeoPolygon) -> i32 {
     point_inside(point, &poly.points)
 }
 

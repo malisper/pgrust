@@ -24,13 +24,14 @@ use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     ANYARRAYOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BPCHAR_BTREE_OPCLASS_OID, BRIN_AM_OID,
-    BTREE_AM_OID, GIN_AM_OID, GIN_ARRAY_FAMILY_OID, GIST_AM_OID, GIST_CIRCLE_FAMILY_OID,
-    GIST_MULTIRANGE_FAMILY_OID, GIST_POLY_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
-    PG_LARGEOBJECT_METADATA_RELATION_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
-    SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID,
-    SPG_RANGE_CONFIG_PROC_OID, SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID,
-    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
+    BTREE_AM_OID, CIRCLE_GIST_OPCLASS_OID, GIN_AM_OID, GIN_ARRAY_FAMILY_OID, GIST_AM_OID,
+    GIST_CIRCLE_FAMILY_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_POLY_FAMILY_OID,
+    GIST_RANGE_FAMILY_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
+    POLY_GIST_OPCLASS_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_KD_CONFIG_PROC_OID,
+    SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID, SPG_RANGE_CONFIG_PROC_OID,
+    SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    range_type_ref_for_sql_type, relkind_has_storage,
 };
 use crate::include::nodes::datetime::{TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND};
 use crate::include::nodes::datum::{
@@ -67,14 +68,6 @@ const SMALL_FULL_MERGE_JOIN_ROW_LIMIT: f64 = 5_000.0;
 
 fn is_gist_like_am(am_oid: u32) -> bool {
     am_oid == GIST_AM_OID || am_oid == SPGIST_AM_OID
-}
-
-fn gist_polygon_circle_family(index: &BoundIndexRelation, index_pos: usize) -> bool {
-    index.index_meta.am_oid == GIST_AM_OID
-        && matches!(
-            index.index_meta.opfamily_oids.get(index_pos).copied(),
-            Some(GIST_POLY_FAMILY_OID | GIST_CIRCLE_FAMILY_OID)
-        )
 }
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
@@ -4164,6 +4157,70 @@ fn parameterized_or_clause_to_scalar_array(expr: Expr) -> Expr {
     )
 }
 
+fn btree_or_clause_to_scalar_array(expr: Expr) -> Expr {
+    let original = expr.clone();
+    let mut args = Vec::new();
+    flatten_or_args(&expr, &mut args);
+    if args.len() < 2 {
+        return original;
+    }
+
+    let mut key_expr: Option<Expr> = None;
+    let mut elements = Vec::with_capacity(args.len());
+    let mut element_type = None;
+    let mut collation_oid = None;
+    for arg in args {
+        let Expr::Op(op) = strip_casts(arg) else {
+            return original;
+        };
+        if op.op != OpExprKind::Eq || op.args.len() != 2 {
+            return original;
+        }
+        let left_is_argument = runtime_index_argument_expr(&op.args[0]);
+        let right_is_argument = runtime_index_argument_expr(&op.args[1]);
+        let (key, element) = match (left_is_argument, right_is_argument) {
+            (false, true) => (strip_casts(&op.args[0]).clone(), op.args[1].clone()),
+            (true, false) => (strip_casts(&op.args[1]).clone(), op.args[0].clone()),
+            _ => return original,
+        };
+        let current_element_type = expr_sql_type(&element);
+        if let Some(existing_element_type) = element_type {
+            if existing_element_type != current_element_type {
+                return original;
+            }
+        } else {
+            element_type = Some(current_element_type);
+        }
+        if let Some(existing) = &key_expr {
+            if strip_casts(existing) != strip_casts(&key) {
+                return original;
+            }
+        } else {
+            key_expr = Some(key);
+            collation_oid = op.collation_oid;
+        }
+        elements.push(element);
+    }
+
+    let Some(key_expr) = key_expr else {
+        return original;
+    };
+    let Some(element_type) = element_type else {
+        return original;
+    };
+    let array_type = SqlType::array_of(element_type);
+    Expr::scalar_array_op_with_collation(
+        SubqueryComparisonOp::Eq,
+        true,
+        key_expr,
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        },
+        collation_oid,
+    )
+}
+
 fn flatten_or_args<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     if let Expr::Bool(bool_expr) = expr
         && bool_expr.boolop == BoolExprType::Or
@@ -6448,7 +6505,13 @@ pub(super) fn build_index_path_spec(
     if !predicate_implies_index_predicate(filter, index.index_predicate.as_ref()) {
         return None;
     }
-    let conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
+    let mut conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
+    if index.index_meta.am_oid == BTREE_AM_OID {
+        conjuncts = conjuncts
+            .into_iter()
+            .map(btree_or_clause_to_scalar_array)
+            .collect();
+    }
     let parsed_quals = conjuncts
         .iter()
         .filter_map(if is_gist_like_am(index.index_meta.am_oid) {
@@ -8980,6 +9043,9 @@ fn index_covers_relation(desc: &RelationDesc, index: &BoundIndexRelation) -> boo
 }
 
 fn index_supports_index_only_scan(desc: &RelationDesc, index: &BoundIndexRelation) -> bool {
+    if gist_polygon_circle_heap_key(desc, index) {
+        return false;
+    }
     if !index_covers_relation(desc, index) {
         return false;
     }
@@ -8995,6 +9061,30 @@ fn index_supports_index_only_scan(desc: &RelationDesc, index: &BoundIndexRelatio
                     && index_column_can_return(index, index_pos)
             })
     })
+}
+
+fn gist_polygon_circle_heap_key(desc: &RelationDesc, index: &BoundIndexRelation) -> bool {
+    index.index_meta.am_oid == GIST_AM_OID
+        && index
+            .index_meta
+            .indkey
+            .iter()
+            .enumerate()
+            .any(|(index_pos, _)| {
+                let heap_column = simple_index_column(index, index_pos)
+                    .and_then(|column_index| desc.columns.get(column_index))
+                    .or_else(|| {
+                        (index.index_meta.indkey.len() == desc.columns.len())
+                            .then(|| desc.columns.get(index_pos))
+                            .flatten()
+                    });
+                heap_column.is_some_and(|column| {
+                    matches!(
+                        column.sql_type.kind,
+                        SqlTypeKind::Polygon | SqlTypeKind::Circle
+                    )
+                })
+            })
 }
 
 pub(super) fn index_supports_index_only_attrs(
@@ -9018,7 +9108,22 @@ pub(super) fn index_supports_index_only_attrs(
 fn index_column_can_return(index: &BoundIndexRelation, index_pos: usize) -> bool {
     match index.index_meta.am_oid {
         BTREE_AM_OID => !btree_index_column_requires_bpchar_cast(index, index_pos),
-        GIST_AM_OID => true,
+        GIST_AM_OID => {
+            !matches!(
+                index.index_meta.opfamily_oids.get(index_pos).copied(),
+                Some(GIST_POLY_FAMILY_OID | GIST_CIRCLE_FAMILY_OID)
+            ) && !matches!(
+                index.index_meta.indclass.get(index_pos).copied(),
+                Some(POLY_GIST_OPCLASS_OID | CIRCLE_GIST_OPCLASS_OID)
+            ) && !matches!(
+                index
+                    .desc
+                    .columns
+                    .get(index_pos)
+                    .map(|column| column.sql_type.kind),
+                Some(SqlTypeKind::Polygon | SqlTypeKind::Circle)
+            )
+        }
         SPGIST_AM_OID => spgist_index_column_can_return(index, index_pos),
         _ => false,
     }
@@ -9367,6 +9472,20 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
         Expr::Const(_) | Expr::Param(_) => true,
         Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => true,
         Expr::Var(var) => var.varlevelsup > 0,
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_none_or(|expr| !expr_contains_local_var_outside_subquery(expr)),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_none_or(|expr| !expr_contains_local_var_outside_subquery(expr))
+                && subplan
+                    .args
+                    .iter()
+                    .all(|expr| !expr_contains_local_var_outside_subquery(expr))
+        }
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
             runtime_index_argument_expr(inner)
         }
@@ -9384,6 +9503,99 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
                             .upper
                             .as_ref()
                             .is_none_or(runtime_index_argument_expr)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0,
+        Expr::Op(op) => op.args.iter().any(expr_contains_local_var_outside_subquery),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_local_var_outside_subquery)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_local_var_outside_subquery(&arm.expr)
+                        || expr_contains_local_var_outside_subquery(&arm.result)
+                })
+                || expr_contains_local_var_outside_subquery(&case_expr.defresult)
+        }
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_local_var_outside_subquery),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(expr_contains_local_var_outside_subquery)
+                || subplan
+                    .args
+                    .iter()
+                    .any(expr_contains_local_var_outside_subquery)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_local_var_outside_subquery(&saop.left)
+                || expr_contains_local_var_outside_subquery(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_contains_local_var_outside_subquery(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_local_var_outside_subquery(expr)
+                || expr_contains_local_var_outside_subquery(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_local_var_outside_subquery)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_local_var_outside_subquery(left)
+                || expr_contains_local_var_outside_subquery(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_local_var_outside_subquery(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_local_var_outside_subquery(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_local_var_outside_subquery)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_local_var_outside_subquery)
                 })
         }
         _ => false,
@@ -9526,9 +9738,6 @@ fn qual_strategy(
     index_pos: usize,
     qual: &IndexableQual,
 ) -> Option<u16> {
-    if gist_polygon_circle_family(index, index_pos) {
-        return None;
-    }
     if is_gist_like_am(index.index_meta.am_oid)
         && !matches!(qual.argument, IndexScanKeyArgument::Const(_))
     {
@@ -9537,7 +9746,7 @@ fn qual_strategy(
     let argument_type_oid = index_argument_type_oid_for_qual(qual);
     match qual.lookup {
         super::super::IndexStrategyLookup::Operator { oid, kind } => {
-            if index.index_meta.am_oid == SPGIST_AM_OID
+            if is_gist_like_am(index.index_meta.am_oid)
                 && oid == 0
                 && matches!(qual.argument, IndexScanKeyArgument::Const(Value::Null))
             {
@@ -10612,9 +10821,6 @@ fn gist_order_match(
             return (Vec::new(), None);
         };
         let Some((index_pos, strategy)) = (0..index_key_count(index)).find_map(|index_pos| {
-            if gist_polygon_circle_family(index, index_pos) {
-                return None;
-            }
             if simple_index_column(index, index_pos) != Some(column) {
                 return None;
             }
