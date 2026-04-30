@@ -325,6 +325,29 @@ fn attribute_not_recognized_error(name: &str) -> ExecError {
     })
 }
 
+fn validate_alter_operator_option_names(action: &AlterOperatorAction) -> Result<(), ExecError> {
+    let AlterOperatorAction::SetOptions(options) = action else {
+        return Ok(());
+    };
+    for option in options {
+        let (option_name, expected) = match option {
+            AlterOperatorOption::Restrict { option_name, .. } => (option_name, "restrict"),
+            AlterOperatorOption::Join { option_name, .. } => (option_name, "join"),
+            AlterOperatorOption::Commutator { option_name, .. } => (option_name, "commutator"),
+            AlterOperatorOption::Negator { option_name, .. } => (option_name, "negator"),
+            AlterOperatorOption::Merges { option_name, .. } => (option_name, "merges"),
+            AlterOperatorOption::Hashes { option_name, .. } => (option_name, "hashes"),
+            AlterOperatorOption::Unrecognized { option_name, .. } => {
+                return Err(attribute_not_recognized_error(option_name));
+            }
+        };
+        if option_name != expected {
+            return Err(attribute_not_recognized_error(option_name));
+        }
+    }
+    Ok(())
+}
+
 fn default_schema_acl(owner_name: &str) -> Vec<String> {
     vec![format!("{owner_name}=UC/{owner_name}")]
 }
@@ -915,6 +938,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        validate_alter_operator_option_names(&stmt.action)?;
         let namespace_oid = stmt
             .schema_name
             .as_deref()

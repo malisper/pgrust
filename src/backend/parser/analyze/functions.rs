@@ -2460,6 +2460,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TestRelpath => args.is_empty(),
             BuiltinScalarFunction::LastVal => args.is_empty(),
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
+            BuiltinScalarFunction::CurrTid2 => args.len() == 2,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
             BuiltinScalarFunction::PgSequenceParameters
@@ -4140,6 +4141,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("lastval", BuiltinScalarFunction::LastVal),
+        ("currtid2", BuiltinScalarFunction::CurrTid2),
         ("setval", BuiltinScalarFunction::SetVal),
         ("setval_oid", BuiltinScalarFunction::SetVal),
         ("setval_text", BuiltinScalarFunction::SetVal),
@@ -5638,6 +5640,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::LastVal
+            | BuiltinScalarFunction::CurrTid2
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::PgSequenceParameters

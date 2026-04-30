@@ -592,7 +592,7 @@ pub fn operator_depend_rows(row: &crate::include::catalog::PgOperatorRow) -> Vec
 
     for type_oid in [row.oprleft, row.oprright, row.oprresult]
         .into_iter()
-        .filter(|oid| *oid != 0)
+        .filter(|oid| *oid != 0 && !is_pinned_depend_object(PG_TYPE_RELATION_OID, *oid))
     {
         rows.push(PgDependRow {
             classid: PG_OPERATOR_RELATION_OID,
@@ -607,7 +607,7 @@ pub fn operator_depend_rows(row: &crate::include::catalog::PgOperatorRow) -> Vec
 
     for proc_oid in [row.oprcode, row.oprrest, row.oprjoin]
         .into_iter()
-        .filter(|oid| *oid != 0)
+        .filter(|oid| *oid != 0 && !is_pinned_depend_object(PG_PROC_RELATION_OID, *oid))
     {
         rows.push(PgDependRow {
             classid: PG_OPERATOR_RELATION_OID,
@@ -620,23 +620,18 @@ pub fn operator_depend_rows(row: &crate::include::catalog::PgOperatorRow) -> Vec
         });
     }
 
-    for operator_oid in [row.oprcom, row.oprnegate]
-        .into_iter()
-        .filter(|oid| *oid != 0)
-    {
-        rows.push(PgDependRow {
-            classid: PG_OPERATOR_RELATION_OID,
-            objid: row.oid,
-            objsubid: 0,
-            refclassid: PG_OPERATOR_RELATION_OID,
-            refobjid: operator_oid,
-            refobjsubid: 0,
-            deptype: DEPENDENCY_NORMAL,
-        });
-    }
-
     sort_pg_depend_rows(&mut rows);
     rows
+}
+
+fn is_pinned_depend_object(classid: u32, objid: u32) -> bool {
+    match classid {
+        PG_TYPE_RELATION_OID => crate::include::catalog::builtin_type_row_by_oid(objid).is_some(),
+        PG_PROC_RELATION_OID => {
+            crate::include::catalog::bootstrap_pg_proc_row_by_oid(objid).is_some()
+        }
+        _ => false,
+    }
 }
 
 pub fn opfamily_depend_rows(row: &PgOpfamilyRow) -> Vec<PgDependRow> {

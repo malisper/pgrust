@@ -20,8 +20,9 @@ use crate::include::nodes::plannodes::{
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR,
     OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, RowsFromSource, ScalarArrayOpExpr,
-    SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
-    is_executor_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
+    SetReturningCall, SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind,
+    XmlExpr, attrno_index, is_executor_special_varno, is_system_attr, set_returning_call_exprs,
+    user_attrno,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -6046,7 +6047,9 @@ fn maybe_wrap_nested_loop_inner_plan(
     if !root.is_some_and(|root| root.config.enable_memoize) || nest_params.is_empty() {
         return right_plan;
     }
-    if memoize_inner_plan_is_trivial_or_function(&right_plan) {
+    if memoize_inner_plan_is_trivial_or_function(&right_plan)
+        || plan_contains_sql_xml_table_scan(&right_plan)
+    {
         return right_plan;
     }
     // :HACK: PostgreSQL avoids wrapping the whole lateral VALUES branch in
@@ -6168,6 +6171,58 @@ fn plan_contains_values_scan(plan: &Plan) -> bool {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::RecursiveUnion { .. } => false,
+    }
+}
+
+fn plan_contains_sql_xml_table_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::FunctionScan {
+            call: SetReturningCall::SqlXmlTable(_),
+            ..
+        } => true,
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_contains_sql_xml_table_scan(input),
+        Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_contains_sql_xml_table_scan),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_sql_xml_table_scan(left) || plan_contains_sql_xml_table_scan(right)
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            plan_contains_sql_xml_table_scan(anchor) || plan_contains_sql_xml_table_scan(recursive)
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => false,
     }
 }
 

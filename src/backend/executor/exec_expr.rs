@@ -128,7 +128,9 @@ use super::{
     ExecError, ExecutorContext, TypedFunctionArg, exec_next, execute_readonly_statement,
     executor_start,
 };
-use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::heap::heapam::{
+    heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_next_visible,
+};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::object_address::{
     ObjectAddress, ObjectAddressError, get_object_address, identify_object,
@@ -140,13 +142,14 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
-    CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
-    PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
-    bind_relation_expr, deserialize_partition_bound, parse_statement, parse_type_name,
-    partition_value_to_value, relation_partition_spec, resolve_raw_type_name,
+    BoundRelation, CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec,
+    PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind,
+    SubqueryComparisonOp, bind_relation_expr, deserialize_partition_bound, parse_statement,
+    parse_type_name, partition_value_to_value, relation_partition_spec, resolve_raw_type_name,
 };
 use crate::backend::rewrite::{
     format_stored_rule_definition_with_catalog, format_view_definition, render_relation_expr_sql,
+    stored_view_query_for_rule,
 };
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
@@ -155,6 +158,7 @@ use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::guc::plpgsql_guc_default_value;
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
+use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::pg_proc::bootstrap_proc_execute_acl_has_grantee;
 use crate::include::catalog::{
@@ -7690,6 +7694,217 @@ fn map_nextval_sequence_error(
     error
 }
 
+fn currtid_invalid_tid_error(tid: ItemPointerData, relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "tid ({}, {}) is not valid for relation \"{}\"",
+            tid.block_number, tid.offset_number, relation_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    }
+}
+
+fn currtid_relation_display_name(catalog: &dyn CatalogLookup, relation_oid: u32) -> Option<String> {
+    sequence_name_for_oid(catalog, relation_oid).map(|name| name.trim_matches('"').to_string())
+}
+
+fn currtid_partitioned_relation_display_name(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> String {
+    let Some(class) = catalog.class_row_by_oid(relation_oid) else {
+        return relation_oid.to_string();
+    };
+    let namespace = catalog
+        .namespace_row_by_oid(class.relnamespace)
+        .map(|row| quote_identifier_if_needed(&row.nspname));
+    let relname = quote_identifier_if_needed(&class.relname);
+    namespace
+        .map(|namespace| format!("{namespace}.{relname}"))
+        .unwrap_or(relname)
+}
+
+fn currtid_view_source_relation(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+) -> Result<BoundRelation, ExecError> {
+    let Some((ctid_index, ctid_column)) = relation
+        .desc
+        .columns
+        .iter()
+        .enumerate()
+        .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case("ctid"))
+    else {
+        return Err(ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    };
+
+    if ctid_column.sql_type.kind != SqlTypeKind::Tid || ctid_column.sql_type.is_array {
+        return Err(ExecError::DetailedError {
+            message: "ctid isn't of type TID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+
+    let rule = catalog
+        .rewrite_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.rulename == "_RETURN")
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let query = stored_view_query_for_rule(rule.oid).ok_or_else(|| ExecError::DetailedError {
+        message: "currtid cannot handle views with no CTID".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })?;
+    let target = query
+        .target_list
+        .iter()
+        .find(|target| !target.resjunk && target.resno == ctid_index + 1)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let Expr::Var(var) = &target.expr else {
+        return Err(ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    };
+    if var.varattno != SELF_ITEM_POINTER_ATTR_NO {
+        return Err(ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    let rte_index = var
+        .varno
+        .checked_sub(1)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let Some(rte) = query.rtable.get(rte_index) else {
+        return Err(ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    };
+    let crate::include::nodes::parsenodes::RangeTblEntryKind::Relation { relation_oid, .. } =
+        &rte.kind
+    else {
+        return Err(ExecError::DetailedError {
+            message: "currtid cannot handle views with no CTID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    };
+    catalog
+        .relation_by_oid(*relation_oid)
+        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string())))
+}
+
+fn eval_currtid2_function(
+    relation_name: &Value,
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let name = relation_name
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "currtid2",
+            left: relation_name.clone(),
+            right: Value::Text("".into()),
+        })?;
+    let catalog = sequence_catalog(ctx)?;
+    let relation = catalog
+        .lookup_any_relation(name)
+        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(name.to_string())))?;
+
+    match relation.relkind {
+        'S' => Ok(Value::Tid(tid)),
+        'i' | 'I' => Err(ExecError::DetailedError {
+            message: format!(
+                "cannot open relation \"{}\"",
+                quote_identifier_if_needed(name)
+            ),
+            detail: Some("This operation is not supported for indexes.".into()),
+            hint: None,
+            sqlstate: "42809",
+        }),
+        'p' => Err(ExecError::DetailedError {
+            message: format!(
+                "cannot look at latest visible tid for relation \"{}\"",
+                currtid_partitioned_relation_display_name(catalog, relation.relation_oid)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }),
+        'v' => {
+            let source_relation = currtid_view_source_relation(catalog, &relation)?;
+            let source_name = currtid_relation_display_name(catalog, source_relation.relation_oid)
+                .unwrap_or_else(|| source_relation.relation_oid.to_string());
+            fetch_currtid_relation(&source_relation, tid, &source_name, ctx)
+        }
+        _ => {
+            let display_name = currtid_relation_display_name(catalog, relation.relation_oid)
+                .unwrap_or_else(|| quote_identifier_if_needed(name));
+            fetch_currtid_relation(&relation, tid, &display_name, ctx)
+        }
+    }
+}
+
+fn fetch_currtid_relation(
+    relation: &BoundRelation,
+    tid: ItemPointerData,
+    relation_name: &str,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let nblocks = ctx
+        .pool
+        .with_storage_mut(|storage| storage.smgr.nblocks(relation.rel, ForkNumber::Main))
+        .map_err(|_| currtid_invalid_tid_error(tid, relation_name))?;
+    if tid.block_number >= nblocks {
+        return Err(currtid_invalid_tid_error(tid, relation_name));
+    }
+    match heap_fetch_visible_with_txns(
+        &ctx.pool,
+        ctx.client_id,
+        relation.rel,
+        tid,
+        &ctx.txns,
+        &ctx.snapshot,
+    ) {
+        Ok(Some(_)) => Ok(Value::Tid(tid)),
+        Ok(None) | Err(_) => Err(currtid_invalid_tid_error(tid, relation_name)),
+    }
+}
+
 fn eval_sequence_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
@@ -7732,6 +7947,9 @@ fn eval_sequence_builtin_function(
             let target = resolve_sequence_call_target(ctx, &Value::Int64(i64::from(relation_oid)))?;
             ensure_sequence_privilege(catalog, ctx, &target, &['U', 'r'])?;
             Ok(Value::Int64(value))
+        }
+        (BuiltinScalarFunction::CurrTid2, [relation_name, Value::Tid(tid)]) => {
+            eval_currtid2_function(relation_name, *tid, ctx)
         }
         (BuiltinScalarFunction::SetVal, [target, Value::Int64(value)]) => {
             let catalog = sequence_catalog(ctx)?;
@@ -11401,6 +11619,7 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
         BuiltinScalarFunction::NextVal
         | BuiltinScalarFunction::CurrVal
         | BuiltinScalarFunction::LastVal
+        | BuiltinScalarFunction::CurrTid2
         | BuiltinScalarFunction::SetVal
         | BuiltinScalarFunction::PgGetSerialSequence
         | BuiltinScalarFunction::PgSequenceParameters
@@ -11615,6 +11834,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::LastVal
+            | BuiltinScalarFunction::CurrTid2
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::PgSequenceParameters
@@ -11826,6 +12046,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::NextVal
         | BuiltinScalarFunction::CurrVal
         | BuiltinScalarFunction::LastVal
+        | BuiltinScalarFunction::CurrTid2
         | BuiltinScalarFunction::SetVal
         | BuiltinScalarFunction::PgGetSerialSequence
         | BuiltinScalarFunction::PgSequenceParameters

@@ -2373,8 +2373,13 @@ fn nonverbose_sort_items(
             })
             .collect();
     }
-    let input_names = qualified_scan_output_names(input)
-        .unwrap_or_else(|| verbose_plan_output_exprs(input, ctx, true));
+    let input_names = if !context_has_relation_aliases(ctx) && leaf_relation_bases(input).len() == 1
+    {
+        input.column_names()
+    } else {
+        qualified_scan_output_names(input)
+            .unwrap_or_else(|| verbose_plan_output_exprs(input, ctx, true))
+    };
     items
         .iter()
         .map(|item| {

@@ -13294,8 +13294,8 @@ fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, P
                 actual: option_name_raw.into(),
             });
         }
-        let option_name = option_name.to_ascii_lowercase();
-        let option = match option_name.as_str() {
+        let option_key = option_name.to_ascii_lowercase();
+        let option = match option_key.as_str() {
             "restrict" => {
                 let function = match value {
                     None => None,

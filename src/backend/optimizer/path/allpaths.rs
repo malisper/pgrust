@@ -26,10 +26,10 @@ use crate::include::nodes::plannodes::{
     AggregateStrategy, PartitionPruneChildDomain, PartitionPrunePlan, PlanEstimate, SetOpStrategy,
 };
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, JoinType, OpExprKind, OrderByEntry, QueryColumn, RelationDesc,
-    ScalarArrayOpExpr, SortGroupClause, ToastRelationRef, Var, attrno_index,
-    expr_contains_set_returning, expr_sql_type_hint, is_system_attr, set_returning_call_exprs,
-    user_attrno,
+    BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind, OrderByEntry, QueryColumn,
+    RelationDesc, ScalarArrayOpExpr, ScalarFunctionImpl, SortGroupClause, ToastRelationRef, Var,
+    attrno_index, expr_contains_set_returning, expr_sql_type_hint, is_system_attr,
+    set_returning_call_exprs, user_attrno,
 };
 
 use super::super::bestpath;
@@ -65,6 +65,26 @@ use super::{
 };
 
 type PlannerIndexExprCache = RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>;
+
+fn spec_prefers_plain_network_btree_scan(spec: &IndexPathSpec) -> bool {
+    spec.index.index_meta.am_oid == BTREE_AM_OID
+        && spec.filter_quals.iter().any(expr_is_network_range_filter)
+}
+
+fn expr_is_network_range_filter(expr: &Expr) -> bool {
+    let Expr::Func(func) = expr else {
+        return false;
+    };
+    matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(
+            BuiltinScalarFunction::NetworkSubnet
+                | BuiltinScalarFunction::NetworkSubnetEq
+                | BuiltinScalarFunction::NetworkSupernet
+                | BuiltinScalarFunction::NetworkSupernetEq
+        )
+    )
+}
 
 fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
     fn walk(root: &PlannerInfo, node: &JoinTreeNode, clauses: &mut Vec<RestrictInfo>) {
@@ -1438,12 +1458,15 @@ fn collect_relation_access_paths(
             || (!config.enable_seqscan
                 && filter.is_none()
                 && index_supports_index_only_attrs(index, &visible_user_attr_indexes(&desc)));
-        if let Some(spec) = build_index_path_spec(
+        let index_spec = build_index_path_spec(
             filter.as_ref(),
             None,
             index,
             config.retain_partial_index_filters,
-        ) {
+        );
+        let has_index_spec = index_spec.is_some();
+        if let Some(spec) = index_spec {
+            let prefer_plain_index_scan = spec_prefers_plain_network_btree_scan(&spec);
             if config.enable_indexscan && access_method_supports_index_scan(index.index_meta.am_oid)
             {
                 paths.push(
@@ -1465,6 +1488,7 @@ fn collect_relation_access_paths(
                 );
             }
             if config.enable_bitmapscan
+                && !prefer_plain_index_scan
                 && access_method_supports_bitmap_scan(index.index_meta.am_oid)
                 && brin_partial_bitmap_allowed(index, config)
             {
@@ -1513,6 +1537,7 @@ fn collect_relation_access_paths(
             && !config.enable_seqscan
             && query_order_items.is_none()
             && filter.is_some()
+            && !has_index_spec
             && access_method_supports_index_scan(index.index_meta.am_oid)
         {
             paths.push(

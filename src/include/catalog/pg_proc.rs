@@ -44,6 +44,7 @@ pub const TEXT_CMP_GT_PROC_OID: u32 = 742;
 pub const TEXT_CMP_GE_PROC_OID: u32 = 743;
 pub const TID_CMP_NE_PROC_OID: u32 = 1265;
 pub const TID_CMP_EQ_PROC_OID: u32 = 1292;
+pub const CURRTID2_PROC_OID: u32 = 1294;
 pub const BOOL_CMP_LE_PROC_OID: u32 = 1691;
 pub const BOOL_CMP_GE_PROC_OID: u32 = 1692;
 pub const RI_FKEY_CHECK_INS_PROC_OID: u32 = 1644;
@@ -1678,6 +1679,19 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         comparison_proc_row(TID_CMP_LE_PROC_OID, "tidle", &[TID_TYPE_OID, TID_TYPE_OID]),
         comparison_proc_row(TID_CMP_GT_PROC_OID, "tidgt", &[TID_TYPE_OID, TID_TYPE_OID]),
         comparison_proc_row(TID_CMP_GE_PROC_OID, "tidge", &[TID_TYPE_OID, TID_TYPE_OID]),
+        proc_row_with_parallel(
+            CURRTID2_PROC_OID,
+            "currtid2",
+            TID_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TID_TYPE_OID]),
+            "currtid_byrelname",
+            2,
+            false,
+            true,
+            'f',
+            'v',
+            'u',
+        ),
         PgProcRow {
             proallargtypes: Some(vec![
                 REGCLASS_TYPE_OID,
@@ -11896,6 +11910,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("lastval", BuiltinScalarFunction::LastVal),
+        ("currtid2", BuiltinScalarFunction::CurrTid2),
+        ("currtid_byrelname", BuiltinScalarFunction::CurrTid2),
         ("setval", BuiltinScalarFunction::SetVal),
         ("setval_oid", BuiltinScalarFunction::SetVal),
         ("setval_text", BuiltinScalarFunction::SetVal),

@@ -6538,6 +6538,12 @@ pub(super) fn build_index_path_spec(
                 .and_then(|qual| qual.residual_expr.clone())
         })
         .collect::<Vec<_>>();
+    if index.index_meta.am_oid == BTREE_AM_OID {
+        filter_quals.extend(used_indexes.iter().filter_map(|idx| {
+            let qual = parsed_quals.get(*idx)?;
+            qual_is_network_btree_range_proc(qual).then(|| qual.expr.clone())
+        }));
+    }
     filter_quals.extend(
         conjuncts
             .iter()
@@ -9953,6 +9959,13 @@ fn network_btree_range_keys_for_qual(
     ])
 }
 
+fn qual_is_network_btree_range_proc(qual: &IndexableQual) -> bool {
+    let super::super::IndexStrategyLookup::Proc(proc_oid) = &qual.lookup else {
+        return false;
+    };
+    is_network_btree_range_proc(*proc_oid)
+}
+
 fn regex_btree_range_keys_for_qual(
     qual: &IndexableQual,
     attribute_number: i16,
@@ -10146,6 +10159,28 @@ fn indexable_qual_with_argument(
             }
             let left = strip_casts(&op.args[0]);
             let right = &op.args[1];
+            if is_network_btree_range_proc(op.opfuncid) {
+                if let Some(argument) = argument_for(right) {
+                    return mk(
+                        left,
+                        super::super::IndexStrategyLookup::Proc(op.opfuncid),
+                        argument,
+                        expr,
+                        false,
+                    );
+                }
+                if let Some(argument) = argument_for(&op.args[0]) {
+                    return mk(
+                        strip_casts(&op.args[1]),
+                        super::super::IndexStrategyLookup::Proc(commuted_function_proc_oid(
+                            op.opfuncid,
+                        )?),
+                        argument,
+                        expr,
+                        false,
+                    );
+                }
+            }
             if matches!(op.op, OpExprKind::RegexMatch)
                 && let Some(prefix) = regex_fixed_prefix_argument(right)
                 && let Some(index_expr) = regex_prefix_index_expr(left, &prefix)
@@ -10271,6 +10306,18 @@ fn indexable_qual_with_argument(
         ),
         _ => None,
     }
+}
+
+fn is_network_btree_range_proc(proc_oid: u32) -> bool {
+    matches!(
+        builtin_scalar_function_for_proc_oid(proc_oid),
+        Some(
+            BuiltinScalarFunction::NetworkSubnet
+                | BuiltinScalarFunction::NetworkSubnetEq
+                | BuiltinScalarFunction::NetworkSupernet
+                | BuiltinScalarFunction::NetworkSupernetEq
+        )
+    )
 }
 
 fn regex_fixed_prefix_argument(expr: &Expr) -> Option<RegexFixedPrefix> {
