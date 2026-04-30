@@ -81,11 +81,18 @@ pub(super) fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostS
         return true;
     };
     if let (Some(candidate_left_relid), Some(current_left_relid)) = (
+        cross_values_join_left_relid(candidate),
+        cross_values_join_left_relid(current),
+    ) && candidate_left_relid != current_left_relid
+    {
+        return candidate_left_relid < current_left_relid;
+    }
+    if let (Some(candidate_left_relid), Some(current_left_relid)) = (
         cross_function_join_left_relid(candidate),
         cross_function_join_left_relid(current),
     ) && candidate_left_relid != current_left_relid
     {
-        return candidate_left_relid > current_left_relid;
+        return candidate_left_relid < current_left_relid;
     }
     if let (Some(candidate_left_relids), Some(current_left_relids)) = (
         cross_join_left_relid_count(candidate),
@@ -168,6 +175,12 @@ pub(super) fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostS
         if preferred_unqualified_left_join_above_nulltest(current, candidate) {
             return false;
         }
+        if preferred_covering_index_only_over_bitmap(candidate, current) {
+            return true;
+        }
+        if preferred_covering_index_only_over_bitmap(current, candidate) {
+            return false;
+        }
         if preferred_bitmap_and_heap(candidate) && !preferred_bitmap_and_heap(current) {
             return true;
         }
@@ -206,6 +219,58 @@ fn preferred_narrow_order_only_index(preferred: &Path, other: &Path) -> bool {
         return false;
     };
     preferred_pathkeys == other_pathkeys && preferred_keys < other_keys
+}
+
+fn preferred_covering_index_only_over_bitmap(preferred: &Path, other: &Path) -> bool {
+    let Some((preferred_source, preferred_index)) = covering_index_only_path(preferred) else {
+        return false;
+    };
+    let Some((other_source, other_index)) = bitmap_heap_index_path(other) else {
+        return false;
+    };
+    preferred_source == other_source && preferred_index == other_index
+}
+
+fn covering_index_only_path(path: &Path) -> Option<(usize, &str)> {
+    match path {
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => covering_index_only_path(input),
+        Path::IndexOnlyScan {
+            source_id,
+            index_name,
+            ..
+        } => Some((*source_id, index_name.as_str())),
+        _ => None,
+    }
+}
+
+fn bitmap_heap_index_path(path: &Path) -> Option<(usize, &str)> {
+    match path {
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => bitmap_heap_index_path(input),
+        Path::BitmapHeapScan {
+            source_id,
+            bitmapqual,
+            ..
+        } => bitmap_index_name(bitmapqual).map(|index_name| (*source_id, index_name)),
+        _ => None,
+    }
+}
+
+fn bitmap_index_name(path: &Path) -> Option<&str> {
+    match path {
+        Path::BitmapIndexScan { index_name, .. } => Some(index_name.as_str()),
+        Path::BitmapAnd { children, .. } | Path::BitmapOr { children, .. } => {
+            let mut names = children.iter().filter_map(bitmap_index_name);
+            let first = names.next()?;
+            names.all(|name| name == first).then_some(first)
+        }
+        _ => None,
+    }
 }
 
 fn order_only_btree_index_path(path: &Path) -> Option<(usize, &[PathKey])> {
@@ -813,6 +878,56 @@ fn cross_function_join_left_relid(path: &Path) -> Option<usize> {
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_function_join_left_relid(input),
         _ => None,
+    }
+}
+
+fn cross_values_join_left_relid(path: &Path) -> Option<usize> {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind,
+            restrict_clauses,
+            ..
+        } if values_cross_like_join(*kind, restrict_clauses)
+            && path_is_plain_values_relation(left)
+            && path_is_plain_values_relation(right) =>
+        {
+            super::path_relids(left).first().copied()
+        }
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => cross_values_join_left_relid(input),
+        _ => None,
+    }
+}
+
+fn values_cross_like_join(
+    kind: JoinType,
+    restrict_clauses: &[crate::include::nodes::pathnodes::RestrictInfo],
+) -> bool {
+    let _ = restrict_clauses;
+    matches!(kind, JoinType::Cross | JoinType::Inner)
+}
+
+fn path_is_plain_values_relation(path: &Path) -> bool {
+    match path {
+        Path::Values { .. } => true,
+        Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => path_is_plain_values_relation(input),
+        Path::Filter { .. } => false,
+        _ => false,
     }
 }
 
