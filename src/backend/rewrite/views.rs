@@ -26,7 +26,7 @@ use crate::include::nodes::primnodes::{
     SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
     SqlXmlTableColumnKind, SubLink, SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause,
     WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
-    user_attrno,
+    set_returning_call_exprs, user_attrno,
 };
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
@@ -1232,19 +1232,41 @@ fn render_target_entry(
     if ctx.options.parenthesize_top_level_ops && matches!(target.expr, Expr::Op(_)) {
         rendered = format!("({rendered})");
     }
+    let quoted_target_name = quote_target_output_name(target, target_name, ctx);
     if natural_output_matches && visible_source_count(ctx.query) == 1 && ctx.outers.is_empty() {
-        quote_identifier_if_needed(target_name)
+        quoted_target_name
     } else if natural_output_matches
         && let Some(rendered) = sql_xml_table_output_name(target_name, ctx)
     {
         rendered
-    } else if rendered == quote_identifier_if_needed(target_name) || natural_output_matches {
+    } else if rendered == quoted_target_name || natural_output_matches {
         rendered
     } else if matches!(target.expr, Expr::Xml(_)) {
         format!("{rendered} AS \"{}\"", target_name.replace('"', "\"\""))
     } else {
-        format!("{rendered} AS {}", quote_identifier_if_needed(target_name))
+        format!("{rendered} AS {quoted_target_name}")
     }
+}
+
+fn quote_target_output_name(
+    target: &TargetEntry,
+    target_name: &str,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    if let Expr::Var(var) = &target.expr
+        && let Some(scope) = ctx.scope_for_var(var)
+        && let Some(rte) = scope.query.rtable.get(var.varno.saturating_sub(1))
+        && matches!(
+            &rte.kind,
+            RangeTblEntryKind::Function {
+                call: SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_),
+            }
+        )
+        && rte.alias.is_none()
+    {
+        return quote_json_table_column_name(target_name);
+    }
+    quote_identifier_if_needed(target_name)
 }
 
 fn sql_xml_table_output_name(target_name: &str, ctx: &ViewDeparseContext<'_>) -> Option<String> {
@@ -1271,6 +1293,9 @@ fn sql_xml_table_output_name(target_name: &str, ctx: &ViewDeparseContext<'_>) ->
 }
 
 fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: usize) -> String {
+    if let Some(rendered) = render_sql_table_function_cross_join_list(ctx, node, indent) {
+        return rendered;
+    }
     match node {
         JoinTreeNode::RangeTblRef(index) => render_rte(ctx, *index),
         JoinTreeNode::JoinExpr {
@@ -1282,7 +1307,7 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
         } => {
             let left_sql = render_from_node(ctx, left, indent + 3);
             let right_sql = render_from_node(ctx, right, indent + 3);
-            if *kind == JoinType::Cross && range_ref_is_sql_xml_table(ctx, right) {
+            if *kind == JoinType::Cross && range_ref_is_sql_table_function(ctx, right) {
                 let joined = format!("{left_sql},\n{}LATERAL {right_sql}", " ".repeat(indent + 1));
                 return append_join_alias(ctx, *rtindex, joined);
             }
@@ -1349,7 +1374,78 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
     }
 }
 
-fn range_ref_is_sql_xml_table(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode) -> bool {
+fn render_sql_table_function_cross_join_list(
+    ctx: &ViewDeparseContext<'_>,
+    node: &JoinTreeNode,
+    indent: usize,
+) -> Option<String> {
+    let JoinTreeNode::JoinExpr { kind, rtindex, .. } = node else {
+        return None;
+    };
+    if *kind != JoinType::Cross || join_node_has_alias(ctx, *rtindex) {
+        return None;
+    }
+    if !cross_join_chain_contains_sql_table_function(ctx, node) {
+        return None;
+    }
+    let mut items = Vec::new();
+    collect_cross_join_source_items(ctx, node, &mut items);
+    let mut iter = items.into_iter();
+    let first = iter.next()?;
+    let rendered = iter.fold(first, |mut rendered, item| {
+        rendered.push_str(&format!(",\n{}{}", " ".repeat(indent + 1), item));
+        rendered
+    });
+    Some(rendered)
+}
+
+fn collect_cross_join_source_items(
+    ctx: &ViewDeparseContext<'_>,
+    node: &JoinTreeNode,
+    items: &mut Vec<String>,
+) {
+    if let JoinTreeNode::JoinExpr {
+        left,
+        right,
+        kind: JoinType::Cross,
+        rtindex,
+        ..
+    } = node
+        && !join_node_has_alias(ctx, *rtindex)
+    {
+        collect_cross_join_source_items(ctx, left, items);
+        collect_cross_join_source_items(ctx, right, items);
+        return;
+    }
+    let mut rendered = render_from_node(ctx, node, 3);
+    if range_ref_should_render_lateral(ctx, node) {
+        rendered = format!("LATERAL {rendered}");
+    }
+    items.push(rendered);
+}
+
+fn cross_join_chain_contains_sql_table_function(
+    ctx: &ViewDeparseContext<'_>,
+    node: &JoinTreeNode,
+) -> bool {
+    match node {
+        JoinTreeNode::RangeTblRef(_) => range_ref_is_sql_table_function(ctx, node),
+        JoinTreeNode::JoinExpr { left, right, .. } => {
+            cross_join_chain_contains_sql_table_function(ctx, left)
+                || cross_join_chain_contains_sql_table_function(ctx, right)
+        }
+    }
+}
+
+fn join_node_has_alias(ctx: &ViewDeparseContext<'_>, rtindex: usize) -> bool {
+    ctx.query
+        .rtable
+        .get(rtindex.saturating_sub(1))
+        .and_then(|rte| rte.alias.as_ref())
+        .is_some()
+}
+
+fn range_ref_is_sql_table_function(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode) -> bool {
     let JoinTreeNode::RangeTblRef(index) = node else {
         return false;
     };
@@ -1360,10 +1456,145 @@ fn range_ref_is_sql_xml_table(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode)
             matches!(
                 &rte.kind,
                 RangeTblEntryKind::Function {
-                    call: SetReturningCall::SqlXmlTable(_),
+                    call: SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_),
                 }
             )
         })
+}
+
+fn range_ref_should_render_lateral(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode) -> bool {
+    let JoinTreeNode::RangeTblRef(index) = node else {
+        return false;
+    };
+    ctx.query
+        .rtable
+        .get(index.saturating_sub(1))
+        .is_some_and(|rte| match &rte.kind {
+            RangeTblEntryKind::Function {
+                call: call @ SetReturningCall::SqlJsonTable(_),
+            } => set_returning_call_uses_outer_columns(call),
+            RangeTblEntryKind::Function {
+                call: SetReturningCall::SqlXmlTable(_),
+            } => true,
+            _ => false,
+        })
+}
+
+fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
+    set_returning_call_exprs(call)
+        .into_iter()
+        .any(expr_uses_outer_columns)
+}
+
+fn expr_uses_outer_columns(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup > 0,
+        Expr::Param(_) => true,
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_uses_outer_columns)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_uses_outer_columns)
+        }
+        Expr::GroupingKey(grouping_key) => expr_uses_outer_columns(&grouping_key.expr),
+        Expr::GroupingFunc(grouping_func) => grouping_func.args.iter().any(expr_uses_outer_columns),
+        Expr::WindowFunc(window_func) => {
+            window_func.args.iter().any(expr_uses_outer_columns)
+                || match &window_func.kind {
+                    WindowFuncKind::Aggregate(aggref) => aggref
+                        .aggfilter
+                        .as_ref()
+                        .is_some_and(expr_uses_outer_columns),
+                    WindowFuncKind::Builtin(_) => false,
+                }
+        }
+        Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_outer_columns),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_uses_outer_columns)
+                || case_expr.args.iter().any(|arm| {
+                    expr_uses_outer_columns(&arm.expr) || expr_uses_outer_columns(&arm.result)
+                })
+                || expr_uses_outer_columns(&case_expr.defresult)
+        }
+        Expr::CaseTest(_) => false,
+        Expr::Func(func) => func.args.iter().any(expr_uses_outer_columns),
+        Expr::SqlJsonQueryFunction(func) => {
+            func.child_exprs().into_iter().any(expr_uses_outer_columns)
+        }
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_uses_outer_columns),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_uses_outer_columns),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_uses_outer_columns),
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_outer_columns(&saop.left) || expr_uses_outer_columns(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_uses_outer_columns(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_outer_columns(expr)
+                || expr_uses_outer_columns(pattern)
+                || escape.as_deref().is_some_and(expr_uses_outer_columns)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_outer_columns(left) || expr_uses_outer_columns(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_uses_outer_columns),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_uses_outer_columns(expr)),
+        Expr::FieldSelect { expr, .. } => expr_uses_outer_columns(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_outer_columns(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_uses_outer_columns)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_uses_outer_columns)
+                })
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_uses_outer_columns),
+        Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn join_operand_requires_outer_parentheses(
@@ -1543,14 +1774,16 @@ fn render_function_rte(
     if let Some(alias) = rte.alias.as_deref() {
         rendered.push(' ');
         rendered.push_str(&quote_identifier_if_needed(alias));
-        let columns = rte
-            .desc
-            .columns
-            .iter()
-            .map(|column| quote_identifier_if_needed(&column.name))
-            .collect::<Vec<_>>();
-        if !columns.is_empty() {
-            rendered.push_str(&format!("({})", columns.join(", ")));
+        if !matches!(call, SetReturningCall::SqlJsonTable(_)) {
+            let columns = rte
+                .desc
+                .columns
+                .iter()
+                .map(|column| quote_identifier_if_needed(&column.name))
+                .collect::<Vec<_>>();
+            if !columns.is_empty() {
+                rendered.push_str(&format!("({})", columns.join(", ")));
+            }
         }
     }
     rendered

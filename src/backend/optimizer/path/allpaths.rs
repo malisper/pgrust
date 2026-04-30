@@ -5594,6 +5594,13 @@ fn path_tie_breaker_prefers(
     left_pathkeys: &[PathKey],
     right_pathkeys: &[PathKey],
 ) -> bool {
+    if let (Some(left_relid), Some(right_relid)) = (
+        cross_function_join_left_relid(left),
+        cross_function_join_left_relid(right),
+    ) && left_relid != right_relid
+    {
+        return left_relid > right_relid;
+    }
     if let (Some(left_relids), Some(right_relids)) = (
         cross_join_left_relid_count(left),
         cross_join_left_relid_count(right),
@@ -5602,6 +5609,39 @@ fn path_tie_breaker_prefers(
         return left_relids > right_relids;
     }
     left_pathkeys.len() > right_pathkeys.len()
+}
+
+fn cross_function_join_left_relid(path: &Path) -> Option<usize> {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind: JoinType::Cross,
+            ..
+        } if path_is_function_scan_leaf(left) && path_is_function_scan_leaf(right) => {
+            path_relids(left).first().copied()
+        }
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => cross_function_join_left_relid(input),
+        _ => None,
+    }
+}
+
+fn path_is_function_scan_leaf(path: &Path) -> bool {
+    match path {
+        Path::FunctionScan { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => path_is_function_scan_leaf(input),
+        _ => false,
+    }
 }
 
 fn cross_join_left_relid_count(path: &Path) -> Option<usize> {

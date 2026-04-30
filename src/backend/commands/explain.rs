@@ -3929,21 +3929,23 @@ fn verbose_function_scan_output_exprs(
     call: &SetReturningCall,
     table_alias: Option<&str>,
 ) -> Vec<String> {
-    if matches!(
-        call,
-        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
-    ) {
-        let name = if matches!(call, SetReturningCall::SqlJsonTable(_)) {
-            "json_table"
-        } else {
-            "xmltable"
-        };
+    if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+        return call
+            .output_columns()
+            .iter()
+            .map(|column| match table_alias {
+                Some(_) => quote_explain_identifier(&column.name),
+                None => format!("\"json_table\".{}", quote_explain_identifier(&column.name)),
+            })
+            .collect();
+    }
+    if matches!(call, SetReturningCall::SqlXmlTable(_)) {
         return call
             .output_columns()
             .iter()
             .map(|column| match table_alias {
                 Some(alias) => format!("{alias}.{}", quote_explain_identifier(&column.name)),
-                None => format!("\"{name}\".{}", quote_explain_identifier(&column.name)),
+                None => format!("\"xmltable\".{}", quote_explain_identifier(&column.name)),
             })
             .collect();
     }

@@ -3338,9 +3338,29 @@ fn sql_json_no_item_error() -> ExecError {
     }
 }
 
+fn sql_json_no_item_error_for_column(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("no SQL/JSON item found for specified path of column \"{column_name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22034",
+    }
+}
+
 fn sql_json_query_single_item_error() -> ExecError {
     ExecError::DetailedError {
         message: "JSON path expression in JSON_QUERY must return single item when no wrapper is requested".into(),
+        detail: None,
+        hint: Some("Use the WITH WRAPPER clause to wrap SQL/JSON items into an array.".into()),
+        sqlstate: "22034",
+    }
+}
+
+fn sql_json_table_single_item_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "JSON path expression for column \"{column_name}\" must return single item when no wrapper is requested"
+        ),
         detail: None,
         hint: Some("Use the WITH WRAPPER clause to wrap SQL/JSON items into an array.".into()),
         sqlstate: "22034",
@@ -5213,6 +5233,7 @@ fn eval_sql_json_table_column(
             on_empty,
             on_error,
         } => eval_sql_json_table_scalar_column(
+            &column.name,
             source,
             vars,
             path,
@@ -5230,6 +5251,7 @@ fn eval_sql_json_table_column(
             on_empty,
             on_error,
         } => eval_sql_json_table_formatted_column(
+            &column.name,
             source,
             vars,
             path,
@@ -5254,6 +5276,7 @@ fn eval_sql_json_table_column(
 }
 
 fn eval_sql_json_table_scalar_column(
+    column_name: &str,
     source: &JsonbValue,
     vars: Option<&JsonbValue>,
     path: &str,
@@ -5265,12 +5288,19 @@ fn eval_sql_json_table_scalar_column(
 ) -> Result<Value, ExecError> {
     let values = match eval_sql_json_path(source, path, vars, true) {
         Ok(values) => values,
+        Err(err) if matches!(on_error, SqlJsonTableBehavior::Error) => return Err(err),
         Err(_) => return eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx),
     };
     if values.is_empty() {
+        if matches!(on_empty, SqlJsonTableBehavior::Error) {
+            return Err(sql_json_no_item_error_for_column(column_name));
+        }
         return eval_sql_json_behavior(on_empty, target_type, "EMPTY", slot, ctx);
     }
     if values.len() != 1 {
+        if matches!(on_error, SqlJsonTableBehavior::Error) {
+            return Err(sql_json_table_single_item_error(column_name));
+        }
         return eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx);
     }
     let value = &values[0];
@@ -5281,12 +5311,16 @@ fn eval_sql_json_table_scalar_column(
         return Ok(Value::Null);
     }
     let text = jsonb_scalar_sql_text_for_type(value, target_type, &ctx.datetime_config);
-    cast_sql_json_text_value(&text, target_type, ctx)
-        .or_else(|_| eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx))
+    match cast_sql_json_text_value(&text, target_type, ctx) {
+        Ok(value) => Ok(value),
+        Err(err) if matches!(on_error, SqlJsonTableBehavior::Error) => Err(err),
+        Err(_) => eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn eval_sql_json_table_formatted_column(
+    column_name: &str,
     source: &JsonbValue,
     vars: Option<&JsonbValue>,
     path: &str,
@@ -5300,9 +5334,13 @@ fn eval_sql_json_table_formatted_column(
 ) -> Result<Value, ExecError> {
     let values = match eval_sql_json_path(source, path, vars, true) {
         Ok(values) => values,
+        Err(err) if matches!(on_error, SqlJsonTableBehavior::Error) => return Err(err),
         Err(_) => return eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx),
     };
     if values.is_empty() {
+        if matches!(on_empty, SqlJsonTableBehavior::Error) {
+            return Err(sql_json_no_item_error_for_column(column_name));
+        }
         return eval_sql_json_behavior(on_empty, target_type, "EMPTY", slot, ctx);
     }
     let value = match wrapper {
@@ -5313,6 +5351,9 @@ fn eval_sql_json_table_formatted_column(
             values[0].clone()
         }
         SqlJsonTableWrapper::Unspecified | SqlJsonTableWrapper::Without => {
+            if matches!(on_error, SqlJsonTableBehavior::Error) {
+                return Err(sql_json_table_single_item_error(column_name));
+            }
             return eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx);
         }
     };
@@ -5330,6 +5371,7 @@ fn eval_sql_json_table_exists_column(
 ) -> Result<Value, ExecError> {
     let exists = match eval_sql_json_path(source, path, vars, true) {
         Ok(values) => !values.is_empty(),
+        Err(err) if matches!(on_error, SqlJsonTableBehavior::Error) => return Err(err),
         Err(_) => return eval_sql_json_exists_behavior(on_error, target_type, slot, ctx),
     };
     coerce_sql_json_exists_bool(exists, target_type, ctx).or_else(|err| {
@@ -5644,8 +5686,18 @@ fn cast_sql_json_formatted_value(
     if matches!(quotes, SqlJsonTableQuotes::Omit)
         && let JsonbValue::String(text) = value
     {
-        return cast_sql_json_text_value(text, target_type, ctx)
-            .or_else(|_| eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx));
+        return match cast_sql_json_text_value(text, target_type, ctx) {
+            Ok(value) => Ok(value),
+            Err(err) if matches!(on_error, SqlJsonTableBehavior::Error) => Err(err),
+            Err(_) => eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx),
+        };
+    }
+    if let Some(result) = cast_sql_json_query_structured_value(value, target_type, quotes, ctx) {
+        return match result {
+            Ok(value) => Ok(value),
+            Err(err) if matches!(on_error, SqlJsonTableBehavior::Error) => Err(err),
+            Err(_) => eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx),
+        };
     }
     match target_type.kind {
         SqlTypeKind::Json if !target_type.is_array => {
@@ -5654,8 +5706,11 @@ fn cast_sql_json_formatted_value(
         SqlTypeKind::Jsonb if !target_type.is_array => Ok(Value::Jsonb(encode_jsonb(value))),
         _ => {
             let text = value.render();
-            cast_sql_json_text_value(&text, target_type, ctx)
-                .or_else(|_| eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx))
+            match cast_sql_json_text_value(&text, target_type, ctx) {
+                Ok(value) => Ok(value),
+                Err(err) if matches!(on_error, SqlJsonTableBehavior::Error) => Err(err),
+                Err(_) => eval_sql_json_behavior(on_error, target_type, "ERROR", slot, ctx),
+            }
         }
     }
 }

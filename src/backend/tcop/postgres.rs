@@ -333,7 +333,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return Some(position);
     }
-    if suppress_sql_json_query_function_runtime_position(sql, e) {
+    if suppress_sql_json_query_function_runtime_position(sql, e)
+        || suppress_sql_json_table_runtime_position(sql, e)
+    {
         return None;
     }
     if suppress_legacy_json_runtime_position(sql, e) {
@@ -572,6 +574,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return Some(position);
             }
             if let Some(position) = sql_json_query_function_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = sql_json_table_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = create_table_error_position(sql, message) {
@@ -845,6 +850,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return Some(position);
             }
             if let Some(position) = routine_definition_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = sql_json_table_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = create_table_error_position(sql, message) {
@@ -1316,6 +1324,42 @@ fn suppress_sql_json_query_function_runtime_position(sql: &str, e: &ExecError) -
     }
 }
 
+fn suppress_sql_json_table_runtime_position(sql: &str, e: &ExecError) -> bool {
+    if find_json_table_function_name_index(sql).is_none() {
+        return false;
+    }
+    match e {
+        ExecError::WithContext { source, .. } => {
+            suppress_sql_json_table_runtime_position(sql, source)
+        }
+        ExecError::Parse(_) => false,
+        ExecError::JsonInput { message, .. } => {
+            message.starts_with("invalid input syntax for type ")
+        }
+        ExecError::ArrayInput { .. }
+        | ExecError::InvalidIntegerInput { .. }
+        | ExecError::IntegerOutOfRange { .. }
+        | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidUuidInput { .. }
+        | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidGeometryInput { .. }
+        | ExecError::InvalidRangeInput { .. }
+        | ExecError::InvalidBitInput { .. }
+        | ExecError::InvalidBooleanInput { .. }
+        | ExecError::InvalidFloatInput { .. }
+        | ExecError::FloatOutOfRange { .. } => true,
+        ExecError::InvalidStorageValue { column, details } => {
+            column == "jsonpath" && is_jsonpath_parse_error(details)
+        }
+        ExecError::DetailedError { message, .. } => {
+            message.starts_with("invalid input syntax for type ")
+                || message.starts_with("malformed range literal: ")
+                || is_jsonpath_parse_error(message)
+        }
+        _ => false,
+    }
+}
+
 fn suppress_legacy_json_runtime_position(sql: &str, e: &ExecError) -> bool {
     match e {
         ExecError::WithContext { source, .. } => suppress_legacy_json_runtime_position(sql, source),
@@ -1422,8 +1466,45 @@ fn sql_json_query_function_error_position(sql: &str, message: &str) -> Option<us
     }
 }
 
+fn sql_json_table_error_position(sql: &str, message: &str) -> Option<usize> {
+    if find_json_table_function_name_index(sql).is_none() {
+        return None;
+    }
+    match message {
+        "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used" => {
+            find_sql_json_table_column_name_before_path_position(sql)
+                .or_else(|| {
+                    find_last_case_insensitive_token_position(sql, "OMIT QUOTES")
+                        .map(|index| index + 1)
+                })
+                .or_else(|| find_json_table_function_name_position(sql))
+        }
+        "only one FOR ORDINALITY column is allowed" => {
+            find_last_json_table_ordinality_column_position(sql)
+        }
+        _ if message.starts_with("duplicate JSON_TABLE column or path name: ") => message
+            .strip_prefix("duplicate JSON_TABLE column or path name: ")
+            .map(|name| name.trim_matches('"'))
+            .and_then(|name| find_last_identifier_position(sql, name)),
+        _ if message.starts_with("invalid ON ERROR behavior")
+            || message.starts_with("invalid ON EMPTY behavior") =>
+        {
+            find_sql_json_table_behavior_clause_position(sql)
+        }
+        _ => None,
+    }
+}
+
 fn is_sql_json_query_function_surface(sql: &str) -> bool {
     find_sql_json_query_function_name_index(sql).is_some()
+}
+
+fn find_json_table_function_name_position(sql: &str) -> Option<usize> {
+    find_json_table_function_name_index(sql).map(|index| index + 1)
+}
+
+fn find_json_table_function_name_index(sql: &str) -> Option<usize> {
+    find_json_function_name_index_for(sql, "json_table")
 }
 
 fn find_sql_json_query_function_name_position(sql: &str) -> Option<usize> {
@@ -1456,6 +1537,13 @@ fn find_sql_json_query_function_call_bounds(sql: &str) -> Option<(usize, usize, 
     Some((name, after_name, close))
 }
 
+fn find_json_table_function_call_bounds(sql: &str) -> Option<(usize, usize, usize)> {
+    let name = find_json_table_function_name_index(sql)?;
+    let after_name = sql[name..].find('(')? + name;
+    let close = find_matching_delimiter(sql, after_name, b'(', b')')?;
+    Some((name, after_name, close))
+}
+
 fn find_sql_json_returning_format_position(sql: &str) -> Option<usize> {
     let (_, open, close) = find_sql_json_query_function_call_bounds(sql)?;
     let returning = find_ascii_keyword(sql, "returning", open + 1)?;
@@ -1482,6 +1570,20 @@ fn find_sql_json_default_behavior_expr_position(sql: &str) -> Option<usize> {
 
 fn find_sql_json_behavior_clause_position(sql: &str) -> Option<usize> {
     let (_, open, close) = find_sql_json_query_function_call_bounds(sql)?;
+    find_sql_json_behavior_clause_position_in_bounds(sql, open, close)
+}
+
+fn find_sql_json_table_behavior_clause_position(sql: &str) -> Option<usize> {
+    let (_, open, close) = find_json_table_function_call_bounds(sql)?;
+    find_sql_json_behavior_clause_position_in_bounds(sql, open, close)
+        .or_else(|| find_sql_json_behavior_clause_position_any_depth(sql, open, close))
+}
+
+fn find_sql_json_behavior_clause_position_in_bounds(
+    sql: &str,
+    open: usize,
+    close: usize,
+) -> Option<usize> {
     let segment = &sql[open + 1..close];
     let on_position = find_sql_json_behavior_on_position(segment)?;
     let prefix = &segment[..on_position];
@@ -1492,6 +1594,128 @@ fn find_sql_json_behavior_clause_position(sql: &str) -> Option<usize> {
     .filter_map(|keyword| find_last_top_level_keyword(prefix, keyword))
     .max()
     .map(|index| open + 1 + index + 1)
+}
+
+fn find_sql_json_behavior_clause_position_any_depth(
+    sql: &str,
+    open: usize,
+    close: usize,
+) -> Option<usize> {
+    let mut start = open + 1;
+    while let Some(on_position) = find_keyword_ignoring_strings(sql, "on", start, close) {
+        let target = skip_ascii_whitespace(sql, on_position + "on".len(), close);
+        let bytes = sql.as_bytes();
+        if ascii_keyword_at(bytes, target, b"error") || ascii_keyword_at(bytes, target, b"empty") {
+            return [
+                "default", "empty", "error", "true", "false", "unknown", "null",
+            ]
+            .iter()
+            .filter_map(|keyword| {
+                find_last_keyword_ignoring_strings(sql, keyword, open + 1, on_position)
+            })
+            .max()
+            .map(|index| index + 1);
+        }
+        start = on_position + "on".len();
+    }
+    None
+}
+
+fn find_keyword_ignoring_strings(
+    sql: &str,
+    keyword: &str,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = start;
+    while index < end && index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                index = skip_single_quoted_sql_string(bytes, index, end);
+                continue;
+            }
+            b'"' => {
+                index = skip_double_quoted_sql_identifier(bytes, index, end);
+                continue;
+            }
+            _ => {}
+        }
+        if ascii_keyword_at(bytes, index, keyword.as_bytes()) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_last_keyword_ignoring_strings(
+    sql: &str,
+    keyword: &str,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let mut cursor = start;
+    let mut last = None;
+    while let Some(index) = find_keyword_ignoring_strings(sql, keyword, cursor, end) {
+        last = Some(index);
+        cursor = index + keyword.len();
+    }
+    last
+}
+
+fn find_sql_json_table_column_name_before_path_position(sql: &str) -> Option<usize> {
+    let (_, open, close) = find_json_table_function_call_bounds(sql)?;
+    let path = find_last_keyword_ignoring_strings(sql, "path", open + 1, close)?;
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut last_delimiter_at_depth = Vec::<usize>::new();
+    let mut index = open + 1;
+    while index < path && index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                index = skip_single_quoted_sql_string(bytes, index, path);
+                continue;
+            }
+            b'"' => {
+                index = skip_double_quoted_sql_identifier(bytes, index, path);
+                continue;
+            }
+            b'(' => {
+                depth = depth.saturating_add(1);
+                if last_delimiter_at_depth.len() <= depth {
+                    last_delimiter_at_depth.resize(depth + 1, open + 1);
+                }
+                last_delimiter_at_depth[depth] = index + 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+            }
+            b',' => {
+                if last_delimiter_at_depth.len() <= depth {
+                    last_delimiter_at_depth.resize(depth + 1, open + 1);
+                }
+                last_delimiter_at_depth[depth] = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let column_start = last_delimiter_at_depth
+        .get(depth)
+        .copied()
+        .unwrap_or(open + 1);
+    let column_name = skip_ascii_whitespace(sql, column_start, path);
+    (column_name < path).then_some(column_name + 1)
+}
+
+fn find_last_json_table_ordinality_column_position(sql: &str) -> Option<usize> {
+    let position = find_last_case_insensitive_token_position(sql, "FOR ORDINALITY")?;
+    let prefix = sql.get(..position.saturating_sub(1))?.trim_end();
+    let start = prefix
+        .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '"'))
+        .map_or(0, |index| index + 1);
+    Some(start + 1)
 }
 
 fn find_sql_json_behavior_on_position(segment: &str) -> Option<usize> {

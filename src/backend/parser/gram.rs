@@ -323,6 +323,25 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
             ")",
         ));
     }
+    if lowered.starts_with("select ")
+        && let Some(position) = json_table_exists_on_empty_behavior_position(trimmed)
+    {
+        return Some(syntax_error_at(sql, leading + position, "empty"));
+    }
+    if lowered.starts_with("select ")
+        && let Some(position) = json_table_dynamic_root_path_position(trimmed)
+    {
+        return Some(
+            ParseError::DetailedError {
+                message: "only string constants are supported in JSON_TABLE path specification"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            }
+            .with_position(sql_position_from_byte_offset(sql, leading + position)),
+        );
+    }
 
     if lowered.starts_with("select ")
         && keyword_boundary(trimmed, "group by grouping sets").is_some()
@@ -333,6 +352,215 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
         ));
     }
 
+    None
+}
+
+fn json_table_exists_on_empty_behavior_position(input: &str) -> Option<usize> {
+    let json_table = keyword_boundary(input, "json_table")?;
+    let after_name = input[json_table + "json_table".len()..].trim_start();
+    if !after_name.starts_with('(') {
+        return None;
+    }
+    let open =
+        json_table + "json_table".len() + input[json_table + "json_table".len()..].find('(')?;
+    let (args, _) = take_parenthesized_segment(&input[open..]).ok()?;
+    let mut start = 0usize;
+    while let Some(exists) = find_keyword_any_depth(&args, "exists", start) {
+        let behavior_start = skip_whitespace_index(&args, exists + "exists".len());
+        let column_end = find_json_table_column_clause_end(&args, exists);
+        if let Some(on_position) =
+            find_keyword_any_depth_before(&args, "on", behavior_start, column_end)
+        {
+            let target_start = skip_whitespace_index(&args, on_position + "on".len());
+            if target_start < column_end && keyword_at_boundary(&args, target_start, "empty") {
+                return Some(open + 1 + target_start);
+            }
+        }
+        start = exists + "exists".len();
+    }
+    None
+}
+
+fn find_keyword_any_depth(input: &str, keyword: &str, start: usize) -> Option<usize> {
+    find_keyword_any_depth_before(input, keyword, start, input.len())
+}
+
+fn find_keyword_any_depth_before(
+    input: &str,
+    keyword: &str,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut index = start;
+    while index < bytes.len() && index < end {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        if keyword_at_boundary(input, index, keyword) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_json_table_column_clause_end(input: &str, start: usize) -> usize {
+    let bytes = input.as_bytes();
+    let start_depth = nesting_depth_at(input, start);
+    let mut depth = start_depth;
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                if depth <= start_depth {
+                    return index;
+                }
+                depth -= 1;
+            }
+            b',' if depth == start_depth => return index,
+            _ => {}
+        }
+        index += 1;
+    }
+    input.len()
+}
+
+fn nesting_depth_at(input: &str, position: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() && index < position {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    depth
+}
+
+fn skip_whitespace_index(input: &str, mut index: usize) -> usize {
+    while index < input.len() {
+        let Some(ch) = input[index..].chars().next() else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
+}
+
+fn json_table_dynamic_root_path_position(input: &str) -> Option<usize> {
+    let json_table = keyword_boundary(input, "json_table")?;
+    let after_name = input[json_table + "json_table".len()..].trim_start();
+    if !after_name.starts_with('(') {
+        return None;
+    }
+    let open =
+        json_table + "json_table".len() + input[json_table + "json_table".len()..].find('(')?;
+    let (args, _) = take_parenthesized_segment(&input[open..]).ok()?;
+    let comma = first_top_level_comma_index(&args)?;
+    let path_start = comma + 1 + args[comma + 1..].len() - args[comma + 1..].trim_start().len();
+    let path_sql = &args[path_start..];
+    let literal_len = match scan_string_literal_token_len(path_sql) {
+        Some(len) => len,
+        None => return Some(open + 1 + path_start),
+    };
+    let after_literal = path_sql[literal_len..].trim_start();
+    if after_literal.is_empty()
+        || keyword_at_start(after_literal, "columns")
+        || keyword_at_start(after_literal, "passing")
+    {
+        return None;
+    }
+    if keyword_at_start(after_literal, "as") {
+        let after_as = consume_keyword(after_literal, "as").trim_start();
+        let Ok((_, rest)) = parse_sql_identifier(after_as) else {
+            return Some(open + 1 + path_start);
+        };
+        let rest = rest.trim_start();
+        if rest.is_empty() || keyword_at_start(rest, "columns") || keyword_at_start(rest, "passing")
+        {
+            return None;
+        }
+    }
+    Some(open + 1 + path_start)
+}
+
+fn first_top_level_comma_index(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => return Some(index),
+            _ => {}
+        }
+        index += 1;
+    }
     None
 }
 
@@ -20131,6 +20359,7 @@ fn build_json_table_column(pair: Pair<'_, Rule>) -> Result<JsonTableColumn, Pars
                 columns: columns.ok_or(ParseError::UnexpectedEof)?,
             })
         }
+        Rule::json_table_exists_column => build_json_table_exists_column(inner),
         Rule::json_table_regular_column => build_json_table_regular_column(inner),
         _ => Err(ParseError::UnexpectedToken {
             expected: "JSON_TABLE column",
@@ -20139,10 +20368,49 @@ fn build_json_table_column(pair: Pair<'_, Rule>) -> Result<JsonTableColumn, Pars
     }
 }
 
+fn build_json_table_exists_column(pair: Pair<'_, Rule>) -> Result<JsonTableColumn, ParseError> {
+    let mut name = None;
+    let mut type_name = None;
+    let mut path = None;
+    let mut on_error = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::type_name => type_name = Some(build_type_name(part)),
+            Rule::json_table_path_clause => {
+                path = Some(
+                    part.into_inner()
+                        .find(|inner| inner.as_rule() == Rule::json_table_path_spec)
+                        .ok_or(ParseError::UnexpectedEof)
+                        .and_then(build_json_table_path_spec)?,
+                );
+            }
+            Rule::json_table_exists_behavior_clause => {
+                let (behavior, target) = build_json_table_behavior_clause(part)?;
+                match target {
+                    JsonTableBehaviorTarget::Error => on_error = Some(behavior),
+                    JsonTableBehaviorTarget::Empty => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "ON ERROR behavior for JSON_TABLE EXISTS column",
+                            actual: "ON EMPTY".into(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(JsonTableColumn::Exists {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        type_name: type_name.ok_or(ParseError::UnexpectedEof)?,
+        path,
+        on_error,
+    })
+}
+
 fn build_json_table_regular_column(pair: Pair<'_, Rule>) -> Result<JsonTableColumn, ParseError> {
     let mut name = None;
     let mut type_name = None;
-    let mut exists = false;
     let mut format_json = false;
     let mut path = None;
     let mut wrapper = JsonTableWrapper::Unspecified;
@@ -20153,7 +20421,6 @@ fn build_json_table_regular_column(pair: Pair<'_, Rule>) -> Result<JsonTableColu
         match part.as_rule() {
             Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
             Rule::type_name => type_name = Some(build_type_name(part)),
-            Rule::json_table_exists_marker => exists = true,
             Rule::json_table_format_clause => format_json = true,
             Rule::json_table_path_clause => {
                 path = Some(
@@ -20177,31 +20444,16 @@ fn build_json_table_regular_column(pair: Pair<'_, Rule>) -> Result<JsonTableColu
     }
     let name = name.ok_or(ParseError::UnexpectedEof)?;
     let type_name = type_name.ok_or(ParseError::UnexpectedEof)?;
-    if exists {
-        if on_empty.is_some() {
-            return Err(ParseError::UnexpectedToken {
-                expected: "ON ERROR behavior for JSON_TABLE EXISTS column",
-                actual: "ON EMPTY".into(),
-            });
-        }
-        Ok(JsonTableColumn::Exists {
-            name,
-            type_name,
-            path,
-            on_error,
-        })
-    } else {
-        Ok(JsonTableColumn::Regular {
-            name,
-            type_name,
-            path,
-            format_json,
-            wrapper,
-            quotes,
-            on_empty,
-            on_error,
-        })
-    }
+    Ok(JsonTableColumn::Regular {
+        name,
+        type_name,
+        path,
+        format_json,
+        wrapper,
+        quotes,
+        on_empty,
+        on_error,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

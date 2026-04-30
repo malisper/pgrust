@@ -1824,7 +1824,7 @@ fn bind_sql_json_table_column_group(
                 ) && matches!(planned_quotes, SqlJsonTableQuotes::Omit)
                 {
                     return Err(ParseError::DetailedError {
-                        message: "OMIT QUOTES cannot be specified when WITH WRAPPER is used".into(),
+                        message: "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used".into(),
                         detail: None,
                         hint: None,
                         sqlstate: "42601",
@@ -1892,20 +1892,23 @@ fn bind_sql_json_table_column_group(
                 )?;
                 column_indexes.push(index);
             }
-            JsonTableColumn::Nested { path, columns } => {
-                let path_name = path.name.clone().unwrap_or_else(|| state.next_path_name());
-                state.remember_name(&path_name)?;
-                nested_plans.push(bind_sql_json_table_column_group(
-                    columns,
-                    path.path.clone(),
-                    path_name,
-                    state,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )?);
-            }
+            JsonTableColumn::Nested { .. } => {}
+        }
+    }
+    for column in columns {
+        if let JsonTableColumn::Nested { path, columns } = column {
+            let path_name = path.name.clone().unwrap_or_else(|| state.next_path_name());
+            state.remember_name(&path_name)?;
+            nested_plans.push(bind_sql_json_table_column_group(
+                columns,
+                path.path.clone(),
+                path_name,
+                state,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?);
         }
     }
     Ok(SqlJsonTablePlan::PathScan {
