@@ -5260,29 +5260,32 @@ fn partition_join_segment_pairs(
     kind: JoinType,
 ) -> Option<Vec<(PartitionJoinSegment, PartitionJoinSegment)>> {
     let mut pairs = Vec::new();
+    let mut right_match_counts = vec![0usize; right.len()];
     for left_segment in &left {
         let matched = right
             .iter()
-            .filter(|right_segment| {
+            .enumerate()
+            .filter(|(_, right_segment)| {
                 partition_bounds_overlap(&left_segment.bound, &right_segment.bound)
             })
-            .cloned()
+            .map(|(index, right_segment)| (index, right_segment.clone()))
             .collect::<Vec<_>>();
         if matched.is_empty() && !matches!(kind, JoinType::Inner | JoinType::Semi) {
             return None;
         }
-        pairs.extend(
-            matched
-                .into_iter()
-                .map(|right_segment| (left_segment.clone(), right_segment)),
-        );
+        if matched.len() > 1 {
+            return None;
+        }
+        pairs.extend(matched.into_iter().map(|(right_index, right_segment)| {
+            right_match_counts[right_index] += 1;
+            (left_segment.clone(), right_segment)
+        }));
+    }
+    if right_match_counts.iter().any(|count| *count > 1) {
+        return None;
     }
     if !matches!(kind, JoinType::Inner | JoinType::Semi)
-        && right.iter().any(|right_segment| {
-            !left.iter().any(|left_segment| {
-                partition_bounds_overlap(&left_segment.bound, &right_segment.bound)
-            })
-        })
+        && right_match_counts.iter().any(|count| *count == 0)
     {
         return None;
     }
@@ -5313,9 +5316,12 @@ fn partition_bounds_overlap(left: &PartitionBoundSpec, right: &PartitionBoundSpe
                 is_default: false,
             },
         ) => left_values.iter().any(|left_value| {
-            right_values
-                .iter()
-                .any(|right_value| left_value == right_value)
+            if matches!(left_value, SerializedPartitionValue::Null) {
+                return false;
+            }
+            right_values.iter().any(|right_value| {
+                !matches!(right_value, SerializedPartitionValue::Null) && left_value == right_value
+            })
         }),
         (
             PartitionBoundSpec::Hash {
@@ -5621,15 +5627,6 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
     }
 }
 
-fn left_oriented_join_path(path: &Path, left_relids: &[usize]) -> bool {
-    match path {
-        Path::NestedLoopJoin { left, .. } | Path::HashJoin { left, .. } => {
-            path_relids(left) == left_relids
-        }
-        _ => true,
-    }
-}
-
 fn query_columns_desc(columns: &[QueryColumn]) -> RelationDesc {
     RelationDesc {
         columns: columns
@@ -5715,17 +5712,13 @@ fn collect_partitionwise_join_candidate_path(
             child_output_columns.clone(),
         );
         let child_path = best_path(root, child_paths)?;
-        let child_path = if left_oriented_join_path(&child_path, &left_relids) {
-            child_path
-        } else {
-            project_to_slot_layout(
-                next_synthetic_slot_id(),
-                &query_columns_desc(&child_output_columns),
-                child_path,
-                child_reltarget.clone(),
-                catalog,
-            )
-        };
+        let child_path = project_to_slot_layout(
+            next_synthetic_slot_id(),
+            &query_columns_desc(&child_output_columns),
+            child_path,
+            child_reltarget.clone(),
+            catalog,
+        );
         children.push(child_path);
     }
     let source_id = next_synthetic_slot_id();

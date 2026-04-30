@@ -50358,6 +50358,107 @@ fn tablesample_bernoulli_repeatable_filters_heap_offsets() {
 }
 
 #[test]
+fn tablesample_system_accepts_lateral_expressions_in_explain() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table sampled_docs (id int4, title text) partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table sampled_docs_p1 partition of sampled_docs for values from (0) to (3)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table sampled_docs_p2 partition of sampled_docs for values from (3) to (6)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into sampled_docs values (1, 'one'), (2, 'two'), (3, 'three')",
+        )
+        .unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select *
+         from sampled_docs s1
+         join lateral (
+           select * from sampled_docs s2
+             tablesample system (s1.id) repeatable (s1.id)
+         ) s2 on s1.id = s2.id",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("PgRustTablesampleBernoulli")),
+        "expected lowered TABLESAMPLE SYSTEM predicate, got {lines:?}"
+    );
+}
+
+#[test]
+fn partition_prune_nested_sublink_filter_does_not_panic() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table prune_outer (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prune_outer_p1 partition of prune_outer for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prune_outer_p2 partition of prune_outer for values from (10) to (20)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table prune_mid (a int4, b int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table prune_inner (a int4, b int4, c int4)")
+        .unwrap();
+
+    let lines = session_explain_lines(
+        &mut session,
+        &db,
+        "select t1.*
+         from prune_outer t1
+         where t1.a in (
+           select t1.b
+           from prune_mid t1
+           where t1.b in (
+             select (t1.a + t1.b) / 2
+             from prune_inner t1
+             where t1.c = 0
+           )
+         )
+         and t1.b = 0
+         order by t1.a",
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Append")),
+        "expected partitioned outer scan in EXPLAIN, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_insert_select_shows_rewritten_source_plan() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);

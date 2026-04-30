@@ -15,7 +15,7 @@ use super::inherit::{append_translation, translate_append_rel_expr};
 use super::joininfo;
 use super::path::build_join_paths_with_root;
 use super::pathnodes::next_synthetic_slot_id;
-use super::util::strip_binary_coercible_casts;
+use super::util::{project_to_slot_layout, strip_binary_coercible_casts};
 use super::{flatten_join_alias_vars, optimize_path_with_config, relids_union};
 
 pub(super) fn generate_partitionwise_join_path(
@@ -56,7 +56,14 @@ pub(super) fn generate_partitionwise_join_path(
             catalog,
         )?;
         let child_path = child_join.cheapest_total_path()?.clone();
-        children.push(child_path);
+        let child_output_columns = child_path.columns();
+        children.push(project_to_slot_layout(
+            next_synthetic_slot_id(),
+            &relation_desc_for_output_columns(&child_output_columns),
+            child_path,
+            child_join.reltarget.clone(),
+            catalog,
+        ));
         members.push(PartitionMember {
             relids: child_join.relids.clone(),
             bound: left_member.bound.clone(),
