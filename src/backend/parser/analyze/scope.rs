@@ -411,6 +411,13 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         }) {
             return Err(ParseError::UnknownColumn(name.to_string()));
         }
+        if scope.columns.iter().any(|column| {
+            !column.hidden
+                && !column.qualified_only
+                && column.output_name.eq_ignore_ascii_case(relation)
+        }) {
+            return Err(ParseError::MissingFromClauseEntry(normalized_relation));
+        }
         return Err(ParseError::UnknownColumn(name.to_string()));
     }
 
@@ -2953,6 +2960,15 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     ctes,
                 )?);
+                if args.len() == 1
+                    && let Some(columns) = resolved_row_columns.clone()
+                {
+                    for column in columns {
+                        desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
+                        output_columns.push(column);
+                    }
+                    continue;
+                }
                 if args.len() == 1
                     && let Some(columns) =
                         output_columns_for_unnest_composite_element(element_type, catalog)?

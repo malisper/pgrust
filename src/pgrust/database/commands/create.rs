@@ -2098,6 +2098,134 @@ fn proc_signature_type_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
     oid.to_string()
 }
 
+fn validate_sql_function_composite_insert_body(
+    create_stmt: &CreateFunctionStatement,
+    catalog: &dyn CatalogLookup,
+    callable_arg_oids: &[u32],
+) -> Result<(), ExecError> {
+    let body = normalized_create_sql_function_body(&create_stmt.body);
+    let lower = body.to_ascii_lowercase();
+    if !lower.starts_with("insert into ") {
+        return Ok(());
+    }
+    let Some(values_pos) = find_ascii_keyword(&body, "values") else {
+        return Ok(());
+    };
+    let target_sql = body["insert into ".len()..values_pos].trim();
+    let target_name = target_sql
+        .split(|ch: char| ch.is_whitespace() || ch == '(')
+        .next()
+        .unwrap_or_default();
+    if target_name.is_empty() {
+        return Ok(());
+    }
+    let values_sql = body[values_pos + "values".len()..].trim();
+    let Some(value_expr) = single_values_expr(values_sql) else {
+        return Ok(());
+    };
+    if value_expr.ends_with(".*") {
+        return Ok(());
+    }
+    let Some(relation) = catalog.lookup_any_relation(target_name) else {
+        return Ok(());
+    };
+    let Some(first_column) = relation.desc.columns.iter().find(|column| !column.dropped) else {
+        return Ok(());
+    };
+
+    let mut input_index = 0usize;
+    for arg in &create_stmt.args {
+        if !matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) {
+            continue;
+        }
+        let arg_oid = callable_arg_oids.get(input_index).copied().unwrap_or(0);
+        input_index += 1;
+        let Some(arg_name) = arg.name.as_deref() else {
+            continue;
+        };
+        if !value_expr.eq_ignore_ascii_case(arg_name) {
+            continue;
+        }
+        let Some(arg_type) = catalog.type_by_oid(arg_oid) else {
+            continue;
+        };
+        if !matches!(
+            arg_type.sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        ) {
+            continue;
+        }
+        // :HACK: CREATE FUNCTION validation currently does not run a full SQL
+        // function planner with parameter scopes. Catch the composite-as-scalar
+        // INSERT shape that PostgreSQL rejects at definition time until SQL
+        // functions are planned against typed parameter Vars.
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column \"{}\" is of type {} but expression is of type {}",
+                first_column.name,
+                format_sql_type_name(first_column.sql_type),
+                sql_function_arg_type_name_for_error(catalog, arg_oid),
+            ),
+            detail: None,
+            hint: Some("You will need to rewrite or cast the expression.".into()),
+            sqlstate: "42804",
+        });
+    }
+    Ok(())
+}
+
+fn sql_function_arg_type_name_for_error(catalog: &dyn CatalogLookup, oid: u32) -> String {
+    catalog
+        .type_by_oid(oid)
+        .filter(|row| {
+            matches!(
+                row.sql_type.kind,
+                SqlTypeKind::Composite | SqlTypeKind::Record
+            )
+        })
+        .map(|row| row.typname)
+        .unwrap_or_else(|| proc_signature_type_name(catalog, oid))
+}
+
+fn normalized_create_sql_function_body(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| line.split_once("--").map_or(line, |(head, _)| head))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_string()
+}
+
+fn find_ascii_keyword(input: &str, keyword: &str) -> Option<usize> {
+    let lower = input.to_ascii_lowercase();
+    let keyword = keyword.to_ascii_lowercase();
+    let mut start = 0usize;
+    while let Some(offset) = lower[start..].find(&keyword) {
+        let pos = start + offset;
+        let before = input[..pos].chars().next_back();
+        let after = input[pos + keyword.len()..].chars().next();
+        if !before.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            && !after.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            return Some(pos);
+        }
+        start = pos + keyword.len();
+    }
+    None
+}
+
+fn single_values_expr(values_sql: &str) -> Option<String> {
+    let trimmed = values_sql.trim().trim_end_matches(';').trim();
+    let inner = trimmed.strip_prefix('(')?.strip_suffix(')')?.trim();
+    if inner.contains(',') {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
 pub(super) fn resolve_aggregate_proc_rows(
     catalog: &dyn CatalogLookup,
     aggregate_name: &str,
@@ -3955,6 +4083,9 @@ impl Database {
             proargmodes.as_deref(),
             &callable_arg_oids,
         )?;
+        if language_row.oid == PG_LANGUAGE_SQL_OID {
+            validate_sql_function_composite_insert_body(create_stmt, &catalog, &callable_arg_oids)?;
+        }
         if prorettype == EVENT_TRIGGER_TYPE_OID {
             if !callable_arg_oids.is_empty() {
                 return Err(ExecError::WithContext {

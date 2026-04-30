@@ -9,7 +9,9 @@ use std::thread;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::commands::copyto::CopyToSink;
-use crate::backend::executor::exec_expr::partition_constraint_conditions_for_catalog;
+use crate::backend::executor::exec_expr::{
+    normalize_composite_result_values_for_catalog, partition_constraint_conditions_for_catalog,
+};
 use crate::backend::executor::{ExecError, QueryColumn, StatementResult};
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
@@ -5796,9 +5798,20 @@ fn execute_streaming_select_statement(
                         }
                         match slot.values() {
                             Ok(values) => {
+                                let values = match normalize_composite_result_values_for_catalog(
+                                    values,
+                                    &columns,
+                                    Some(&catalog),
+                                ) {
+                                    Ok(values) => values,
+                                    Err(e) => {
+                                        err = Some(e);
+                                        break;
+                                    }
+                                };
                                 send_typed_data_row(
                                     stream,
-                                    values,
+                                    &values,
                                     &columns,
                                     &[],
                                     &mut row_buf,

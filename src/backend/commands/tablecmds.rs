@@ -10347,10 +10347,13 @@ pub(crate) fn apply_assignment_target(
             &ctx.datetime_config,
         )
     }
-    .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
+    .map_err(|err| {
+        rewrite_assignment_coercion_error(desc, target, &value, assignment_type, err, ctx)
+    })?;
     let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
-    enforce_domain_constraints_for_value_ref(&value, assignment_type, ctx)
-        .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
+    enforce_domain_constraints_for_value_ref(&value, assignment_type, ctx).map_err(|err| {
+        rewrite_assignment_coercion_error(desc, target, &value, assignment_type, err, ctx)
+    })?;
     let resolved_indirection = if target.indirection.is_empty() {
         target
             .subscripts
@@ -10454,6 +10457,53 @@ fn coerce_record_assignment_value(
     Ok(Value::Record(RecordValue::from_descriptor(
         descriptor, fields,
     )))
+}
+
+fn rewrite_assignment_coercion_error(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    value: &Value,
+    assignment_type: SqlType,
+    err: ExecError,
+    ctx: &ExecutorContext,
+) -> ExecError {
+    if let Some(field) = assignment_target_final_field(target)
+        && let Some(actual_type) = value.sql_type_hint()
+    {
+        return ExecError::DetailedError {
+            message: format!(
+                "subfield \"{}\" is of type {} but expression is of type {}",
+                field,
+                sql_type_display_name_with_catalog(assignment_type, ctx.catalog.as_deref()),
+                sql_type_display_name_with_catalog(actual_type, ctx.catalog.as_deref()),
+            ),
+            detail: None,
+            hint: Some("You will need to rewrite or cast the expression.".into()),
+            sqlstate: "42804",
+        };
+    }
+    rewrite_subscripted_assignment_error(desc, target, value, err)
+}
+
+fn assignment_target_final_field(target: &BoundAssignmentTarget) -> Option<&str> {
+    target
+        .indirection
+        .iter()
+        .rev()
+        .find_map(|step| match step {
+            BoundAssignmentTargetIndirection::Field(field) => Some(field.as_str()),
+            BoundAssignmentTargetIndirection::Subscript(_) => None,
+        })
+        .or_else(|| target.field_path.last().map(String::as_str))
+}
+
+fn sql_type_display_name_with_catalog(ty: SqlType, catalog: Option<&dyn CatalogLookup>) -> String {
+    if matches!(ty.kind, SqlTypeKind::Composite)
+        && let Some(row) = catalog.and_then(|catalog| catalog.type_by_oid(ty.type_oid))
+    {
+        return row.typname.to_string();
+    }
+    sql_type_display_name(ty)
 }
 
 fn rewrite_subscripted_assignment_error(
@@ -10601,18 +10651,32 @@ fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarge
 }
 
 fn assignment_navigation_sql_type(sql_type: SqlType, ctx: &ExecutorContext) -> SqlType {
-    let Some(domain) = ctx
+    let sql_type = if let Some(domain) = ctx
         .catalog
         .as_deref()
         .and_then(|catalog| catalog.domain_by_type_oid(sql_type.type_oid))
-    else {
-        return sql_type;
-    };
-    if sql_type.is_array && !domain.sql_type.is_array {
-        SqlType::array_of(domain.sql_type)
+    {
+        if sql_type.is_array && !domain.sql_type.is_array {
+            SqlType::array_of(domain.sql_type)
+        } else {
+            domain.sql_type
+        }
     } else {
-        domain.sql_type
+        sql_type
+    };
+
+    if !sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite)
+        && sql_type.typrelid == 0
+        && let Some(row) = ctx
+            .catalog
+            .as_deref()
+            .and_then(|catalog| catalog.type_by_oid(sql_type.type_oid))
+        && row.typrelid != 0
+    {
+        return sql_type.with_identity(row.oid, row.typrelid);
     }
+    sql_type
 }
 
 #[derive(Clone)]
@@ -10991,7 +11055,7 @@ fn assignment_record_value(
     ctx: &ExecutorContext,
 ) -> Result<RecordValue, ExecError> {
     match current {
-        Value::Record(record) => Ok(record),
+        Value::Record(record) => normalize_assignment_record_value(record, sql_type, ctx),
         Value::Null => {
             let descriptor = assignment_record_descriptor(sql_type, ctx)?;
             Ok(RecordValue::from_descriptor(
@@ -11005,6 +11069,33 @@ fn assignment_record_value(
             right: Value::Null,
         }),
     }
+}
+
+fn normalize_assignment_record_value(
+    record: RecordValue,
+    sql_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<RecordValue, ExecError> {
+    let descriptor = assignment_record_descriptor(sql_type, ctx)?;
+    if descriptor.fields == record.descriptor.fields {
+        return Ok(record);
+    }
+    let fields = descriptor
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, target_field)| {
+            record
+                .descriptor
+                .fields
+                .iter()
+                .position(|source_field| source_field.name.eq_ignore_ascii_case(&target_field.name))
+                .and_then(|source_index| record.fields.get(source_index).cloned())
+                .or_else(|| record.fields.get(index).cloned())
+                .unwrap_or(Value::Null)
+        })
+        .collect();
+    Ok(RecordValue::from_descriptor(descriptor, fields))
 }
 
 fn assign_record_field_path(

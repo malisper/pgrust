@@ -23455,7 +23455,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
         SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => "array".to_string(),
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
-        SqlExpr::FieldSelect { field, .. } => field.clone(),
+        SqlExpr::FieldSelect { field, .. } => field.rsplit('.').next().unwrap_or(field).to_string(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
             SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => select_item_name(inner, index),
             SqlExpr::ArraySubscript { .. }
@@ -24304,8 +24304,11 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                             .find(|part| part.as_rule() == Rule::identifier)
                             .map(build_identifier)
                             .ok_or(ParseError::UnexpectedEof)?;
-                        field_path.push(field.clone());
-                        indirection.push(AssignmentTargetIndirection::Field(field));
+                        for field_part in field.split('.') {
+                            let field_part = field_part.to_string();
+                            field_path.push(field_part.clone());
+                            indirection.push(AssignmentTargetIndirection::Field(field_part));
+                        }
                     }
                     _ => {}
                 }
@@ -24321,8 +24324,11 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                     .find(|inner| inner.as_rule() == Rule::identifier)
                     .map(build_identifier)
                     .ok_or(ParseError::UnexpectedEof)?;
-                field_path.push(field.clone());
-                indirection.push(AssignmentTargetIndirection::Field(field));
+                for field_part in field.split('.') {
+                    let field_part = field_part.to_string();
+                    field_path.push(field_part.clone());
+                    indirection.push(AssignmentTargetIndirection::Field(field_part));
+                }
             }
             _ => {}
         }
@@ -25675,6 +25681,9 @@ fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
                 name,
                 array_bounds: array_bounds.saturating_add(1),
             },
+            RawTypeName::Record => RawTypeName::Builtin(SqlType::array_of(SqlType::record(
+                crate::include::catalog::RECORD_TYPE_OID,
+            ))),
             other => other,
         };
     }
@@ -27572,12 +27581,70 @@ fn build_comparison_expr(left: SqlExpr, op: &str, right: SqlExpr) -> Result<SqlE
             left: Box::new(left),
             right: Box::new(right),
         },
+        "*=" => SqlExpr::BinaryOperator {
+            op: "*=".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*<>" => SqlExpr::BinaryOperator {
+            op: "*<>".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*<" => SqlExpr::BinaryOperator {
+            op: "*<".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*<=" => SqlExpr::BinaryOperator {
+            op: "*<=".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*>" => SqlExpr::BinaryOperator {
+            op: "*>".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "*>=" => SqlExpr::BinaryOperator {
+            op: "*>=".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
         "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
         "<=" => SqlExpr::LtEq(Box::new(left), Box::new(right)),
         ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
         ">=" => SqlExpr::GtEq(Box::new(left), Box::new(right)),
+        "~~" => SqlExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            escape: None,
+            case_insensitive: false,
+            negated: false,
+        },
+        "!~~" => SqlExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            escape: None,
+            case_insensitive: false,
+            negated: true,
+        },
+        "~~*" => SqlExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            escape: None,
+            case_insensitive: true,
+            negated: false,
+        },
+        "!~~*" => SqlExpr::Like {
+            expr: Box::new(left),
+            pattern: Box::new(right),
+            escape: None,
+            case_insensitive: true,
+            negated: true,
+        },
         "~" => SqlExpr::RegexMatch(Box::new(left), Box::new(right)),
         "!~" => SqlExpr::Not(Box::new(SqlExpr::RegexMatch(
             Box::new(left),

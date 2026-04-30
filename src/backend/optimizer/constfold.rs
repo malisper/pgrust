@@ -34,6 +34,31 @@ pub(crate) fn fold_expr_constants(expr: Expr) -> Result<Expr, ParseError> {
     simplify_expr(expr, None)
 }
 
+fn const_value_is_sql_null(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Record(record) => record
+            .fields
+            .iter()
+            .all(|field| matches!(field, Value::Null)),
+        _ => false,
+    }
+}
+
+fn const_value_is_sql_not_null(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Record(record) => {
+            !record.fields.is_empty()
+                && record
+                    .fields
+                    .iter()
+                    .all(|field| !matches!(field, Value::Null))
+        }
+        _ => true,
+    }
+}
+
 fn simplify_query(query: Query) -> Result<Query, ParseError> {
     Ok(Query {
         command_type: query.command_type,
@@ -817,16 +842,14 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
         Expr::IsNull(inner) => {
             let inner = simplify_expr(*inner, case_test_value)?;
             Ok(match inner {
-                Expr::Const(Value::Null) => Expr::Const(Value::Bool(true)),
-                Expr::Const(_) => Expr::Const(Value::Bool(false)),
+                Expr::Const(value) => Expr::Const(Value::Bool(const_value_is_sql_null(&value))),
                 other => Expr::IsNull(Box::new(other)),
             })
         }
         Expr::IsNotNull(inner) => {
             let inner = simplify_expr(*inner, case_test_value)?;
             Ok(match inner {
-                Expr::Const(Value::Null) => Expr::Const(Value::Bool(false)),
-                Expr::Const(_) => Expr::Const(Value::Bool(true)),
+                Expr::Const(value) => Expr::Const(Value::Bool(const_value_is_sql_not_null(&value))),
                 other => Expr::IsNotNull(Box::new(other)),
             })
         }

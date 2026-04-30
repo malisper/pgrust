@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::backend::executor::exec_expr::normalize_composite_result_values_for_catalog;
 use crate::backend::executor::{ExecError, QueryColumn, Value, exec_next};
 use crate::backend::parser::ParseError;
 use crate::include::access::htup::ItemPointerData;
@@ -241,7 +242,11 @@ impl Portal {
         while let Some(slot) = exec_next(&mut guard.state, &mut guard.ctx)? {
             let tid = slot.tid();
             let table_oid = slot.table_oid;
-            let mut values = slot.values()?.to_vec();
+            let mut values = normalize_composite_result_values_for_catalog(
+                slot.values()?,
+                &columns,
+                guard.ctx.catalog.as_deref(),
+            )?;
             Value::materialize_all(&mut values);
             rows.push(values);
             row_positions.push(positioned_row_from_metadata(
@@ -577,7 +582,11 @@ fn fetch_streaming_forward(
             Some(slot) => {
                 let tid = slot.tid();
                 let table_oid = slot.table_oid;
-                let mut values = slot.values()?.to_vec();
+                let mut values = normalize_composite_result_values_for_catalog(
+                    slot.values()?,
+                    &guard.columns,
+                    guard.ctx.catalog.as_deref(),
+                )?;
                 Value::materialize_all(&mut values);
                 rows.push(values);
                 current_row = positioned_row_from_metadata(

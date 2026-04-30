@@ -3207,16 +3207,7 @@ fn parse_composite_text_input(
         .filter(|column| !column.dropped)
         .collect::<Vec<_>>();
     if fields.len() != columns.len() {
-        return Err(ExecError::DetailedError {
-            message: "malformed record literal".into(),
-            detail: Some(format!(
-                "record literal has {} fields but type expects {}",
-                fields.len(),
-                columns.len()
-            )),
-            hint: None,
-            sqlstate: "22P02",
-        });
+        return Err(record_field_count_error(text, fields.len(), columns.len()));
     }
     let descriptor = RecordDescriptor::named(
         composite_type.type_oid,
@@ -3304,6 +3295,7 @@ fn cast_text_to_composite_value(
     let Some(catalog) = catalog else {
         return Err(unsupported_record_input());
     };
+    let ty = composite_input_base_type(ty, catalog).ok_or_else(unsupported_record_input)?;
     let relation = catalog
         .relation_by_oid(ty.typrelid)
         .or_else(|| catalog.lookup_relation_by_oid(ty.typrelid))
@@ -3316,16 +3308,11 @@ fn cast_text_to_composite_value(
         .filter(|column| !column.dropped)
         .collect::<Vec<_>>();
     if raw_fields.len() != columns.len() {
-        return Err(ExecError::DetailedError {
-            message: "malformed record literal".into(),
-            detail: Some(format!(
-                "record literal has {} fields but type expects {}",
-                raw_fields.len(),
-                columns.len()
-            )),
-            hint: None,
-            sqlstate: "22P02",
-        });
+        return Err(record_field_count_error(
+            text,
+            raw_fields.len(),
+            columns.len(),
+        ));
     }
     let descriptor = RecordDescriptor::named(
         ty.type_oid,
@@ -3355,46 +3342,188 @@ fn cast_text_to_composite_value(
     )))
 }
 
-fn parse_composite_literal_fields(text: &str) -> Result<Vec<Option<String>>, ExecError> {
-    let body = text
-        .strip_prefix('(')
-        .and_then(|rest| rest.strip_suffix(')'))
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "malformed record literal".into(),
-            detail: Some(format!("missing left parenthesis in \"{text}\"")),
-            hint: None,
-            sqlstate: "22P02",
-        })?;
+fn cast_record_to_composite_value(
+    record: RecordValue,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let Some(catalog) = catalog else {
+        return Err(unsupported_record_input());
+    };
+    let ty = composite_input_base_type(ty, catalog).ok_or_else(unsupported_record_input)?;
+    let relation = catalog
+        .relation_by_oid(ty.typrelid)
+        .or_else(|| catalog.lookup_relation_by_oid(ty.typrelid))
+        .ok_or_else(unsupported_record_input)?;
+    let columns = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .collect::<Vec<_>>();
+    if record.fields.len() != columns.len() {
+        return Err(record_field_count_error(
+            &crate::backend::executor::value_io::format_record_text(&record),
+            record.fields.len(),
+            columns.len(),
+        ));
+    }
+    let descriptor = RecordDescriptor::named(
+        ty.type_oid,
+        ty.typrelid,
+        ty.typmod,
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    );
+    let fields = columns
+        .iter()
+        .zip(record.fields)
+        .map(|(column, value)| {
+            cast_value_with_source_type_catalog_and_config(
+                value,
+                None,
+                column.sql_type,
+                Some(catalog),
+                config,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Record(RecordValue::from_descriptor(
+        descriptor, fields,
+    )))
+}
+
+fn malformed_record_literal_error(text: &str, detail: impl Into<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("malformed record literal: \"{text}\""),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "22P02",
+    }
+}
+
+fn record_field_count_error(text: &str, actual: usize, expected: usize) -> ExecError {
+    let detail = if actual < expected {
+        "Too few columns.".to_string()
+    } else if actual > expected {
+        "Too many columns.".to_string()
+    } else {
+        format!("record literal has {actual} fields but type expects {expected}")
+    };
+    malformed_record_literal_error(text, detail)
+}
+
+pub(crate) fn parse_composite_literal_fields(text: &str) -> Result<Vec<Option<String>>, ExecError> {
+    let mut chars = text.char_indices().peekable();
+    while let Some((_, ch)) = chars.peek().copied() {
+        if !ch.is_whitespace() {
+            break;
+        }
+        chars.next();
+    }
+    match chars.next() {
+        Some((_, '(')) => {}
+        _ => {
+            return Err(malformed_record_literal_error(
+                text,
+                "Missing left parenthesis.",
+            ));
+        }
+    }
+
     let mut fields = Vec::new();
     let mut current = String::new();
     let mut quoted = false;
-    let mut escaped = false;
-    for ch in body.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
+    let mut field_was_quoted = false;
+    let mut field_has_data = false;
+
+    while let Some((_, ch)) = chars.next() {
+        if quoted {
+            match ch {
+                '"' => {
+                    if matches!(chars.peek(), Some((_, '"'))) {
+                        chars.next();
+                        current.push('"');
+                        field_has_data = true;
+                    } else {
+                        quoted = false;
+                    }
+                }
+                '\\' => {
+                    if let Some((_, escaped)) = chars.next() {
+                        current.push(escaped);
+                    } else {
+                        current.push('\\');
+                    }
+                    field_has_data = true;
+                }
+                _ => {
+                    current.push(ch);
+                    field_has_data = true;
+                }
+            }
             continue;
         }
+
         match ch {
-            '\\' if quoted => escaped = true,
-            '"' => quoted = !quoted,
-            ',' if !quoted => {
-                fields.push((!current.is_empty()).then(|| current.clone()));
-                current.clear();
+            '"' => {
+                quoted = true;
+                field_was_quoted = true;
             }
-            _ => current.push(ch),
+            '\\' => {
+                if let Some((_, escaped)) = chars.next() {
+                    current.push(escaped);
+                } else {
+                    current.push('\\');
+                }
+                field_has_data = true;
+            }
+            ',' => {
+                fields.push(if field_has_data || field_was_quoted {
+                    Some(current.clone())
+                } else {
+                    None
+                });
+                current.clear();
+                field_has_data = false;
+                field_was_quoted = false;
+            }
+            ')' => {
+                fields.push(if field_has_data || field_was_quoted {
+                    Some(current)
+                } else {
+                    None
+                });
+                while let Some((_, trailing)) = chars.peek().copied() {
+                    if !trailing.is_whitespace() {
+                        return Err(malformed_record_literal_error(
+                            text,
+                            "Junk after right parenthesis.",
+                        ));
+                    }
+                    chars.next();
+                }
+                return Ok(fields);
+            }
+            _ => {
+                current.push(ch);
+                field_has_data = true;
+            }
         }
     }
     if quoted {
-        return Err(ExecError::DetailedError {
-            message: "malformed record literal".into(),
-            detail: Some(format!("unterminated quoted string in \"{text}\"")),
-            hint: None,
-            sqlstate: "22P02",
-        });
+        return Err(malformed_record_literal_error(
+            text,
+            "Unexpected end of input.",
+        ));
     }
-    fields.push((!current.is_empty()).then_some(current));
-    Ok(fields)
+    Err(malformed_record_literal_error(
+        text,
+        "Missing right parenthesis.",
+    ))
 }
 
 pub(crate) fn render_pg_lsn_text(value: u64) -> String {
@@ -3866,8 +3995,10 @@ pub(crate) fn soft_input_error_info_with_catalog_and_config(
         return Ok(None);
     }
     if !ty.is_array && matches!(ty.kind, SqlTypeKind::Composite) && ty.typrelid != 0 {
-        validate_composite_text_input(text, ty, catalog, config)?;
-        return Ok(None);
+        return match validate_composite_text_input(text, ty, catalog, config) {
+            Ok(()) => Ok(None),
+            Err(err) => Ok(Some(input_error_info(err, text))),
+        };
     }
     if !ty.is_array
         && matches!(
@@ -5992,6 +6123,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 Ok(Value::Text(CompactString::from_owned(
                     crate::backend::executor::value_io::format_record_text(&record),
                 )))
+            }
+            SqlTypeKind::Composite if !ty.is_array => {
+                cast_record_to_composite_value(record, ty, catalog, config)
             }
             _ => Ok(Value::Record(record)),
         },

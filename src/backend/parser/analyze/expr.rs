@@ -11,8 +11,9 @@ use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
 use crate::include::catalog::{
-    ANYOID, PG_LANGUAGE_INTERNAL_OID, UNKNOWN_TYPE_OID, builtin_scalar_function_for_proc_oid,
-    builtin_type_name_for_oid, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    ANYOID, PG_LANGUAGE_INTERNAL_OID, RECORD_TYPE_OID, UNKNOWN_TYPE_OID,
+    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
@@ -953,14 +954,36 @@ fn expression_navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup
     if is_array_of_domain_over_array_type(sql_type, catalog) {
         return sql_type;
     }
-    let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
-        return sql_type;
-    };
-    if sql_type.is_array && !domain.sql_type.is_array {
-        SqlType::array_of(domain.sql_type)
+    let sql_type = if let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) {
+        if sql_type.is_array && !domain.sql_type.is_array {
+            SqlType::array_of(domain.sql_type)
+        } else {
+            domain.sql_type
+        }
     } else {
-        domain.sql_type
+        sql_type
+    };
+
+    if !sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite)
+        && sql_type.typrelid == 0
+        && let Some(row) = catalog.type_by_oid(sql_type.type_oid)
+        && row.typrelid != 0
+    {
+        return sql_type.with_identity(row.oid, row.typrelid);
     }
+    if !sql_type.is_array
+        && matches!(sql_type.kind, SqlTypeKind::Composite)
+        && sql_type.type_oid == 0
+        && sql_type.typrelid != 0
+        && let Some(row) = catalog
+            .type_rows()
+            .into_iter()
+            .find(|row| row.typrelid == sql_type.typrelid)
+    {
+        return sql_type.with_identity(row.oid, row.typrelid);
+    }
+    sql_type
 }
 
 fn unsupported_subscript_type_error(sql_type: SqlType) -> ParseError {
@@ -1083,7 +1106,7 @@ pub(crate) fn bind_expr_with_outer(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
 }
 
-fn build_whole_row_expr(fields: Vec<(String, Expr)>, named_row_type: Option<(u32, u32)>) -> Expr {
+fn build_plain_row_expr(fields: Vec<(String, Expr)>, named_row_type: Option<(u32, u32)>) -> Expr {
     let descriptor_fields = fields
         .iter()
         .map(|(field_name, expr)| {
@@ -1098,13 +1121,29 @@ fn build_whole_row_expr(fields: Vec<(String, Expr)>, named_row_type: Option<(u32
     } else {
         assign_anonymous_record_descriptor(descriptor_fields)
     };
-    let row_expr = Expr::Row {
-        descriptor: descriptor.clone(),
-        fields: fields.clone(),
+    Expr::Row { descriptor, fields }
+}
+
+fn build_whole_row_expr(fields: Vec<(String, Expr)>, named_row_type: Option<(u32, u32)>) -> Expr {
+    let row_expr = build_plain_row_expr(fields.clone(), named_row_type);
+    let descriptor = match &row_expr {
+        Expr::Row { descriptor, .. } => descriptor.clone(),
+        _ => unreachable!("build_plain_row_expr always returns Expr::Row"),
     };
+    if descriptor.typrelid == 0 {
+        return row_expr;
+    }
     let Some(all_fields_null) = fields
         .iter()
-        .map(|(_, expr)| Expr::IsNull(Box::new(expr.clone())))
+        .map(|(_, expr)| {
+            if expr_sql_type_hint(expr).is_some_and(|ty| {
+                !ty.is_array && matches!(ty.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+            }) {
+                Expr::IsNotDistinctFrom(Box::new(expr.clone()), Box::new(Expr::Const(Value::Null)))
+            } else {
+                Expr::IsNull(Box::new(expr.clone()))
+            }
+        })
         .reduce(Expr::and)
     else {
         return row_expr;
@@ -1403,9 +1442,12 @@ fn bind_row_comparison_expr(
         });
     }
     if left_fields.is_empty() {
-        return Err(ParseError::FeatureNotSupported(
-            "cannot compare rows of zero length".into(),
-        ));
+        return Err(ParseError::DetailedError {
+            message: "cannot compare rows of zero length".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
     }
 
     let mut parts = Vec::with_capacity(left_fields.len());
@@ -1450,6 +1492,17 @@ fn bind_row_comparison_expr(
     ))
 }
 
+fn row_comparison_operator_interpretation_error(op: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("could not determine interpretation of row comparison operator {op}"),
+        detail: None,
+        hint: Some(
+            "Row comparison operators must be associated with btree operator families.".into(),
+        ),
+        sqlstate: "42883",
+    }
+}
+
 fn coerce_bound_unknown_string_literal_type(
     expr: &Expr,
     expr_type: SqlType,
@@ -1492,8 +1545,8 @@ fn build_row_ordering_comparison(make: OpExprKind, parts: Vec<Expr>) -> Result<E
         make,
         SqlType::new(SqlTypeKind::Bool),
         vec![
-            build_whole_row_expr(left_fields, None),
-            build_whole_row_expr(right_fields, None),
+            build_plain_row_expr(left_fields, None),
+            build_plain_row_expr(right_fields, None),
         ],
         collation_oid,
     ))
@@ -1571,6 +1624,16 @@ fn bind_named_composite_row_cast(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Option<Expr>, ParseError> {
+    let target_type = if !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Composite)
+        && target_type.typrelid == 0
+        && let Some(row) = catalog.type_by_oid(target_type.type_oid)
+        && row.typrelid != 0
+    {
+        target_type.with_identity(row.oid, row.typrelid)
+    } else {
+        target_type
+    };
     if !matches!(target_type.kind, SqlTypeKind::Composite) || target_type.typrelid == 0 {
         return Ok(None);
     }
@@ -2918,6 +2981,36 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                             .expr
                     }
                     Err(ParseError::UnknownColumn(_)) => {
+                        if let Some((relation_name, field_name)) = name.rsplit_once('.')
+                            && let Some(resolved) = resolve_relation_row_expr_ref_with_outer(
+                                scope,
+                                outer_scopes,
+                                relation_name,
+                            )
+                        {
+                            let named_row_type =
+                                relation_row_type_identity(catalog, resolved.relation_oid);
+                            let row_expr = build_whole_row_expr(resolved.fields, named_row_type);
+                            if let Some(expr) = try_bind_column_notation_function_call(
+                                &row_expr, field_name, catalog,
+                            )? {
+                                return Ok(expr);
+                            }
+                        }
+                        if let Some((relation_name, field_name)) = name.rsplit_once('.') {
+                            let relation_expr = SqlExpr::Column(relation_name.to_string());
+                            if let Ok(expr) = bind_function_call_for_column_notation(
+                                &relation_expr,
+                                field_name,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            ) {
+                                return Ok(expr);
+                            }
+                        }
                         if let Some(expr) =
                             bind_sql_function_inline_named_field(name, catalog)?
                         {
@@ -3027,26 +3120,62 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             )?,
-            "~<=~" => bind_text_pattern_comparison_expr(
-                "~<=~",
-                left,
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
-            "~>=~" => bind_text_pattern_comparison_expr(
-                "~>=~",
-                left,
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
+            "~<=~" => {
+                if let (Some(left_items), Some(right_items)) =
+                    (row_comparison_items(left), row_comparison_items(right))
+                {
+                    bind_row_comparison_expr(
+                        "~<=~",
+                        OpExprKind::LtEq,
+                        &left_items,
+                        &right_items,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?
+                } else {
+                    bind_text_pattern_comparison_expr(
+                        "~<=~",
+                        left,
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?
+                }
+            }
+            "~>=~" => {
+                if let (Some(left_items), Some(right_items)) =
+                    (row_comparison_items(left), row_comparison_items(right))
+                {
+                    bind_row_comparison_expr(
+                        "~>=~",
+                        OpExprKind::GtEq,
+                        &left_items,
+                        &right_items,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?
+                } else {
+                    bind_text_pattern_comparison_expr(
+                        "~>=~",
+                        left,
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?
+                }
+            }
             "~>~" => bind_text_pattern_comparison_expr(
                 "~>~",
                 left,
@@ -3108,6 +3237,72 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )?,
             "===" => bind_catalog_equality_operator_expr(
                 "===",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "*=" => bind_record_image_operator_expr(
+                "*=",
+                OpExprKind::Eq,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "*<>" => bind_record_image_operator_expr(
+                "*<>",
+                OpExprKind::NotEq,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "*<" => bind_record_image_operator_expr(
+                "*<",
+                OpExprKind::Lt,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "*<=" => bind_record_image_operator_expr(
+                "*<=",
+                OpExprKind::LtEq,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "*>" => bind_record_image_operator_expr(
+                "*>",
+                OpExprKind::Gt,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "*>=" => bind_record_image_operator_expr(
+                "*>=",
+                OpExprKind::GtEq,
                 left,
                 right,
                 scope,
@@ -4342,6 +4537,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             negated,
         } => Expr::Like {
             expr: Box::new({
+                if row_comparison_items(expr).is_some() && row_comparison_items(pattern).is_some() {
+                    return Err(row_comparison_operator_interpretation_error(
+                        if *case_insensitive {
+                            if *negated { "!~~*" } else { "~~*" }
+                        } else if *negated {
+                            "!~~"
+                        } else {
+                            "~~"
+                        },
+                    ));
+                }
                 let bound = bind_expr_with_outer_and_ctes(
                     expr,
                     scope,
@@ -5366,7 +5572,13 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?;
-                if catalog_backed_explicit_cast_allowed(bound_arg.sql_type, target_type, catalog) {
+                if !functional_cast_from_composite_to_string(bound_arg.sql_type, target_type)
+                    && catalog_backed_explicit_cast_allowed(
+                        bound_arg.sql_type,
+                        target_type,
+                        catalog,
+                    )
+                {
                     return Ok(Expr::Cast(
                         Box::new(bound_arg.expr),
                         if bound_arg.sql_type == target_type {
@@ -5707,6 +5919,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }) {
                 Some(func) => func,
                 None => {
+                    if let Some(fallback) = try_bind_functional_field_notation(
+                        name,
+                        args_list,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )? {
+                        return Ok(fallback);
+                    }
                     if !catalog.proc_rows_by_name(name).is_empty()
                         && let Some(err) = proc_resolution_error
                     {
@@ -5994,12 +6217,289 @@ fn bind_field_select_expr(
             bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
         }
     };
-    let field_type = resolve_bound_field_select_type(&bound_inner, field, catalog)?;
-    Ok(Expr::FieldSelect {
-        expr: Box::new(bound_inner),
-        field: field.to_string(),
-        field_type,
-    })
+    let mut current = bound_inner;
+    for part in field.split('.') {
+        let field_type = match resolve_bound_field_select_type(&current, part, catalog) {
+            Ok(field_type) => field_type,
+            Err(err) if part == field => {
+                if let Some(fallback) =
+                    try_bind_column_notation_function_call(&current, part, catalog)?
+                {
+                    return Ok(fallback);
+                }
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+        current = Expr::FieldSelect {
+            expr: Box::new(current),
+            field: part.to_string(),
+            field_type,
+        };
+    }
+    Ok(current)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_function_call_for_column_notation(
+    expr: &SqlExpr,
+    field: &str,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let call = SqlExpr::FuncCall {
+        name: field.to_string(),
+        args: SqlCallArgs::Args(vec![SqlFunctionArg::positional(expr.clone())]),
+        order_by: Vec::new(),
+        within_group: None,
+        distinct: false,
+        func_variadic: false,
+        filter: None,
+        null_treatment: None,
+        over: None,
+    };
+    bind_expr_with_outer_and_ctes(&call, scope, catalog, outer_scopes, grouped_outer, ctes)
+}
+
+fn try_bind_column_notation_function_call(
+    arg: &Expr,
+    name: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    if resolve_function_cast_type(catalog, name).is_some() {
+        return Ok(None);
+    }
+    let Some(actual_type) =
+        expr_sql_type_hint(arg).map(|ty| expression_navigation_sql_type(ty, catalog))
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        actual_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Record
+    ) || actual_type.is_array
+    {
+        return Ok(None);
+    }
+    if let Ok(resolved) = resolve_function_call(catalog, name, &[actual_type], false)
+        && !resolved.proretset
+        && resolved.prokind == 'f'
+    {
+        let declared_type = resolved
+            .declared_arg_types
+            .first()
+            .copied()
+            .unwrap_or(actual_type);
+        return Ok(Some(Expr::func(
+            resolved.proc_oid,
+            Some(resolved.result_type),
+            resolved.func_variadic,
+            vec![coerce_bound_expr(arg.clone(), actual_type, declared_type)],
+        )));
+    }
+    try_bind_column_notation_single_arg_proc(arg, name, actual_type, catalog)
+}
+
+fn try_bind_column_notation_single_arg_proc(
+    arg: &Expr,
+    name: &str,
+    actual_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let actual_descriptor = expr_record_descriptor(arg);
+    let mut matches = catalog
+        .proc_rows_by_name(name)
+        .into_iter()
+        .filter(|row| row.prokind == 'f' && !row.proretset)
+        .filter_map(|row| {
+            let declared_oid = row.proargtypes.trim().parse::<u32>().ok()?;
+            let declared_row = catalog.type_by_oid(declared_oid)?;
+            let declared_type = if !declared_row.sql_type.is_array
+                && matches!(declared_row.sql_type.kind, SqlTypeKind::Composite)
+                && declared_row.sql_type.typrelid == 0
+                && declared_row.typrelid != 0
+            {
+                declared_row
+                    .sql_type
+                    .with_identity(declared_row.oid, declared_row.typrelid)
+            } else {
+                declared_row.sql_type
+            };
+            let matches_type = declared_oid == actual_type.type_oid
+                || (actual_type.typrelid != 0 && declared_type.typrelid == actual_type.typrelid)
+                || actual_descriptor.is_some_and(|descriptor| {
+                    record_descriptor_matches_composite_type(descriptor, declared_type, catalog)
+                });
+            matches_type.then_some((row, declared_type))
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Ok(None);
+    }
+    let (row, declared_type) = matches.pop().expect("one match checked");
+    let result_type = catalog
+        .type_by_oid(row.prorettype)
+        .map(|row| row.sql_type)
+        .ok_or_else(|| ParseError::UnsupportedType(row.prorettype.to_string()))?;
+    Ok(Some(Expr::func(
+        row.oid,
+        Some(result_type),
+        false,
+        vec![coerce_bound_expr(arg.clone(), actual_type, declared_type)],
+    )))
+}
+
+fn expr_record_descriptor(expr: &Expr) -> Option<&crate::include::nodes::datum::RecordDescriptor> {
+    match expr {
+        Expr::Row { descriptor, .. } => Some(descriptor),
+        Expr::Case(case_expr) => expr_record_descriptor(&case_expr.defresult),
+        Expr::Cast(inner, _) => expr_record_descriptor(inner),
+        _ => None,
+    }
+}
+
+fn record_descriptor_matches_composite_type(
+    descriptor: &crate::include::nodes::datum::RecordDescriptor,
+    declared_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    if declared_type.is_array
+        || !matches!(declared_type.kind, SqlTypeKind::Composite)
+        || declared_type.typrelid == 0
+    {
+        return false;
+    }
+    let Some(relation) = catalog.lookup_relation_by_oid(declared_type.typrelid) else {
+        return false;
+    };
+    let columns = relation
+        .desc
+        .columns
+        .into_iter()
+        .filter(|column| !column.dropped)
+        .collect::<Vec<_>>();
+    descriptor.fields.len() == columns.len()
+        && descriptor
+            .fields
+            .iter()
+            .zip(columns.iter())
+            .all(|(field, column)| {
+                field.name.eq_ignore_ascii_case(&column.name)
+                    && record_field_types_compatible(field.sql_type, column.sql_type)
+            })
+}
+
+fn record_field_types_compatible(actual: SqlType, declared: SqlType) -> bool {
+    actual.kind == declared.kind
+        && actual.is_array == declared.is_array
+        && (actual.type_oid == 0 || declared.type_oid == 0 || actual.type_oid == declared.type_oid)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_bind_functional_field_notation(
+    name: &str,
+    args: &[SqlFunctionArg],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Option<Expr>, ParseError> {
+    if args.len() != 1
+        || args[0].name.is_some()
+        || resolve_function_cast_type(catalog, name).is_some()
+    {
+        return Ok(None);
+    }
+    let field_expr = SqlExpr::FieldSelect {
+        expr: Box::new(args[0].value.clone()),
+        field: name.to_string(),
+    };
+    match bind_expr_with_outer_and_ctes(
+        &field_expr,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    ) {
+        Ok(expr) => Ok(Some(expr)),
+        Err(ParseError::DetailedError {
+            sqlstate: "42703", ..
+        })
+        | Err(ParseError::UnexpectedToken {
+            expected: "record expression",
+            ..
+        }) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_record_image_operator_expr(
+    op: &'static str,
+    kind: OpExprKind,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let left_oid = catalog
+        .type_oid_for_sql_type(left_type)
+        .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(left_type)))?;
+    let right_oid = catalog
+        .type_oid_for_sql_type(right_type)
+        .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(right_type)))?;
+    let lookup_left_oid = if matches!(left_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record)
+    {
+        RECORD_TYPE_OID
+    } else {
+        left_oid
+    };
+    let lookup_right_oid = if matches!(
+        right_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Record
+    ) {
+        RECORD_TYPE_OID
+    } else {
+        right_oid
+    };
+    let operator = catalog
+        .operator_by_name_left_right(op, lookup_left_oid, lookup_right_oid)
+        .ok_or_else(|| ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        })?;
+    let left_bound =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    Ok(Expr::Op(Box::new(
+        crate::include::nodes::primnodes::OpExpr {
+            opno: operator.oid,
+            opfuncid: operator.oprcode,
+            op: kind,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![
+                coerce_bound_expr(left_bound, raw_left_type, left_type),
+                coerce_bound_expr(right_bound, raw_right_type, right_type),
+            ],
+            collation_oid: None,
+        },
+    )))
 }
 
 pub(crate) fn resolve_bound_field_select_type(
@@ -6040,6 +6540,16 @@ pub(crate) fn resolve_bound_field_select_type(
         {
             return Ok(found.sql_type);
         }
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column \"{}\" not found in data type {}",
+                field,
+                catalog_sql_type_name(row_type, catalog)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42703",
+        });
     }
 
     if matches!(row_type.kind, SqlTypeKind::Record)
@@ -6053,9 +6563,11 @@ pub(crate) fn resolve_bound_field_select_type(
         return Ok(found.sql_type);
     }
 
-    Err(ParseError::UnexpectedToken {
-        expected: "record field",
-        actual: format!("field selection .{field}"),
+    Err(ParseError::DetailedError {
+        message: format!("could not identify column \"{field}\" in record data type"),
+        detail: None,
+        hint: None,
+        sqlstate: "42703",
     })
 }
 
@@ -6530,6 +7042,16 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
         return true;
     }
     false
+}
+
+fn functional_cast_from_composite_to_string(source_type: SqlType, target_type: SqlType) -> bool {
+    !source_type.is_array
+        && matches!(
+            source_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+        && !target_type.is_array
+        && is_text_like_type(target_type)
 }
 
 fn domain_base_sql_type(type_oid: u32, catalog: &dyn CatalogLookup) -> Option<SqlType> {
