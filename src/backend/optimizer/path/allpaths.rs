@@ -7,6 +7,7 @@ use std::{
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::compare_order_values;
+use crate::backend::parser::analyze::bind_relation_constraints;
 use crate::backend::parser::{
     BoundIndexRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp,
@@ -609,6 +610,25 @@ fn is_append_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
         .is_some_and(|rel| matches!(rel.reloptkind, RelOptKind::OtherMemberRel))
 }
 
+fn is_regular_inheritance_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
+    let Some(parent_relid) = root
+        .append_rel_infos
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .map(|info| info.parent_relid)
+    else {
+        return false;
+    };
+    root.parse
+        .rtable
+        .get(parent_relid.saturating_sub(1))
+        .and_then(|rte| match rte.kind {
+            RangeTblEntryKind::Relation { relkind, .. } => Some(relkind),
+            _ => None,
+        })
+        .is_some_and(|relkind| relkind != 'p')
+}
+
 fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
     if rel
         .baserestrictinfo
@@ -618,38 +638,78 @@ fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
         return true;
     }
 
-    let mut equalities = Vec::<(Expr, Value)>::new();
-    for clause in rel
-        .baserestrictinfo
-        .iter()
-        .flat_map(|restrict| flatten_and_conjuncts(&restrict.clause))
-    {
-        let Some((expr, value)) = equality_to_nonnull_const(&clause) else {
+    expr_list_has_contradictory_equalities(
+        rel.baserestrictinfo
+            .iter()
+            .flat_map(|restrict| flatten_and_conjuncts(&restrict.clause)),
+    )
+}
+
+fn exprs_have_contradictory_equalities(left: &Expr, right: &Expr) -> bool {
+    expr_list_has_contradictory_equalities(
+        flatten_and_conjuncts(left)
+            .into_iter()
+            .chain(flatten_and_conjuncts(right)),
+    )
+}
+
+fn expr_list_has_contradictory_equalities(clauses: impl IntoIterator<Item = Expr>) -> bool {
+    let mut equalities = Vec::<(Expr, Value, Option<u32>)>::new();
+    for clause in clauses {
+        let Some((expr, value, collation_oid)) = equality_to_nonnull_const(&clause) else {
             continue;
         };
-        if equalities.iter().any(|(existing_expr, existing_value)| {
-            existing_expr == &expr && existing_value != &value
-        }) {
+        if equalities
+            .iter()
+            .any(|(existing_expr, existing_value, existing_collation_oid)| {
+                equality_exprs_match_for_contradiction(existing_expr, &expr)
+                    && existing_value != &value
+                    && *existing_collation_oid == collation_oid
+            })
+        {
             return true;
         }
-        equalities.push((expr, value));
+        equalities.push((expr, value, collation_oid));
     }
     false
 }
 
-fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value)> {
+fn equality_exprs_match_for_contradiction(left: &Expr, right: &Expr) -> bool {
+    left == right
+        || matches!(
+            (left, right),
+            (Expr::Var(left), Expr::Var(right))
+                if left.varlevelsup == 0
+                    && right.varlevelsup == 0
+                    && left.varattno == right.varattno
+                    && left.vartype == right.vartype
+        )
+}
+
+fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value, Option<u32>)> {
     let Expr::Op(op) = expr else {
         return None;
     };
     if op.op != OpExprKind::Eq || op.args.len() != 2 {
         return None;
     }
+    let collation_oid = op
+        .collation_oid
+        .or_else(|| op.args.iter().find_map(top_level_explicit_collation));
     match (&op.args[0], &op.args[1]) {
         (Expr::Const(value), other) | (other, Expr::Const(value))
             if !matches!(value, Value::Null) =>
         {
-            Some((other.clone(), value.clone()))
+            Some((other.clone(), value.clone(), collation_oid))
         }
+        _ => None,
+    }
+}
+
+fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        Expr::Cast(inner, _) => top_level_explicit_collation(inner),
         _ => None,
     }
 }
@@ -2687,19 +2747,7 @@ fn simple_subquery_where_qual_is_contradictory(query: &Query) -> bool {
         return true;
     }
 
-    let mut equalities = Vec::<(Expr, Value)>::new();
-    for clause in flatten_and_conjuncts(where_qual) {
-        let Some((expr, value)) = equality_to_nonnull_const(&clause) else {
-            continue;
-        };
-        if equalities.iter().any(|(existing_expr, existing_value)| {
-            existing_expr == &expr && existing_value != &value
-        }) {
-            return true;
-        }
-        equalities.push((expr, value));
-    }
-    false
+    expr_list_has_contradictory_equalities(flatten_and_conjuncts(where_qual))
 }
 
 fn subquery_filter_pushdown_is_safe(query: &Query) -> bool {
@@ -3439,9 +3487,18 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         .get(rtindex)
         .and_then(Option::as_ref)
         .and_then(base_filter_expr);
-    if root.config.constraint_exclusion_on
+    let constraint_exclusion_applies = root.config.constraint_exclusion_on
+        || (root.config.constraint_exclusion_partition
+            && is_regular_inheritance_child_rel(root, rtindex));
+    if constraint_exclusion_applies
         && let RangeTblEntryKind::Relation { relation_oid, .. } = rte.kind.clone()
-        && !relation_may_satisfy_own_partition_bound(catalog, relation_oid, filter.as_ref())
+        && (!relation_may_satisfy_own_partition_bound(catalog, relation_oid, filter.as_ref())
+            || !relation_may_satisfy_check_constraints(
+                catalog,
+                relation_oid,
+                &rte.desc,
+                filter.as_ref(),
+            ))
     {
         if let Some(rel) = root
             .simple_rel_array
@@ -4062,6 +4119,25 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         RangeTblEntryKind::Join { .. } => unreachable!("join RTEs are not base relations"),
     }
     bestpath::set_cheapest(rel);
+}
+
+fn relation_may_satisfy_check_constraints(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    filter: Option<&Expr>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let Ok(constraints) = bind_relation_constraints(None, relation_oid, desc, catalog) else {
+        return true;
+    };
+    constraints
+        .checks
+        .iter()
+        .filter(|check| check.enforced)
+        .all(|check| !exprs_have_contradictory_equalities(filter, &check.expr))
 }
 
 fn set_base_rel_pathlists(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {

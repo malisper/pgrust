@@ -116,9 +116,9 @@ use crate::include::nodes::parsenodes::{
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, ParamKind, QueryColumn, RelationPrivilegeMask,
-    RelationPrivilegeRequirement, SubLinkType, TargetEntry, Var, attrno_index, expr_sql_type_hint,
-    user_attrno,
+    BoolExpr, BoolExprType, INNER_VAR, OUTER_VAR, OpExprKind, ParamKind, QueryColumn,
+    RelationPrivilegeMask, RelationPrivilegeRequirement, SubLinkType, TargetEntry, Var,
+    attrno_index, expr_sql_type_hint, user_attrno,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -897,13 +897,28 @@ fn apply_update_constraint_exclusion(
     catalog: &dyn CatalogLookup,
     planner_config: PlannerConfig,
 ) -> BoundUpdateStatement {
-    if !planner_config.constraint_exclusion_on {
-        return stmt;
-    }
+    let has_multiple_targets = stmt.targets.len() > 1;
     for target in &mut stmt.targets {
+        let should_check = if target.partition_update_root_oid.is_some() {
+            planner_config.enable_partition_pruning
+        } else if has_multiple_targets
+            && relation_has_regular_inheritance_parent(catalog, target.relation_oid)
+        {
+            planner_config.constraint_exclusion_partition
+        } else {
+            planner_config.constraint_exclusion_on
+        };
+        if !should_check {
+            continue;
+        }
         if !relation_may_satisfy_own_partition_bound(
             catalog,
             target.relation_oid,
+            target.predicate.as_ref(),
+        ) || !relation_may_satisfy_bound_check_constraints(
+            catalog,
+            target.relation_oid,
+            &target.desc,
             target.predicate.as_ref(),
         ) {
             target.predicate = Some(Expr::Const(Value::Bool(false)));
@@ -918,13 +933,28 @@ fn apply_delete_constraint_exclusion(
     catalog: &dyn CatalogLookup,
     planner_config: PlannerConfig,
 ) -> BoundDeleteStatement {
-    if !planner_config.constraint_exclusion_on {
-        return stmt;
-    }
+    let has_multiple_targets = stmt.targets.len() > 1;
     for target in &mut stmt.targets {
+        let should_check = if target.partition_delete_root_oid.is_some() {
+            planner_config.enable_partition_pruning
+        } else if has_multiple_targets
+            && relation_has_regular_inheritance_parent(catalog, target.relation_oid)
+        {
+            planner_config.constraint_exclusion_partition
+        } else {
+            planner_config.constraint_exclusion_on
+        };
+        if !should_check {
+            continue;
+        }
         if !relation_may_satisfy_own_partition_bound(
             catalog,
             target.relation_oid,
+            target.predicate.as_ref(),
+        ) || !relation_may_satisfy_bound_check_constraints(
+            catalog,
+            target.relation_oid,
+            &target.desc,
             target.predicate.as_ref(),
         ) {
             target.predicate = Some(Expr::Const(Value::Bool(false)));
@@ -932,6 +962,109 @@ fn apply_delete_constraint_exclusion(
         }
     }
     stmt
+}
+
+fn relation_has_regular_inheritance_parent(catalog: &dyn CatalogLookup, relation_oid: u32) -> bool {
+    catalog
+        .inheritance_parents(relation_oid)
+        .into_iter()
+        .any(|row| {
+            catalog
+                .relation_by_oid(row.inhparent)
+                .is_some_and(|parent| parent.relkind != 'p')
+        })
+}
+
+fn relation_may_satisfy_bound_check_constraints(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    filter: Option<&Expr>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let Ok(constraints) = bind_relation_constraints(None, relation_oid, desc, catalog) else {
+        return true;
+    };
+    constraints
+        .checks
+        .iter()
+        .filter(|check| check.enforced)
+        .all(|check| !exprs_have_contradictory_equalities(filter, &check.expr))
+}
+
+fn exprs_have_contradictory_equalities(left: &Expr, right: &Expr) -> bool {
+    let mut equalities = Vec::<(Expr, Value, Option<u32>)>::new();
+    for clause in flatten_and_exprs(left)
+        .into_iter()
+        .chain(flatten_and_exprs(right))
+    {
+        let Some((expr, value, collation_oid)) = equality_to_nonnull_const(&clause) else {
+            continue;
+        };
+        if equalities
+            .iter()
+            .any(|(existing_expr, existing_value, existing_collation_oid)| {
+                equality_exprs_match_for_contradiction(existing_expr, &expr)
+                    && existing_value != &value
+                    && *existing_collation_oid == collation_oid
+            })
+        {
+            return true;
+        }
+        equalities.push((expr, value, collation_oid));
+    }
+    false
+}
+
+fn flatten_and_exprs(expr: &Expr) -> Vec<Expr> {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            bool_expr.args.iter().flat_map(flatten_and_exprs).collect()
+        }
+        other => vec![other.clone()],
+    }
+}
+
+fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value, Option<u32>)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    let collation_oid = op
+        .collation_oid
+        .or_else(|| op.args.iter().find_map(top_level_explicit_collation));
+    match (&op.args[0], &op.args[1]) {
+        (Expr::Const(value), other) | (other, Expr::Const(value))
+            if !matches!(value, Value::Null) =>
+        {
+            Some((other.clone(), value.clone(), collation_oid))
+        }
+        _ => None,
+    }
+}
+
+fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        Expr::Cast(inner, _) => top_level_explicit_collation(inner),
+        _ => None,
+    }
+}
+
+fn equality_exprs_match_for_contradiction(left: &Expr, right: &Expr) -> bool {
+    left == right
+        || matches!(
+            (left, right),
+            (Expr::Var(left), Expr::Var(right))
+                if left.varlevelsup == 0
+                    && right.varlevelsup == 0
+                    && left.varattno == right.varattno
+                    && left.vartype == right.vartype
+        )
 }
 
 fn execute_explain_insert(
@@ -2480,6 +2613,18 @@ fn explain_update_lines(
         return lines;
     }
 
+    if !verbose
+        && explain_partitioned_update_append_plain(stmt, &partition_targets, show_costs, &mut lines)
+    {
+        return lines;
+    }
+    if !verbose
+        && partition_targets.is_empty()
+        && explain_inherited_update_append_plain(stmt, &bound.targets, show_costs, &mut lines)
+    {
+        return lines;
+    }
+
     if verbose
         && partition_targets.len() > 1
         && explain_partitioned_update_append(
@@ -2592,6 +2737,121 @@ fn explain_update_lines(
         lines.push("        One-Time Filter: false".into());
     }
     lines
+}
+
+fn explain_partitioned_update_append_plain(
+    stmt: &UpdateStatement,
+    targets: &[&BoundUpdateTarget],
+    show_costs: bool,
+    lines: &mut Vec<String>,
+) -> bool {
+    let live_targets = targets
+        .iter()
+        .copied()
+        .filter(|target| !is_const_false(target.predicate.as_ref()))
+        .collect::<Vec<_>>();
+    if live_targets.len() <= 1 {
+        return false;
+    }
+    for (index, target) in live_targets.iter().enumerate() {
+        let alias = format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1);
+        lines.push(format!("  Update on {} {alias}", target.relation_name));
+    }
+    push_explain_line(
+        "  ->  Append",
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    for (index, target) in live_targets.iter().enumerate() {
+        let alias = format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1);
+        push_explain_line(
+            &format!(
+                "        ->  {}",
+                explain_update_scan_label(target, Some(&alias))
+            ),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            lines,
+        );
+        if let Some(index_cond) = explain_update_index_cond(target) {
+            lines.push(format!("              Index Cond: {index_cond}"));
+        } else if let Some(predicate) = &target.predicate {
+            lines.push(format!(
+                "              Filter: {}",
+                crate::backend::executor::render_explain_expr(
+                    predicate,
+                    &target
+                        .desc
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            ));
+        }
+    }
+    true
+}
+
+fn explain_inherited_update_append_plain(
+    stmt: &UpdateStatement,
+    targets: &[BoundUpdateTarget],
+    show_costs: bool,
+    lines: &mut Vec<String>,
+) -> bool {
+    let live_targets = targets
+        .iter()
+        .filter(|target| !is_const_false(target.predicate.as_ref()))
+        .collect::<Vec<_>>();
+    if live_targets.len() <= 1 {
+        return false;
+    }
+    for (index, target) in live_targets.iter().enumerate() {
+        let alias = format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1);
+        lines.push(format!("  Update on {} {alias}", target.relation_name));
+    }
+    push_explain_line(
+        "  ->  Result",
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    push_explain_line(
+        "        ->  Append",
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    for (index, target) in live_targets.iter().enumerate() {
+        let alias = format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1);
+        push_explain_line(
+            &format!(
+                "              ->  {}",
+                explain_update_scan_label(target, Some(&alias))
+            ),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            lines,
+        );
+        if let Some(index_cond) = explain_update_index_cond(target) {
+            lines.push(format!("                    Index Cond: {index_cond}"));
+        } else if let Some(predicate) = &target.predicate {
+            lines.push(format!(
+                "                    Filter: {}",
+                crate::backend::executor::render_explain_expr(
+                    predicate,
+                    &target
+                        .desc
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            ));
+        }
+    }
+    true
 }
 
 fn partitioned_update_explain_targets(bound: &BoundUpdateStatement) -> Vec<&BoundUpdateTarget> {
@@ -6537,6 +6797,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
                         rel: row.relation.rel,
                         relation_oid: row.relation.relation_oid,
                         relkind: 'r',
+                        partition_delete_root_oid: None,
                         toast: row.relation.toast,
                         desc: row.relation.desc.clone(),
                         referenced_by_foreign_keys,
@@ -8162,6 +8423,12 @@ fn remap_partition_write_checks(
                 source_varno,
                 &output_exprs,
             ),
+            display_exprs: check
+                .display_exprs
+                .iter()
+                .cloned()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr, source_varno, &output_exprs))
+                .collect(),
             policy_name: check.policy_name.clone(),
             source: check.source.clone(),
         })

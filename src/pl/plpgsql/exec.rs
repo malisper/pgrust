@@ -4218,6 +4218,12 @@ fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerC
         constraint_exclusion_on: gucs
             .get("constraint_exclusion")
             .is_some_and(|value| value.eq_ignore_ascii_case("on")),
+        constraint_exclusion_partition: gucs
+            .get("constraint_exclusion")
+            .map(|value| {
+                value.eq_ignore_ascii_case("partition") || value.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(true),
         retain_partial_index_filters: false,
         enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
         enable_sort: bool_executor_guc(gucs, "enable_sort", true),

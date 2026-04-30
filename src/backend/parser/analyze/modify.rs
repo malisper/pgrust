@@ -113,6 +113,7 @@ pub struct BoundDeleteTarget {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub relkind: char,
+    pub partition_delete_root_oid: Option<u32>,
     pub toast: Option<ToastRelationRef>,
     pub desc: RelationDesc,
     pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
@@ -3420,6 +3421,8 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
                 &relation_name,
                 &resolved.base_relation.desc,
                 predicate.as_ref(),
+                (resolved.base_relation.relkind == 'p')
+                    .then_some(resolved.base_relation.relation_oid),
                 &child,
                 catalog,
             )
@@ -3489,6 +3492,7 @@ fn build_delete_target(
     base_relation_name: &str,
     parent_desc: &RelationDesc,
     parent_predicate: Option<&Expr>,
+    partition_delete_root_oid: Option<u32>,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundDeleteTarget, ParseError> {
@@ -3507,6 +3511,7 @@ fn build_delete_target(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        partition_delete_root_oid,
         toast: child.toast,
         desc: child.desc.clone(),
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
@@ -3524,6 +3529,7 @@ fn build_delete_target_from_joined_input(
     base_relation_name: &str,
     parent_desc: &RelationDesc,
     parent_predicate: Option<&Expr>,
+    partition_delete_root_oid: Option<u32>,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundDeleteTarget, ParseError> {
@@ -3539,6 +3545,7 @@ fn build_delete_target_from_joined_input(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        partition_delete_root_oid,
         toast: child.toast,
         desc: child.desc.clone(),
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
@@ -4868,6 +4875,8 @@ pub(crate) fn bind_delete_with_outer_scopes(
     )?;
     let predicate = prepend_visibility_quals(target_rls.visibility_quals.clone(), predicate);
 
+    let partition_delete_root_oid =
+        (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
     let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
         .into_iter()
         .map(|relation_oid| {
@@ -4878,6 +4887,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
                 &stmt.table_name,
                 &entry.desc,
                 predicate.as_ref(),
+                partition_delete_root_oid,
                 &child,
                 catalog,
             )
@@ -4995,6 +5005,8 @@ fn bind_delete_using(
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 
+    let partition_delete_root_oid =
+        (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
     let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
         .into_iter()
         .map(|relation_oid| {
@@ -5005,6 +5017,7 @@ fn bind_delete_using(
                 &stmt.table_name,
                 &entry.desc,
                 predicate.as_ref(),
+                partition_delete_root_oid,
                 &child,
                 catalog,
             )

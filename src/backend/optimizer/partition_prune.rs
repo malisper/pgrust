@@ -2699,9 +2699,13 @@ mod tests {
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, PUBLIC_NAMESPACE_OID, PgInheritsRow,
     };
-    use crate::include::catalog::{C_COLLATION_OID, POSIX_COLLATION_OID};
+    use crate::include::catalog::{
+        C_COLLATION_OID, POSIX_COLLATION_OID, proc_oid_for_builtin_scalar_function,
+    };
     use crate::include::nodes::primnodes::RelationDesc;
-    use crate::include::nodes::primnodes::{ScalarArrayOpExpr, Var};
+    use crate::include::nodes::primnodes::{
+        BuiltinScalarFunction, FuncExpr, ScalarArrayOpExpr, ScalarFunctionImpl, Var,
+    };
 
     #[derive(Default)]
     struct MockCatalog {
@@ -2837,6 +2841,19 @@ mod tests {
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
         })
+    }
+
+    fn substr_key_expr() -> Expr {
+        Expr::Func(Box::new(FuncExpr {
+            funcid: proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Substring)
+                .expect("substring proc oid"),
+            funcname: Some("substr".into()),
+            funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
+            funcvariadic: false,
+            implementation: ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Substring),
+            display_args: None,
+            args: vec![key_expr(), Expr::Const(Value::Int32(1))],
+        }))
     }
 
     fn int_key_expr(varno: usize) -> Expr {
@@ -2994,6 +3011,23 @@ mod tests {
             opresulttype: SqlType::new(SqlTypeKind::Bool),
             args: vec![
                 key_expr(),
+                Expr::Collate {
+                    expr: Box::new(text_const(value)),
+                    collation_oid,
+                },
+            ],
+            collation_oid: None,
+        }))
+    }
+
+    fn collated_substr_eq(value: &str, collation_oid: u32) -> Expr {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op: OpExprKind::Eq,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args: vec![
+                substr_key_expr(),
                 Expr::Collate {
                     expr: Box::new(text_const(value)),
                     collation_oid,
@@ -3315,6 +3349,42 @@ mod tests {
         let expr = Expr::and(
             collated_text_eq("e", C_COLLATION_OID),
             collated_text_eq("a", POSIX_COLLATION_OID),
+        );
+
+        assert!(!expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+        assert!(!expr_may_match_bound(&expr, &spec, &third, &[]));
+    }
+
+    #[test]
+    fn multi_key_range_uses_operand_collation_for_duplicate_substr_keys() {
+        let posix_key = Expr::Collate {
+            expr: Box::new(substr_key_expr()),
+            collation_oid: POSIX_COLLATION_OID,
+        };
+        let c_key = Expr::Collate {
+            expr: Box::new(substr_key_expr()),
+            collation_oid: C_COLLATION_OID,
+        };
+        let spec = LoweredPartitionSpec {
+            strategy: PartitionStrategy::Range,
+            key_columns: vec!["a_posix".into(), "a_c".into()],
+            key_exprs: vec![posix_key, c_key],
+            key_types: vec![SqlType::new(SqlTypeKind::Text); 2],
+            key_sqls: vec![
+                "substr(a, 1) COLLATE \"POSIX\"".into(),
+                "substr(a, 1) COLLATE \"C\"".into(),
+            ],
+            partattrs: vec![0, 0],
+            partclass: vec![0, 0],
+            partcollation: vec![POSIX_COLLATION_OID, C_COLLATION_OID],
+        };
+        let first = multi_text_range_bound(&["a", "a"], &["a", "e"]);
+        let second = multi_text_range_bound(&["a", "e"], &["a", "z"]);
+        let third = multi_text_range_bound(&["b", "a"], &["b", "e"]);
+        let expr = Expr::and(
+            collated_substr_eq("e", C_COLLATION_OID),
+            collated_substr_eq("a", POSIX_COLLATION_OID),
         );
 
         assert!(!expr_may_match_bound(&expr, &spec, &first, &[]));

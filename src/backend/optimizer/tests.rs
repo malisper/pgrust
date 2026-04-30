@@ -12,8 +12,8 @@ use crate::backend::parser::{
 };
 use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
-    PgInheritsRow,
+    BOOTSTRAP_SUPERUSER_OID, C_COLLATION_OID, CURRENT_DATABASE_OID, PG_TYPE_RELATION_OID,
+    POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, PgInheritsRow, proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{
@@ -23,9 +23,9 @@ use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate, PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
-    Aggref, AttrNumber, BoolExprType, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind,
-    OrderByEntry, Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var, WindowFrameBound,
-    user_attrno,
+    Aggref, AttrNumber, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, INNER_VAR, JoinType,
+    OUTER_VAR, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind, QueryColumn, RelationDesc,
+    ScalarFunctionImpl, TargetEntry, Var, WindowFrameBound, user_attrno,
 };
 
 fn int4() -> SqlType {
@@ -76,6 +76,22 @@ fn typed_var(
         varlevelsup: 0,
         vartype,
     })
+}
+
+fn text_substr_partition_key() -> Expr {
+    Expr::Func(Box::new(FuncExpr {
+        funcid: proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Substring)
+            .expect("substring proc oid"),
+        funcname: Some("substr".into()),
+        funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
+        funcvariadic: false,
+        implementation: ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Substring),
+        display_args: None,
+        args: vec![
+            typed_var(1, 1, SqlType::new(SqlTypeKind::Text)),
+            Expr::Const(Value::Int32(1)),
+        ],
+    }))
 }
 
 fn pathkey(expr: crate::include::nodes::primnodes::Expr) -> PathKey {
@@ -1722,6 +1738,91 @@ fn catalog_with_varchar_list_partitions() -> Catalog {
     catalog
 }
 
+fn catalog_with_collated_substr_range_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    let desc = RelationDesc {
+        columns: vec![column_desc("a", SqlType::new(SqlTypeKind::Text), true)],
+    };
+    let entry = catalog
+        .create_table_with_relkind(
+            "coll_pruning_multi",
+            desc.clone(),
+            PUBLIC_NAMESPACE_OID,
+            CURRENT_DATABASE_OID,
+            'p',
+            'p',
+            BOOTSTRAP_SUPERUSER_OID,
+        )
+        .expect("create coll_pruning_multi");
+    let parent_oid = entry.relation_oid;
+    let posix_key = Expr::Collate {
+        expr: Box::new(text_substr_partition_key()),
+        collation_oid: POSIX_COLLATION_OID,
+    };
+    let c_key = Expr::Collate {
+        expr: Box::new(text_substr_partition_key()),
+        collation_oid: C_COLLATION_OID,
+    };
+    let spec = LoweredPartitionSpec {
+        strategy: PartitionStrategy::Range,
+        key_columns: vec![
+            "substr(a, 1) COLLATE \"POSIX\"".into(),
+            "substr(a, 1) COLLATE \"C\"".into(),
+        ],
+        key_exprs: vec![posix_key, c_key],
+        key_types: vec![
+            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Text),
+        ],
+        key_sqls: vec![
+            "substr(a, 1) COLLATE \"POSIX\"".into(),
+            "substr(a, 1) COLLATE \"C\"".into(),
+        ],
+        partattrs: vec![0, 0],
+        partclass: vec![0, 0],
+        partcollation: vec![POSIX_COLLATION_OID, C_COLLATION_OID],
+    };
+    let table = catalog
+        .tables
+        .get_mut("coll_pruning_multi")
+        .expect("coll_pruning_multi table");
+    table.relhassubclass = true;
+    table.partitioned_table = Some(pg_partitioned_table_row(parent_oid, &spec, 0));
+
+    for (inhseqno, name, from, to) in [
+        (1, "coll_pruning_multi1", ("a", "a"), ("a", "e")),
+        (2, "coll_pruning_multi2", ("a", "e"), ("a", "z")),
+        (3, "coll_pruning_multi3", ("b", "a"), ("b", "e")),
+    ] {
+        let entry = catalog
+            .create_table(name, desc.clone())
+            .expect("create coll_pruning_multi child");
+        let bound = PartitionBoundSpec::Range {
+            from: vec![
+                PartitionRangeDatumValue::Value(SerializedPartitionValue::Text(from.0.into())),
+                PartitionRangeDatumValue::Value(SerializedPartitionValue::Text(from.1.into())),
+            ],
+            to: vec![
+                PartitionRangeDatumValue::Value(SerializedPartitionValue::Text(to.0.into())),
+                PartitionRangeDatumValue::Value(SerializedPartitionValue::Text(to.1.into())),
+            ],
+            is_default: false,
+        };
+        let child_oid = entry.relation_oid;
+        let table = catalog.tables.get_mut(name).expect("child table");
+        table.relispartition = true;
+        table.relpartbound = Some(serialize_partition_bound(&bound).expect("serialize bound"));
+        catalog.inherits.push(PgInheritsRow {
+            inhrelid: child_oid,
+            inhparent: parent_oid,
+            inhseqno,
+            inhdetachpending: false,
+        });
+    }
+
+    catalog
+}
+
 #[test]
 fn partitioned_scalar_array_null_qual_renders_result_false() {
     let catalog = catalog_with_varchar_list_partitions();
@@ -1732,6 +1833,24 @@ fn partitioned_scalar_array_null_qual_renders_result_false() {
     let lines = explain_lines_for_planned_stmt(&planned);
 
     assert_eq!(lines, ["Result", "  One-Time Filter: false"]);
+}
+
+#[test]
+fn collated_duplicate_expression_partition_keys_prune_independently() {
+    let catalog = catalog_with_collated_substr_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from coll_pruning_multi where substr(a, 1) = 'e' collate \"C\" and substr(a, 1) = 'a' collate \"POSIX\"",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert_eq!(
+        lines,
+        [
+            "Seq Scan on coll_pruning_multi2 coll_pruning_multi",
+            "  Filter: ((substr(a, 1) = 'e'::text COLLATE \"C\") AND (substr(a, 1) = 'a'::text COLLATE \"POSIX\"))"
+        ]
+    );
 }
 
 fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
