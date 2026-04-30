@@ -670,6 +670,8 @@ pub enum Path {
         slot_id: usize,
         input: Box<Path>,
         clause: WindowClause,
+        run_condition: Option<Expr>,
+        top_qual: Option<Expr>,
         output_columns: Vec<QueryColumn>,
     },
     Values {

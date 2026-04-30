@@ -428,6 +428,8 @@ pub enum Plan {
         plan_info: PlanEstimate,
         input: Box<Plan>,
         clause: WindowClause,
+        run_condition: Option<Expr>,
+        top_qual: Option<Expr>,
         output_columns: Vec<QueryColumn>,
     },
     FunctionScan {

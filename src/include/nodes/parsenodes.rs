@@ -643,6 +643,7 @@ impl Query {
     pub fn columns(&self) -> Vec<QueryColumn> {
         self.target_list
             .iter()
+            .filter(|target| !target.resjunk)
             .map(|target| QueryColumn {
                 name: target.name.clone(),
                 sql_type: target.sql_type,

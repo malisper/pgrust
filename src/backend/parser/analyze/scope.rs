@@ -5540,18 +5540,21 @@ fn bind_join_constraint_with_ctes(
             }
             Ok((Expr::Const(Value::Bool(true)), None, None))
         }
-        JoinConstraint::On(on) => Ok((
-            bind_expr_with_outer_and_ctes(
-                on,
-                raw_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
-            None,
-            None,
-        )),
+        JoinConstraint::On(on) => {
+            reject_window_clause(on, "JOIN conditions")?;
+            Ok((
+                bind_expr_with_outer_and_ctes(
+                    on,
+                    raw_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                None,
+                None,
+            ))
+        }
         JoinConstraint::Using(columns) => {
             bind_join_using_projection(kind, columns, left_scope, right_scope)
         }

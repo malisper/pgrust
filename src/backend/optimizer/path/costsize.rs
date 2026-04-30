@@ -38,7 +38,7 @@ use crate::include::nodes::datum::{
     ArrayValue, IntervalValue, NumericValue, RecordDescriptor, RecordValue, Value as DatumValue,
 };
 use crate::include::nodes::parsenodes::{
-    JoinTreeNode, Query, RangeTblEntryKind, TableSampleClause,
+    JoinTreeNode, Query, RangeTblEntryKind, TableSampleClause, WindowFrameMode,
 };
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RestrictInfo,
@@ -47,8 +47,8 @@ use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanE
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExprKind,
     OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl,
-    SetReturningCall, TargetEntry, ToastRelationRef, Var, attrno_index, set_returning_call_exprs,
-    user_attrno,
+    SetReturningCall, TargetEntry, ToastRelationRef, Var, WindowClause, WindowFrameBound,
+    attrno_index, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::joininfo;
@@ -749,6 +749,8 @@ pub(super) fn optimize_path_with_config(
                 pathtarget,
                 input,
                 clause,
+                run_condition,
+                top_qual,
                 output_columns,
                 slot_id,
                 ..
@@ -760,18 +762,27 @@ pub(super) fn optimize_path_with_config(
                     .map(|col| estimate_sql_type_width(col.sql_type))
                     .sum();
                 let function_cost = clause.functions.len().max(1) as f64 * CPU_OPERATOR_COST;
+                let rows = input_info.plan_rows.as_f64();
+                let per_tuple_cost = function_cost
+                    + (clause.spec.partition_by.len() + clause.spec.order_by.len()) as f64
+                        * CPU_OPERATOR_COST
+                    + CPU_TUPLE_COST;
+                let total = input_info.total_cost.as_f64() + rows * per_tuple_cost;
+                let startup_tuples = window_clause_startup_tuples(&input, &clause, catalog, rows);
+                let startup = if rows > 0.0 && startup_tuples > 1.0 {
+                    input_info.startup_cost.as_f64()
+                        + (total - input_info.startup_cost.as_f64()) / rows * (startup_tuples - 1.0)
+                } else {
+                    input_info.startup_cost.as_f64()
+                };
                 Path::WindowAgg {
-                    plan_info: PlanEstimate::new(
-                        input_info.total_cost.as_f64(),
-                        input_info.total_cost.as_f64()
-                            + input_info.plan_rows.as_f64() * function_cost,
-                        input_info.plan_rows.as_f64(),
-                        width,
-                    ),
+                    plan_info: PlanEstimate::new(startup, total, rows, width),
                     pathtarget,
                     slot_id,
                     input: Box::new(input),
                     clause,
+                    run_condition,
+                    top_qual,
                     output_columns,
                 }
             }
@@ -2948,6 +2959,7 @@ fn build_join_paths_internal(
     if !lateral_orientation_locked
         && !matches!(kind, JoinType::Cross)
         && !small_full_join_prefers_merge(kind, &left, &right)
+        && !small_window_inner_join_prefers_merge(root, kind, &left, &right)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
     {
@@ -3001,6 +3013,7 @@ fn build_join_paths_internal(
 
     if !lateral_orientation_locked
         && matches!(kind, JoinType::Inner)
+        && !small_window_inner_join_prefers_merge(root, kind, &right, &left)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
     {
@@ -3065,6 +3078,18 @@ fn small_full_join_prefers_merge(kind: JoinType, left: &Path, right: &Path) -> b
     matches!(kind, JoinType::Full)
         && left.plan_info().plan_rows.as_f64() <= SMALL_FULL_MERGE_JOIN_ROW_LIMIT
         && right.plan_info().plan_rows.as_f64() <= SMALL_FULL_MERGE_JOIN_ROW_LIMIT
+}
+
+fn small_window_inner_join_prefers_merge(
+    root: Option<&PlannerInfo>,
+    kind: JoinType,
+    left: &Path,
+    right: &Path,
+) -> bool {
+    root.is_some_and(|root| !root.parse.window_clauses.is_empty())
+        && matches!(kind, JoinType::Inner)
+        && left.plan_info().plan_rows.as_f64() <= 2_000.0
+        && right.plan_info().plan_rows.as_f64() <= 2_000.0
 }
 
 fn reassociate_lateral_values_index_join(
@@ -3903,6 +3928,72 @@ fn visible_user_attr_indexes_for_index_only(desc: &RelationDesc) -> Vec<usize> {
         .collect()
 }
 
+fn window_clause_startup_tuples(
+    input: &Path,
+    clause: &WindowClause,
+    catalog: &dyn CatalogLookup,
+    input_rows: f64,
+) -> f64 {
+    let input_rows = input_rows.max(1.0);
+    let partition_tuples = if clause.spec.partition_by.is_empty() {
+        input_rows
+    } else {
+        let groups = estimate_group_rows(input, &clause.spec.partition_by, catalog, input_rows);
+        input_rows / groups.max(1.0)
+    };
+    let peer_tuples = if clause.spec.order_by.is_empty() {
+        1.0
+    } else {
+        let order_exprs = clause
+            .spec
+            .order_by
+            .iter()
+            .map(|item| item.expr.clone())
+            .collect::<Vec<_>>();
+        let groups = estimate_group_rows(input, &order_exprs, catalog, partition_tuples);
+        partition_tuples / groups.max(1.0)
+    };
+    let mut needed = match &clause.spec.frame.end_bound {
+        WindowFrameBound::UnboundedFollowing => partition_tuples,
+        WindowFrameBound::CurrentRow => match clause.spec.frame.mode {
+            WindowFrameMode::Rows => 1.0,
+            WindowFrameMode::Range | WindowFrameMode::Groups => {
+                if clause.spec.order_by.is_empty() {
+                    partition_tuples
+                } else {
+                    peer_tuples
+                }
+            }
+        },
+        WindowFrameBound::OffsetPreceding(_) => 1.0,
+        WindowFrameBound::OffsetFollowing(offset) => match clause.spec.frame.mode {
+            WindowFrameMode::Rows => window_frame_offset_const(&offset.expr).unwrap_or(1.0) + 1.0,
+            WindowFrameMode::Range | WindowFrameMode::Groups => {
+                peer_tuples * (window_frame_offset_const(&offset.expr).unwrap_or(1.0) + 1.0)
+            }
+        },
+        WindowFrameBound::UnboundedPreceding => 1.0,
+    };
+    if !clause.spec.partition_by.is_empty() || !clause.spec.order_by.is_empty() {
+        needed = (needed + 1.0).min(partition_tuples);
+    } else {
+        needed = needed.min(partition_tuples);
+    }
+    clamp_rows(needed)
+}
+
+fn window_frame_offset_const(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::Const(DatumValue::Int16(value)) => Some((*value).into()),
+        Expr::Const(DatumValue::Int32(value)) => Some((*value).into()),
+        Expr::Const(DatumValue::Int64(value)) => Some(*value as f64),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            window_frame_offset_const(inner)
+        }
+        _ => None,
+    }
+}
+
 fn index_only_attrs_for_parameterized_path(
     source_id: usize,
     pathtarget: &PathTarget,
@@ -4472,7 +4563,12 @@ fn flatten_or_args<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 
 fn parameterize_outer_vars(expr: Expr, outer_relids: &[usize]) -> Expr {
     match expr {
-        Expr::Var(mut var) if var.varlevelsup == 0 && outer_relids.contains(&var.varno) => {
+        Expr::Var(mut var)
+            if var.varlevelsup == 0
+                && (outer_relids.contains(&var.varno)
+                    || rte_slot_varno(var.varno)
+                        .is_some_and(|relid| outer_relids.contains(&relid))) =>
+        {
             var.varlevelsup = 1;
             Expr::Var(var)
         }
@@ -5640,7 +5736,13 @@ fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
                     .as_ref()
                     .is_some_and(|having| expr_uses_outer_relids(having, relids))
         }
-        Path::WindowAgg { input, clause, .. } => {
+        Path::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
             path_uses_outer_relids(input, relids)
                 || clause
                     .spec
@@ -5657,6 +5759,12 @@ fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
                         .iter()
                         .any(|arg| expr_uses_outer_relids(arg, relids))
                 })
+                || run_condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_uses_outer_relids(expr, relids))
+                || top_qual
+                    .as_ref()
+                    .is_some_and(|expr| expr_uses_outer_relids(expr, relids))
         }
         Path::Values { rows, .. } => rows
             .iter()
@@ -5851,7 +5959,13 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
                     .as_ref()
                     .is_some_and(expr_uses_immediate_outer_columns)
         }
-        Path::WindowAgg { input, clause, .. } => {
+        Path::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
             path_uses_immediate_outer_columns(input)
                 || clause
                     .spec
@@ -5875,6 +5989,12 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
                             crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
                         }
                 })
+                || run_condition
+                    .as_ref()
+                    .is_some_and(expr_uses_immediate_outer_columns)
+                || top_qual
+                    .as_ref()
+                    .is_some_and(expr_uses_immediate_outer_columns)
         }
         Path::Values { rows, .. } => rows.iter().flatten().any(expr_uses_immediate_outer_columns),
         Path::FunctionScan { call, .. } => set_returning_call_uses_immediate_outer_columns(call),
