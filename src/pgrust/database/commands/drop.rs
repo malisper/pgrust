@@ -53,6 +53,34 @@ struct DropDomainColumnDependency {
     attnum: i16,
 }
 
+fn expand_drop_function_statement(drop_stmt: &DropFunctionStatement) -> Vec<DropFunctionStatement> {
+    let mut statements = Vec::with_capacity(1 + drop_stmt.additional_functions.len());
+    statements.push(DropFunctionStatement {
+        if_exists: drop_stmt.if_exists,
+        schema_name: drop_stmt.schema_name.clone(),
+        function_name: drop_stmt.function_name.clone(),
+        arg_list_specified: drop_stmt.arg_list_specified,
+        arg_types: drop_stmt.arg_types.clone(),
+        additional_functions: Vec::new(),
+        cascade: drop_stmt.cascade,
+    });
+    statements.extend(
+        drop_stmt
+            .additional_functions
+            .iter()
+            .map(|item| DropFunctionStatement {
+                if_exists: drop_stmt.if_exists,
+                schema_name: item.schema_name.clone(),
+                function_name: item.routine_name.clone(),
+                arg_list_specified: !item.arg_types.is_empty(),
+                arg_types: item.arg_types.clone(),
+                additional_functions: Vec::new(),
+                cascade: drop_stmt.cascade,
+            }),
+    );
+    statements
+}
+
 #[derive(Debug, Default)]
 struct DropDomainPlan {
     explicit_domain_names: BTreeSet<String>,
@@ -1557,16 +1585,19 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        self.execute_drop_function_stmt_in_transaction_with_kind(
-            client_id,
-            drop_stmt,
-            xid,
-            cid,
-            configured_search_path,
-            catalog_effects,
-            'f',
-            "function",
-        )
+        for item_stmt in expand_drop_function_statement(drop_stmt) {
+            self.execute_drop_function_stmt_in_transaction_with_kind(
+                client_id,
+                &item_stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+                'f',
+                "function",
+            )?;
+        }
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_drop_procedure_stmt_with_search_path(
@@ -1607,6 +1638,7 @@ impl Database {
                 function_name: procedure.routine_name.clone(),
                 arg_list_specified: false,
                 arg_types: procedure.arg_types.clone(),
+                additional_functions: Vec::new(),
                 cascade: drop_stmt.cascade,
             };
             self.execute_drop_function_stmt_in_transaction_with_kind(
@@ -1661,6 +1693,7 @@ impl Database {
                 function_name: routine.routine_name.clone(),
                 arg_list_specified: false,
                 arg_types: routine.arg_types.clone(),
+                additional_functions: Vec::new(),
                 cascade: drop_stmt.cascade,
             };
             self.execute_drop_function_stmt_in_transaction_with_kind(

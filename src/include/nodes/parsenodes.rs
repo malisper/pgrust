@@ -819,6 +819,7 @@ pub struct CreateFunctionStatement {
     pub security_definer: bool,
     pub volatility: FunctionVolatility,
     pub parallel: FunctionParallel,
+    pub window: bool,
     pub language: String,
     pub body: String,
     pub link_symbol: Option<String>,
@@ -3622,6 +3623,7 @@ pub struct DropFunctionStatement {
     pub function_name: String,
     pub arg_list_specified: bool,
     pub arg_types: Vec<String>,
+    pub additional_functions: Vec<DropRoutineItem>,
     pub cascade: bool,
 }
 

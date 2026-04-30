@@ -51073,19 +51073,19 @@ fn pg_get_viewdef_renders_window_functions_and_function_rtes() {
 
     assert!(sql.contains("generate_series(1, 10) i(i)"), "{sql}");
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)"),
+        sql.contains("sum(i) OVER (ORDER BY i ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)"),
         "{sql}"
     );
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)"),
+        sql.contains("sum(i) OVER (ORDER BY i ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)"),
         "{sql}"
     );
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE TIES)"),
+        sql.contains("sum(i) OVER (ORDER BY i ROWS UNBOUNDED PRECEDING EXCLUDE TIES)"),
         "{sql}"
     );
     assert!(
-        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING)"),
+        sql.contains("sum(i) OVER (ORDER BY i ROWS UNBOUNDED PRECEDING)"),
         "{sql}"
     );
     assert!(!sql.contains("WindowFunc"), "{sql}");
@@ -51147,7 +51147,7 @@ fn create_or_replace_temp_window_view_keeps_rewrite_rule() {
     let Value::Text(sql) = &def[0][0] else {
         panic!("expected text view definition, got {def:?}");
     };
-    assert!(sql.contains("min(i.i) OVER (ORDER BY i.i RANGE BETWEEN"));
+    assert!(sql.contains("min(i) OVER (ORDER BY i RANGE BETWEEN"));
     assert!(sql.contains("generate_series(now(),"));
     assert!(!sql.contains("missing rewrite rule"));
 }

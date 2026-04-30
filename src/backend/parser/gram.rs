@@ -9860,6 +9860,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut security_definer = false;
     let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
     let mut parallel = crate::backend::parser::FunctionParallel::Unsafe;
+    let mut window = false;
     let mut config = Vec::new();
 
     while !rest.trim_start().is_empty() {
@@ -10024,6 +10025,11 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             rest = next_rest;
             continue;
         }
+        if keyword_at_start(rest, "window") {
+            window = true;
+            rest = consume_keyword(rest, "window");
+            continue;
+        }
         if keyword_at_start(rest, "set") {
             let (parsed, next_rest) = parse_create_function_set_config(rest)?;
             config.push(parsed);
@@ -10071,6 +10077,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         security_definer,
         volatility,
         parallel,
+        window,
         language: language.ok_or(ParseError::UnexpectedEof)?,
         body: body.ok_or(ParseError::UnexpectedEof)?,
         link_symbol,
@@ -10138,36 +10145,30 @@ fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, Par
             syntax_error_token_at(rest, 0).as_str(),
         ));
     }
-    let ((schema_name, function_name), rest_after_name) = parse_qualified_sql_name(rest)?;
-    let rest_after_name = rest_after_name.trim_start();
-    let arg_list_specified = rest_after_name.starts_with('(');
-    let (arg_sql, suffix) = if rest_after_name.starts_with('(') {
-        take_parenthesized_segment(rest_after_name)?
-    } else {
-        ("".into(), rest_after_name)
-    };
-    let suffix = suffix.trim();
-    let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
-        false
-    } else if keyword_at_start(suffix, "cascade") {
-        true
-    } else {
+    let (routine_list, cascade) = split_drop_routine_suffix(rest)?;
+    let items = split_top_level_items(routine_list, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .collect::<Vec<_>>();
+    let Some(first_item) = items.first() else {
         return Err(ParseError::UnexpectedToken {
-            expected: "CASCADE, RESTRICT, or end of statement",
-            actual: suffix.into(),
+            expected: "DROP FUNCTION name(args)",
+            actual: rest.into(),
         });
     };
-    let arg_types = split_comma_separated_sql(&arg_sql)?
-        .into_iter()
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
-        .collect();
+    let mut routines = items
+        .iter()
+        .map(|item| parse_drop_routine_item(item))
+        .collect::<Result<Vec<_>, _>>()?;
+    let first = routines.remove(0);
+    let arg_list_specified = drop_routine_item_has_arg_list(first_item)?;
     Ok(DropFunctionStatement {
         if_exists,
-        schema_name,
-        function_name,
+        schema_name: first.schema_name,
+        function_name: first.routine_name,
         arg_list_specified,
-        arg_types,
+        arg_types: first.arg_types,
+        additional_functions: routines,
         cascade,
     })
 }
@@ -10414,6 +10415,11 @@ fn parse_drop_routine_item(input: &str) -> Result<DropRoutineItem, ParseError> {
         routine_name,
         arg_types,
     })
+}
+
+fn drop_routine_item_has_arg_list(input: &str) -> Result<bool, ParseError> {
+    let (_, rest) = parse_qualified_sql_name(input.trim())?;
+    Ok(rest.trim_start().starts_with('('))
 }
 
 fn build_alter_procedure_statement(sql: &str) -> Result<AlterProcedureStatement, ParseError> {
@@ -10736,6 +10742,7 @@ fn build_drop_routine_like_statement(
         function_name,
         arg_list_specified,
         arg_types,
+        additional_functions: Vec::new(),
         cascade,
     })
 }

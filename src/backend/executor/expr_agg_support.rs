@@ -7,6 +7,7 @@ use super::exec_expr::{
 use super::expr_casts::cast_value;
 use super::expr_math::eval_abs_function;
 use super::expr_ops::{add_values, compare_order_values, div_values, sub_values};
+use super::expr_string::eval_quote_nullable_function;
 use super::sqlfunc::{
     execute_user_defined_sql_scalar_function_values,
     execute_user_defined_sql_scalar_function_values_with_arg_type_oids,
@@ -91,6 +92,57 @@ pub(crate) fn build_aggregate_runtime(
                 })?,
         )
     };
+    let mtransfn = if aggregate.aggmtransfn == 0 {
+        None
+    } else {
+        Some(
+            catalog
+                .proc_row_by_oid(aggregate.aggmtransfn)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "unknown aggregate moving transition function oid {}",
+                        aggregate.aggmtransfn
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42883",
+                })?,
+        )
+    };
+    let minvtransfn = if aggregate.aggminvtransfn == 0 {
+        None
+    } else {
+        Some(
+            catalog
+                .proc_row_by_oid(aggregate.aggminvtransfn)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "unknown aggregate moving inverse transition function oid {}",
+                        aggregate.aggminvtransfn
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42883",
+                })?,
+        )
+    };
+    let mfinalfn = if aggregate.aggmfinalfn == 0 {
+        None
+    } else {
+        Some(
+            catalog
+                .proc_row_by_oid(aggregate.aggmfinalfn)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "unknown aggregate moving final function oid {}",
+                        aggregate.aggmfinalfn
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42883",
+                })?,
+        )
+    };
     let declared_transtype = catalog
         .type_by_oid(aggregate.aggtranstype)
         .ok_or_else(|| ExecError::DetailedError {
@@ -109,14 +161,41 @@ pub(crate) fn build_aggregate_runtime(
         .filter_map(expr_sql_type_hint)
         .collect::<Vec<_>>();
     let transtype = concrete_custom_aggregate_transtype(declared_transtype, &input_arg_types);
+    let declared_mtranstype = if aggregate.aggmtranstype == 0 {
+        declared_transtype
+    } else {
+        catalog
+            .type_by_oid(aggregate.aggmtranstype)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!(
+                    "unknown aggregate moving transition type oid {}",
+                    aggregate.aggmtranstype
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42883",
+            })?
+            .sql_type
+    };
+    let mtranstype = concrete_custom_aggregate_transtype(declared_mtranstype, &input_arg_types);
     let mut transfn_arg_types = Vec::with_capacity(input_arg_types.len() + 1);
     transfn_arg_types.push(transtype);
     transfn_arg_types.extend(input_arg_types.iter().copied());
     let finalfn_arg_types = vec![transtype];
+    let mut mtransfn_arg_types = Vec::with_capacity(input_arg_types.len() + 1);
+    mtransfn_arg_types.push(mtranstype);
+    mtransfn_arg_types.extend(input_arg_types.iter().copied());
+    let minvtransfn_arg_types = mtransfn_arg_types.clone();
+    let mfinalfn_arg_types = vec![mtranstype];
     let init_value = aggregate
         .agginitval
         .as_ref()
         .map(|text| cast_value(Value::Text(text.clone().into()), transtype))
+        .transpose()?;
+    let minit_value = aggregate
+        .aggminitval
+        .as_ref()
+        .map(|text| cast_value(Value::Text(text.clone().into()), mtranstype))
         .transpose()?;
 
     Ok(AggregateRuntime::Custom(CustomAggregateRuntime {
@@ -124,10 +203,21 @@ pub(crate) fn build_aggregate_runtime(
         transfn_strict: transfn.proisstrict,
         finalfn_oid: finalfn.as_ref().map(|row| row.oid),
         finalfn_strict: finalfn.as_ref().is_some_and(|row| row.proisstrict),
+        mtransfn_oid: mtransfn.as_ref().map(|row| row.oid),
+        mtransfn_strict: mtransfn.as_ref().is_some_and(|row| row.proisstrict),
+        minvtransfn_oid: minvtransfn.as_ref().map(|row| row.oid),
+        minvtransfn_strict: minvtransfn.as_ref().is_some_and(|row| row.proisstrict),
+        mfinalfn_oid: mfinalfn.as_ref().map(|row| row.oid),
+        mfinalfn_strict: mfinalfn.as_ref().is_some_and(|row| row.proisstrict),
         transtype,
+        mtranstype,
         transfn_arg_types,
         finalfn_arg_types,
+        mtransfn_arg_types,
+        minvtransfn_arg_types,
+        mfinalfn_arg_types,
         init_value,
+        minit_value,
     }))
 }
 
@@ -317,6 +407,7 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
             _ => malformed_aggregate_support_call("boolor_statefunc"),
         },
+        BuiltinScalarFunction::QuoteNullable => eval_quote_nullable_function(arg_values),
         BuiltinScalarFunction::HashValue(kind) => {
             execute_builtin_hash_value_call(kind, false, arg_values)
         }

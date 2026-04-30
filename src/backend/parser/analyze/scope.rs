@@ -3532,7 +3532,7 @@ fn bind_function_from_item_with_ctes(
                 let alias_single_function_output = resolved_row_columns.is_none();
                 let output_columns = resolved_row_columns.unwrap_or_else(|| {
                     vec![QueryColumn {
-                        name: other.to_string(),
+                        name: resolved.proname.clone(),
                         sql_type: resolved.result_type,
                         wire_type_oid: None,
                     }]
@@ -3565,11 +3565,11 @@ fn bind_function_from_item_with_ctes(
                 let desc = RelationDesc {
                     columns: desc_columns,
                 };
-                let scope = scope_for_relation(Some(name), &desc);
+                let scope = scope_for_relation(Some(&resolved.proname), &desc);
                 Ok((
                     AnalyzedFrom::function(SetReturningCall::UserDefined {
                         proc_oid: resolved.proc_oid,
-                        function_name: name.to_string(),
+                        function_name: resolved.proname.clone(),
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
                         inlined_expr: None,
@@ -3888,7 +3888,7 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
     let alias_single_function_output = resolved_row_columns.is_none();
     let output_columns = resolved_row_columns.unwrap_or_else(|| {
         vec![QueryColumn {
-            name: name.to_string(),
+            name: resolved.proname.clone(),
             sql_type: resolved.result_type,
             wire_type_oid: None,
         }]
@@ -3917,11 +3917,11 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
     let desc = RelationDesc {
         columns: desc_columns,
     };
-    let scope = scope_for_relation(Some(name), &desc);
+    let scope = scope_for_relation(Some(&resolved.proname), &desc);
     Ok((
         AnalyzedFrom::function(SetReturningCall::UserDefined {
             proc_oid: resolved.proc_oid,
-            function_name: name.to_string(),
+            function_name: resolved.proname.clone(),
             func_variadic: resolved.func_variadic,
             args: bound_args,
             inlined_expr: None,
@@ -3970,14 +3970,14 @@ fn bind_single_row_function_from_item_with_ctes(
         let desc = RelationDesc {
             columns: desc_columns,
         };
-        let scope = scope_for_relation(Some(name), &desc);
+        let scope = scope_for_relation(Some(&resolved.proname), &desc);
         let alias_single_function_output = output_columns.len() == 1;
         let inlined_expr =
             try_inline_sql_scalar_function_scan_expr(resolved, &bound_args, catalog)?;
         return Ok((
             AnalyzedFrom::function(SetReturningCall::UserDefined {
                 proc_oid: resolved.proc_oid,
-                function_name: name.to_string(),
+                function_name: resolved.proname.clone(),
                 func_variadic: resolved.func_variadic,
                 args: bound_args,
                 inlined_expr: inlined_expr.map(Box::new),
@@ -3998,7 +3998,7 @@ fn bind_single_row_function_from_item_with_ctes(
         resolved,
     )?;
     let mut output_columns = vec![QueryColumn {
-        name: name.to_string(),
+        name: resolved.proname.clone(),
         sql_type: resolved.result_type,
         wire_type_oid: None,
     }];
@@ -4010,12 +4010,12 @@ fn bind_single_row_function_from_item_with_ctes(
     let desc = RelationDesc {
         columns: desc_columns,
     };
-    let scope = scope_for_relation(Some(name), &desc);
+    let scope = scope_for_relation(Some(&resolved.proname), &desc);
     let inlined_expr = try_inline_sql_scalar_function_scan_expr(resolved, &bound_args, catalog)?;
     Ok((
         AnalyzedFrom::function(SetReturningCall::UserDefined {
             proc_oid: resolved.proc_oid,
-            function_name: name.to_string(),
+            function_name: resolved.proname.clone(),
             func_variadic: resolved.func_variadic,
             args: bound_args,
             inlined_expr: inlined_expr.map(Box::new),
@@ -4029,7 +4029,7 @@ fn bind_single_row_function_from_item_with_ctes(
 
 #[allow(clippy::too_many_arguments)]
 fn try_inline_sql_set_function_from_item(
-    name: &str,
+    _name: &str,
     resolved: &ResolvedFunctionCall,
     bound_args: &[Expr],
     output_columns: Vec<QueryColumn>,
@@ -4054,7 +4054,7 @@ fn try_inline_sql_set_function_from_item(
     let has_target_function_call = stmt
         .targets
         .iter()
-        .any(|target| matches!(target.expr, SqlExpr::FuncCall { .. }));
+        .any(|target| matches!(&target.expr, SqlExpr::FuncCall { over: None, .. }));
     if has_target_function_call && !sql_function_target_only_body_can_inline(&stmt) {
         return Ok(None);
     }
@@ -4097,8 +4097,10 @@ fn try_inline_sql_set_function_from_item(
             output_columns,
         };
         let desc = plan.desc();
-        let scope =
-            scope_with_output_exprs(scope_for_relation(Some(name), &desc), &plan.output_exprs);
+        let scope = scope_with_output_exprs(
+            scope_for_relation(Some(&row.proname), &desc),
+            &plan.output_exprs,
+        );
         return Ok(Some((plan, scope, false)));
     }
     let preserve_body_names = query.set_operation.is_some() && !query.sort_clause.is_empty();
@@ -4127,7 +4129,10 @@ fn try_inline_sql_set_function_from_item(
         rte.eref.aliasname = "*SELECT*".into();
     }
     let desc = plan.desc();
-    let scope = scope_with_output_exprs(scope_for_relation(Some(name), &desc), &plan.output_exprs);
+    let scope = scope_with_output_exprs(
+        scope_for_relation(Some(&row.proname), &desc),
+        &plan.output_exprs,
+    );
     Ok(Some((plan, scope, false)))
 }
 
