@@ -2402,6 +2402,14 @@ pub(crate) fn bind_concat_operands(
     } else if matches!(right_type.kind, SqlTypeKind::TsQuery) && left_is_string_literal {
         left_type = SqlType::new(SqlTypeKind::TsQuery);
     }
+    if left_type.kind == SqlTypeKind::Jsonb && !left_type.is_array && right_is_string_literal {
+        right_type = SqlType::new(SqlTypeKind::Jsonb);
+    } else if right_type.kind == SqlTypeKind::Jsonb
+        && !right_type.is_array
+        && left_is_string_literal
+    {
+        left_type = SqlType::new(SqlTypeKind::Jsonb);
+    }
 
     if left_type.kind == SqlTypeKind::Jsonb
         && !left_type.is_array
@@ -2411,8 +2419,12 @@ pub(crate) fn bind_concat_operands(
         return Ok(Expr::binary_op(
             crate::include::nodes::primnodes::OpExprKind::Concat,
             SqlType::new(SqlTypeKind::Jsonb),
-            left_bound,
-            right_bound,
+            coerce_bound_expr(left_bound, raw_left_type, SqlType::new(SqlTypeKind::Jsonb)),
+            coerce_bound_expr(
+                right_bound,
+                raw_right_type,
+                SqlType::new(SqlTypeKind::Jsonb),
+            ),
         ));
     }
 

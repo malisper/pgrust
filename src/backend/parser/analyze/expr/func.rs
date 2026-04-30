@@ -1350,11 +1350,33 @@ fn bind_scalar_function_call_from_bound_args(
                         ctes,
                     );
                     let target = if idx == args.len().saturating_sub(1)
-                        && matches!(ty.kind, SqlTypeKind::Jsonb)
+                        && matches!(ty.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb)
                     {
-                        SqlType::new(SqlTypeKind::Jsonb)
+                        ty
                     } else {
                         SqlType::new(SqlTypeKind::Text)
+                    };
+                    coerce_bound_expr(bound_args[idx].clone(), ty, target)
+                })
+                .collect(),
+        )),
+        BuiltinScalarFunction::JsonToTsVector => Ok(build_func(
+            false,
+            args.iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    let target = match (args.len(), idx) {
+                        (2, 0) | (3, 1) => SqlType::new(SqlTypeKind::Json),
+                        (2, 1) | (3, 2) => SqlType::new(SqlTypeKind::Jsonb),
+                        _ => SqlType::new(SqlTypeKind::Text),
                     };
                     coerce_bound_expr(bound_args[idx].clone(), ty, target)
                 })
@@ -1405,30 +1427,44 @@ fn bind_scalar_function_call_from_bound_args(
                 .collect(),
         )),
         BuiltinScalarFunction::TsHeadline => {
+            let document_index = match bound_args.len() {
+                2 => 0,
+                3 if matches!(
+                    arg_types.get(1).map(|ty| ty.kind),
+                    Some(SqlTypeKind::TsQuery)
+                ) =>
+                {
+                    0
+                }
+                3 | 4 => 1,
+                _ => unreachable!("ts_headline arity validated earlier"),
+            };
+            let document_target = match arg_types.get(document_index).map(|ty| ty.kind) {
+                Some(SqlTypeKind::Json) => SqlType::new(SqlTypeKind::Json),
+                Some(SqlTypeKind::Jsonb) => SqlType::new(SqlTypeKind::Jsonb),
+                _ => SqlType::new(SqlTypeKind::Text),
+            };
             let targets = match bound_args.len() {
-                2 => vec![
-                    SqlType::new(SqlTypeKind::Text),
-                    SqlType::new(SqlTypeKind::TsQuery),
-                ],
+                2 => vec![document_target, SqlType::new(SqlTypeKind::TsQuery)],
                 3 if matches!(
                     arg_types.get(1).map(|ty| ty.kind),
                     Some(SqlTypeKind::TsQuery)
                 ) =>
                 {
                     vec![
-                        SqlType::new(SqlTypeKind::Text),
+                        document_target,
                         SqlType::new(SqlTypeKind::TsQuery),
                         SqlType::new(SqlTypeKind::Text),
                     ]
                 }
                 3 => vec![
                     SqlType::new(SqlTypeKind::Text),
-                    SqlType::new(SqlTypeKind::Text),
+                    document_target,
                     SqlType::new(SqlTypeKind::TsQuery),
                 ],
                 4 => vec![
                     SqlType::new(SqlTypeKind::Text),
-                    SqlType::new(SqlTypeKind::Text),
+                    document_target,
                     SqlType::new(SqlTypeKind::TsQuery),
                     SqlType::new(SqlTypeKind::Text),
                 ],
@@ -1746,6 +1782,35 @@ fn bind_scalar_function_call_from_bound_args(
             {
                 return Err(ParseError::UnexpectedToken {
                     expected: "text, bytea, bit, or tsvector argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            let arg = if matches!(arg_type.kind, SqlTypeKind::Char) && !arg_type.is_array {
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    SqlType::new(SqlTypeKind::Text),
+                )
+            } else {
+                bound_args[0].clone()
+            };
+            Ok(build_func(func_variadic, vec![arg]))
+        }
+        BuiltinScalarFunction::OctetLength => {
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if !is_bit_string_type(arg_type)
+                && arg_type.kind != SqlTypeKind::Bytea
+                && !should_use_text_concat(&args[0], arg_type, &args[0], arg_type)
+            {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "text, bytea, or bit argument",
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
@@ -3730,6 +3795,15 @@ fn bind_scalar_function_call_from_bound_args(
             let mut rewritten = rewritten_bound_args;
             rewritten[1] = coerce_bound_expr(rewritten[1].clone(), path_type, target_path_type);
             Ok(build_func(func_variadic, rewritten))
+        }
+        BuiltinScalarFunction::JsonbConcat => {
+            let jsonb_type = SqlType::new(SqlTypeKind::Jsonb);
+            let coerced = bound_args
+                .into_iter()
+                .zip(arg_types)
+                .map(|(arg, actual_type)| coerce_bound_expr(arg, actual_type, jsonb_type))
+                .collect();
+            Ok(build_func(func_variadic, coerced))
         }
         BuiltinScalarFunction::ArrayNdims | BuiltinScalarFunction::ArrayDims => {
             Ok(build_func(func_variadic, vec![bound_args[0].clone()]))

@@ -1908,6 +1908,23 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     agg_list,
                     n_keys,
                 )
+            } else if let Some(kind) = resolve_json_table_function(name) {
+                reject_function_null_treatment(name, *null_treatment)?;
+                bind_grouped_json_table_srf(
+                    name,
+                    args.args(),
+                    *func_variadic,
+                    kind,
+                    &clause,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
             } else {
                 reject_function_null_treatment(name, *null_treatment)?;
                 bind_grouped_func_call(
@@ -3681,6 +3698,187 @@ pub(super) fn bind_agg_output_expr_in_clause(
             sqlstate: "42P02",
         }),
     }
+}
+
+fn grouped_json_table_output_columns(kind: JsonTableFunction) -> Vec<QueryColumn> {
+    match kind {
+        JsonTableFunction::ObjectKeys => vec![QueryColumn::text("json_object_keys")],
+        JsonTableFunction::Each => vec![
+            QueryColumn::text("key"),
+            QueryColumn {
+                name: "value".into(),
+                sql_type: SqlType::new(SqlTypeKind::Json),
+                wire_type_oid: None,
+            },
+        ],
+        JsonTableFunction::EachText => vec![QueryColumn::text("key"), QueryColumn::text("value")],
+        JsonTableFunction::ArrayElements => vec![QueryColumn {
+            name: "value".into(),
+            sql_type: SqlType::new(SqlTypeKind::Json),
+            wire_type_oid: None,
+        }],
+        JsonTableFunction::ArrayElementsText => vec![QueryColumn::text("value")],
+        JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz => {
+            vec![QueryColumn {
+                name: "jsonb_path_query".into(),
+                sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                wire_type_oid: None,
+            }]
+        }
+        JsonTableFunction::JsonbObjectKeys => vec![QueryColumn::text("jsonb_object_keys")],
+        JsonTableFunction::JsonbEach => vec![
+            QueryColumn::text("key"),
+            QueryColumn {
+                name: "value".into(),
+                sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                wire_type_oid: None,
+            },
+        ],
+        JsonTableFunction::JsonbEachText => {
+            vec![QueryColumn::text("key"), QueryColumn::text("value")]
+        }
+        JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
+            name: "value".into(),
+            sql_type: SqlType::new(SqlTypeKind::Jsonb),
+            wire_type_oid: None,
+        }],
+        JsonTableFunction::JsonbArrayElementsText => vec![QueryColumn::text("value")],
+    }
+}
+
+fn bind_grouped_json_table_srf_arg(
+    kind: JsonTableFunction,
+    index: usize,
+    arg: &SqlExpr,
+    clause: &UngroupedColumnClause,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[CollectedAggregate],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let target_type = match (kind, index) {
+        (JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz, 0 | 2)
+        | (JsonTableFunction::JsonbObjectKeys, 0)
+        | (JsonTableFunction::JsonbEach, 0)
+        | (JsonTableFunction::JsonbEachText, 0)
+        | (JsonTableFunction::JsonbArrayElements, 0)
+        | (JsonTableFunction::JsonbArrayElementsText, 0) => Some(SqlType::new(SqlTypeKind::Jsonb)),
+        (JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz, 1) => {
+            Some(SqlType::new(SqlTypeKind::JsonPath))
+        }
+        (JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz, 3) => {
+            Some(SqlType::new(SqlTypeKind::Bool))
+        }
+        _ => None,
+    };
+    let raw_arg_type =
+        grouped_infer_sql_expr_type(arg, input_scope, catalog, outer_scopes, grouped_outer);
+    let resolved_arg_type = target_type
+        .map(|target| coerce_unknown_string_literal_type(arg, raw_arg_type, target))
+        .unwrap_or(raw_arg_type);
+    let bound = bind_agg_output_expr_in_clause(
+        arg,
+        clause.clone(),
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    Ok(match target_type {
+        Some(target) if resolved_arg_type == target && raw_arg_type != target => {
+            coerce_bound_expr(bound, raw_arg_type, target)
+        }
+        None => bound,
+        Some(_) => bound,
+    })
+}
+
+fn bind_grouped_json_table_srf(
+    name: &str,
+    args: &[SqlFunctionArg],
+    func_variadic: bool,
+    kind: JsonTableFunction,
+    clause: &UngroupedColumnClause,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[CollectedAggregate],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let lowered_args = lower_named_table_function_args(name, args)?;
+    let actual_types = lowered_args
+        .iter()
+        .map(|arg| {
+            grouped_infer_sql_expr_function_arg_type(
+                arg,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )
+        })
+        .collect::<Vec<_>>();
+    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).ok();
+    let bound_args = lowered_args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            bind_grouped_json_table_srf_arg(
+                kind,
+                index,
+                arg,
+                clause,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_columns = grouped_json_table_output_columns(kind);
+    let (sql_type, column_index) = if output_columns.len() == 1 {
+        (output_columns[0].sql_type, 1)
+    } else {
+        let descriptor = assign_anonymous_record_descriptor(
+            output_columns
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        );
+        (descriptor.sql_type(), 0)
+    };
+    let call = SetReturningCall::JsonTableFunction {
+        func_oid: resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0),
+        func_variadic: resolved
+            .as_ref()
+            .map(|call| call.func_variadic)
+            .unwrap_or(func_variadic),
+        kind,
+        args: bound_args,
+        output_columns,
+        with_ordinality: false,
+    };
+    Ok(Expr::set_returning(
+        name.to_ascii_lowercase(),
+        call,
+        sql_type,
+        column_index,
+    ))
 }
 
 fn bind_grouped_generate_series_srf(

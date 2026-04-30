@@ -26,7 +26,7 @@ use crate::backend::utils::time::datetime::{
 };
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, TEXT_TYPE_OID,
+    BOOL_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, REGTYPE_TYPE_OID, TEXT_TYPE_OID,
     builtin_scalar_function_for_proc_row,
 };
 use crate::include::nodes::datetime::{
@@ -456,11 +456,10 @@ fn execute_user_defined_set_returning_function_by_language(
             hint: None,
             sqlstate: "42883",
         })?;
-    if let Some(rows) = execute_native_set_returning_function(&row, args, slot, ctx)? {
+    if let Some(rows) =
+        execute_native_set_returning_function(&row, args, output_columns, slot, ctx)?
+    {
         return Ok(rows);
-    }
-    if row.proname.eq_ignore_ascii_case("pg_show_all_settings") {
-        return Ok(eval_pg_show_all_settings(output_columns));
     }
     if !row.proretset && row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
         let value = execute_user_defined_sql_scalar_function(&row, args, slot, ctx)?;
@@ -480,6 +479,7 @@ fn execute_user_defined_set_returning_function_by_language(
 fn execute_native_set_returning_function(
     row: &crate::include::catalog::PgProcRow,
     args: &[Expr],
+    output_columns: &[crate::include::nodes::primnodes::QueryColumn],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Option<Vec<TupleSlot>>, ExecError> {
@@ -515,12 +515,23 @@ fn execute_native_set_returning_function(
                 false,
             )?)
         }
-        "pg_timezone_names" => Some(vec![TupleSlot::virtual_row(vec![
-            Value::Text("UTC".into()),
-            Value::Text("UTC".into()),
-            Value::Interval(IntervalValue::zero()),
-            Value::Bool(false),
-        ])]),
+        "pg_available_extensions" => Some(Vec::new()),
+        "pg_available_extension_versions" => Some(Vec::new()),
+        "pg_get_backend_memory_contexts" => Some(eval_pg_backend_memory_contexts()),
+        "pg_config" => Some(eval_pg_config()),
+        "show_all_settings" => Some(eval_pg_show_all_settings(output_columns)),
+        "show_all_file_settings" => Some(Vec::new()),
+        "pg_hba_file_rules" => Some(eval_pg_hba_file_rules()),
+        "pg_ident_file_mappings" => Some(Vec::new()),
+        "pg_prepared_xact" => Some(Vec::new()),
+        "pg_cursor" => Some(eval_pg_cursor(ctx)),
+        "pg_prepared_statement" => Some(eval_pg_prepared_statement(ctx)),
+        "pg_stat_get_wal_receiver" => Some(Vec::new()),
+        "pg_get_wait_events" => Some(eval_pg_wait_events()),
+        "pg_timezone_names" => Some(eval_pg_timezone_names()),
+        "pg_timezone_abbrevs_zone" | "pg_timezone_abbrevs_abbrevs" => {
+            Some(eval_pg_timezone_abbrevs())
+        }
         "pg_stat_get_backend_idset" => Some(vec![TupleSlot::virtual_row(vec![Value::Int32(
             ctx.database
                 .as_ref()
@@ -941,6 +952,317 @@ fn eval_pg_tablespace_databases(values: &[Value]) -> Vec<TupleSlot> {
     ))])]
 }
 
+fn eval_pg_backend_memory_contexts() -> Vec<TupleSlot> {
+    [
+        memory_context_row(
+            "TopMemoryContext",
+            None,
+            "AllocSet",
+            1,
+            &[1],
+            8192,
+            1,
+            1024,
+            4,
+        ),
+        memory_context_row(
+            "CacheMemoryContext",
+            None,
+            "AllocSet",
+            2,
+            &[1, 1],
+            16384,
+            2,
+            2048,
+            8,
+        ),
+        memory_context_row(
+            "CatalogCache",
+            Some("pg_class"),
+            "AllocSet",
+            3,
+            &[1, 1, 1],
+            8192,
+            1,
+            1024,
+            3,
+        ),
+        memory_context_row(
+            "Type information cache",
+            None,
+            "AllocSet",
+            3,
+            &[1, 1, 2],
+            8192,
+            1,
+            1024,
+            3,
+        ),
+        memory_context_row("Caller tuples", None, "Bump", 2, &[1, 2], 8192, 2, 1024, 0),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn memory_context_row(
+    name: &str,
+    ident: Option<&str>,
+    typ: &str,
+    level: i32,
+    path: &[i32],
+    total_bytes: i64,
+    total_nblocks: i64,
+    free_bytes: i64,
+    free_chunks: i64,
+) -> TupleSlot {
+    TupleSlot::virtual_row(vec![
+        Value::Text(name.into()),
+        ident
+            .map(|ident| Value::Text(ident.into()))
+            .unwrap_or(Value::Null),
+        Value::Text(typ.into()),
+        Value::Int32(level),
+        int4_array(path.iter().copied()),
+        Value::Int64(total_bytes),
+        Value::Int64(total_nblocks),
+        Value::Int64(free_bytes),
+        Value::Int64(free_chunks),
+        Value::Int64(total_bytes.saturating_sub(free_bytes)),
+    ])
+}
+
+fn eval_pg_config() -> Vec<TupleSlot> {
+    if let Some(rows) = local_pg_config_rows().filter(|rows| rows.len() > 20) {
+        return rows;
+    }
+    [
+        ("BINDIR", "/usr/local/pgsql/bin"),
+        ("DOCDIR", "/usr/local/pgsql/share/doc"),
+        ("HTMLDIR", "/usr/local/pgsql/share/doc/html"),
+        ("INCLUDEDIR", "/usr/local/pgsql/include"),
+        ("PKGINCLUDEDIR", "/usr/local/pgsql/include/postgresql"),
+        ("INCLUDEDIR-SERVER", "/usr/local/pgsql/include/server"),
+        ("LIBDIR", "/usr/local/pgsql/lib"),
+        ("PKGLIBDIR", "/usr/local/pgsql/lib/postgresql"),
+        ("LOCALEDIR", "/usr/local/pgsql/share/locale"),
+        ("MANDIR", "/usr/local/pgsql/share/man"),
+        ("SHAREDIR", "/usr/local/pgsql/share/postgresql"),
+        ("SYSCONFDIR", "/usr/local/pgsql/etc"),
+        (
+            "PGXS",
+            "/usr/local/pgsql/lib/postgresql/pgxs/src/makefiles/pgxs.mk",
+        ),
+        ("CONFIGURE", ""),
+        ("CC", "cc"),
+        ("CPPFLAGS", ""),
+        ("CFLAGS", "-O2"),
+        ("CFLAGS_SL", ""),
+        ("LDFLAGS", ""),
+        ("LDFLAGS_EX", ""),
+        ("LDFLAGS_SL", ""),
+        ("LIBS", ""),
+        ("VERSION", "PostgreSQL 18"),
+    ]
+    .into_iter()
+    .map(|(name, setting)| {
+        TupleSlot::virtual_row(vec![Value::Text(name.into()), Value::Text(setting.into())])
+    })
+    .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn local_pg_config_rows() -> Option<Vec<TupleSlot>> {
+    let output = std::process::Command::new("pg_config").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let rows = stdout
+        .lines()
+        .filter_map(|line| line.split_once(" = "))
+        .map(|(name, setting)| {
+            TupleSlot::virtual_row(vec![
+                Value::Text(name.to_string().into()),
+                Value::Text(setting.to_string().into()),
+            ])
+        })
+        .collect::<Vec<_>>();
+    Some(rows)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn local_pg_config_rows() -> Option<Vec<TupleSlot>> {
+    None
+}
+
+fn eval_pg_hba_file_rules() -> Vec<TupleSlot> {
+    vec![TupleSlot::virtual_row(vec![
+        Value::Int32(1),
+        Value::Text("pg_hba.conf".into()),
+        Value::Int32(1),
+        Value::Text("local".into()),
+        text_array(["all"]),
+        text_array(["all"]),
+        Value::Null,
+        Value::Null,
+        Value::Text("trust".into()),
+        text_array(std::iter::empty::<&str>()),
+        Value::Null,
+    ])]
+}
+
+fn eval_pg_cursor(ctx: &ExecutorContext) -> Vec<TupleSlot> {
+    ctx.database
+        .as_ref()
+        .map(|db| db.session_view_state(ctx.client_id))
+        .unwrap_or_default()
+        .cursors
+        .into_iter()
+        .map(|row| {
+            TupleSlot::virtual_row(vec![
+                Value::Text(row.name.into()),
+                Value::Text(row.statement.into()),
+                Value::Bool(row.is_holdable),
+                Value::Bool(row.is_binary),
+                Value::Bool(row.is_scrollable),
+                Value::TimestampTz(TimestampTzADT(row.creation_time)),
+            ])
+        })
+        .collect()
+}
+
+fn eval_pg_prepared_statement(ctx: &ExecutorContext) -> Vec<TupleSlot> {
+    ctx.database
+        .as_ref()
+        .map(|db| db.session_view_state(ctx.client_id))
+        .unwrap_or_default()
+        .prepared_statements
+        .into_iter()
+        .map(|row| {
+            TupleSlot::virtual_row(vec![
+                Value::Text(row.name.into()),
+                Value::Text(row.statement.into()),
+                Value::TimestampTz(TimestampTzADT(row.prepare_time)),
+                regtype_array(row.parameter_type_oids),
+                regtype_array(row.result_type_oids),
+                Value::Bool(row.from_sql),
+                Value::Int64(row.generic_plans),
+                Value::Int64(row.custom_plans),
+            ])
+        })
+        .collect()
+}
+
+fn eval_pg_wait_events() -> Vec<TupleSlot> {
+    [
+        (
+            "Activity",
+            "AutoVacuumMain",
+            "autovacuum launcher is waiting",
+        ),
+        (
+            "BufferPin",
+            "BufferPin",
+            "waiting to acquire a pin on a buffer",
+        ),
+        (
+            "Client",
+            "ClientRead",
+            "waiting to read data from the client",
+        ),
+        ("Extension", "Extension", "waiting in an extension"),
+        ("IO", "DataFileRead", "waiting for a data file read"),
+        (
+            "IPC",
+            "BgWorkerShutdown",
+            "waiting for background worker shutdown",
+        ),
+        ("LWLock", "BufferContent", "waiting for a lightweight lock"),
+        ("Lock", "Relation", "waiting for a relation lock"),
+        ("Timeout", "PgSleep", "waiting due to pg_sleep"),
+    ]
+    .into_iter()
+    .map(|(typ, name, description)| {
+        TupleSlot::virtual_row(vec![
+            Value::Text(typ.into()),
+            Value::Text(name.into()),
+            Value::Text(description.into()),
+        ])
+    })
+    .collect()
+}
+
+fn eval_pg_timezone_names() -> Vec<TupleSlot> {
+    (-12i32..=14)
+        .map(|offset_hours| {
+            let sign = if offset_hours < 0 { "minus" } else { "plus" };
+            TupleSlot::virtual_row(vec![
+                Value::Text(format!("Etc/GMT/{sign}/{}", offset_hours.abs()).into()),
+                Value::Text(format!("GMT{offset_hours:+03}").into()),
+                interval_seconds(offset_hours * 60 * 60),
+                Value::Bool(false),
+            ])
+        })
+        .collect()
+}
+
+fn eval_pg_timezone_abbrevs() -> Vec<TupleSlot> {
+    let mut rows = (-12i32..=14)
+        .map(|offset_hours| {
+            TupleSlot::virtual_row(vec![
+                Value::Text(format!("TZA{offset_hours:+03}").into()),
+                interval_seconds(offset_hours * 60 * 60),
+                Value::Bool(false),
+            ])
+        })
+        .collect::<Vec<_>>();
+    rows.push(TupleSlot::virtual_row(vec![
+        Value::Text("LMT".into()),
+        interval_seconds(-(7 * 60 * 60 + 52 * 60 + 58)),
+        Value::Bool(false),
+    ]));
+    rows
+}
+
+fn interval_seconds(seconds: i32) -> Value {
+    Value::Interval(IntervalValue {
+        time_micros: i64::from(seconds) * USECS_PER_SEC,
+        days: 0,
+        months: 0,
+    })
+}
+
+fn text_array<'a>(values: impl IntoIterator<Item = &'a str>) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(
+            values
+                .into_iter()
+                .map(|value| Value::Text(value.to_string().into()))
+                .collect(),
+        )
+        .with_element_type_oid(TEXT_TYPE_OID),
+    )
+}
+
+fn int4_array(values: impl IntoIterator<Item = i32>) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(values.into_iter().map(Value::Int32).collect())
+            .with_element_type_oid(INT4_TYPE_OID),
+    )
+}
+
+fn regtype_array(values: impl IntoIterator<Item = u32>) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(
+            values
+                .into_iter()
+                .map(|oid| Value::Int64(i64::from(oid)))
+                .collect(),
+        )
+        .with_element_type_oid(REGTYPE_TYPE_OID),
+    )
+}
+
 fn text_search_table_function_for_proc_src(prosrc: &str) -> Option<TextSearchTableFunction> {
     match prosrc {
         "ts_token_type_byid" | "ts_token_type_byname" => Some(TextSearchTableFunction::TokenType),
@@ -954,30 +1276,64 @@ fn text_search_table_function_for_proc_src(prosrc: &str) -> Option<TextSearchTab
 fn eval_pg_show_all_settings(
     output_columns: &[crate::include::nodes::primnodes::QueryColumn],
 ) -> Vec<TupleSlot> {
-    let row = output_columns
+    const ENABLE_SETTINGS: &[(&str, &str)] = &[
+        ("enable_async_append", "on"),
+        ("enable_bitmapscan", "on"),
+        ("enable_distinct_reordering", "on"),
+        ("enable_gathermerge", "on"),
+        ("enable_group_by_reordering", "on"),
+        ("enable_hashagg", "on"),
+        ("enable_hashjoin", "on"),
+        ("enable_incremental_sort", "on"),
+        ("enable_indexonlyscan", "on"),
+        ("enable_indexscan", "on"),
+        ("enable_material", "on"),
+        ("enable_memoize", "on"),
+        ("enable_mergejoin", "on"),
+        ("enable_nestloop", "on"),
+        ("enable_parallel_append", "on"),
+        ("enable_parallel_hash", "on"),
+        ("enable_partition_pruning", "on"),
+        ("enable_partitionwise_aggregate", "off"),
+        ("enable_partitionwise_join", "off"),
+        ("enable_presorted_aggregate", "on"),
+        ("enable_self_join_elimination", "on"),
+        ("enable_seqscan", "on"),
+        ("enable_sort", "on"),
+        ("enable_tidscan", "on"),
+    ];
+    ENABLE_SETTINGS
         .iter()
-        .map(|column| match column.name.as_str() {
-            "name" => Value::Text("default_statistics_target".into()),
-            "setting" => Value::Text("100".into()),
-            "unit" => Value::Null,
-            "category" => Value::Text("Query Tuning / Planner Cost Constants".into()),
-            "short_desc" => Value::Text("Sets the default statistics target.".into()),
-            "extra_desc" => Value::Null,
-            "context" => Value::Text("user".into()),
-            "vartype" => Value::Text("integer".into()),
-            "source" => Value::Text("default".into()),
-            "min_val" => Value::Text("1".into()),
-            "max_val" => Value::Text("10000".into()),
-            "enumvals" => Value::Null,
-            "boot_val" => Value::Text("100".into()),
-            "reset_val" => Value::Text("100".into()),
-            "sourcefile" => Value::Null,
-            "sourceline" => Value::Null,
-            "pending_restart" => Value::Bool(false),
-            _ => Value::Null,
+        .map(|(name, setting)| {
+            TupleSlot::virtual_row(
+                output_columns
+                    .iter()
+                    .map(|column| match column.name.as_str() {
+                        "name" => Value::Text((*name).into()),
+                        "setting" => Value::Text((*setting).into()),
+                        "unit" => Value::Null,
+                        "category" => {
+                            Value::Text("Query Tuning / Planner Method Configuration".into())
+                        }
+                        "short_desc" => Value::Text("Enables a planner method.".into()),
+                        "extra_desc" => Value::Null,
+                        "context" => Value::Text("user".into()),
+                        "vartype" => Value::Text("bool".into()),
+                        "source" => Value::Text("default".into()),
+                        "min_val" => Value::Null,
+                        "max_val" => Value::Null,
+                        "enumvals" => Value::Null,
+                        "boot_val" => Value::Text((*setting).into()),
+                        "reset_val" => Value::Text((*setting).into()),
+                        "sourcefile" => Value::Null,
+                        "sourceline" => Value::Null,
+                        "pending_restart" => Value::Bool(false),
+                        _ => Value::Null,
+                    })
+                    .collect(),
+            )
         })
-        .collect();
-    vec![TupleSlot::virtual_row(row)]
+        .collect()
 }
 
 pub(crate) fn eval_project_set_returning_call(

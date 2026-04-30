@@ -41,11 +41,11 @@ use crate::backend::parser::{
     OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
     PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
     RuleEvent, SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement,
-    UpdateStatement, ValuesStatement, bind_delete, bind_delete_with_outer_scopes_and_ctes,
-    bind_insert, bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes, bind_update,
-    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_rows, cte_body_references_table,
-    delete_statement_references_table, insert_statement_references_table,
-    merge_statement_references_table, pg_plan_query_with_config,
+    TransactionOptions, UpdateStatement, ValuesStatement, bind_delete,
+    bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
+    bind_insert_with_outer_scopes_and_ctes, bind_update, bind_update_with_outer_scopes_and_ctes,
+    bound_cte_from_query_rows, cte_body_references_table, delete_statement_references_table,
+    insert_statement_references_table, merge_statement_references_table, pg_plan_query_with_config,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
     plan_merge, plan_merge_with_outer_ctes, select_statement_references_table,
     update_statement_references_table,
@@ -90,7 +90,8 @@ use crate::pgrust::database::commands::privilege::{
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::database::{
     AsyncListenAction, AsyncListenOp, Database, DynamicTypeSnapshot, PendingNotification,
-    SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
+    SequenceMutationEffect, SessionCursorViewRow, SessionPreparedStatementViewRow,
+    SessionStatsState, SessionViewState, StatsFetchConsistency, TempMutationEffect,
     TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
     alter_table_validate_constraint_lock_requests, default_sequence_name_base,
     delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,
@@ -1477,6 +1478,8 @@ impl Drop for StatementLockScopeGuard {
 
 struct ActiveTransaction {
     xid: Option<TransactionId>,
+    current_write_xid: Option<TransactionId>,
+    subxids: Vec<TransactionId>,
     started_at_usecs: i64,
     advisory_scope_id: u64,
     failed: bool,
@@ -1486,6 +1489,7 @@ struct ActiveTransaction {
     next_command_id: u32,
     isolation_level: crate::backend::parser::TransactionIsolationLevel,
     read_only: bool,
+    deferrable: bool,
     snapshot_taken: bool,
     transaction_snapshot: Option<Snapshot>,
     catalog_effects: Vec<CatalogMutationEffect>,
@@ -1513,6 +1517,13 @@ struct GucState {
 #[derive(Clone)]
 struct SavepointState {
     name: String,
+    parent_write_xid: Option<TransactionId>,
+    subxid_len: usize,
+    isolation_level: crate::backend::parser::TransactionIsolationLevel,
+    read_only: bool,
+    deferrable: bool,
+    snapshot_taken: bool,
+    transaction_snapshot: Option<Snapshot>,
     dynamic_type_snapshot: DynamicTypeSnapshot,
     catalog_snapshot: crate::backend::catalog::store::CatalogStoreSnapshot,
     catalog_effect_len: usize,
@@ -1527,11 +1538,29 @@ struct SavepointState {
     stats_state: crate::backend::utils::activity::SessionStatsState,
 }
 
+impl ActiveTransaction {
+    fn chained_options(&self) -> TransactionOptions {
+        TransactionOptions {
+            isolation_level: Some(self.isolation_level),
+            read_only: Some(self.read_only),
+            deferrable: Some(self.deferrable),
+        }
+    }
+
+    fn live_xids(&self) -> Vec<TransactionId> {
+        self.xid
+            .into_iter()
+            .chain(self.subxids.iter().copied())
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PreparedSelectStatement {
     query: PreparedStatementQuery,
     query_sql: String,
     parameter_types: Vec<RawTypeName>,
+    prepare_time: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1689,6 +1718,7 @@ pub struct Session {
     portals: PortalManager,
     plpgsql_function_cache: Arc<RwLock<PlpgsqlFunctionCache>>,
     prepared_selects: HashMap<String, PreparedSelectStatement>,
+    protocol_prepared_statements: Vec<SessionPreparedStatementViewRow>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2246,6 +2276,8 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "default_transaction_read_only" => Some("off"),
         "transaction_isolation" => Some("read committed"),
         "transaction_read_only" => Some("off"),
+        "default_transaction_deferrable" => Some("off"),
+        "transaction_deferrable" => Some("off"),
         "vacuum_cost_delay" => Some("0"),
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
@@ -2514,6 +2546,7 @@ impl Session {
             portals: PortalManager::default(),
             plpgsql_function_cache: Arc::new(RwLock::new(PlpgsqlFunctionCache::default())),
             prepared_selects: HashMap::new(),
+            protocol_prepared_statements: Vec::new(),
         }
     }
 
@@ -2534,6 +2567,59 @@ impl Session {
         if let Some(ref mut txn) = self.active_txn {
             txn.failed = true;
         }
+    }
+
+    pub fn begin_implicit_query_transaction(&mut self, db: &Database) {
+        if self.active_txn.is_none() {
+            self.active_txn =
+                Some(self.active_transaction_without_xid_with_options(
+                    db,
+                    &TransactionOptions::default(),
+                ));
+            self.stats_state.write().begin_top_level_xact();
+        }
+    }
+
+    pub fn commit_implicit_query_transaction(
+        &mut self,
+        db: &Database,
+    ) -> Result<StatementResult, ExecError> {
+        let Some(txn) = self.active_txn.take() else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        if txn.failed {
+            let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
+            self.abort_taken_transaction(db, &txn);
+            for rel in held_locks {
+                db.table_locks.unlock_table(rel, self.client_id);
+            }
+            self.restore_guc_state(db, txn.guc_start_state);
+            self.portals.drop_transaction_portals(false);
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        let result = self
+            .validate_constraints_for_active_txn(db, false)
+            .map(|_| StatementResult::AffectedRows(0));
+        let result = self.finalize_taken_transaction(db, txn, result);
+        if result.is_ok() {
+            self.portals.drop_transaction_portals(true);
+        } else {
+            self.portals.drop_transaction_portals(false);
+        }
+        result
+    }
+
+    pub fn rollback_implicit_query_transaction(&mut self, db: &Database) {
+        let Some(txn) = self.active_txn.take() else {
+            return;
+        };
+        let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
+        self.abort_taken_transaction(db, &txn);
+        for rel in held_locks {
+            db.table_locks.unlock_table(rel, self.client_id);
+        }
+        self.restore_guc_state(db, txn.guc_start_state);
+        self.portals.drop_transaction_portals(false);
     }
 
     pub fn ready_status(&self) -> u8 {
@@ -2945,7 +3031,16 @@ impl Session {
     ) -> LazyCatalogLookup {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
-        db.lazy_catalog_lookup(self.client_id, Some((xid, cid)), search_path.as_deref())
+        let catalog_xid = self
+            .active_txn
+            .as_ref()
+            .and_then(|txn| (txn.subxids.contains(&xid)).then(|| txn.xid).flatten())
+            .unwrap_or(xid);
+        db.lazy_catalog_lookup(
+            self.client_id,
+            Some((catalog_xid, cid)),
+            search_path.as_deref(),
+        )
     }
 
     fn execute_call_stmt(
@@ -3083,10 +3178,8 @@ impl Session {
         // PL executor can stream DML more efficiently.
         let _statement_timeout_guard = ctx.interrupts.statement_interrupt_guard(None);
         let result = execute_do_with_context(do_stmt, &catalog, &mut ctx);
-        if let Some(xid) = ctx.transaction_xid()
-            && let Some(txn) = self.active_txn.as_mut()
-        {
-            txn.xid = Some(xid);
+        if let Some(xid) = ctx.transaction_xid() {
+            self.note_context_xid(xid);
         }
         self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
         result
@@ -3433,6 +3526,8 @@ impl Session {
         let guc_state = self.capture_guc_state();
         ActiveTransaction {
             xid: None,
+            current_write_xid: None,
+            subxids: Vec::new(),
             started_at_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             advisory_scope_id: db.allocate_statement_lock_scope_id(),
@@ -3444,13 +3539,12 @@ impl Session {
             isolation_level: options
                 .isolation_level
                 .unwrap_or_else(|| self.default_transaction_isolation_level()),
-            read_only: options.read_only.unwrap_or_else(|| {
-                self.gucs
-                    .get("default_transaction_read_only")
-                    .is_some_and(|value| {
-                        value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true")
-                    })
-            }),
+            read_only: options
+                .read_only
+                .unwrap_or_else(|| self.default_transaction_read_only()),
+            deferrable: options
+                .deferrable
+                .unwrap_or_else(|| self.default_transaction_deferrable()),
             snapshot_taken: false,
             transaction_snapshot: None,
             catalog_effects: Vec::new(),
@@ -3497,10 +3591,22 @@ impl Session {
     }
 
     fn ensure_active_xid(&mut self, db: &Database) -> TransactionId {
+        if self
+            .active_txn
+            .as_ref()
+            .is_some_and(|txn| !txn.savepoints.is_empty())
+        {
+            self.ensure_active_subxid(db)
+        } else {
+            self.ensure_top_xid(db)
+        }
+    }
+
+    fn ensure_top_xid(&mut self, db: &Database) -> TransactionId {
         let txn = self
             .active_txn
             .as_mut()
-            .expect("ensure_active_xid requires an active transaction");
+            .expect("ensure_top_xid requires an active transaction");
         if let Some(xid) = txn.xid {
             return xid;
         }
@@ -3508,6 +3614,40 @@ impl Session {
         txn.xid = Some(xid);
         db.txn_waiter.register_holder(xid, self.client_id);
         xid
+    }
+
+    fn ensure_active_subxid(&mut self, db: &Database) -> TransactionId {
+        self.ensure_top_xid(db);
+        let txn = self
+            .active_txn
+            .as_mut()
+            .expect("ensure_active_subxid requires an active transaction");
+        if let Some(xid) = txn.current_write_xid {
+            return xid;
+        }
+        let xid = db.txns.write().begin();
+        txn.current_write_xid = Some(xid);
+        txn.subxids.push(xid);
+        db.txn_waiter.register_holder(xid, self.client_id);
+        xid
+    }
+
+    fn note_context_xid(&mut self, xid: TransactionId) {
+        if xid == INVALID_TRANSACTION_ID {
+            return;
+        }
+        let Some(txn) = self.active_txn.as_mut() else {
+            return;
+        };
+        if txn.xid == Some(xid) || txn.subxids.contains(&xid) {
+            return;
+        }
+        if txn.xid.is_none() {
+            txn.xid = Some(xid);
+        } else {
+            txn.current_write_xid = Some(xid);
+            txn.subxids.push(xid);
+        }
     }
 
     fn default_transaction_isolation_level(
@@ -3519,6 +3659,34 @@ impl Session {
             .unwrap_or_default()
     }
 
+    fn default_transaction_read_only(&self) -> bool {
+        self.gucs
+            .get("default_transaction_read_only")
+            .and_then(|value| parse_bool_guc(value))
+            .unwrap_or(false)
+    }
+
+    fn default_transaction_deferrable(&self) -> bool {
+        self.gucs
+            .get("default_transaction_deferrable")
+            .and_then(|value| parse_bool_guc(value))
+            .unwrap_or(false)
+    }
+
+    fn current_transaction_read_only(&self) -> bool {
+        self.active_txn
+            .as_ref()
+            .map(|txn| txn.read_only)
+            .unwrap_or_else(|| self.default_transaction_read_only())
+    }
+
+    fn current_transaction_deferrable(&self) -> bool {
+        self.active_txn
+            .as_ref()
+            .map(|txn| txn.deferrable)
+            .unwrap_or_else(|| self.default_transaction_deferrable())
+    }
+
     fn current_transaction_isolation_level(
         &self,
     ) -> crate::backend::parser::TransactionIsolationLevel {
@@ -3526,19 +3694,6 @@ impl Session {
             .as_ref()
             .map(|txn| txn.isolation_level)
             .unwrap_or_else(|| self.default_transaction_isolation_level())
-    }
-
-    fn current_transaction_read_only(&self) -> bool {
-        self.active_txn.as_ref().map_or_else(
-            || {
-                self.gucs
-                    .get("default_transaction_read_only")
-                    .is_some_and(|value| {
-                        value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true")
-                    })
-            },
-            |txn| txn.read_only,
-        )
     }
 
     fn effective_gucs_for_execution(&self) -> HashMap<String, String> {
@@ -3549,15 +3704,18 @@ impl Session {
         );
         gucs.insert(
             "transaction_read_only".into(),
-            if self.current_transaction_read_only() {
-                "on"
-            } else {
-                "off"
-            }
-            .into(),
+            bool_guc_value(self.current_transaction_read_only()).into(),
+        );
+        gucs.insert(
+            "transaction_deferrable".into(),
+            bool_guc_value(self.current_transaction_deferrable()).into(),
         );
         gucs.entry("default_transaction_isolation".into())
             .or_insert_with(|| self.default_transaction_isolation_level().as_str().into());
+        gucs.entry("default_transaction_read_only".into())
+            .or_insert_with(|| bool_guc_value(self.default_transaction_read_only()).into());
+        gucs.entry("default_transaction_deferrable".into())
+            .or_insert_with(|| bool_guc_value(self.default_transaction_deferrable()).into());
         gucs
     }
 
@@ -3584,6 +3742,40 @@ impl Session {
         Ok(())
     }
 
+    fn set_active_transaction_read_only(&mut self, read_only: bool) -> Result<(), ExecError> {
+        let Some(txn) = self.active_txn.as_mut() else {
+            return Ok(());
+        };
+        if txn.read_only == read_only {
+            return Ok(());
+        }
+        if !read_only && txn.read_only && !txn.savepoints.is_empty() {
+            return Err(ExecError::DetailedError {
+                message: "cannot set transaction read-write mode inside a read-only transaction"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25006",
+            });
+        }
+        if txn.snapshot_taken {
+            return Err(ExecError::DetailedError {
+                message: "transaction read-write mode must be set before any query".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25001",
+            });
+        }
+        txn.read_only = read_only;
+        Ok(())
+    }
+
+    fn set_active_transaction_deferrable(&mut self, deferrable: bool) {
+        if let Some(txn) = self.active_txn.as_mut() {
+            txn.deferrable = deferrable;
+        }
+    }
+
     fn apply_transaction_options(
         &mut self,
         options: &crate::backend::parser::TransactionOptions,
@@ -3592,18 +3784,10 @@ impl Session {
             self.set_active_transaction_isolation(level)?;
         }
         if let Some(read_only) = options.read_only {
-            if let Some(txn) = self.active_txn.as_mut() {
-                if txn.snapshot_taken {
-                    return Err(ExecError::Parse(ParseError::DetailedError {
-                        message: "SET TRANSACTION READ WRITE must be called before any query"
-                            .into(),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "25001",
-                    }));
-                }
-                txn.read_only = read_only;
-            }
+            self.set_active_transaction_read_only(read_only)?;
+        }
+        if let Some(deferrable) = options.deferrable {
+            self.set_active_transaction_deferrable(deferrable);
         }
         Ok(())
     }
@@ -3623,11 +3807,13 @@ impl Session {
         };
         txn.snapshot_taken = true;
         if !txn.isolation_level.uses_transaction_snapshot() {
-            return db
+            let mut snapshot = db
                 .txns
                 .read()
                 .snapshot_for_command(xid, cid)
-                .map_err(ExecError::from);
+                .map_err(ExecError::from)?;
+            Self::install_transaction_own_xids(txn, &mut snapshot);
+            return Ok(snapshot);
         }
         if txn.transaction_snapshot.is_none() {
             let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
@@ -3639,6 +3825,7 @@ impl Session {
             .expect("repeatable-read snapshot must be initialized");
         snapshot.current_xid = xid;
         snapshot.current_cid = cid;
+        Self::install_transaction_own_xids(txn, &mut snapshot);
         crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
             db,
             self.client_id,
@@ -3646,6 +3833,17 @@ impl Session {
             snapshot.clone(),
         );
         Ok(snapshot)
+    }
+
+    fn install_transaction_own_xids(txn: &ActiveTransaction, snapshot: &mut Snapshot) {
+        snapshot.own_xids.clear();
+        if let Some(xid) = txn.xid {
+            snapshot.own_xids.insert(xid);
+        }
+        snapshot.own_xids.extend(txn.subxids.iter().copied());
+        if snapshot.current_xid != INVALID_TRANSACTION_ID {
+            snapshot.own_xids.insert(snapshot.current_xid);
+        }
     }
 
     fn active_txn_ctx_for_command(&self, cid: CommandId) -> Option<(TransactionId, CommandId)> {
@@ -3660,6 +3858,13 @@ impl Session {
 
     fn active_advisory_scope_id(&self) -> Option<u64> {
         self.active_txn.as_ref().map(|txn| txn.advisory_scope_id)
+    }
+
+    fn current_savepoint_depth(&self) -> usize {
+        self.active_txn
+            .as_ref()
+            .map(|txn| txn.savepoints.len())
+            .unwrap_or(0)
     }
 
     fn cte_body_has_writable_insert(body: &CteBody) -> bool {
@@ -4070,6 +4275,86 @@ impl Session {
         Ok((materialized_ctes, remaining_ctes))
     }
 
+    fn read_only_write_error(command: &'static str) -> ExecError {
+        ExecError::DetailedError {
+            message: format!("cannot execute {command} in a read-only transaction"),
+            detail: None,
+            hint: None,
+            sqlstate: "25006",
+        }
+    }
+
+    fn read_only_relation_is_writable(catalog: &dyn CatalogLookup, table_name: &str) -> bool {
+        catalog
+            .lookup_any_relation(table_name)
+            .is_some_and(|relation| relation.relpersistence == 't')
+    }
+
+    fn check_read_only_statement_allowed(
+        &self,
+        db: &Database,
+        stmt: &Statement,
+    ) -> Result<(), ExecError> {
+        if !self.current_transaction_read_only() {
+            return Ok(());
+        }
+        let catalog = self.catalog_lookup(db);
+        match stmt {
+            Statement::Insert(insert)
+                if !Self::read_only_relation_is_writable(&catalog, &insert.table_name) =>
+            {
+                Err(Self::read_only_write_error("INSERT"))
+            }
+            Statement::Update(update)
+                if !Self::read_only_relation_is_writable(&catalog, &update.table_name) =>
+            {
+                Err(Self::read_only_write_error("UPDATE"))
+            }
+            Statement::Delete(delete)
+                if !Self::read_only_relation_is_writable(&catalog, &delete.table_name) =>
+            {
+                Err(Self::read_only_write_error("DELETE"))
+            }
+            Statement::CopyFrom(copy)
+                if !Self::read_only_relation_is_writable(&catalog, &copy.table_name) =>
+            {
+                Err(Self::read_only_write_error("COPY FROM"))
+            }
+            Statement::DropTable(drop)
+                if drop
+                    .table_names
+                    .iter()
+                    .any(|name| !Self::read_only_relation_is_writable(&catalog, name)) =>
+            {
+                Err(Self::read_only_write_error("DROP TABLE"))
+            }
+            Statement::CreateTable(create)
+                if create.persistence != crate::backend::parser::TablePersistence::Temporary =>
+            {
+                Err(Self::read_only_write_error("CREATE TABLE"))
+            }
+            Statement::CreateTableAs(create)
+                if create.persistence != crate::backend::parser::TablePersistence::Temporary =>
+            {
+                Err(Self::read_only_write_error("CREATE TABLE AS"))
+            }
+            Statement::TruncateTable(truncate)
+                if truncate
+                    .table_names
+                    .iter()
+                    .any(|name| !Self::read_only_relation_is_writable(&catalog, name)) =>
+            {
+                Err(Self::read_only_write_error("TRUNCATE"))
+            }
+            Statement::Merge(merge)
+                if !Self::read_only_relation_is_writable(&catalog, &merge.target_table) =>
+            {
+                Err(Self::read_only_write_error("MERGE"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn statement_requires_xid_in_transaction(stmt: &Statement) -> bool {
         if let Statement::Select(select) = stmt
             && Self::select_has_writable_ctes(select)
@@ -4105,12 +4390,25 @@ impl Session {
                 | Statement::Move(_)
                 | Statement::ClosePortal(_)
                 | Statement::Begin(_)
-                | Statement::Commit
-                | Statement::Rollback
+                | Statement::Commit(_)
+                | Statement::Rollback(_)
                 | Statement::Savepoint(_)
                 | Statement::ReleaseSavepoint(_)
                 | Statement::RollbackTo(_)
         )
+    }
+
+    fn statement_uses_savepoint_subxid(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Insert(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::Merge(_)
+            | Statement::CopyFrom(_)
+            | Statement::TruncateTable(_) => true,
+            Statement::Select(select) => Self::select_has_writable_ctes(select),
+            _ => false,
+        }
     }
 
     fn reindex_non_relation_transaction_command(
@@ -4929,7 +5227,9 @@ impl Session {
             return;
         }
         if self.active_txn.is_some() {
-            for portal in pending_portals {
+            let savepoint_depth = self.current_savepoint_depth();
+            for mut portal in pending_portals {
+                portal.created_savepoint_depth = savepoint_depth;
                 self.portals.put(portal);
             }
         }
@@ -4967,21 +5267,21 @@ impl Session {
             return self.finish_autocommit_streaming_select_guard(db, guard, succeeded);
         }
 
-        if let Some(xid) = guard.ctx.transaction_xid()
-            && let Some(txn) = self.active_txn.as_mut()
-        {
-            txn.xid = Some(xid);
-            if txn.isolation_level.uses_transaction_snapshot()
-                && let Some(mut snapshot) = txn.transaction_snapshot.clone()
-            {
-                snapshot.current_xid = xid;
-                snapshot.current_cid = guard.base_command_id;
-                crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
-                    db,
-                    self.client_id,
-                    xid,
-                    snapshot,
-                );
+        if let Some(xid) = guard.ctx.transaction_xid() {
+            self.note_context_xid(xid);
+            if let Some(txn) = self.active_txn.as_mut() {
+                if txn.isolation_level.uses_transaction_snapshot()
+                    && let Some(mut snapshot) = txn.transaction_snapshot.clone()
+                {
+                    snapshot.current_xid = xid;
+                    snapshot.current_cid = guard.base_command_id;
+                    crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+                        db,
+                        self.client_id,
+                        xid,
+                        snapshot,
+                    );
+                }
             }
         }
         self.merge_ctx_pending_async_notifications(&mut guard.ctx, succeeded);
@@ -5176,17 +5476,20 @@ impl Session {
         let result = match result {
             Ok(r) => {
                 (|| {
-                    if let Some(xid) = txn.xid {
+                    let live_xids = txn.live_xids();
+                    if !live_xids.is_empty() {
                         let _checkpoint_guard = db.checkpoint_commit_guard();
-                        db.pool.write_wal_commit(xid).map_err(|e| {
-                            ExecError::Heap(
-                                crate::backend::access::heap::heapam::HeapError::Storage(
-                                    crate::backend::storage::smgr::SmgrError::Io(
-                                        std::io::Error::new(std::io::ErrorKind::Other, e),
+                        for xid in &live_xids {
+                            db.pool.write_wal_commit(*xid).map_err(|e| {
+                                ExecError::Heap(
+                                    crate::backend::access::heap::heapam::HeapError::Storage(
+                                        crate::backend::storage::smgr::SmgrError::Io(
+                                            std::io::Error::new(std::io::ErrorKind::Other, e),
+                                        ),
                                     ),
-                                ),
-                            )
-                        })?;
+                                )
+                            })?;
+                        }
                         db.pool.flush_wal().map_err(|e| {
                             ExecError::Heap(
                                 crate::backend::access::heap::heapam::HeapError::Storage(
@@ -5196,11 +5499,13 @@ impl Session {
                                 ),
                             )
                         })?;
-                        db.txns.write().commit(xid).map_err(|e| {
-                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(
-                                e,
-                            ))
-                        })?;
+                        for xid in &live_xids {
+                            db.txns.write().commit(*xid).map_err(|e| {
+                                ExecError::Heap(
+                                    crate::backend::access::heap::heapam::HeapError::Mvcc(e),
+                                )
+                            })?;
+                        }
                         // :HACK: See `Database::finish_txn()`: session commit also needs the
                         // transaction status flushed so fresh durable snapshot readers observe
                         // catalog changes immediately.
@@ -5209,9 +5514,11 @@ impl Session {
                                 e,
                             ))
                         })?;
-                        db.txn_waiter.unregister_holder(xid);
+                        for xid in &live_xids {
+                            db.txn_waiter.unregister_holder(*xid);
+                            db.commit_enum_labels_created_by(*xid);
+                        }
                         db.txn_waiter.notify();
-                        db.commit_enum_labels_created_by(xid);
                     } else {
                         debug_assert!(txn.catalog_effects.is_empty());
                         debug_assert!(txn.temp_effects.is_empty());
@@ -5264,9 +5571,12 @@ impl Session {
     }
 
     fn abort_taken_transaction(&mut self, db: &Database, txn: &ActiveTransaction) {
-        if let Some(xid) = txn.xid {
-            let _ = db.txns.write().abort(xid);
-            db.txn_waiter.unregister_holder(xid);
+        let live_xids = txn.live_xids();
+        if !live_xids.is_empty() {
+            for xid in &live_xids {
+                let _ = db.txns.write().abort(*xid);
+                db.txn_waiter.unregister_holder(*xid);
+            }
             db.txn_waiter.notify();
         } else {
             debug_assert!(txn.catalog_effects.is_empty());
@@ -5350,6 +5660,7 @@ impl Session {
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         db.install_plpgsql_function_cache(self.client_id, Arc::clone(&self.plpgsql_function_cache));
+        self.install_session_view_state(db);
         let _prepared_guard = self.push_prepared_statement_thread_context();
         let result = stacker::grow(32 * 1024 * 1024, || {
             StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb)
@@ -5452,12 +5763,7 @@ impl Session {
         if self.active_txn.is_some()
             && !matches!(
                 stmt,
-                Statement::Begin(_)
-                    | Statement::Commit
-                    | Statement::Rollback
-                    | Statement::Savepoint(_)
-                    | Statement::ReleaseSavepoint(_)
-                    | Statement::RollbackTo(_)
+                Statement::Commit(_) | Statement::Rollback(_) | Statement::RollbackTo(_)
             )
         {
             if self.transaction_failed() {
@@ -5475,12 +5781,16 @@ impl Session {
                 return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(command)));
             }
             stmt = self.resolve_prepared_explain_statement(db, stmt)?;
+            self.check_read_only_statement_allowed(db, &stmt)?;
             if matches!(
                 stmt,
                 Statement::DeclareCursor(_)
                     | Statement::Fetch(_)
                     | Statement::Move(_)
                     | Statement::ClosePortal(_)
+                    | Statement::Begin(_)
+                    | Statement::Savepoint(_)
+                    | Statement::ReleaseSavepoint(_)
                     | Statement::CopyTo(_)
                     | Statement::Prepare(_)
                     | Statement::Execute(_)
@@ -5509,6 +5819,7 @@ impl Session {
                 return result;
             }
         }
+        self.check_read_only_statement_allowed(db, &stmt)?;
         if self.active_txn.is_none()
             && !matches!(stmt, Statement::ReindexIndex(_))
             && let Some(tag) = Self::event_trigger_command_tag(&stmt)
@@ -7751,8 +8062,17 @@ impl Session {
                 self.stats_state.write().begin_top_level_xact();
                 Ok(StatementResult::AffectedRows(0))
             }
-            Statement::Commit => {
+            Statement::Commit(options) => {
                 if self.active_txn.is_none() {
+                    if options.chain {
+                        return Err(ExecError::Parse(ParseError::DetailedError {
+                            message: "COMMIT AND CHAIN can only be used in transaction blocks"
+                                .into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "25001",
+                        }));
+                    }
                     crate::backend::utils::misc::notices::push_warning(
                         "there is no transaction in progress",
                     );
@@ -7760,6 +8080,7 @@ impl Session {
                 }
                 if self.active_txn.as_ref().is_some_and(|txn| txn.failed) {
                     let txn = self.active_txn.take().unwrap();
+                    let chained_options = options.chain.then(|| txn.chained_options());
                     let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                     self.abort_taken_transaction(db, &txn);
                     for rel in held_locks {
@@ -7767,30 +8088,54 @@ impl Session {
                     }
                     self.restore_guc_state(db, txn.guc_start_state);
                     self.portals.drop_transaction_portals(false);
+                    if let Some(chained_options) = chained_options {
+                        self.active_txn = Some(
+                            self.active_transaction_without_xid_with_options(db, &chained_options),
+                        );
+                        self.stats_state.write().begin_top_level_xact();
+                    }
                     return Ok(StatementResult::AffectedRows(0));
                 }
                 let result = self
                     .validate_constraints_for_active_txn(db, false)
                     .map(|_| StatementResult::AffectedRows(0));
                 let txn = self.active_txn.take().unwrap();
+                let chained_options = options.chain.then(|| txn.chained_options());
                 let result = self.finalize_taken_transaction(db, txn, result);
                 if result.is_ok() {
                     self.portals.drop_transaction_portals(true);
+                    if let Some(chained_options) = chained_options {
+                        self.active_txn = Some(
+                            self.active_transaction_without_xid_with_options(db, &chained_options),
+                        );
+                        self.stats_state.write().begin_top_level_xact();
+                    }
                 } else {
                     self.portals.drop_transaction_portals(false);
                 }
                 result
             }
-            Statement::Rollback => {
+            Statement::Rollback(options) => {
                 let txn = match self.active_txn.take() {
                     Some(t) => t,
                     None => {
+                        if options.chain {
+                            return Err(ExecError::Parse(ParseError::DetailedError {
+                                message:
+                                    "ROLLBACK AND CHAIN can only be used in transaction blocks"
+                                        .into(),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "25001",
+                            }));
+                        }
                         crate::backend::utils::misc::notices::push_warning(
                             "there is no transaction in progress",
                         );
                         return Ok(StatementResult::AffectedRows(0));
                     }
                 };
+                let chained_options = options.chain.then(|| txn.chained_options());
                 let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
                 self.abort_taken_transaction(db, &txn);
                 for rel in held_locks {
@@ -7798,6 +8143,12 @@ impl Session {
                 }
                 self.restore_guc_state(db, txn.guc_start_state);
                 self.portals.drop_transaction_portals(false);
+                if let Some(chained_options) = chained_options {
+                    self.active_txn = Some(
+                        self.active_transaction_without_xid_with_options(db, &chained_options),
+                    );
+                    self.stats_state.write().begin_top_level_xact();
+                }
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Savepoint(ref name) => {
@@ -7810,6 +8161,13 @@ impl Session {
                 };
                 txn.savepoints.push(SavepointState {
                     name: name.clone(),
+                    parent_write_xid: txn.current_write_xid,
+                    subxid_len: txn.subxids.len(),
+                    isolation_level: txn.isolation_level,
+                    read_only: txn.read_only,
+                    deferrable: txn.deferrable,
+                    snapshot_taken: txn.snapshot_taken,
+                    transaction_snapshot: txn.transaction_snapshot.clone(),
                     dynamic_type_snapshot: db.dynamic_type_snapshot(),
                     catalog_snapshot: db.catalog_store_snapshot(
                         self.client_id,
@@ -7826,28 +8184,41 @@ impl Session {
                     guc_commit_state: txn.guc_commit_state.clone(),
                     stats_state: self.stats_state.read().clone(),
                 });
+                txn.current_write_xid = None;
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::ReleaseSavepoint(ref name) => {
-                let Some(txn) = self.active_txn.as_mut() else {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "active transaction",
-                        actual: "RELEASE SAVEPOINT can only be used in transaction blocks".into(),
-                    }));
+                let released_depth = {
+                    let Some(txn) = self.active_txn.as_mut() else {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "active transaction",
+                            actual: "RELEASE SAVEPOINT can only be used in transaction blocks"
+                                .into(),
+                        }));
+                    };
+                    let Some(index) = txn
+                        .savepoints
+                        .iter()
+                        .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+                    else {
+                        return Err(ExecError::DetailedError {
+                            message: format!("savepoint \"{name}\" does not exist"),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "3B001",
+                        });
+                    };
+                    let savepoint = txn.savepoints[index].clone();
+                    txn.current_write_xid = savepoint.parent_write_xid;
+                    txn.isolation_level = savepoint.isolation_level;
+                    txn.read_only = savepoint.read_only;
+                    txn.deferrable = savepoint.deferrable;
+                    txn.snapshot_taken = savepoint.snapshot_taken;
+                    txn.transaction_snapshot = savepoint.transaction_snapshot;
+                    txn.savepoints.truncate(index);
+                    index + 1
                 };
-                let Some(index) = txn
-                    .savepoints
-                    .iter()
-                    .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
-                else {
-                    return Err(ExecError::DetailedError {
-                        message: format!("savepoint \"{name}\" does not exist"),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "3B001",
-                    });
-                };
-                txn.savepoints.truncate(index);
+                self.portals.release_savepoint_depth(released_depth);
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::RollbackTo(ref name) => {
@@ -7858,6 +8229,7 @@ impl Session {
                     local_auth_active,
                     guc_effective_state,
                     stats_state,
+                    rollback_depth,
                 ) = {
                     let Some(txn) = self.active_txn.as_mut() else {
                         return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -7879,6 +8251,7 @@ impl Session {
                         });
                     };
                     let savepoint = txn.savepoints[index].clone();
+                    let aborted_subxids = txn.subxids[savepoint.subxid_len..].to_vec();
                     let aborted_catalog_effects =
                         txn.catalog_effects[savepoint.catalog_effect_len..].to_vec();
                     let aborted_prior_invalidations = txn.prior_cmd_catalog_invalidations
@@ -7925,6 +8298,13 @@ impl Session {
                     txn.current_cmd_catalog_invalidations.clear();
                     txn.temp_effects.truncate(savepoint.temp_effect_len);
                     txn.sequence_effects.truncate(savepoint.sequence_effect_len);
+                    txn.subxids.truncate(savepoint.subxid_len);
+                    txn.current_write_xid = None;
+                    txn.isolation_level = savepoint.isolation_level;
+                    txn.read_only = savepoint.read_only;
+                    txn.deferrable = savepoint.deferrable;
+                    txn.snapshot_taken = savepoint.snapshot_taken;
+                    txn.transaction_snapshot = savepoint.transaction_snapshot.clone();
                     txn.deferred_foreign_keys
                         .restore(savepoint.deferred_foreign_key_snapshot.clone());
                     txn.local_auth_active = savepoint.local_auth_active;
@@ -7942,12 +8322,18 @@ impl Session {
                     txn.guc_commit_state = savepoint.guc_commit_state.clone();
                     txn.savepoints.truncate(index + 1);
                     txn.failed = false;
+                    for xid in aborted_subxids {
+                        let _ = db.txns.write().abort(xid);
+                        db.txn_waiter.unregister_holder(xid);
+                    }
+                    db.txn_waiter.notify();
                     (
                         savepoint.dynamic_type_snapshot,
                         savepoint.auth_effective_state,
                         savepoint.local_auth_active,
                         savepoint.guc_effective_state,
                         savepoint.stats_state,
+                        index + 1,
                     )
                 };
                 db.restore_dynamic_type_snapshot(&dynamic_type_snapshot);
@@ -7963,6 +8349,8 @@ impl Session {
                 self.stats_state
                     .write()
                     .restore_after_savepoint_rollback(stats_state);
+                self.portals
+                    .drop_portals_created_at_or_after_savepoint(rollback_depth);
                 Ok(StatementResult::AffectedRows(0))
             }
             _ => {
@@ -8133,6 +8521,7 @@ impl Session {
             query: prepare_stmt.query.clone(),
             query_sql: prepare_stmt.query_sql.clone(),
             parameter_types: prepare_stmt.parameter_types.clone(),
+            prepare_time: crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         };
         self.prepared_selects.insert(name.clone(), prepared.clone());
         SESSION_PREPARED_STATEMENTS.with(|cell| {
@@ -8162,11 +8551,62 @@ impl Session {
         Ok(StatementResult::AffectedRows(0))
     }
 
-    pub(crate) fn prepared_statement_rows(&self) -> Vec<(String, String)> {
-        self.prepared_selects
+    pub(crate) fn set_protocol_prepared_statement_view_rows(
+        &mut self,
+        rows: Vec<SessionPreparedStatementViewRow>,
+    ) {
+        self.protocol_prepared_statements = rows;
+    }
+
+    fn session_view_state(&self, catalog: &dyn CatalogLookup) -> SessionViewState {
+        let now = crate::backend::utils::time::datetime::current_postgres_timestamp_usecs();
+        let cursors = self
+            .portals
+            .cursor_view_rows()
+            .into_iter()
+            .map(|row| SessionCursorViewRow {
+                name: row.name,
+                statement: row.statement,
+                is_holdable: row.is_holdable,
+                is_binary: row.is_binary,
+                is_scrollable: row.is_scrollable,
+                creation_time: now,
+            })
+            .collect();
+        let mut prepared_statements = self
+            .prepared_selects
             .iter()
-            .map(|(name, prepared)| (name.clone(), prepared.query_sql.clone()))
-            .collect()
+            .map(|(name, prepared)| SessionPreparedStatementViewRow {
+                name: name.clone(),
+                statement: prepared.query_sql.clone(),
+                prepare_time: prepared.prepare_time,
+                parameter_type_oids: prepared
+                    .parameter_types
+                    .iter()
+                    .filter_map(|raw| raw.as_builtin())
+                    .filter_map(|ty| {
+                        catalog
+                            .type_oid_for_sql_type(ty)
+                            .or_else(|| (ty.type_oid != 0).then_some(ty.type_oid))
+                    })
+                    .collect(),
+                result_type_oids: Vec::new(),
+                from_sql: true,
+                generic_plans: 0,
+                custom_plans: 0,
+            })
+            .chain(self.protocol_prepared_statements.iter().cloned())
+            .collect::<Vec<_>>();
+        prepared_statements.sort_by(|left, right| left.name.cmp(&right.name));
+        SessionViewState {
+            cursors,
+            prepared_statements,
+        }
+    }
+
+    fn install_session_view_state(&self, db: &Database) {
+        let catalog = self.catalog_lookup(db);
+        db.install_session_view_state(self.client_id, self.session_view_state(&catalog));
     }
 
     fn resolve_prepared_statement(
@@ -9595,6 +10035,7 @@ impl Session {
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
         let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
+        self.check_read_only_statement_allowed(db, &resolved.statement)?;
         if self.active_txn.is_some() {
             // Transactional prepared execution still uses the older substitution path until
             // transaction-local external-param plumbing is threaded through the large session
@@ -9979,6 +10420,7 @@ impl Session {
         db.install_session_replication_role(self.client_id, self.session_replication_role());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_interrupt_state(self.client_id, self.interrupts());
+        self.install_session_view_state(db);
         if self.active_txn.is_none() {
             db.accept_invalidation_messages(self.client_id);
         }
@@ -10001,12 +10443,7 @@ impl Session {
                 (None, None, 0, 0)
             };
         let snapshot_override = match txn_ctx {
-            Some((snapshot_xid, snapshot_cid))
-                if self
-                    .active_txn
-                    .as_ref()
-                    .is_some_and(|txn| txn.isolation_level.uses_transaction_snapshot()) =>
-            {
+            Some((snapshot_xid, snapshot_cid)) if self.active_txn.is_some() => {
                 Some(self.snapshot_for_command(db, snapshot_xid, snapshot_cid)?)
             }
             _ => None,
@@ -10091,6 +10528,7 @@ impl Session {
         options: CursorOptions,
     ) -> Result<(), ExecError> {
         let guard = self.execute_streaming(db, query)?;
+        let created_savepoint_depth = self.current_savepoint_depth();
         let mut portal = Portal::streaming_select(
             name.to_string(),
             source_text,
@@ -10098,6 +10536,7 @@ impl Session {
             Vec::new(),
             options,
             true,
+            created_savepoint_depth,
             guard,
         );
         if portal.options.scroll || portal.options.holdable {
@@ -10293,6 +10732,7 @@ impl Session {
             )?
         };
         let created_in_transaction = self.active_txn.is_some();
+        let created_savepoint_depth = self.current_savepoint_depth();
         match stmt {
             Statement::Select(select_stmt) => {
                 if select_sql_requires_command_end_xid_handling(&source_text) {
@@ -10308,6 +10748,7 @@ impl Session {
                             result_formats,
                             options,
                             created_in_transaction,
+                            created_savepoint_depth,
                             columns,
                             column_names,
                             rows,
@@ -10320,6 +10761,7 @@ impl Session {
                                 result_formats,
                                 options,
                                 created_in_transaction,
+                                created_savepoint_depth,
                                 None,
                             );
                             portal.command_tag =
@@ -10337,6 +10779,7 @@ impl Session {
                     result_formats,
                     options,
                     created_in_transaction,
+                    created_savepoint_depth,
                     guard,
                 );
                 if portal.options.scroll || portal.options.holdable {
@@ -10357,6 +10800,7 @@ impl Session {
                         result_formats,
                         options,
                         created_in_transaction,
+                        created_savepoint_depth,
                         columns,
                         column_names,
                         rows,
@@ -10369,6 +10813,7 @@ impl Session {
                             result_formats,
                             options,
                             created_in_transaction,
+                            created_savepoint_depth,
                             None,
                         );
                         portal.command_tag =
@@ -10385,6 +10830,7 @@ impl Session {
                 result_formats,
                 options,
                 created_in_transaction,
+                created_savepoint_depth,
                 None,
             )),
         }
@@ -10396,6 +10842,7 @@ impl Session {
         stmt: Statement,
         _statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
+        self.check_read_only_statement_allowed(db, &stmt)?;
         let effect_start = self
             .active_txn
             .as_ref()
@@ -10408,7 +10855,11 @@ impl Session {
             cid
         };
         let xid = if Self::statement_requires_xid_in_transaction(&stmt) {
-            self.ensure_active_xid(db)
+            if Self::statement_uses_savepoint_subxid(&stmt) {
+                self.ensure_active_xid(db)
+            } else {
+                self.ensure_top_xid(db)
+            }
         } else {
             self.active_txn
                 .as_ref()
@@ -13088,21 +13539,21 @@ impl Session {
                             self.planner_config(),
                         ),
                     };
-                    if let Some(xid) = ctx.transaction_xid()
-                        && let Some(txn) = self.active_txn.as_mut()
-                    {
-                        txn.xid = Some(xid);
-                        if txn.isolation_level.uses_transaction_snapshot()
-                            && let Some(mut snapshot) = txn.transaction_snapshot.clone()
-                        {
-                            snapshot.current_xid = xid;
-                            snapshot.current_cid = cid;
-                            crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+                    if let Some(xid) = ctx.transaction_xid() {
+                        self.note_context_xid(xid);
+                        if let Some(txn) = self.active_txn.as_mut() {
+                            if txn.isolation_level.uses_transaction_snapshot()
+                                && let Some(mut snapshot) = txn.transaction_snapshot.clone()
+                            {
+                                snapshot.current_xid = xid;
+                                snapshot.current_cid = cid;
+                                crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
                                 db,
                                 self.client_id,
                                 xid,
                                 snapshot,
                             );
+                            }
                         }
                     }
                     self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
@@ -13959,8 +14410,8 @@ impl Session {
                     )
                 }
                 Statement::Begin(_)
-                | Statement::Commit
-                | Statement::Rollback
+                | Statement::Commit(_)
+                | Statement::Rollback(_)
                 | Statement::Savepoint(_)
                 | Statement::ReleaseSavepoint(_)
                 | Statement::RollbackTo(_) => {
@@ -14083,18 +14534,19 @@ impl Session {
         }
         if normalized == "transaction_read_only"
             && let Some(value) = &stmt.value
-            && let Some(txn) = self.active_txn.as_mut()
         {
-            if txn.snapshot_taken {
-                return Err(ExecError::Parse(ParseError::DetailedError {
-                    message: "SET TRANSACTION READ WRITE must be called before any query".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "25001",
-                }));
-            }
-            txn.read_only = parse_pg_bool_text(value)
-                .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.clone())))?;
+            let read_only = parse_bool_guc(value).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(value.clone()))
+            })?;
+            self.set_active_transaction_read_only(read_only)?;
+        }
+        if normalized == "transaction_deferrable"
+            && let Some(value) = &stmt.value
+        {
+            let deferrable = parse_bool_guc(value).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(value.clone()))
+            })?;
+            self.set_active_transaction_deferrable(deferrable);
         }
 
         self.install_guc_state(effective_state);
@@ -14111,6 +14563,9 @@ impl Session {
         &mut self,
         stmt: &crate::backend::parser::SetTransactionStatement,
     ) -> Result<StatementResult, ExecError> {
+        if let Some(snapshot_id) = &stmt.snapshot_id {
+            return self.apply_set_transaction_snapshot(snapshot_id);
+        }
         match stmt.scope {
             crate::backend::parser::SetTransactionScope::Transaction => {
                 self.apply_transaction_options(&stmt.options)?;
@@ -14125,12 +14580,51 @@ impl Session {
                 if let Some(read_only) = stmt.options.read_only {
                     self.gucs.insert(
                         "default_transaction_read_only".into(),
-                        if read_only { "on" } else { "off" }.into(),
+                        bool_guc_value(read_only).into(),
+                    );
+                }
+                if let Some(deferrable) = stmt.options.deferrable {
+                    self.gucs.insert(
+                        "default_transaction_deferrable".into(),
+                        bool_guc_value(deferrable).into(),
                     );
                 }
             }
         }
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn apply_set_transaction_snapshot(
+        &mut self,
+        snapshot_id: &str,
+    ) -> Result<StatementResult, ExecError> {
+        if self.active_txn.is_none() {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: "SET TRANSACTION SNAPSHOT can only be used in transaction blocks".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25001",
+            }));
+        }
+        let parts = snapshot_id.split('-').collect::<Vec<_>>();
+        let valid_identifier = parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_hexdigit()));
+        if !valid_identifier {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!("invalid snapshot identifier: \"{snapshot_id}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            }));
+        }
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message: format!("snapshot \"{snapshot_id}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }))
     }
 
     fn apply_reset(
@@ -14153,6 +14647,17 @@ impl Session {
                 return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
                     normalized,
                 )));
+            }
+            if matches!(
+                normalized.as_str(),
+                "transaction_isolation" | "transaction_read_only" | "transaction_deferrable"
+            ) {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!("parameter \"{normalized}\" cannot be reset"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "25001",
+                }));
             }
             let mut effective_state = self.capture_guc_state();
             if is_builtin {
@@ -14296,27 +14801,27 @@ impl Session {
                     .as_str()
                     .to_string(),
             ),
-            "transaction_read_only" => (
-                "transaction_read_only".to_string(),
-                if self.current_transaction_read_only() {
-                    "on"
-                } else {
-                    "off"
-                }
-                .to_string(),
-            ),
             "default_transaction_isolation" => (
                 "default_transaction_isolation".to_string(),
                 self.default_transaction_isolation_level()
                     .as_str()
                     .to_string(),
             ),
+            "transaction_read_only" => (
+                "transaction_read_only".to_string(),
+                bool_guc_value(self.current_transaction_read_only()).to_string(),
+            ),
             "default_transaction_read_only" => (
                 "default_transaction_read_only".to_string(),
-                self.gucs
-                    .get("default_transaction_read_only")
-                    .cloned()
-                    .unwrap_or_else(|| "off".to_string()),
+                bool_guc_value(self.default_transaction_read_only()).to_string(),
+            ),
+            "transaction_deferrable" => (
+                "transaction_deferrable".to_string(),
+                bool_guc_value(self.current_transaction_deferrable()).to_string(),
+            ),
+            "default_transaction_deferrable" => (
+                "default_transaction_deferrable".to_string(),
+                bool_guc_value(self.default_transaction_deferrable()).to_string(),
             ),
             _ if is_checkpoint_guc(&name) => (
                 stmt.name.clone(),
@@ -16373,14 +16878,14 @@ fn apply_guc_value_to_state(
                 })?;
             stored_value = level.as_str().to_string();
         }
-        "default_transaction_read_only" | "transaction_read_only" => {
-            stored_value = if parse_pg_bool_text(value).map_err(|_| {
+        "default_transaction_read_only"
+        | "transaction_read_only"
+        | "default_transaction_deferrable"
+        | "transaction_deferrable" => {
+            let bool_value = parse_bool_guc(value).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
-            })? {
-                "on".to_string()
-            } else {
-                "off".to_string()
-            };
+            })?;
+            stored_value = bool_guc_value(bool_value).to_string();
         }
         "xmlbinary" => {
             let Some(binary) = parse_xmlbinary(value) else {
@@ -16721,6 +17226,10 @@ fn parse_bool_guc(value: &str) -> Option<bool> {
         "off" | "false" | "no" | "0" | "f" => Some(false),
         _ => None,
     }
+}
+
+fn bool_guc_value(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
 }
 
 fn parse_max_stack_depth(value: &str) -> Result<u32, ExecError> {

@@ -106,6 +106,22 @@ pub(super) fn bind_builtin_system_view(
     catalog: &dyn CatalogLookup,
 ) -> Option<(AnalyzedFrom, BoundScope)> {
     let view = synthetic_system_view(name)?;
+    if let Some(function) = view.set_returning_function() {
+        let output_columns = view.output_columns();
+        return build_function_view(
+            name,
+            output_columns.clone(),
+            SetReturningCall::UserDefined {
+                proc_oid: function.proc_oid,
+                function_name: function.function_name.into(),
+                func_variadic: false,
+                args: Vec::new(),
+                inlined_expr: None,
+                output_columns,
+                with_ordinality: false,
+            },
+        );
+    }
     if matches!(view.kind, SyntheticSystemViewKind::PgLocks) {
         let output_columns = view.output_columns();
         return build_function_view(
@@ -295,7 +311,23 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgStats => catalog.pg_stats_rows(),
         SyntheticSystemViewKind::PgStatsExt => catalog.pg_stats_ext_rows(),
         SyntheticSystemViewKind::PgStatsExtExprs => catalog.pg_stats_ext_exprs_rows(),
-        SyntheticSystemViewKind::PgSettings => catalog.pg_settings_rows(),
+        SyntheticSystemViewKind::PgAvailableExtensions
+        | SyntheticSystemViewKind::PgAvailableExtensionVersions
+        | SyntheticSystemViewKind::PgBackendMemoryContexts
+        | SyntheticSystemViewKind::PgConfig
+        | SyntheticSystemViewKind::PgCursors
+        | SyntheticSystemViewKind::PgFileSettings
+        | SyntheticSystemViewKind::PgHbaFileRules
+        | SyntheticSystemViewKind::PgIdentFileMappings
+        | SyntheticSystemViewKind::PgPreparedXacts
+        | SyntheticSystemViewKind::PgPreparedStatements
+        | SyntheticSystemViewKind::PgSettings
+        | SyntheticSystemViewKind::PgStatWalReceiver
+        | SyntheticSystemViewKind::PgWaitEvents
+        | SyntheticSystemViewKind::PgTimezoneNames
+        | SyntheticSystemViewKind::PgTimezoneAbbrevs => {
+            unreachable!("SRF-backed system views are bound before value-row expansion")
+        }
         SyntheticSystemViewKind::PgUserMappings => catalog.pg_user_mappings_rows(),
         SyntheticSystemViewKind::PgRoles => catalog
             .authid_rows()

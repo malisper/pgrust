@@ -144,6 +144,52 @@ pub(super) fn bind_maybe_jsonb_delete(
     )
 }
 
+pub(super) fn bind_jsonb_delete_path_expr(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let jsonb_type = SqlType::new(SqlTypeKind::Jsonb);
+    let path_type = SqlType::array_of(SqlType::new(SqlTypeKind::Text));
+
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, jsonb_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, path_type);
+    if left_type.kind != SqlTypeKind::Jsonb || left_type.is_array || right_type != path_type {
+        return Err(ParseError::UndefinedOperator {
+            op: "#-".into(),
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+
+    let (left_bound, right_bound) = bind_json_binary_operands(
+        left,
+        right,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    Ok(Expr::builtin_func(
+        BuiltinScalarFunction::JsonbDeletePath,
+        Some(jsonb_type),
+        false,
+        vec![
+            coerce_bound_expr(left_bound, raw_left_type, jsonb_type),
+            coerce_bound_expr(right_bound, raw_right_type, path_type),
+        ],
+    ))
+}
+
 pub(super) fn bind_json_binary_expr(
     op: crate::include::nodes::primnodes::OpExprKind,
     left: &SqlExpr,

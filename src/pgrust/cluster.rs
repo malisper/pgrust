@@ -32,8 +32,8 @@ use crate::pgrust::autovacuum::{AutovacuumConfig, AutovacuumRuntime};
 use crate::pgrust::database::{
     AsyncNotifyRuntime, BaseTypeEntry, ConversionEntry, Database, DatabaseCreateGrant,
     DatabaseError, DatabaseOpenOptions, DatabaseStatsStore, DomainEntry, EnumTypeEntry,
-    LargeObjectRuntime, RangeTypeEntry, SequenceRuntime, SessionStatsState, StatisticsObjectEntry,
-    TempBackendId, TempNamespace, load_range_type_entries,
+    LargeObjectRuntime, RangeTypeEntry, SequenceRuntime, SessionStatsState, SessionViewState,
+    StatisticsObjectEntry, TempBackendId, TempNamespace, load_range_type_entries,
 };
 use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId};
@@ -107,6 +107,7 @@ pub(crate) struct OpenDatabaseState {
         Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
     pub session_guc_states: Arc<RwLock<HashMap<ClientId, HashMap<String, String>>>>,
+    pub session_view_states: Arc<RwLock<HashMap<ClientId, SessionViewState>>>,
     pub database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
     pub domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
@@ -146,6 +147,7 @@ impl OpenDatabaseState {
             session_plpgsql_function_caches: Arc::new(RwLock::new(HashMap::new())),
             session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
             session_guc_states: Arc::new(RwLock::new(HashMap::new())),
+            session_view_states: Arc::new(RwLock::new(HashMap::new())),
             database_create_grants: Arc::new(RwLock::new(Vec::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
@@ -392,6 +394,7 @@ impl Cluster {
                 session_plpgsql_function_caches: Arc::new(RwLock::new(HashMap::new())),
                 session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
                 session_guc_states: Arc::new(RwLock::new(HashMap::new())),
+                session_view_states: Arc::new(RwLock::new(HashMap::new())),
                 database_create_grants: Arc::new(RwLock::new(Vec::new())),
                 temp_relations: Arc::new(RwLock::new(HashMap::new())),
                 domains: Arc::new(RwLock::new(BTreeMap::new())),
@@ -496,6 +499,7 @@ impl Cluster {
             session_plpgsql_function_caches: Arc::clone(&state.session_plpgsql_function_caches),
             session_temp_backend_ids: Arc::clone(&state.session_temp_backend_ids),
             session_guc_states: Arc::clone(&state.session_guc_states),
+            session_view_states: Arc::clone(&state.session_view_states),
             database_create_grants: Arc::clone(&state.database_create_grants),
             temp_relations: Arc::clone(&state.temp_relations),
             domains: Arc::clone(&state.domains),

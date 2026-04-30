@@ -186,14 +186,14 @@ fn check_visibility(
             Some(TransactionStatus::Aborted) | Some(TransactionStatus::InProgress) | None => true,
         };
     }
-    if xmin == snapshot.current_xid {
-        if cid >= snapshot.current_cid {
+    if snapshot.transaction_is_own(xmin) {
+        if xmin == snapshot.current_xid && cid >= snapshot.current_cid {
             return false;
         }
         if xmax == INVALID_TRANSACTION_ID {
             return true;
         }
-        if xmax == snapshot.current_xid {
+        if snapshot.transaction_is_own(xmax) {
             return false;
         }
         if xmax >= snapshot.xmax {
@@ -223,7 +223,7 @@ fn check_visibility(
     if xmax == INVALID_TRANSACTION_ID {
         return true;
     }
-    if xmax == snapshot.current_xid {
+    if snapshot.transaction_is_own(xmax) {
         return false;
     }
     if xmax >= snapshot.xmax {

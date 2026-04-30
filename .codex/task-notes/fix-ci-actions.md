@@ -137,6 +137,26 @@ query_repl.rs still has the existing unreachable-pattern warning during check.
 ---
 
 Goal:
+Fix PR CI failure in `ts_headline_handles_empty_and_basic_queries`.
+
+Key decisions:
+Use the active text search config when matching `ts_headline` document tokens against tsquery lexemes, so English stemming highlights `painted` for query lexeme `paint`.
+Reuse the existing text-search config value resolution for explicit regconfig/text config arguments.
+
+Files touched:
+src/backend/executor/exec_expr.rs
+
+Tests run:
+CARGO_TARGET_DIR=/tmp/pgrust-target-ci-fix-madrid RUSTC_WRAPPER=/usr/bin/env scripts/cargo_isolated.sh test --lib --quiet ts_headline_handles_empty_and_basic_queries
+RUSTC_WRAPPER=/usr/bin/env scripts/cargo_isolated.sh test --lib --quiet ts_headline_json_highlights_string_values_only
+CARGO_TARGET_DIR=/tmp/pgrust-target-ci-fix-madrid RUSTC_WRAPPER=/usr/bin/env scripts/cargo_isolated.sh check
+
+Remaining:
+No local failures in the attached CI repro.
+
+---
+
+Goal:
 Fix merge-queue cargo-test failures on the join-regression PR.
 
 Key decisions:

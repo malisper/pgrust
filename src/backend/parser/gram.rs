@@ -16714,13 +16714,13 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
         Rule::begin_stmt => Ok(Statement::Begin(build_begin(inner)?)),
-        Rule::commit_stmt => Ok(Statement::Commit),
+        Rule::commit_stmt => Ok(Statement::Commit(build_transaction_end_options(inner))),
         Rule::savepoint_stmt => Ok(Statement::Savepoint(build_transaction_marker_name(inner)?)),
         Rule::rollback_to_stmt => Ok(Statement::RollbackTo(build_transaction_marker_name(inner)?)),
         Rule::release_savepoint_stmt => Ok(Statement::ReleaseSavepoint(
             build_transaction_marker_name(inner)?,
         )),
-        Rule::rollback_stmt => Ok(Statement::Rollback),
+        Rule::rollback_stmt => Ok(Statement::Rollback(build_transaction_end_options(inner))),
         _ => Err(ParseError::UnexpectedToken {
             expected: "statement",
             actual: inner.as_str().into(),
@@ -18062,7 +18062,21 @@ fn build_begin(pair: Pair<'_, Rule>) -> Result<TransactionOptions, ParseError> {
     Ok(TransactionOptions::default())
 }
 
+fn build_transaction_end_options(pair: Pair<'_, Rule>) -> TransactionEndOptions {
+    let chain = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::transaction_chain_clause)
+        .is_some_and(|part| {
+            !part
+                .as_str()
+                .split_whitespace()
+                .any(|word| word.eq_ignore_ascii_case("no"))
+        });
+    TransactionEndOptions { chain }
+}
+
 fn build_set_transaction(pair: Pair<'_, Rule>) -> Result<SetTransactionStatement, ParseError> {
+    let raw = pair.as_str();
     let scope = if pair
         .as_str()
         .trim_start()
@@ -18073,13 +18087,35 @@ fn build_set_transaction(pair: Pair<'_, Rule>) -> Result<SetTransactionStatement
     } else {
         SetTransactionScope::Transaction
     };
+    let snapshot_id = if raw
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("set transaction snapshot")
+    {
+        let snapshot_idx = raw
+            .to_ascii_lowercase()
+            .find("snapshot")
+            .ok_or(ParseError::UnexpectedEof)?;
+        let literal = raw[snapshot_idx + "snapshot".len()..].trim_start();
+        let len = scan_string_literal_token_len(literal).ok_or(ParseError::UnexpectedToken {
+            expected: "snapshot identifier",
+            actual: literal.to_string(),
+        })?;
+        Some(decode_string_literal(&literal[..len])?)
+    } else {
+        None
+    };
     let options = pair
         .into_inner()
         .find(|part| part.as_rule() == Rule::transaction_mode_list)
         .map(build_transaction_options)
         .transpose()?
         .unwrap_or_default();
-    Ok(SetTransactionStatement { scope, options })
+    Ok(SetTransactionStatement {
+        scope,
+        options,
+        snapshot_id,
+    })
 }
 
 fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
@@ -27316,6 +27352,11 @@ fn build_comparison_expr(left: SqlExpr, op: &str, right: SqlExpr) -> Result<SqlE
         "?" => SqlExpr::JsonbExists(Box::new(left), Box::new(right)),
         "?|" => SqlExpr::JsonbExistsAny(Box::new(left), Box::new(right)),
         "?&" => SqlExpr::JsonbExistsAll(Box::new(left), Box::new(right)),
+        "#-" => SqlExpr::BinaryOperator {
+            op: "#-".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
         "&&" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
             SqlExpr::ArrayOverlap(Box::new(left), Box::new(right))
         }

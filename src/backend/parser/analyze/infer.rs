@@ -1072,7 +1072,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     | BuiltinScalarFunction::TsQueryContainedBy,
                 ) => SqlType::new(SqlTypeKind::Bool),
                 Some(BuiltinScalarFunction::TsRewrite) => SqlType::new(SqlTypeKind::TsQuery),
-                Some(BuiltinScalarFunction::ToTsVector) => SqlType::new(SqlTypeKind::TsVector),
+                Some(
+                    BuiltinScalarFunction::ToTsVector
+                    | BuiltinScalarFunction::JsonToTsVector
+                    | BuiltinScalarFunction::JsonbToTsVector,
+                ) => SqlType::new(SqlTypeKind::TsVector),
                 Some(
                     BuiltinScalarFunction::ToTsQuery
                     | BuiltinScalarFunction::PlainToTsQuery
@@ -1400,6 +1404,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::Sha384)
                 | Some(BuiltinScalarFunction::Sha512) => SqlType::new(SqlTypeKind::Bytea),
                 Some(BuiltinScalarFunction::Length)
+                | Some(BuiltinScalarFunction::OctetLength)
                 | Some(BuiltinScalarFunction::ArrayLength)
                 | Some(BuiltinScalarFunction::Cardinality)
                 | Some(BuiltinScalarFunction::ArrayPosition)

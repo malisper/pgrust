@@ -227,11 +227,47 @@ pub(crate) fn parse_json_text_input(text: &str) -> Result<SerdeJsonValue, ExecEr
     serde_json::from_str::<SerdeJsonValue>(text).map_err(|err| json_input_error(text, err))
 }
 
+pub(crate) fn validate_json_text_input(text: &str) -> Result<(), ExecError> {
+    validate_json_text_input_with_options(text, None, false)
+}
+
+pub(crate) fn validate_json_text_input_with_limit(
+    text: &str,
+    max_stack_depth_kb: u32,
+) -> Result<(), ExecError> {
+    validate_json_text_input_with_options(text, Some(max_stack_depth_kb), false)
+}
+
+fn validate_json_text_input_for_decoding(text: &str) -> Result<(), ExecError> {
+    validate_json_text_input_with_options(text, None, true)
+}
+
+fn validate_json_text_input_for_decoding_with_limit(
+    text: &str,
+    max_stack_depth_kb: u32,
+) -> Result<(), ExecError> {
+    validate_json_text_input_with_options(text, Some(max_stack_depth_kb), true)
+}
+
+fn validate_json_text_input_with_options(
+    text: &str,
+    max_stack_depth_kb: Option<u32>,
+    decode_strings: bool,
+) -> Result<(), ExecError> {
+    if let Some(max_stack_depth_kb) = max_stack_depth_kb {
+        enforce_json_stack_limit(text, max_stack_depth_kb)?;
+    }
+    match JsonDiagnosticParser::new(text, decode_strings).parse() {
+        Ok(()) => Ok(()),
+        Err(diag) => Err(json_input_diagnostic_error(text, diag)),
+    }
+}
+
 fn parse_json_text_input_with_stack_limit(
     text: &str,
     max_stack_depth_kb: u32,
 ) -> Result<SerdeJsonValue, ExecError> {
-    enforce_json_stack_limit(text, max_stack_depth_kb)?;
+    validate_json_text_input_for_decoding_with_limit(text, max_stack_depth_kb)?;
     parse_json_text_input(text)
 }
 
@@ -277,7 +313,15 @@ fn enforce_json_stack_limit(text: &str, max_stack_depth_kb: u32) -> Result<(), E
 
 pub(crate) fn json_input_error(text: &str, err: SerdeJsonError) -> ExecError {
     let (detail, context) = match diagnose_json_input(text) {
-        Some(diag) => (Some(diag.detail), Some(diag.context)),
+        Some(diag) => {
+            return ExecError::JsonInput {
+                raw_input: text.to_string(),
+                message: diag.message.unwrap_or_else(default_json_input_message),
+                detail: Some(diag.detail),
+                context: Some(diag.context),
+                sqlstate: "22P02",
+            };
+        }
         None => {
             let line = err.line();
             let column = err.column();
@@ -300,11 +344,25 @@ pub(crate) fn json_input_error(text: &str, err: SerdeJsonError) -> ExecError {
     };
     ExecError::JsonInput {
         raw_input: text.to_string(),
-        message: "invalid input syntax for type json".into(),
+        message: default_json_input_message(),
         detail,
         context,
         sqlstate: "22P02",
     }
+}
+
+fn json_input_diagnostic_error(text: &str, diag: JsonInputDiagnostic) -> ExecError {
+    ExecError::JsonInput {
+        raw_input: text.to_string(),
+        message: diag.message.unwrap_or_else(default_json_input_message),
+        detail: Some(diag.detail),
+        context: Some(diag.context),
+        sqlstate: "22P02",
+    }
+}
+
+fn default_json_input_message() -> String {
+    "invalid input syntax for type json".into()
 }
 
 fn json_error_context(text: &str, line: usize, column: usize) -> Option<String> {
@@ -365,26 +423,29 @@ fn json_error_context_range(text: &str, start: usize, end: usize) -> Option<Stri
 
 #[derive(Debug)]
 struct JsonInputDiagnostic {
+    message: Option<String>,
     detail: String,
     context: String,
 }
 
 fn diagnose_json_input(text: &str) -> Option<JsonInputDiagnostic> {
-    JsonDiagnosticParser::new(text).parse().err()
+    JsonDiagnosticParser::new(text, false).parse().err()
 }
 
 struct JsonDiagnosticParser<'a> {
     text: &'a str,
     chars: Vec<char>,
     pos: usize,
+    decode_strings: bool,
 }
 
 impl<'a> JsonDiagnosticParser<'a> {
-    fn new(text: &'a str) -> Self {
+    fn new(text: &'a str, decode_strings: bool) -> Self {
         Self {
             text,
             chars: text.chars().collect(),
             pos: 0,
+            decode_strings,
         }
     }
 
@@ -489,39 +550,74 @@ impl<'a> JsonDiagnosticParser<'a> {
 
     fn parse_string(&mut self) -> Result<(), JsonInputDiagnostic> {
         let start = self.pos;
+        let mut hi_surrogate = None;
         self.bump();
         while let Some(ch) = self.peek() {
             match ch {
                 '"' => {
+                    if hi_surrogate.is_some() {
+                        return Err(self.error_unicode_low_surrogate());
+                    }
                     self.bump();
                     return Ok(());
                 }
                 '\\' => {
+                    let escape_start = self.pos;
                     self.bump();
                     let Some(escaped) = self.peek() else {
                         return Err(self.error_token_invalid_range(start, self.pos));
                     };
                     match escaped {
                         '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => {
+                            if hi_surrogate.is_some() {
+                                return Err(self.error_unicode_low_surrogate());
+                            }
                             self.bump();
                         }
                         'u' => {
                             self.bump();
+                            let mut codepoint = 0_u32;
                             for _ in 0..4 {
                                 let Some(hex) = self.peek() else {
-                                    return Err(self.error_invalid_escape('u'));
+                                    return Err(self.error_unicode_escape_format(escape_start));
                                 };
                                 if !hex.is_ascii_hexdigit() {
-                                    return Err(self.error_invalid_escape('u'));
+                                    return Err(self.error_unicode_escape_format(escape_start));
                                 }
+                                codepoint = codepoint * 16 + hex.to_digit(16).unwrap();
                                 self.bump();
+                            }
+                            if self.decode_strings {
+                                if is_utf16_high_surrogate(codepoint) {
+                                    if hi_surrogate.is_some() {
+                                        return Err(self.error_unicode_high_surrogate());
+                                    }
+                                    hi_surrogate = Some(codepoint);
+                                    continue;
+                                }
+                                if is_utf16_low_surrogate(codepoint) {
+                                    if hi_surrogate.is_none() {
+                                        return Err(self.error_unicode_low_surrogate());
+                                    }
+                                    hi_surrogate = None;
+                                } else if hi_surrogate.is_some() {
+                                    return Err(self.error_unicode_low_surrogate());
+                                }
+                                if codepoint == 0 {
+                                    return Err(self.error_unicode_zero(escape_start));
+                                }
                             }
                         }
                         other => return Err(self.error_invalid_escape(other)),
                     }
                 }
                 ch if ch.is_control() => return Err(self.error_unescaped_control(ch)),
-                _ => self.bump(),
+                _ => {
+                    if hi_surrogate.is_some() {
+                        return Err(self.error_unicode_low_surrogate());
+                    }
+                    self.bump();
+                }
             }
         }
         Err(self.error_token_invalid_range(start, self.pos))
@@ -611,6 +707,40 @@ impl<'a> JsonDiagnosticParser<'a> {
         )
     }
 
+    fn error_unicode_escape_format(&self, start: usize) -> JsonInputDiagnostic {
+        self.error_with_range(
+            "\"\\u\" must be followed by four hexadecimal digits.".into(),
+            start,
+            self.pos.saturating_add(1),
+        )
+    }
+
+    fn error_unicode_zero(&self, start: usize) -> JsonInputDiagnostic {
+        let mut diagnostic = self.error_with_range(
+            "\\u0000 cannot be converted to text.".into(),
+            start,
+            start.saturating_add(6),
+        );
+        diagnostic.message = Some("unsupported Unicode escape sequence".into());
+        diagnostic
+    }
+
+    fn error_unicode_high_surrogate(&self) -> JsonInputDiagnostic {
+        self.error_with_range(
+            "Unicode high surrogate must not follow a high surrogate.".into(),
+            self.pos.saturating_sub(6),
+            self.pos,
+        )
+    }
+
+    fn error_unicode_low_surrogate(&self) -> JsonInputDiagnostic {
+        self.error_with_range(
+            "Unicode low surrogate must follow a high surrogate.".into(),
+            self.pos.saturating_sub(6),
+            self.pos,
+        )
+    }
+
     fn error_unescaped_control(&self, ch: char) -> JsonInputDiagnostic {
         self.error_with_range(
             format!("Character with value 0x{:02x} must be escaped.", ch as u32),
@@ -681,6 +811,7 @@ impl<'a> JsonDiagnosticParser<'a> {
     fn error_with_range(&self, detail: String, start: usize, end: usize) -> JsonInputDiagnostic {
         let (line, _column) = self.line_col_at(start);
         JsonInputDiagnostic {
+            message: None,
             detail,
             context: json_error_context_range(self.text, start, end)
                 .or_else(|| json_error_context(self.text, line, 1))
@@ -765,11 +896,367 @@ fn is_json_delimiter(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, ',' | ':' | ']' | '[' | '}' | '{')
 }
 
+fn is_utf16_high_surrogate(codepoint: u32) -> bool {
+    (0xD800..=0xDBFF).contains(&codepoint)
+}
+
+fn is_utf16_low_surrogate(codepoint: u32) -> bool {
+    (0xDC00..=0xDFFF).contains(&codepoint)
+}
+
 fn render_json_expected(expected: &str) -> String {
     if expected == "string" {
         expected.to_string()
     } else {
         format!("\"{expected}\"")
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RawJsonValue<'a> {
+    source: &'a str,
+    start: usize,
+    end: usize,
+    kind: RawJsonKind<'a>,
+}
+
+#[derive(Debug)]
+enum RawJsonKind<'a> {
+    Null,
+    String,
+    Scalar,
+    Array(Vec<RawJsonValue<'a>>),
+    Object(Vec<(String, RawJsonValue<'a>)>),
+}
+
+impl<'a> RawJsonValue<'a> {
+    pub(crate) fn raw_text(&self) -> &'a str {
+        &self.source[self.start..self.end]
+    }
+
+    pub(crate) fn is_null(&self) -> bool {
+        matches!(self.kind, RawJsonKind::Null)
+    }
+
+    pub(crate) fn is_string(&self) -> bool {
+        matches!(self.kind, RawJsonKind::String)
+    }
+
+    pub(crate) fn array_items(&self) -> Option<&[RawJsonValue<'a>]> {
+        match &self.kind {
+            RawJsonKind::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn lookup_key(&self, key: &str) -> Option<&RawJsonValue<'a>> {
+        let RawJsonKind::Object(entries) = &self.kind else {
+            return None;
+        };
+        entries
+            .iter()
+            .filter_map(|(entry_key, value)| (entry_key == key).then_some(value))
+            .last()
+    }
+
+    pub(crate) fn lookup_index(&self, index: i32) -> Option<&RawJsonValue<'a>> {
+        let RawJsonKind::Array(items) = &self.kind else {
+            return None;
+        };
+        let len = i32::try_from(items.len()).ok()?;
+        let index = if index < 0 {
+            len.checked_add(index)?
+        } else {
+            index
+        };
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| items.get(index))
+    }
+
+    pub(crate) fn lookup_path(&self, path: &[String]) -> Option<&RawJsonValue<'a>> {
+        let mut current = self;
+        for part in path {
+            current = match &current.kind {
+                RawJsonKind::Object(_) => current.lookup_key(part)?,
+                RawJsonKind::Array(_) => part
+                    .parse::<i32>()
+                    .ok()
+                    .and_then(|index| current.lookup_index(index))?,
+                _ => return None,
+            };
+        }
+        Some(current)
+    }
+}
+
+pub(crate) fn parse_raw_json_with_decoding(text: &str) -> Result<RawJsonValue<'_>, ExecError> {
+    validate_json_text_input_for_decoding(text)?;
+    RawJsonParser::new(text).parse()
+}
+
+pub(crate) fn decode_json_string_text(raw: &str) -> Result<String, ExecError> {
+    validate_json_text_input_for_decoding(raw)?;
+    let mut out = String::new();
+    let mut chars = raw[1..raw.len().saturating_sub(1)].chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('b') => out.push('\u{0008}'),
+            Some('f') => out.push('\u{000c}'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('u') => {
+                let mut codepoint = read_json_hex_escape(&mut chars)?;
+                if is_utf16_high_surrogate(codepoint) {
+                    if chars.next() == Some('\\') && chars.next() == Some('u') {
+                        let low = read_json_hex_escape(&mut chars)?;
+                        codepoint = 0x1_0000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00);
+                    }
+                }
+                if let Some(decoded) = char::from_u32(codepoint) {
+                    out.push(decoded);
+                }
+            }
+            _ => unreachable!("JSON string was validated before decoding"),
+        }
+    }
+    Ok(out)
+}
+
+fn read_json_hex_escape(chars: &mut std::str::Chars<'_>) -> Result<u32, ExecError> {
+    let mut codepoint = 0_u32;
+    for _ in 0..4 {
+        let ch = chars
+            .next()
+            .ok_or_else(|| ExecError::RaiseException("invalid JSON unicode escape".into()))?;
+        codepoint = codepoint * 16
+            + ch.to_digit(16)
+                .ok_or_else(|| ExecError::RaiseException("invalid JSON unicode escape".into()))?;
+    }
+    Ok(codepoint)
+}
+
+struct RawJsonParser<'a> {
+    text: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> RawJsonParser<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            bytes: text.as_bytes(),
+            pos: 0,
+        }
+    }
+
+    fn parse(mut self) -> Result<RawJsonValue<'a>, ExecError> {
+        self.skip_ws();
+        let value = self.parse_value()?;
+        self.skip_ws();
+        Ok(value)
+    }
+
+    fn parse_value(&mut self) -> Result<RawJsonValue<'a>, ExecError> {
+        self.skip_ws();
+        match self.peek() {
+            Some(b'"') => self.parse_string_value(),
+            Some(b'[') => self.parse_array(),
+            Some(b'{') => self.parse_object(),
+            Some(b'n') => self.parse_literal("null", RawJsonKind::Null),
+            Some(b't') => self.parse_literal("true", RawJsonKind::Scalar),
+            Some(b'f') => self.parse_literal("false", RawJsonKind::Scalar),
+            Some(b'-' | b'0'..=b'9') => self.parse_number(),
+            _ => Err(ExecError::RaiseException(
+                "invalid raw JSON parser state".into(),
+            )),
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<RawJsonValue<'a>, ExecError> {
+        let start = self.pos;
+        self.pos += 1;
+        let mut entries = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b'}') {
+            self.pos += 1;
+            return Ok(RawJsonValue {
+                source: self.text,
+                start,
+                end: self.pos,
+                kind: RawJsonKind::Object(entries),
+            });
+        }
+        loop {
+            let key = self.parse_object_key()?;
+            self.skip_ws();
+            self.expect_byte(b':')?;
+            let value = self.parse_value()?;
+            entries.push((key, value));
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => {
+                    self.pos += 1;
+                    self.skip_ws();
+                }
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(RawJsonValue {
+                        source: self.text,
+                        start,
+                        end: self.pos,
+                        kind: RawJsonKind::Object(entries),
+                    });
+                }
+                _ => {
+                    return Err(ExecError::RaiseException(
+                        "invalid raw JSON object parser state".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn parse_array(&mut self) -> Result<RawJsonValue<'a>, ExecError> {
+        let start = self.pos;
+        self.pos += 1;
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            return Ok(RawJsonValue {
+                source: self.text,
+                start,
+                end: self.pos,
+                kind: RawJsonKind::Array(items),
+            });
+        }
+        loop {
+            items.push(self.parse_value()?);
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => {
+                    self.pos += 1;
+                    self.skip_ws();
+                }
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(RawJsonValue {
+                        source: self.text,
+                        start,
+                        end: self.pos,
+                        kind: RawJsonKind::Array(items),
+                    });
+                }
+                _ => {
+                    return Err(ExecError::RaiseException(
+                        "invalid raw JSON array parser state".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn parse_object_key(&mut self) -> Result<String, ExecError> {
+        let start = self.pos;
+        self.scan_string()?;
+        decode_json_string_text(&self.text[start..self.pos])
+    }
+
+    fn parse_string_value(&mut self) -> Result<RawJsonValue<'a>, ExecError> {
+        let start = self.pos;
+        self.scan_string()?;
+        Ok(RawJsonValue {
+            source: self.text,
+            start,
+            end: self.pos,
+            kind: RawJsonKind::String,
+        })
+    }
+
+    fn scan_string(&mut self) -> Result<(), ExecError> {
+        self.expect_byte(b'"')?;
+        while let Some(byte) = self.peek() {
+            self.pos += 1;
+            match byte {
+                b'"' => return Ok(()),
+                b'\\' => {
+                    if self.peek() == Some(b'u') {
+                        self.pos += 1 + 4;
+                    } else {
+                        self.pos += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err(ExecError::RaiseException(
+            "invalid raw JSON string parser state".into(),
+        ))
+    }
+
+    fn parse_number(&mut self) -> Result<RawJsonValue<'a>, ExecError> {
+        let start = self.pos;
+        while self
+            .peek()
+            .is_some_and(|byte| matches!(byte, b'-' | b'+' | b'.' | b'0'..=b'9' | b'e' | b'E'))
+        {
+            self.pos += 1;
+        }
+        Ok(RawJsonValue {
+            source: self.text,
+            start,
+            end: self.pos,
+            kind: RawJsonKind::Scalar,
+        })
+    }
+
+    fn parse_literal(
+        &mut self,
+        literal: &str,
+        kind: RawJsonKind<'a>,
+    ) -> Result<RawJsonValue<'a>, ExecError> {
+        let start = self.pos;
+        self.pos += literal.len();
+        Ok(RawJsonValue {
+            source: self.text,
+            start,
+            end: self.pos,
+            kind,
+        })
+    }
+
+    fn skip_ws(&mut self) {
+        while self
+            .peek()
+            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            self.pos += 1;
+        }
+    }
+
+    fn expect_byte(&mut self, expected: u8) -> Result<(), ExecError> {
+        if self.peek() == Some(expected) {
+            self.pos += 1;
+            Ok(())
+        } else {
+            Err(ExecError::RaiseException(
+                "invalid raw JSON parser state".into(),
+            ))
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
     }
 }
 
@@ -997,6 +1484,10 @@ pub(crate) fn jsonb_get<'a>(
                 let name = key.as_text().unwrap();
                 items.iter().find(|(k, _)| k == name).map(|(_, v)| v)
             }
+            JsonbValue::Array(_) => key
+                .as_text()
+                .and_then(|text| text.parse::<i32>().ok())
+                .and_then(|idx| jsonb_get_index(value, idx)),
             _ => None,
         },
         Value::Int16(index) => jsonb_get_index(value, *index as i32),
@@ -1995,6 +2486,16 @@ mod tests {
                 "JSON data, line 1: \"\\v...",
             ),
             (
+                "\"\\u00\"",
+                "\"\\u\" must be followed by four hexadecimal digits.",
+                "JSON data, line 1: \"\\u00\"",
+            ),
+            (
+                "\"\\u000g\"",
+                "\"\\u\" must be followed by four hexadecimal digits.",
+                "JSON data, line 1: \"\\u000g...",
+            ),
+            (
                 "[1,2,]",
                 "Expected JSON value, but found \"]\".",
                 "JSON data, line 1: [1,2,]",
@@ -2066,6 +2567,45 @@ mod tests {
             } if message == "stack depth limit exceeded"
                 && sqlstate == "54001"
                 && hint.contains("\"max_stack_depth\" (currently 100kB)")
+        ));
+    }
+
+    #[test]
+    fn json_input_enforces_stack_depth_limit_without_decoding_escapes() {
+        let err = validate_json_text_input_with_limit(&"[".repeat(10_000), 100).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                hint: Some(hint),
+                sqlstate,
+                ..
+            } if message == "stack depth limit exceeded"
+                && sqlstate == "54001"
+                && hint.contains("\"max_stack_depth\" (currently 100kB)")
+        ));
+        assert!(validate_json_text_input("\"\\u0000\"").is_ok());
+        assert!(validate_json_text_input("\"\\ud83d\\ud83d\"").is_ok());
+    }
+
+    #[test]
+    fn jsonb_input_rejects_text_incompatible_unicode_escapes() {
+        let err = parse_jsonb_text("\"\\u0000\"").unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::JsonInput {
+                detail: Some(detail),
+                ..
+            } if detail == "\\u0000 cannot be converted to text."
+        ));
+
+        let err = parse_jsonb_text("\"\\ud83d\\ud83d\"").unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::JsonInput {
+                detail: Some(detail),
+                ..
+            } if detail == "Unicode high surrogate must not follow a high surrogate."
         ));
     }
 

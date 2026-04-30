@@ -486,7 +486,7 @@ pub fn execute_user_defined_scalar_function(
     if track_stats {
         ctx.session_stats.write().begin_function_call(proc_oid);
     }
-    let mut rows = execute_compiled_function(&compiled, &arg_values, None, ctx)?;
+    let mut rows = execute_compiled_function_for_call(&compiled, &arg_values, None, ctx)?;
     if track_stats {
         ctx.session_stats.write().finish_function_call(proc_oid);
     }
@@ -591,7 +591,7 @@ fn execute_user_defined_scalar_function_values_with_actual_arg_types(
     if track_stats {
         ctx.session_stats.write().begin_function_call(proc_oid);
     }
-    let mut rows = execute_compiled_function(&compiled, arg_values, None, ctx)?;
+    let mut rows = execute_compiled_function_for_call(&compiled, arg_values, None, ctx)?;
     if track_stats {
         ctx.session_stats.write().finish_function_call(proc_oid);
     }
@@ -1559,6 +1559,26 @@ fn execute_compiled_function(
     }
 }
 
+fn execute_compiled_function_for_call(
+    compiled: &CompiledFunction,
+    arg_values: &[Value],
+    expected_record_shape: Option<&[QueryColumn]>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let saved_snapshot_cid = if compiled.provolatile == 'v' {
+        let saved = ctx.snapshot.current_cid;
+        ctx.snapshot.current_cid = CommandId::MAX;
+        Some(saved)
+    } else {
+        None
+    };
+    let result = execute_compiled_function(compiled, arg_values, expected_record_shape, ctx);
+    if let Some(saved) = saved_snapshot_cid {
+        ctx.snapshot.current_cid = saved;
+    }
+    result
+}
+
 fn exec_do_block(
     block: &CompiledBlock,
     values: &mut [Value],
@@ -1855,6 +1875,7 @@ fn exec_do_stmt(
             "SET is only supported inside CREATE FUNCTION".into(),
         ))),
         CompiledStmt::Return { .. }
+        | CompiledStmt::ReturnSelect { .. }
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
         | CompiledStmt::ReturnTriggerNull
@@ -1878,11 +1899,10 @@ fn exec_do_stmt(
         | CompiledStmt::ExecDeleteInto { .. }
         | CompiledStmt::ExecDelete { .. }
         | CompiledStmt::CreateTableAs { .. }
-        | CompiledStmt::CreateTable { .. } => {
-            Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "statement is only supported inside CREATE FUNCTION".into(),
-            )))
-        }
+        | CompiledStmt::CreateTable { .. }
+        | CompiledStmt::ExecSql { .. } => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "statement is only supported inside CREATE FUNCTION".into(),
+        ))),
     }
 }
 
@@ -2394,6 +2414,9 @@ fn exec_function_stmt(
         CompiledStmt::Return { expr, .. } => {
             exec_function_return(expr.as_ref(), compiled, expected_record_shape, state, ctx)
         }
+        CompiledStmt::ReturnSelect { plan, sql, .. } => {
+            exec_function_return_select(plan, sql, compiled, expected_record_shape, state, ctx)
+        }
         CompiledStmt::ReturnNext { expr } => {
             exec_function_return_next(expr.as_ref(), compiled, expected_record_shape, state, ctx)?;
             Ok(FunctionControl::Continue)
@@ -2447,6 +2470,11 @@ fn exec_function_stmt(
             } else {
                 state.session_guc_writes.insert(normalized);
             }
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::ExecSql { sql } => {
+            let result = execute_dynamic_sql_statement(sql, false, compiled, state, ctx)?;
+            state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::CommentOnFunction { stmt } => {
@@ -2631,7 +2659,7 @@ fn exec_function_return(
         } => {
             state.scalar_return = Some(match expr {
                 Some(expr) => {
-                    let value = eval_function_expr(expr, &state.values, ctx)?;
+                    let value = eval_function_expr_inner(expr, &state.values, ctx)?;
                     cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)
                         .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?
                 }
@@ -2689,6 +2717,64 @@ fn exec_function_return(
             Ok(FunctionControl::Return)
         }
     }
+}
+
+fn exec_function_return_select(
+    plan: &crate::include::nodes::plannodes::PlannedStmt,
+    sql: &str,
+    compiled: &CompiledFunction,
+    expected_record_shape: Option<&[QueryColumn]>,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionControl, ExecError> {
+    let FunctionReturnContract::Scalar {
+        ty,
+        setof: false,
+        output_slot: None,
+    } = &compiled.return_contract
+    else {
+        return exec_function_return(None, compiled, expected_record_shape, state, ctx);
+    };
+    let saved_snapshot_cid = if compiled.provolatile == 'v' {
+        let saved = ctx.snapshot.current_cid;
+        ctx.snapshot.current_cid = crate::backend::access::transam::xact::CommandId::MAX;
+        Some(saved)
+    } else {
+        None
+    };
+    let result = if compiled.provolatile == 'v' {
+        statement_result_to_query_result(
+            execute_dynamic_sql_statement(sql, true, compiled, state, ctx)?,
+            "RETURN query did not produce rows",
+        )
+    } else {
+        execute_function_query_result(plan, compiled, state, ctx)
+    }
+    .map_err(|err| with_sql_statement_context(err, Some(sql)));
+    if let Some(saved) = saved_snapshot_cid {
+        ctx.snapshot.current_cid = saved;
+    }
+    let result = result?;
+    if result.rows.len() > 1 {
+        return Err(ExecError::DetailedError {
+            message: "more than one row returned by a subquery used as an expression".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "21000",
+        });
+    }
+    let source_type = result.columns.first().map(|column| column.sql_type);
+    let value = result
+        .rows
+        .first()
+        .and_then(|row| row.values.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    state.scalar_return = Some(
+        cast_function_value(value, source_type, *ty, ctx)
+            .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?,
+    );
+    Ok(FunctionControl::Return)
 }
 
 fn exec_function_return_next(
@@ -4060,6 +4146,7 @@ fn execute_dynamic_sql_statement(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
+    refresh_dynamic_sql_catalog(ctx);
     let catalog = ctx.catalog.clone().ok_or_else(|| {
         function_runtime_error(
             "user-defined functions require executor catalog context",
@@ -4157,6 +4244,7 @@ fn execute_dynamic_sql_statement(
             crate::backend::parser::Statement::CreateTable(stmt) => {
                 exec_dynamic_create_table(&stmt, ctx)
             }
+            crate::backend::parser::Statement::Analyze(stmt) => exec_dynamic_analyze(&stmt, ctx),
             crate::backend::parser::Statement::DropIndex(stmt) => {
                 exec_function_drop_index(&stmt, ctx)
             }
@@ -4195,6 +4283,58 @@ fn execute_dynamic_sql_statement(
         })
     });
     result.map_err(|err| with_sql_statement_context(err, Some(sql)))
+}
+
+fn refresh_dynamic_sql_catalog(ctx: &mut ExecutorContext) {
+    let Some(db) = ctx.database.clone() else {
+        return;
+    };
+    let search_path = plpgsql_configured_search_path(ctx);
+    let txn_ctx = ctx.transaction_xid().map(|xid| (xid, ctx.next_command_id));
+    let catalog = db.lazy_catalog_lookup(ctx.client_id, txn_ctx, search_path.as_deref());
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(catalog));
+}
+
+fn exec_dynamic_analyze(
+    stmt: &crate::backend::parser::AnalyzeStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let db = ctx.database.clone().ok_or_else(|| {
+        function_runtime_error(
+            "PL/pgSQL ANALYZE requires database execution context",
+            None,
+            "0A000",
+        )
+    })?;
+    let xid = ctx.ensure_write_xid()?;
+    let cid = ctx.next_command_id;
+    let search_path = plpgsql_configured_search_path(ctx);
+    let targets = db.effective_analyze_targets_with_search_path(
+        ctx.client_id,
+        Some((xid, cid)),
+        search_path.as_deref(),
+        stmt,
+    )?;
+    let effect_start = ctx.catalog_effects.len();
+    let result = db.execute_analyze_stmt_in_transaction_with_search_path(
+        ctx.client_id,
+        &targets,
+        xid,
+        cid,
+        search_path.as_deref(),
+        false,
+        &mut ctx.catalog_effects,
+    );
+    if result.is_ok() {
+        let consumed_catalog_cids = ctx
+            .catalog_effects
+            .len()
+            .saturating_sub(effect_start)
+            .max(1);
+        advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+        refresh_dynamic_sql_catalog(ctx);
+    }
+    result
 }
 
 fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerConfig {
@@ -4469,6 +4609,7 @@ fn export_open_cursors_as_portals(state: &FunctionState, ctx: &mut ExecutorConte
                 visible: true,
             },
             true,
+            0,
             cursor.columns.clone(),
             column_names,
             rows,
@@ -7129,7 +7270,8 @@ fn stmt_context_line(stmt: &CompiledStmt) -> usize {
         | CompiledStmt::Assign { line, .. }
         | CompiledStmt::AssignSubscript { line, .. }
         | CompiledStmt::AssignIndirect { line, .. }
-        | CompiledStmt::Return { line, .. } => *line,
+        | CompiledStmt::Return { line, .. }
+        | CompiledStmt::ReturnSelect { line, .. } => *line,
         _ => 1,
     }
 }
@@ -7153,7 +7295,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::Reraise => "RAISE",
         CompiledStmt::Assert { .. } => "ASSERT",
         CompiledStmt::Continue => "CONTINUE",
-        CompiledStmt::Return { .. } => "RETURN",
+        CompiledStmt::Return { .. } | CompiledStmt::ReturnSelect { .. } => "RETURN",
         CompiledStmt::ReturnNext { .. } => "RETURN NEXT",
         CompiledStmt::ReturnQuery { .. } => "RETURN QUERY",
         CompiledStmt::ReturnTriggerRow { .. }
@@ -7178,7 +7320,8 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         | CompiledStmt::ExecDeleteInto { .. }
         | CompiledStmt::ExecDelete { .. }
         | CompiledStmt::CreateTableAs { .. }
-        | CompiledStmt::CreateTable { .. } => "SQL statement",
+        | CompiledStmt::CreateTable { .. }
+        | CompiledStmt::ExecSql { .. } => "SQL statement",
     }
 }
 

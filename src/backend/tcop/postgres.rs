@@ -334,6 +334,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     if suppress_sql_json_query_function_runtime_position(sql, e) {
         return None;
     }
+    if suppress_legacy_json_runtime_position(sql, e) {
+        return None;
+    }
     if matches!(e, ExecError::Regex(_))
         && is_jsonpath_sql_surface(sql)
         && let Some(position) = find_jsonpath_literal_position(sql)
@@ -418,7 +421,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnknownTable(name)) => {
             let lower = sql.trim_start().to_ascii_lowercase();
-            if lower.starts_with("select ") || lower.starts_with("delete ") {
+            if lower.starts_with("select ")
+                || lower.starts_with("delete ")
+                || lower.starts_with("insert ")
+            {
                 return find_case_insensitive_token_position(sql, name);
             }
             return None;
@@ -499,6 +505,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, system_column);
             }
             if message.starts_with("invalid value for parameter \"") {
+                return None;
+            }
+            if message.starts_with("invalid snapshot identifier: ")
+                || (message.starts_with("snapshot \"") && message.ends_with("\" does not exist"))
+            {
                 return None;
             }
             if message == "cannot determine type of empty array" {
@@ -1121,6 +1132,83 @@ fn suppress_sql_json_query_function_runtime_position(sql: &str, e: &ExecError) -
         }
         _ => false,
     }
+}
+
+fn suppress_legacy_json_runtime_position(sql: &str, e: &ExecError) -> bool {
+    match e {
+        ExecError::WithContext { source, .. } => suppress_legacy_json_runtime_position(sql, source),
+        ExecError::DetailedError { message, .. } => {
+            (is_legacy_json_record_function_surface(sql)
+                && message.starts_with("invalid input syntax for type "))
+                || (is_unique_json_object_agg_surface(sql)
+                    && message.starts_with("duplicate JSON object key value: "))
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+            is_legacy_json_record_function_surface(sql)
+                && message.starts_with("invalid input syntax for type ")
+        }
+        ExecError::InvalidStorageValue { details, .. } => {
+            is_legacy_json_record_function_surface(sql)
+                && details.starts_with("invalid input syntax for type ")
+        }
+        ExecError::InvalidIntegerInput { .. }
+        | ExecError::IntegerOutOfRange { .. }
+        | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidUuidInput { .. }
+        | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidGeometryInput { .. }
+        | ExecError::InvalidRangeInput { .. }
+        | ExecError::InvalidBitInput { .. }
+        | ExecError::InvalidBooleanInput { .. }
+        | ExecError::InvalidFloatInput { .. }
+        | ExecError::FloatOutOfRange { .. } => is_legacy_json_record_function_surface(sql),
+        _ => false,
+    }
+}
+
+fn is_legacy_json_record_function_surface(sql: &str) -> bool {
+    find_json_function_name_index(
+        sql,
+        &[
+            "json_populate_record",
+            "json_populate_recordset",
+            "json_to_record",
+            "json_to_recordset",
+        ],
+    )
+    .is_some()
+}
+
+fn is_unique_json_object_agg_surface(sql: &str) -> bool {
+    find_json_function_name_index(
+        sql,
+        &[
+            "json_object_agg_unique",
+            "json_object_agg_unique_strict",
+            "jsonb_object_agg_unique",
+            "jsonb_object_agg_unique_strict",
+        ],
+    )
+    .is_some()
+}
+
+fn find_json_function_name_index(sql: &str, names: &[&str]) -> Option<usize> {
+    names
+        .iter()
+        .filter_map(|name| find_json_function_name_index_for(sql, name))
+        .min()
+}
+
+fn find_json_function_name_index_for(sql: &str, name: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(index) = find_ascii_keyword(sql, name, start) {
+        let after_name = skip_ascii_whitespace(sql, index + name.len(), sql.len());
+        if sql.as_bytes().get(after_name) == Some(&b'(') {
+            return Some(index);
+        }
+        start = index + name.len();
+    }
+    None
 }
 
 fn sql_json_query_function_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -4292,7 +4380,7 @@ fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
 }
 use crate::ClientId;
 use crate::pgrust::cluster::Cluster;
-use crate::pgrust::database::Database;
+use crate::pgrust::database::{Database, SessionPreparedStatementViewRow};
 use crate::pgrust::portal::{CursorOptions, PortalFetchDirection, PortalFetchLimit};
 use crate::pgrust::session::{
     CopyCommand, CopyDirection, CopyEndpoint, CopyExecutionResult, Session, parse_copy_command,
@@ -4307,6 +4395,7 @@ static NEXT_CLIENT_ID: AtomicU32 = AtomicU32::new(1);
 struct PreparedStatement {
     sql: String,
     param_type_oids: Vec<u32>,
+    prepare_time: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -4670,8 +4759,18 @@ fn handle_query(
         send_ready_with_pending_messages(stream, db, &state.session)?;
         return Ok(());
     }
+    // :HACK: pg_regress drives psql backslash-escaped semicolons as one Query
+    // message.  Normalize that psql surface form before the protocol splitter so
+    // the backend still sees the individual SQL commands.
+    let normalized_escaped_semicolons;
+    let split_sql = if sql.contains("\\;") {
+        normalized_escaped_semicolons = normalize_psql_escaped_semicolons(sql);
+        normalized_escaped_semicolons.as_str()
+    } else {
+        sql
+    };
     let statements =
-        split_simple_query_statements(sql, state.session.standard_conforming_strings())
+        split_simple_query_statements(split_sql, state.session.standard_conforming_strings())
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -4687,6 +4786,14 @@ fn handle_query(
     Ok(())
 }
 
+fn normalize_psql_escaped_semicolons(sql: &str) -> String {
+    let mut normalized = sql.to_string();
+    while normalized.contains("\\;") {
+        normalized = normalized.replace("\\;", ";");
+    }
+    normalized
+}
+
 struct SimpleQueryExecutionResult {
     executed_any: bool,
     copy_in_started: bool,
@@ -4698,22 +4805,107 @@ enum QueryStatementFlow {
     CopyInStarted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SimpleQueryTxnControl {
+    Begin,
+    Commit { chain: bool },
+    Rollback { chain: bool },
+    Savepoint,
+    Release,
+    RollbackTo,
+    Other,
+}
+
 fn execute_simple_query_statements(
     stream: &mut impl Write,
     db: &Database,
     state: &mut ConnectionState,
     statements: Vec<String>,
 ) -> io::Result<SimpleQueryExecutionResult> {
+    let multi_statement = statements
+        .iter()
+        .filter(|sql| !sql_is_effectively_empty_after_comments(sql))
+        .count()
+        > 1;
     let mut executed_any = false;
     let mut statements = statements.into_iter();
+    let mut hidden_implicit_txn = false;
     while let Some(raw_stmt) = statements.next() {
         if sql_is_effectively_empty_after_comments(&raw_stmt) {
             continue;
         }
         executed_any = true;
+        let txn_control = simple_query_txn_control(&raw_stmt);
+        if multi_statement
+            && !hidden_implicit_txn
+            && !state.session.in_transaction()
+            && simple_query_starts_implicit_transaction(txn_control)
+        {
+            state.session.begin_implicit_query_transaction(db);
+            hidden_implicit_txn = true;
+        }
+        if hidden_implicit_txn {
+            match txn_control {
+                SimpleQueryTxnControl::Begin => {
+                    hidden_implicit_txn = false;
+                    send_command_complete(stream, "BEGIN")?;
+                    continue;
+                }
+                SimpleQueryTxnControl::Commit { chain: false } => {
+                    if let Err(e) = state.session.commit_implicit_query_transaction(db) {
+                        send_exec_error(stream, &raw_stmt, &e)?;
+                        return Ok(SimpleQueryExecutionResult {
+                            executed_any,
+                            copy_in_started: false,
+                        });
+                    }
+                    hidden_implicit_txn = false;
+                }
+                SimpleQueryTxnControl::Rollback { chain: false } => {
+                    state.session.rollback_implicit_query_transaction(db);
+                    hidden_implicit_txn = false;
+                }
+                SimpleQueryTxnControl::Commit { chain: true } => {
+                    let err = simple_query_chain_requires_transaction_error("COMMIT");
+                    send_exec_error(stream, &raw_stmt, &err)?;
+                    state.session.rollback_implicit_query_transaction(db);
+                    return Ok(SimpleQueryExecutionResult {
+                        executed_any,
+                        copy_in_started: false,
+                    });
+                }
+                SimpleQueryTxnControl::Rollback { chain: true } => {
+                    let err = simple_query_chain_requires_transaction_error("ROLLBACK");
+                    send_exec_error(stream, &raw_stmt, &err)?;
+                    state.session.rollback_implicit_query_transaction(db);
+                    return Ok(SimpleQueryExecutionResult {
+                        executed_any,
+                        copy_in_started: false,
+                    });
+                }
+                SimpleQueryTxnControl::Savepoint
+                | SimpleQueryTxnControl::Release
+                | SimpleQueryTxnControl::RollbackTo => {
+                    let err = simple_query_savepoint_requires_transaction_error(txn_control);
+                    send_exec_error(stream, &raw_stmt, &err)?;
+                    state.session.rollback_implicit_query_transaction(db);
+                    return Ok(SimpleQueryExecutionResult {
+                        executed_any,
+                        copy_in_started: false,
+                    });
+                }
+                SimpleQueryTxnControl::Other => {}
+            }
+        }
         match execute_query_statement(stream, db, state, &raw_stmt)? {
             QueryStatementFlow::Continue => {}
-            QueryStatementFlow::Stop => break,
+            QueryStatementFlow::Stop => {
+                if hidden_implicit_txn {
+                    state.session.rollback_implicit_query_transaction(db);
+                    hidden_implicit_txn = false;
+                }
+                break;
+            }
             QueryStatementFlow::CopyInStarted => {
                 if let Some(copy) = state.copy_in.as_mut() {
                     copy.continuation = statements.collect();
@@ -4725,10 +4917,76 @@ fn execute_simple_query_statements(
             }
         }
     }
+    if hidden_implicit_txn && let Err(e) = state.session.commit_implicit_query_transaction(db) {
+        send_exec_error(stream, "", &e)?;
+    }
 
     Ok(SimpleQueryExecutionResult {
         executed_any,
         copy_in_started: false,
+    })
+}
+
+fn simple_query_txn_control(sql: &str) -> SimpleQueryTxnControl {
+    let normalized = sql
+        .trim_start()
+        .trim_end_matches(';')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if normalized.starts_with("begin") || normalized.starts_with("start transaction") {
+        return SimpleQueryTxnControl::Begin;
+    }
+    if normalized.starts_with("commit") || normalized.starts_with("end") {
+        return SimpleQueryTxnControl::Commit {
+            chain: normalized.contains(" and chain"),
+        };
+    }
+    if normalized.starts_with("rollback to") || normalized.starts_with("abort to") {
+        return SimpleQueryTxnControl::RollbackTo;
+    }
+    if normalized.starts_with("rollback") || normalized.starts_with("abort") {
+        return SimpleQueryTxnControl::Rollback {
+            chain: normalized.contains(" and chain"),
+        };
+    }
+    if normalized.starts_with("savepoint") {
+        return SimpleQueryTxnControl::Savepoint;
+    }
+    if normalized.starts_with("release") {
+        return SimpleQueryTxnControl::Release;
+    }
+    SimpleQueryTxnControl::Other
+}
+
+fn simple_query_starts_implicit_transaction(control: SimpleQueryTxnControl) -> bool {
+    matches!(control, SimpleQueryTxnControl::Other)
+}
+
+fn simple_query_chain_requires_transaction_error(command: &'static str) -> ExecError {
+    ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+        message: format!("{command} AND CHAIN can only be used in transaction blocks"),
+        detail: None,
+        hint: None,
+        sqlstate: "25001",
+    })
+}
+
+fn simple_query_savepoint_requires_transaction_error(control: SimpleQueryTxnControl) -> ExecError {
+    let message = match control {
+        SimpleQueryTxnControl::Savepoint => "SAVEPOINT can only be used in transaction blocks",
+        SimpleQueryTxnControl::Release => {
+            "RELEASE SAVEPOINT can only be used in transaction blocks"
+        }
+        SimpleQueryTxnControl::RollbackTo => {
+            "ROLLBACK TO SAVEPOINT can only be used in transaction blocks"
+        }
+        _ => "savepoint command can only be used in transaction blocks",
+    };
+    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+        expected: "active transaction",
+        actual: message.into(),
     })
 }
 
@@ -4860,173 +5118,25 @@ fn fetch_limit_from_i64(count: Option<i64>) -> PortalFetchLimit {
     }
 }
 
-fn try_handle_pg_cursors_query(
-    stream: &mut impl Write,
-    state: &ConnectionState,
-    sql: &str,
-) -> io::Result<bool> {
-    let normalized = sql.to_ascii_lowercase();
-    if !normalized.contains("from pg_cursors") && !normalized.contains("from pg_catalog.pg_cursors")
-    {
-        return Ok(false);
-    }
-    let name_only = normalized.trim_start().starts_with("select name ");
-    let columns = if name_only {
-        vec![QueryColumn::text("name")]
-    } else {
-        vec![
-            QueryColumn::text("name"),
-            QueryColumn::text("statement"),
-            QueryColumn {
-                name: "is_holdable".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-            QueryColumn {
-                name: "is_binary".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-            QueryColumn {
-                name: "is_scrollable".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-        ]
-    };
-    let rows = state
-        .session
-        .cursor_view_rows()
-        .into_iter()
-        .map(|row| {
-            if name_only {
-                vec![Value::Text(row.name.into())]
-            } else {
-                vec![
-                    Value::Text(row.name.into()),
-                    Value::Text(row.statement.into()),
-                    Value::Bool(row.is_holdable),
-                    Value::Bool(row.is_binary),
-                    Value::Bool(row.is_scrollable),
-                ]
-            }
-        })
-        .collect::<Vec<_>>();
-    send_query_result(
-        stream,
-        &columns,
-        &rows,
-        &format!("SELECT {}", rows.len()),
-        FloatFormatOptions {
-            extra_float_digits: state.session.extra_float_digits(),
-            bytea_output: state.session.bytea_output(),
-            datetime_config: state.session.datetime_config().clone(),
-        },
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )?;
-    Ok(true)
-}
-
-// :HACK: This session-state view lives in the wire connection today. Long-term,
-// pg_prepared_statements should be modeled in normal catalog/executor paths.
-fn try_handle_pg_prepared_statements_query(
-    stream: &mut impl Write,
-    state: &ConnectionState,
-    sql: &str,
-) -> io::Result<bool> {
-    let normalized = sql.to_ascii_lowercase();
-    if !normalized.contains("from pg_prepared_statements")
-        && !normalized.contains("from pg_catalog.pg_prepared_statements")
-    {
-        return Ok(false);
-    }
-    let projection = pg_prepared_statements_projection(&normalized);
-    let columns = if projection == PreparedStatementsProjection::Name {
-        vec![QueryColumn::text("name")]
-    } else if projection == PreparedStatementsProjection::NameStatement {
-        vec![QueryColumn::text("name"), QueryColumn::text("statement")]
-    } else {
-        vec![
-            QueryColumn::text("name"),
-            QueryColumn::text("statement"),
-            QueryColumn {
-                name: "from_sql".into(),
-                sql_type: SqlType::new(SqlTypeKind::Bool),
-                wire_type_oid: None,
-            },
-        ]
-    };
-    let mut prepared_rows = state
+fn refresh_protocol_prepared_statement_view_rows(state: &mut ConnectionState) {
+    let mut rows = state
         .prepared
         .iter()
-        .map(|(name, prepared)| (name.clone(), prepared.sql.clone(), false))
-        .chain(
-            state
-                .session
-                .prepared_statement_rows()
-                .into_iter()
-                .map(|(name, sql)| (name, sql, true)),
-        )
-        .collect::<Vec<_>>();
-    prepared_rows.sort_by(|left, right| left.0.cmp(&right.0));
-    let rows = prepared_rows
-        .into_iter()
-        .map(|(name, statement, from_sql)| match projection {
-            PreparedStatementsProjection::Name => vec![Value::Text(name.into())],
-            PreparedStatementsProjection::NameStatement => {
-                vec![Value::Text(name.into()), Value::Text(statement.into())]
-            }
-            PreparedStatementsProjection::All => vec![
-                Value::Text(name.into()),
-                Value::Text(statement.into()),
-                Value::Bool(from_sql),
-            ],
+        .map(|(name, prepared)| SessionPreparedStatementViewRow {
+            name: name.clone(),
+            statement: prepared.sql.clone(),
+            prepare_time: prepared.prepare_time,
+            parameter_type_oids: prepared.param_type_oids.clone(),
+            result_type_oids: Vec::new(),
+            from_sql: false,
+            generic_plans: 0,
+            custom_plans: 0,
         })
         .collect::<Vec<_>>();
-    send_query_result(
-        stream,
-        &columns,
-        &rows,
-        &format!("SELECT {}", rows.len()),
-        FloatFormatOptions {
-            extra_float_digits: state.session.extra_float_digits(),
-            bytea_output: state.session.bytea_output(),
-            datetime_config: state.session.datetime_config().clone(),
-        },
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )?;
-    Ok(true)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PreparedStatementsProjection {
-    Name,
-    NameStatement,
-    All,
-}
-
-fn pg_prepared_statements_projection(normalized_sql: &str) -> PreparedStatementsProjection {
-    let Some(select_clause) = normalized_sql.split(" from ").next() else {
-        return PreparedStatementsProjection::All;
-    };
-    let Some(projection) = select_clause.trim_start().strip_prefix("select") else {
-        return PreparedStatementsProjection::All;
-    };
-    match projection.split_whitespace().collect::<String>().as_str() {
-        "name" => PreparedStatementsProjection::Name,
-        "name,statement" => PreparedStatementsProjection::NameStatement,
-        _ => PreparedStatementsProjection::All,
-    }
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    state
+        .session
+        .set_protocol_prepared_statement_view_rows(rows);
 }
 
 fn try_handle_pg_listening_channels_query(
@@ -5310,16 +5420,11 @@ fn execute_query_statement(
         )
         .map_err(|e| io::Error::other(format!("{e:?}")))
     };
+    refresh_protocol_prepared_statement_view_rows(state);
     if let Ok(stmt) = parsed.as_ref()
         && let Some(flow) = handle_portal_statement(stream, db, state, sql.as_ref(), stmt)?
     {
         return Ok(flow);
-    }
-    if try_handle_pg_cursors_query(stream, state, sql.as_ref())? {
-        return Ok(QueryStatementFlow::Continue);
-    }
-    if try_handle_pg_prepared_statements_query(stream, state, sql.as_ref())? {
-        return Ok(QueryStatementFlow::Continue);
     }
     if try_handle_pg_listening_channels_query(stream, db, state, sql.as_ref())? {
         return Ok(QueryStatementFlow::Continue);
@@ -5661,6 +5766,7 @@ fn execute_streaming_select_statement(
             drop(guard);
 
             if let Some(e) = err {
+                state.session.mark_transaction_failed();
                 send_queued_notices_with_sql(stream, Some(sql))?;
                 send_exec_error(stream, sql, &e)?;
                 return Ok(QueryStatementFlow::Stop);
@@ -5674,6 +5780,7 @@ fn execute_streaming_select_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Err(e) => {
+            state.session.mark_transaction_failed();
             send_queued_notices_with_sql(stream, Some(sql))?;
             send_exec_error(stream, sql, &e)?;
             Ok(QueryStatementFlow::Stop)
@@ -10089,6 +10196,7 @@ fn handle_parse(
         PreparedStatement {
             sql,
             param_type_oids,
+            prepare_time: crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
         },
     );
     send_parse_complete(stream)
@@ -12751,7 +12859,7 @@ mod tests {
             "privileges for membership of role user3 in role user1"
         ));
         assert!(
-            db.backend_catcache(2, None)
+            !db.backend_catcache(2, None)
                 .unwrap()
                 .authid_rows()
                 .into_iter()
@@ -13423,6 +13531,7 @@ mod tests {
             required_bind_param_count(&PreparedStatement {
                 sql: "select $2".into(),
                 param_type_oids: vec![],
+                prepare_time: 0,
             }),
             2
         );
@@ -13430,6 +13539,7 @@ mod tests {
             required_bind_param_count(&PreparedStatement {
                 sql: "select 1".into(),
                 param_type_oids: vec![23, 25],
+                prepare_time: 0,
             }),
             2
         );
@@ -15846,6 +15956,34 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             detail: Some("Token \"aaa\" is invalid.".into()),
             context: Some("JSON data, line 1: aaa".into()),
             sqlstate: "22P02",
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_omits_legacy_json_runtime_errors() {
+        let sql = "select * from json_populate_record(row('x',3,'2012-12-31 15:30:56')::jpop,'{\"c\":[100,200,false],\"x\":43.2}') q;";
+        let err = ExecError::DetailedError {
+            message: "invalid input syntax for type timestamp: \"[100,200,false]\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22007",
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "invalid input syntax for type timestamp: \"[100,200,false]\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22007",
+        });
+        assert_eq!(exec_error_position(sql, &err), None);
+
+        let sql = "select json_object_agg_unique(mod(i,100), i) from generate_series(0, 199) i;";
+        let err = ExecError::DetailedError {
+            message: "duplicate JSON object key value: \"0\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22030",
         };
         assert_eq!(exec_error_position(sql, &err), None);
     }
