@@ -2259,7 +2259,9 @@ fn collect_relation_access_paths(
                 && access_method_supports_bitmap_scan(index.index_meta.am_oid)
                 && brin_partial_bitmap_allowed(index, config)
                 && !order_removing_index_scan_available
-                && !target_index_only_unique_btree(index, target_index_only)
+                && !(config.enable_indexscan
+                    && target_index_only_unique_btree(index, target_index_only))
+                && !target_index_only_btree_scalar_array_range(index, target_index_only, &spec)
                 && !(!config.enable_seqscan
                     && config.enable_indexonlyscan
                     && spec.row_prefix
@@ -2411,6 +2413,23 @@ fn target_index_only_unique_btree(
     target_index_only
         && index.index_meta.indisunique
         && index.index_meta.am_oid == crate::include::catalog::BTREE_AM_OID
+}
+
+fn target_index_only_btree_scalar_array_range(
+    index: &crate::backend::parser::BoundIndexRelation,
+    target_index_only: bool,
+    spec: &IndexPathSpec,
+) -> bool {
+    target_index_only
+        && index.index_meta.am_oid == crate::include::catalog::BTREE_AM_OID
+        && spec.keys.iter().any(|key| {
+            key.strategy == 3
+                && matches!(
+                    key.argument.as_const(),
+                    Some(Value::Array(_) | Value::PgArray(_))
+                )
+        })
+        && spec.keys.iter().any(|key| key.strategy != 3)
 }
 
 fn mark_seqscan_disabled(path: &mut Path) {

@@ -2595,23 +2595,29 @@ fn push_nonverbose_plan_details(
             true
         }
         Plan::SeqScan {
-            tablesample: Some(sample),
+            disabled,
+            tablesample,
             ..
-        } => {
-            let args = sample
-                .args
-                .iter()
-                .map(|expr| render_verbose_expr(expr, &[], ctx))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let mut detail = format!("{} ({})", sample.method.to_ascii_lowercase(), args);
-            if let Some(repeatable) = &sample.repeatable {
-                detail.push_str(&format!(
-                    " REPEATABLE ({})",
-                    render_verbose_expr(repeatable, &[], ctx)
-                ));
+        } if *disabled || tablesample.is_some() => {
+            if *disabled {
+                lines.push(format!("{prefix}Disabled: true"));
             }
-            lines.push(format!("{prefix}Sampling: {detail}"));
+            if let Some(sample) = tablesample {
+                let args = sample
+                    .args
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &[], ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut detail = format!("{} ({})", sample.method.to_ascii_lowercase(), args);
+                if let Some(repeatable) = &sample.repeatable {
+                    detail.push_str(&format!(
+                        " REPEATABLE ({})",
+                        render_verbose_expr(repeatable, &[], ctx)
+                    ));
+                }
+                lines.push(format!("{prefix}Sampling: {detail}"));
+            }
             true
         }
         Plan::TidScan {
@@ -2947,6 +2953,10 @@ fn push_nonverbose_scan_details(
             ctx,
             lines,
         ),
+        Plan::SeqScan { disabled, .. } if *disabled => {
+            let prefix = explain_detail_prefix(indent);
+            lines.push(format!("{prefix}Disabled: true"));
+        }
         _ => {}
     }
 }
