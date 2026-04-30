@@ -182,14 +182,12 @@ pub(crate) fn parse_default(text: &str) -> Vec<ParsedTextSearchToken> {
             index += consumed;
             continue;
         }
-        let Some((_, ch)) = text[index..].char_indices().next() else {
-            break;
-        };
+        let consumed = take_separator_run(&text[index..]);
         out.push(ParsedTextSearchToken {
             tokid: SPACE,
-            token: ch.to_string(),
+            token: text[index..index + consumed].to_string(),
         });
-        index += ch.len_utf8();
+        index += consumed;
     }
     out
 }
@@ -253,9 +251,6 @@ pub(crate) fn token_has_dictionary(tokid: i32) -> bool {
 fn next_token(input: &str) -> Option<(i32, String, usize, Vec<ParsedTextSearchToken>)> {
     if input.is_empty() {
         return None;
-    }
-    if let Some(consumed) = take_while(input, |ch| ch.is_whitespace()) {
-        return Some((SPACE, input[..consumed].to_string(), consumed, Vec::new()));
     }
     if let Some(consumed) = take_xml_tag(input) {
         return Some((TAG_T, input[..consumed].to_string(), consumed, Vec::new()));
@@ -324,6 +319,33 @@ fn next_token(input: &str) -> Option<(i32, String, usize, Vec<ParsedTextSearchTo
         return Some((tokid, token.to_string(), consumed, Vec::new()));
     }
     None
+}
+
+fn take_separator_run(input: &str) -> usize {
+    if input.chars().next().is_some_and(|ch| ch.is_whitespace()) {
+        let whitespace = take_while(input, |ch| ch.is_whitespace()).unwrap_or(1);
+        let rest = &input[whitespace..];
+        if rest.starts_with('<') || rest.is_empty() || next_token(rest).is_some() {
+            return whitespace;
+        }
+        return whitespace + take_separator_run(rest);
+    }
+
+    let mut consumed = 0usize;
+    while consumed < input.len() {
+        let rest = &input[consumed..];
+        if consumed > 0 && next_token(rest).is_some() {
+            break;
+        }
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        consumed += ch.len_utf8();
+        if ch.is_whitespace() {
+            break;
+        }
+    }
+    consumed
 }
 
 fn take_while(input: &str, mut pred: impl FnMut(char) -> bool) -> Option<usize> {
@@ -417,10 +439,11 @@ fn take_protocol_url(input: &str) -> Option<(usize, usize, Vec<ParsedTextSearchT
             token: after_host[..path_len].to_string(),
         });
     } else if path_len == 1 {
-        consumed = protocol_len + host_len + 1;
+        let trailing_space = take_while(&after_host[1..], |ch| ch.is_whitespace()).unwrap_or(0);
+        consumed = protocol_len + host_len + 1 + trailing_space;
         extras.push(ParsedTextSearchToken {
             tokid: SPACE,
-            token: "/".into(),
+            token: after_host[..1 + trailing_space].into(),
         });
     }
     Some((protocol_len, consumed, extras))
@@ -690,6 +713,30 @@ mod tests {
                 .map(|token| (token.tokid, token.token.as_str()))
                 .collect::<Vec<_>>(),
             vec![(ASCIIWORD, "readline"), (DECIMAL_T, "-4.2")]
+        );
+    }
+
+    #[test]
+    fn parser_groups_separator_runs_before_next_token() {
+        let tokens = parse_default("qwe@efd.r ' http://www.com/ http://x.y/");
+        let pairs = tokens
+            .iter()
+            .map(|token| (token.tokid, token.token.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pairs,
+            vec![
+                (ASCIIWORD, "qwe"),
+                (SPACE, "@"),
+                (FILEPATH, "efd.r"),
+                (SPACE, " ' "),
+                (PROTOCOL, "http://"),
+                (HOST, "www.com"),
+                (SPACE, "/ "),
+                (ASCIIWORD, "http"),
+                (SPACE, ":"),
+                (FILEPATH, "//x.y/"),
+            ]
         );
     }
 

@@ -141,14 +141,15 @@ pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_po
 pub(crate) use srf::set_returning_call_label;
 pub use startup::executor_start;
 pub(crate) use tsearch::{
-    array_to_tsvector, compare_tsquery, compare_tsvector, concat_tsvector, decode_tsquery_bytes,
-    decode_tsvector_bytes, delete_tsvector_lexemes, encode_tsquery_bytes, encode_tsvector_bytes,
-    eval_tsquery_matches_tsvector, eval_tsvector_matches_tsquery, filter_tsvector, numnode,
-    parse_ts_weight, parse_tsquery_text, parse_tsvector_text, render_tsquery_text,
-    render_tsvector_text, setweight_tsvector, strip_tsvector, text_array_items, ts_rank,
-    ts_rank_cd, tsquery_and, tsquery_contained_by, tsquery_contains, tsquery_input_error,
-    tsquery_not, tsquery_operands, tsquery_or, tsquery_phrase, tsquery_rewrite,
-    tsvector_input_error, tsvector_to_array, unnest_tsvector,
+    array_to_tsvector, canonicalize_tsquery_rewrite_result, compare_tsquery, compare_tsvector,
+    concat_tsvector, decode_tsquery_bytes, decode_tsvector_bytes, delete_tsvector_lexemes,
+    encode_tsquery_bytes, encode_tsvector_bytes, eval_tsquery_matches_tsvector,
+    eval_tsvector_matches_tsquery, filter_tsvector, numnode, parse_ts_weight, parse_tsquery_text,
+    parse_tsvector_text, render_tsquery_text, render_tsvector_text, setweight_tsvector,
+    strip_tsvector, text_array_items, ts_headline, ts_rank, ts_rank_cd, tsquery_and,
+    tsquery_contained_by, tsquery_contains, tsquery_input_error, tsquery_not, tsquery_operands,
+    tsquery_or, tsquery_phrase, tsquery_rewrite, tsvector_input_error, tsvector_to_array,
+    unnest_tsvector,
 };
 pub use value_io::{format_array_value_text, render_uuid_text};
 

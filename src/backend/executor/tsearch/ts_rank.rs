@@ -103,6 +103,13 @@ fn matching_positions(vector: &TsVector, operand: &TsQueryOperand) -> Vec<TsPosi
     out
 }
 
+fn matching_positioned_positions(vector: &TsVector, operand: &TsQueryOperand) -> Vec<TsPosition> {
+    matching_positions(vector, operand)
+        .into_iter()
+        .filter(|position| position.position != u16::MAX)
+        .collect()
+}
+
 fn rank_or(vector: &TsVector, operands: &[TsQueryOperand], weights: &[f64; 4]) -> f64 {
     let mut result = 0.0;
     for operand in operands {
@@ -181,7 +188,7 @@ fn rank_cd_cover(
 ) -> f64 {
     let matched = operands
         .iter()
-        .map(|operand| matching_positions(vector, operand))
+        .map(|operand| matching_positioned_positions(vector, operand))
         .collect::<Vec<_>>();
     if matched.iter().any(Vec::is_empty) {
         return 0.0;
@@ -310,4 +317,16 @@ fn word_distance(distance: i32) -> f64 {
         return 1e-30;
     }
     1.0 / (1.005 + 0.05 * ((distance as f64) / 1.5 - 2.0).exp())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ts_rank_cd_requires_positioned_matches_for_cover_density() {
+        let vector = TsVector::parse("'stripped' 'unstripped':1").unwrap();
+        let query = TsQuery::parse("stripped & unstripped").unwrap();
+        assert_eq!(ts_rank_cd(&vector, &query, None, 0), 0.0);
+    }
 }

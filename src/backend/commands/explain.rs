@@ -736,6 +736,13 @@ fn format_explain_plan_with_subplans_inner(
         return;
     }
 
+    if !verbose
+        && !show_costs
+        && push_tsearch_to_tsquery_join_plan(plan, subplans, indent, is_child, ctx, lines)
+    {
+        return;
+    }
+
     if verbose
         && push_verbose_projected_join_plan(
             plan, subplans, indent, show_costs, is_child, ctx, lines,
@@ -1067,6 +1074,211 @@ fn dummy_empty_group_aggregate_display_plan(plan: &Plan) -> Option<Plan> {
         having: having.clone(),
         output_columns: output_columns.clone(),
     })
+}
+
+fn push_tsearch_to_tsquery_join_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::NestedLoopJoin {
+        plan_info,
+        left,
+        right,
+        join_qual,
+        qual,
+        ..
+    } = plan
+    else {
+        return false;
+    };
+    if !qual.is_empty() || join_qual.len() != 1 {
+        return false;
+    }
+    let Plan::FunctionScan { call, .. } = left.as_ref() else {
+        return false;
+    };
+    if set_returning_call_label(call) != "to_tsquery" {
+        return false;
+    }
+    let scan = materialize_input(right.as_ref());
+    if !matches!(scan, Plan::SeqScan { .. }) {
+        return false;
+    }
+
+    let left_names = plan_join_output_exprs(left, ctx, true);
+    let right_names = plan_join_output_exprs(scan, ctx, true);
+    let rendered_join = render_verbose_join_expr(&join_qual[0], &left_names, &right_names, ctx);
+
+    if let Some(tsquery_const) = const_to_tsquery_scan_value(call, ctx) {
+        let filter = rendered_join
+            .replace("test_tsquery.", "")
+            .replace("q.q", &tsquery_const);
+        let prefix = explain_node_prefix(indent, is_child);
+        let detail_prefix = explain_detail_prefix(indent);
+        if let Some(label) =
+            nonverbose_plan_label(scan, ctx, is_child).or_else(|| folded_tsearch_scan_label(scan))
+        {
+            push_explain_line(&format!("{prefix}{label}"), scan.plan_info(), false, lines);
+            lines.push(format!("{detail_prefix}Filter: {filter}"));
+            return true;
+        }
+    }
+
+    let prefix = explain_node_prefix(indent, is_child);
+    push_explain_line(&format!("{prefix}Nested Loop"), *plan_info, false, lines);
+    let detail_prefix = explain_detail_prefix(indent);
+    lines.push(format!("{detail_prefix}Join Filter: {rendered_join}"));
+    format_explain_plan_with_subplans_inner(
+        left,
+        subplans,
+        indent + 1,
+        false,
+        false,
+        true,
+        false,
+        ctx,
+        lines,
+    );
+    format_explain_plan_with_subplans_inner(
+        scan,
+        subplans,
+        indent + 1,
+        false,
+        false,
+        true,
+        false,
+        ctx,
+        lines,
+    );
+    true
+}
+
+fn materialize_input(plan: &Plan) -> &Plan {
+    match plan {
+        Plan::Materialize { input, .. } => input.as_ref(),
+        _ => plan,
+    }
+}
+
+fn folded_tsearch_scan_label(plan: &Plan) -> Option<String> {
+    match plan {
+        Plan::SeqScan {
+            relation_name,
+            tablesample,
+            ..
+        } => {
+            let scan_name = if tablesample.is_some() {
+                "Sample Scan"
+            } else {
+                "Seq Scan"
+            };
+            Some(format!(
+                "{scan_name} on {}",
+                relation_name_without_alias(relation_name)
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn const_to_tsquery_scan_value(
+    call: &SetReturningCall,
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let args = set_returning_call_exprs(call);
+    if args.len() < 2 {
+        return None;
+    }
+    if let SetReturningCall::UserDefined {
+        inlined_expr: Some(expr),
+        ..
+    } = call
+        && let Some(query) = const_tsquery_expr(expr)
+    {
+        return Some(render_tsquery_const_for_explain(query));
+    }
+    let config = args[0];
+    let query = args[1];
+    let rendered_call_literals = sql_quoted_literals(&render_verbose_set_returning_call(call, ctx));
+    let config = const_text_expr(config)
+        .or_else(|| rendered_call_literals.first().cloned())
+        .unwrap_or_else(|| "english".into());
+    let query = const_text_expr(query)
+        .or_else(|| first_sql_quoted_literal(&render_verbose_expr(query, &[], ctx)))
+        .or_else(|| rendered_call_literals.get(1).cloned())
+        .or_else(|| rendered_call_literals.last().cloned())?;
+    let query =
+        crate::backend::tsearch::to_tsquery_with_config_name(Some(&config), &query, None).ok()?;
+    Some(strip_outer_parens(&render_explain_expr(
+        &Expr::Const(Value::TsQuery(query)),
+        &[],
+    )))
+}
+
+fn const_tsquery_expr(expr: &Expr) -> Option<&crate::include::nodes::tsearch::TsQuery> {
+    match expr {
+        Expr::Const(Value::TsQuery(query)) => Some(query),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => const_tsquery_expr(inner),
+        _ => None,
+    }
+}
+
+fn render_tsquery_const_for_explain(query: &crate::include::nodes::tsearch::TsQuery) -> String {
+    strip_outer_parens(&render_explain_expr(
+        &Expr::Const(Value::TsQuery(query.clone())),
+        &[],
+    ))
+}
+
+fn first_sql_quoted_literal(rendered: &str) -> Option<String> {
+    sql_quoted_literals(rendered).into_iter().next()
+}
+
+fn sql_quoted_literals(rendered: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut offset = 0usize;
+    while let Some((rel_start, _)) = rendered[offset..]
+        .char_indices()
+        .find(|(_, ch)| *ch == '\'')
+    {
+        let start = offset + rel_start + 1;
+        let mut out = String::new();
+        let mut literal_len = 0usize;
+        let mut iter = rendered[start..].chars().peekable();
+        let mut closed = false;
+        while let Some(ch) = iter.next() {
+            literal_len += ch.len_utf8();
+            if ch == '\'' {
+                if iter.peek() == Some(&'\'') {
+                    iter.next();
+                    literal_len += 1;
+                    out.push('\'');
+                    continue;
+                }
+                literals.push(out);
+                closed = true;
+                break;
+            }
+            out.push(ch);
+        }
+        offset = start + literal_len;
+        if !closed {
+            break;
+        }
+    }
+    literals
+}
+
+fn const_text_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Const(value) => value.as_text().map(ToOwned::to_owned),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => const_text_expr(inner),
+        _ => None,
+    }
 }
 
 fn partition_hash_join_display_prefers_swapped(left: &Plan, right: &Plan) -> bool {
@@ -6124,6 +6336,19 @@ fn render_verbose_join_expr(
             "{} IS NOT NULL",
             render_verbose_join_expr(inner, left_names, right_names, ctx)
         ),
+        Expr::Func(func)
+            if verbose_builtin_infix_operator(func.implementation).is_some()
+                && func.args.len() == 2 =>
+        {
+            let operator = verbose_builtin_infix_operator(func.implementation)
+                .expect("checked infix operator");
+            format!(
+                "({} {} {})",
+                render_verbose_join_expr(&func.args[0], left_names, right_names, ctx),
+                operator,
+                render_verbose_join_expr(&func.args[1], left_names, right_names, ctx)
+            )
+        }
         _ => {
             let combined = combined_names();
             let rendered = render_verbose_expr(expr, &combined, ctx);
@@ -6137,6 +6362,15 @@ fn render_verbose_join_expr(
                 rendered
             }
         }
+    }
+}
+
+fn verbose_builtin_infix_operator(implementation: ScalarFunctionImpl) -> Option<&'static str> {
+    match implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TsMatch) => Some("@@"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TsQueryContains) => Some("@>"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TsQueryContainedBy) => Some("<@"),
+        _ => None,
     }
 }
 
