@@ -5,6 +5,7 @@ use super::tablespace::{
     resolve_relation_tablespace_oid, tablespace_oid_by_name,
 };
 use crate::backend::access::nbtree::nbtree::UNIQUE_BUILD_DETAIL_SEPARATOR;
+use crate::backend::catalog::indexing::rebuild_system_catalog_index_in_pool_for_db;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
     reinitialize_index_relation, row_matches_index_predicate,
@@ -30,6 +31,7 @@ use crate::include::catalog::{
     ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
     GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PgOpclassRow, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
     builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::RelOption;
@@ -2971,6 +2973,16 @@ impl Database {
                 index,
                 catalog_effects,
             );
+        }
+        if let Some(descriptor) = system_catalog_index_by_oid(index.relation_oid).copied() {
+            rebuild_system_catalog_index_in_pool_for_db(
+                &self.pool,
+                &self.txns,
+                self.database_oid,
+                descriptor,
+            )
+            .map_err(map_catalog_error)?;
+            return Ok(());
         }
         let interrupts = self.interrupt_state(client_id);
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;

@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::backend::commands::rolecmds::PasswordSettings;
 use crate::backend::executor::{
     ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot,
     cast_value_with_config, eval_expr, execute_planned_stmt,
@@ -2121,9 +2122,12 @@ impl Database {
             | Statement::Prepare(_)
             | Statement::Execute(_)
             | Statement::Deallocate(_) => Ok(StatementResult::AffectedRows(0)),
-            Statement::CreateRole(ref create_stmt) => {
-                self.execute_create_role_stmt(client_id, create_stmt, None)
-            }
+            Statement::CreateRole(ref create_stmt) => self.execute_create_role_stmt(
+                client_id,
+                create_stmt,
+                None,
+                PasswordSettings::default(),
+            ),
             Statement::CreateDatabase(ref create_stmt) => {
                 self.execute_create_database_stmt(client_id, create_stmt)
             }
@@ -2131,7 +2135,7 @@ impl Database {
                 self.execute_alter_database_stmt(client_id, alter_stmt)
             }
             Statement::AlterRole(ref alter_stmt) => {
-                self.execute_alter_role_stmt(client_id, alter_stmt)
+                self.execute_alter_role_stmt(client_id, alter_stmt, PasswordSettings::default())
             }
             Statement::DropRole(ref drop_stmt) => self.execute_drop_role_stmt(client_id, drop_stmt),
             Statement::DropDatabase(ref drop_stmt) => {
