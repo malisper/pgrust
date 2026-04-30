@@ -376,7 +376,7 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation_name = format_trigger_drop_relation_name(stmt);
         let relation = match catalog.lookup_any_relation(&relation_name) {
-            Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => entry,
+            Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') => entry,
             Some(_) => {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: relation_name.clone(),
@@ -1364,6 +1364,7 @@ fn validate_trigger_relation_kind(
 ) -> Result<(), ExecError> {
     match relkind {
         'v' => validate_view_trigger_stmt(stmt, relation_name),
+        'f' => validate_foreign_table_trigger_stmt(stmt, relation_name),
         _ => validate_table_trigger_stmt(stmt, relation_name),
     }
 }
@@ -1381,10 +1382,47 @@ fn validate_table_trigger_stmt(
             "TRUNCATE triggers are not supported".into(),
         )));
     }
+    if stmt.is_constraint {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "CONSTRAINT TRIGGER is not supported".into(),
+        )));
+    }
     if stmt.timing == TriggerTiming::Instead {
         return Err(ExecError::DetailedError {
             message: format!("\"{}\" is a table", relation_name),
             detail: Some("Tables cannot have INSTEAD OF triggers.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    Ok(())
+}
+
+fn validate_foreign_table_trigger_stmt(
+    stmt: &CreateTriggerStatement,
+    relation_name: &str,
+) -> Result<(), ExecError> {
+    let relation_basename = relation_name.rsplit('.').next().unwrap_or(relation_name);
+    if stmt.is_constraint {
+        return Err(wrong_object_type_error(
+            relation_basename,
+            "foreign table",
+            "Foreign tables cannot have constraint triggers.",
+        ));
+    }
+    if stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Truncate)
+    {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "TRUNCATE triggers are not supported".into(),
+        )));
+    }
+    if stmt.timing == TriggerTiming::Instead {
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is a foreign table", relation_basename),
+            detail: Some("Foreign tables cannot have INSTEAD OF triggers.".into()),
             hint: None,
             sqlstate: "42809",
         });
@@ -1473,6 +1511,14 @@ fn validate_trigger_referencing_usage(
             relation_name,
             "view",
             "Triggers on views cannot have transition tables.",
+        ));
+    }
+    if relation.relkind == 'f' {
+        let relation_basename = relation_name.rsplit('.').next().unwrap_or(relation_name);
+        return Err(wrong_object_type_error(
+            relation_basename,
+            "foreign table",
+            "Triggers on foreign tables cannot have transition tables.",
         ));
     }
     if stmt.level == TriggerLevel::Row && relation.relkind == 'p' {

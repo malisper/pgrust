@@ -2014,6 +2014,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            6405,
+            "test_fdw_handler",
+            FDW_HANDLER_TYPE_OID,
+            "",
+            "test_fdw_handler",
+            0,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             6406,
             "postgresql_fdw_validator",
             BOOL_TYPE_OID,

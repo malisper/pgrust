@@ -27,7 +27,9 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
+use crate::include::nodes::primnodes::{
+    Param, ParamKind, QueryColumn, TargetEntry, Var, user_attrno,
+};
 
 use super::ast::{
     AliasTarget, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection, Decl,
@@ -3047,6 +3049,10 @@ fn compile_exec_sql_stmt(
             }),
             Err(err) => Err(err),
         },
+        Statement::Merge(_) => Ok(CompiledStmt::RuntimeSql {
+            sql: rewritten_sql,
+            scope: runtime_sql_scope(env),
+        }),
         Statement::CreateTable(stmt) if stmt.persistence == TablePersistence::Temporary => {
             Ok(CompiledStmt::ExecSql { sql: rewritten_sql })
         }
@@ -3138,12 +3144,45 @@ fn outer_scope_for_sql(env: &CompileEnv) -> BoundScope {
 }
 
 pub(crate) fn runtime_sql_bound_scope(scope: &RuntimeSqlScope) -> BoundScope {
-    outer_scope_from_slot_columns(scope.columns.clone(), scope.relation_scopes.clone())
+    bound_scope_from_slot_columns(
+        scope.columns.clone(),
+        scope.relation_scopes.clone(),
+        |column| {
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(column.slot),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+                collation_oid: None,
+            })
+        },
+    )
 }
 
-fn outer_scope_from_slot_columns(
+pub(crate) const PLPGSQL_RUNTIME_PARAM_BASE: usize = 1_000_000_000;
+
+pub(crate) fn runtime_sql_param_id(slot: usize) -> usize {
+    PLPGSQL_RUNTIME_PARAM_BASE + slot
+}
+
+pub(crate) fn runtime_sql_param_bound_scope(scope: &RuntimeSqlScope) -> BoundScope {
+    bound_scope_from_slot_columns(
+        scope.columns.clone(),
+        scope.relation_scopes.clone(),
+        |column| {
+            Expr::Param(Param {
+                paramkind: ParamKind::External,
+                paramid: runtime_sql_param_id(column.slot),
+                paramtype: column.sql_type,
+            })
+        },
+    )
+}
+
+fn bound_scope_from_slot_columns(
     columns: Vec<SlotScopeColumn>,
     relation_scopes: Vec<(String, Vec<SlotScopeColumn>)>,
+    mut slot_expr: impl FnMut(&SlotScopeColumn) -> Expr,
 ) -> BoundScope {
     let desc = RelationDesc {
         columns: columns
@@ -3156,18 +3195,7 @@ fn outer_scope_from_slot_columns(
             }))
             .collect(),
     };
-    let mut output_exprs = columns
-        .iter()
-        .map(|column| {
-            Expr::Var(Var {
-                varno: 1,
-                varattno: user_attrno(column.slot),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-                collation_oid: None,
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut output_exprs = columns.iter().map(&mut slot_expr).collect::<Vec<_>>();
     let mut scope_columns = columns
         .into_iter()
         .map(|column| crate::backend::parser::analyze::ScopeColumn {
@@ -3196,13 +3224,7 @@ fn outer_scope_from_slot_columns(
         }
         relations.extend(relation_scope.relations);
         for column in relation_columns {
-            output_exprs.push(Expr::Var(Var {
-                varno: 1,
-                varattno: user_attrno(column.slot),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-                collation_oid: None,
-            }));
+            output_exprs.push(slot_expr(&column));
         }
         scope_columns.extend(relation_scope.columns);
     }
@@ -3332,7 +3354,8 @@ fn split_dml_returning_into_targets(sql: &str) -> Option<(String, Vec<String>)> 
     let lower = trimmed.to_ascii_lowercase();
     if !(lower.starts_with("insert ")
         || lower.starts_with("update ")
-        || lower.starts_with("delete "))
+        || lower.starts_with("delete ")
+        || lower.starts_with("merge "))
     {
         return None;
     }
@@ -4156,8 +4179,9 @@ fn compile_exec_returning_into_stmt(
                 targets,
             })
         }
+        Statement::Merge(_) => compile_runtime_select_into_stmt(sql, target_refs, false, env),
         other => Err(ParseError::UnexpectedToken {
-            expected: "INSERT/UPDATE/DELETE ... RETURNING ... INTO",
+            expected: "INSERT/UPDATE/DELETE/MERGE ... RETURNING ... INTO",
             actual: format!("{other:?}"),
         }),
     }

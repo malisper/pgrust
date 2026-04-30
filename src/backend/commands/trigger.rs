@@ -123,6 +123,10 @@ impl RuntimeTriggers {
         TriggerTransitionCapture::default()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.triggers.is_empty()
+    }
+
     pub(crate) fn capture_insert_row(&self, capture: &mut TriggerTransitionCapture, row: &[Value]) {
         if self
             .triggers

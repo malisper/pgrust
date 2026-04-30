@@ -227,6 +227,16 @@ impl<'a> PartitionedKeyInstaller<'a> {
         Ok(children)
     }
 
+    fn direct_partition_children_include_foreign_table(
+        &self,
+        relation_oid: u32,
+    ) -> Result<bool, ExecError> {
+        Ok(self
+            .direct_partition_children(relation_oid)?
+            .into_iter()
+            .any(|child| child.relkind == 'f'))
+    }
+
     fn column_attnums_for_names(
         desc: &RelationDesc,
         columns: &[String],
@@ -1043,6 +1053,20 @@ impl<'a> PartitionedKeyInstaller<'a> {
         )?;
 
         let attached = if relation.relkind == 'p' {
+            if self.direct_partition_children_include_foreign_table(relation.relation_oid)? {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot create unique index on partitioned table \"{}\"",
+                        relation_name
+                    ),
+                    detail: Some(format!(
+                        "Table \"{}\" contains partitions that are foreign tables.",
+                        relation_name
+                    )),
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
             let index_entry = self.create_partitioned_index(
                 &relation,
                 &index_name,

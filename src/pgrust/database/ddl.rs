@@ -96,7 +96,7 @@ pub(super) fn lookup_trigger_relation_for_ddl(
     name: &str,
 ) -> Result<BoundRelation, ExecError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') => Ok(entry),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table or view",
@@ -1751,11 +1751,7 @@ pub(super) fn automatic_alter_type_cast_allowed(
     if is_text_like_type(from) && is_text_like_type(to) {
         return true;
     }
-    if !from.is_array
-        && !to.is_array
-        && matches!(from.kind, SqlTypeKind::Bool)
-        && is_text_like_type(to)
-    {
+    if !from.is_array && !to.is_array && is_text_like_type(to) {
         return true;
     }
     let Some(source_oid) = catalog.type_oid_for_sql_type(from) else {
@@ -2030,10 +2026,12 @@ pub(super) fn validate_alter_table_alter_column_options(
     column_name: &str,
 ) -> Result<String, ExecError> {
     if is_system_column_name(column_name) {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "user column name for ALTER COLUMN SET/RESET options",
-            actual: column_name.to_string(),
-        }));
+        return Err(ExecError::DetailedError {
+            message: format!("cannot alter system column \"{column_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
     let column = desc
         .columns
@@ -2230,6 +2228,7 @@ pub(super) fn validate_alter_table_alter_column_type(
     ty: &RawTypeName,
     collation: Option<&str>,
     using_expr: Option<&SqlExpr>,
+    metadata_only: bool,
 ) -> Result<AlterColumnTypePlan, ExecError> {
     if is_system_column_name(column_name) {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -2329,7 +2328,8 @@ pub(super) fn validate_alter_table_alter_column_type(
         ),
     };
 
-    if !automatic_alter_type_cast_allowed(catalog, rewrite_type, target_sql_type) {
+    if !metadata_only && !automatic_alter_type_cast_allowed(catalog, rewrite_type, target_sql_type)
+    {
         if using_expr.is_some() {
             return alter_column_type_error(
                 format!(
@@ -2377,9 +2377,14 @@ pub(super) fn validate_alter_table_alter_column_type(
     new_column.storage.attstorage = current_column.storage.attstorage;
     new_column.storage.attcompression = current_column.storage.attcompression;
     new_column.attstattarget = current_column.attstattarget;
+    new_column.attinhcount = current_column.attinhcount;
+    new_column.attislocal = current_column.attislocal;
     new_column.not_null_constraint_oid = current_column.not_null_constraint_oid;
     new_column.not_null_constraint_name = current_column.not_null_constraint_name.clone();
     new_column.not_null_constraint_validated = current_column.not_null_constraint_validated;
+    new_column.not_null_constraint_is_local = current_column.not_null_constraint_is_local;
+    new_column.not_null_constraint_inhcount = current_column.not_null_constraint_inhcount;
+    new_column.not_null_constraint_no_inherit = current_column.not_null_constraint_no_inherit;
     new_column.not_null_primary_key_owned = current_column.not_null_primary_key_owned;
     new_column.attrdef_oid = current_column.attrdef_oid;
     new_column.default_expr = current_column.default_expr.clone();
