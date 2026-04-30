@@ -131,8 +131,12 @@ pub fn vacuum_relation_pages(
         let mut guard = pool.lock_buffer_exclusive(pin.buffer_id())?;
         let mut page = *guard;
 
-        let initial = classify_page_for_prune(&page, &txns, oldest_xmin, freeze_cutoff_xid)?;
-        for offset in initial.removable_offsets.iter().rev().copied() {
+        let removable_offsets = scan
+            .dead_tids
+            .iter()
+            .filter_map(|tid| (tid.block_number == block).then_some(tid.offset_number))
+            .collect::<Vec<_>>();
+        for offset in removable_offsets.iter().rev().copied() {
             if offset <= page_get_max_offset_number(&page)? {
                 page_remove_item(&mut page, offset)?;
             }
@@ -252,6 +256,7 @@ fn truncate_empty_tail(
     if new_nblocks < nblocks {
         let visibility_map_blocks =
             visibilitymap_prepare_truncate(pool, client_id, rel, new_nblocks)?;
+        pool.flush_relation(rel).map_err(HeapError::Buffer)?;
         pool.invalidate_relation(rel).map_err(HeapError::Buffer)?;
         pool.with_storage_mut(|storage| {
             storage.smgr.truncate(rel, ForkNumber::Main, new_nblocks)?;

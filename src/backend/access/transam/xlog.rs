@@ -66,6 +66,7 @@ pub const RM_BTREE_ID: u8 = 3;
 pub const RM_XLOG_ID: u8 = 4;
 pub const RM_GIST_ID: u8 = 5;
 pub const RM_HASH_ID: u8 = 6;
+pub const RM_GIN_ID: u8 = 7;
 
 pub const REGBUF_STANDARD: u8 = 1 << 0;
 pub const REGBUF_WILL_INIT: u8 = 1 << 1;
@@ -283,6 +284,12 @@ pub enum WalRecord {
         tuple_data: Vec<u8>,
     },
     GistPageImage {
+        xid: u32,
+        tag: BufferTag,
+        page: Box<[u8; PAGE_SIZE]>,
+        info: u8,
+    },
+    GinPageImage {
         xid: u32,
         tag: BufferTag,
         page: Box<[u8; PAGE_SIZE]>,
@@ -886,6 +893,23 @@ impl WalReader {
                     .ok_or_else(|| WalError::Corrupt("gist record missing page image".into()))?
                     .clone();
                 WalRecord::GistPageImage {
+                    xid: decoded.xid,
+                    tag: block.tag,
+                    page,
+                    info: decoded.info,
+                }
+            }
+            (RM_GIN_ID, XLOG_FPI) => {
+                let block = decoded
+                    .blocks
+                    .first()
+                    .ok_or_else(|| WalError::Corrupt("gin record missing block ref".into()))?;
+                let page = block
+                    .image
+                    .as_ref()
+                    .ok_or_else(|| WalError::Corrupt("gin record missing page image".into()))?
+                    .clone();
+                WalRecord::GinPageImage {
                     xid: decoded.xid,
                     tag: block.tag,
                     page,
