@@ -238,7 +238,7 @@ pub(crate) struct SessionPreparedStatementViewRow {
     pub statement: String,
     pub prepare_time: i64,
     pub parameter_type_oids: Vec<u32>,
-    pub result_type_oids: Vec<u32>,
+    pub result_type_oids: Option<Vec<u32>>,
     pub from_sql: bool,
     pub generic_plans: i64,
     pub custom_plans: i64,

@@ -257,6 +257,7 @@ pub(super) fn optimize_path_with_config(
             } => {
                 let stats = relation_stats(catalog, relation_oid, &desc);
                 let base = seq_scan_estimate(&stats);
+                let disabled = disabled || !config.enable_seqscan;
                 Path::SeqScan {
                     plan_info: base,
                     pathtarget,
@@ -2346,10 +2347,12 @@ pub(super) fn estimate_index_candidate(
     }
     let index_only = can_index_only;
     let unordered_probe = order_items.is_none();
+    let scalar_array_range_index_only =
+        target_index_only_btree_scalar_array_range(target_index_only, &spec);
     let unordered_btree_range_heap_fetch =
         !index_only && unordered_btree_range_probe_fetches_heap(&spec, unique_eq_lookup);
-    let broad_unordered_btree_range =
-        unordered_btree_range_probe_needs_heap_penalty(&spec, stats, scan_sel);
+    let broad_unordered_btree_range = !scalar_array_range_index_only
+        && unordered_btree_range_probe_needs_heap_penalty(&spec, stats, scan_sel);
     let (startup_cost, mut base_cost) = if is_gist_like_am(spec.index.index_meta.am_oid) {
         estimate_gist_scan_cost(
             index_pages,
@@ -2406,6 +2409,13 @@ pub(super) fn estimate_index_candidate(
         } else {
             base_cost -= index_rows * CPU_TUPLE_COST;
         }
+    }
+    if scalar_array_range_index_only {
+        base_cost = base_cost.min(
+            index_pages * SEQ_PAGE_COST
+                + index_rows * CPU_INDEX_TUPLE_COST
+                + unused_btree_column_cost,
+        );
     }
     let scan_info = PlanEstimate::new(startup_cost, base_cost, index_rows, stats.width);
     let mut total_cost = scan_info.total_cost.as_f64();
@@ -2562,6 +2572,22 @@ fn runtime_equality_index_rows(spec: &IndexPathSpec, stats: &RelationStats) -> O
         saw_runtime_eq = true;
     }
     saw_runtime_eq.then(|| clamp_rows(stats.reltuples * selectivity))
+}
+
+fn target_index_only_btree_scalar_array_range(
+    target_index_only: bool,
+    spec: &IndexPathSpec,
+) -> bool {
+    target_index_only
+        && spec.index.index_meta.am_oid == BTREE_AM_OID
+        && spec.keys.iter().any(|key| {
+            key.strategy == 3
+                && matches!(
+                    key.argument.as_const(),
+                    Some(Value::Array(_) | Value::PgArray(_))
+                )
+        })
+        && spec.keys.iter().any(|key| key.strategy != 3)
 }
 
 fn unordered_btree_range_probe_needs_heap_penalty(
@@ -10640,24 +10666,8 @@ fn row_prefix_index_expr(index: &BoundIndexRelation, expr: &Expr, strategy: u16)
     if prefix_len == 0 {
         return None;
     }
-    let strategy = row_prefix_effective_strategy(strategy, prefix_len, left_fields.len())?;
-    let op_kind = btree_strategy_expr_kind(strategy)?;
-    if prefix_len == 1 {
-        let (_, left_expr) = left_fields.first()?;
-        let (_, right_expr) = right_fields.first()?;
-        return Some(Expr::op_auto(
-            op_kind,
-            vec![left_expr.clone(), right_expr.clone()],
-        ));
-    }
-    Some(Expr::op(
-        op_kind,
-        SqlType::new(SqlTypeKind::Bool),
-        vec![
-            truncated_row_expr(&left_desc, &left_fields, prefix_len),
-            truncated_row_expr(&right_desc, &right_fields, prefix_len),
-        ],
-    ))
+    let _ = (left_desc, right_desc, strategy, prefix_len);
+    Some(expr.clone())
 }
 
 fn row_prefix_qual_is_fully_covered(index: &BoundIndexRelation, expr: &Expr) -> bool {
@@ -10704,19 +10714,6 @@ fn row_expr_parts_for_index(expr: &Expr) -> Option<(RecordDescriptor, Vec<(Strin
                 .collect(),
         )),
         _ => None,
-    }
-}
-
-fn truncated_row_expr(
-    descriptor: &crate::include::nodes::datum::RecordDescriptor,
-    fields: &[(String, Expr)],
-    prefix_len: usize,
-) -> Expr {
-    let mut descriptor = descriptor.clone();
-    descriptor.fields.truncate(prefix_len);
-    Expr::Row {
-        descriptor,
-        fields: fields.iter().take(prefix_len).cloned().collect(),
     }
 }
 
@@ -11355,7 +11352,7 @@ fn row_prefix_indexable_qual_for_sides(
         index_expr: index_expr.clone(),
         recheck_expr: None,
         expr: original_expr.clone(),
-        residual_expr: Some(original_expr.clone()),
+        residual_expr: None,
         is_not_null: false,
         row_prefix: true,
     })

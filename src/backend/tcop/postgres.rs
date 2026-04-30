@@ -354,6 +354,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return Some(position);
     }
+    if let Some(parameter) = prepared_parameter_coercion_error_index(e)
+        && let Some(position) = find_execute_argument_position(sql, parameter)
+    {
+        return Some(position);
+    }
     if suppress_sql_json_query_function_runtime_position(sql, e)
         || suppress_sql_json_table_runtime_position(sql, e)
     {
@@ -1047,6 +1052,86 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn prepared_parameter_coercion_error_index(e: &ExecError) -> Option<usize> {
+    let message = match e {
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+        | ExecError::DetailedError { message, .. } => message,
+        _ => return None,
+    };
+    let rest = message.strip_prefix("parameter $")?;
+    let digits = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn find_execute_argument_position(sql: &str, parameter: usize) -> Option<usize> {
+    if parameter == 0
+        || !sql
+            .trim_start()
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("execute"))
+    {
+        return None;
+    }
+    let bytes = sql.as_bytes();
+    let open = bytes.iter().position(|byte| *byte == b'(')?;
+    let mut arg = 1usize;
+    let mut index = open + 1;
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        match quote {
+            Some(q) => {
+                if bytes[index] == q {
+                    if index + 1 < bytes.len() && bytes[index + 1] == q {
+                        index += 2;
+                        continue;
+                    }
+                    quote = None;
+                }
+                index += 1;
+            }
+            None => match bytes[index] {
+                b'\'' | b'"' => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    quote = Some(bytes[index]);
+                    index += 1;
+                }
+                b' ' | b'\t' | b'\n' | b'\r' => {
+                    index += 1;
+                }
+                b'(' => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    depth += 1;
+                    index += 1;
+                }
+                b')' if depth == 0 => return None,
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    index += 1;
+                }
+                b',' if depth == 0 => {
+                    arg += 1;
+                    index += 1;
+                }
+                _ => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    index += 1;
+                }
+            },
+        }
+    }
+    None
 }
 
 fn composite_rowtype_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -6747,7 +6832,7 @@ fn refresh_protocol_prepared_statement_view_rows(state: &mut ConnectionState) {
             statement: prepared.sql.clone(),
             prepare_time: prepared.prepare_time,
             parameter_type_oids: prepared.param_type_oids.clone(),
-            result_type_oids: Vec::new(),
+            result_type_oids: Some(Vec::new()),
             from_sql: false,
             generic_plans: 0,
             custom_plans: 0,

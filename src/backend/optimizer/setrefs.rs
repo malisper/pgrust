@@ -8792,7 +8792,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relation_oid,
             relkind,
             relispopulated,
-            disabled,
+            disabled || ctx.root.is_some_and(|root| !root.config.enable_seqscan),
             toast,
             tablesample,
             desc,
