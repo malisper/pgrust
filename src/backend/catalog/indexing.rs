@@ -363,6 +363,36 @@ pub fn rebuild_system_catalog_indexes_in_pool_for_db(
     Ok(())
 }
 
+pub fn rebuild_system_catalog_index_in_pool_for_db(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &Arc<RwLock<TransactionManager>>,
+    db_oid: u32,
+    descriptor: CatalogIndexDescriptor,
+) -> Result<(), CatalogError> {
+    let snapshot = txns
+        .read()
+        .snapshot(INVALID_TRANSACTION_ID)
+        .map_err(|err| CatalogError::Io(format!("system catalog snapshot failed: {err:?}")))?;
+    let interrupts = Arc::new(InterruptState::new());
+    let build_ctx = system_catalog_index_build_context(
+        pool,
+        txns,
+        &snapshot,
+        &interrupts,
+        descriptor,
+        db_oid,
+        system_catalog_index_rel(descriptor, db_oid),
+    );
+    index_build_stub(&build_ctx, BTREE_AM_OID).map_err(|err| {
+        CatalogError::Io(format!(
+            "system catalog index build failed for {}: {err:?}",
+            descriptor.relation_name
+        ))
+    })?;
+    let _ = pool.invalidate_relation(system_catalog_index_rel(descriptor, db_oid));
+    Ok(())
+}
+
 fn system_catalog_index_build_context(
     pool: &Arc<BufferPool<SmgrStorageBackend>>,
     txns: &Arc<RwLock<TransactionManager>>,

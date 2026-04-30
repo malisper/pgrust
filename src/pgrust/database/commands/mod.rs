@@ -53,3 +53,7 @@ mod tsearch;
 mod typecmds;
 mod typed_table;
 mod vacuum_full;
+
+fn maintenance_safe_gucs() -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("search_path".into(), "pg_catalog, pg_temp".into())])
+}

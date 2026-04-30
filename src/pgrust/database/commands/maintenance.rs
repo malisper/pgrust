@@ -429,6 +429,25 @@ fn lookup_table_or_partitioned_relation_for_comment(
     }
 }
 
+fn lookup_column_comment_relation(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<crate::backend::parser::BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f' | 'c') => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None => Err(ExecError::DetailedError {
+            message: format!("relation \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P01",
+        }),
+    }
+}
+
 fn lookup_sequence_relation_for_comment(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -617,7 +636,7 @@ where
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         statement_timestamp_usecs:
             crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-        gucs: std::collections::HashMap::new(),
+        gucs: super::maintenance_safe_gucs(),
         interrupts,
         stats: Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),
@@ -1648,7 +1667,7 @@ impl Database {
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             statement_timestamp_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
+            gucs: super::maintenance_safe_gucs(),
             interrupts: Arc::clone(&interrupts),
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
@@ -2293,8 +2312,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation =
-            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
+        let relation = lookup_column_comment_relation(&catalog, &comment_stmt.table_name)?;
         let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
             lock_tag,
@@ -2619,7 +2637,7 @@ impl Database {
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             statement_timestamp_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
+            gucs: super::maintenance_safe_gucs(),
             interrupts: Arc::clone(&interrupts),
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
@@ -2747,7 +2765,7 @@ impl Database {
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             statement_timestamp_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
+            gucs: super::maintenance_safe_gucs(),
             interrupts: Arc::clone(&interrupts),
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
@@ -3102,8 +3120,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation =
-            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
+        let relation = lookup_column_comment_relation(&catalog, &comment_stmt.table_name)?;
         if relation.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for COMMENT ON COLUMN",
@@ -3455,7 +3472,7 @@ impl Database {
                 ),
                 statement_timestamp_usecs:
                     crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-                gucs: std::collections::HashMap::new(),
+                gucs: super::maintenance_safe_gucs(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&self.stats),
                 session_stats: self.session_stats_state(client_id),

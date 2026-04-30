@@ -833,8 +833,7 @@ fn dropped_view_attribute_number(
     if let Some(attr_index) = query
         .rtable
         .iter()
-        .filter_map(|rte| dropped_attr_before_actual_column(&rte.desc, actual_name))
-        .next()
+        .find_map(|rte| dropped_attr_before_actual_column(&rte.desc, actual_name))
     {
         return attr_index.saturating_add(1);
     }
@@ -852,14 +851,13 @@ fn dropped_attr_from_query_function_call(
     if let Some(Expr::Var(var)) = target.map(|target| &target.expr)
         && var.varno > 0
         && let Some(rte) = query.rtable.get(var.varno.saturating_sub(1))
+        && let RangeTblEntryKind::Function { call } = &rte.kind
     {
-        if let RangeTblEntryKind::Function { call } = &rte.kind {
-            let rte_index = attrno_index(var.varattno).unwrap_or(index);
-            if let Some(attr_index) =
-                dropped_attr_from_call(call, catalog, rte_index, stored_name, actual_name)
-            {
-                return Some(attr_index);
-            }
+        let rte_index = attrno_index(var.varattno).unwrap_or(index);
+        if let Some(attr_index) =
+            dropped_attr_from_call(call, catalog, rte_index, stored_name, actual_name)
+        {
+            return Some(attr_index);
         }
     }
     query.rtable.iter().find_map(|rte| match &rte.kind {
@@ -913,7 +911,9 @@ fn dropped_attr_from_proc_return(
 ) -> Option<usize> {
     let proc_row = catalog.proc_row_by_oid(proc_oid)?;
     let return_type = catalog.type_by_oid(proc_row.prorettype)?;
-    let relation = catalog.relation_by_oid(return_type.typrelid)?;
+    let relation = catalog
+        .relation_by_oid(return_type.typrelid)
+        .or_else(|| catalog.lookup_relation_by_oid(return_type.typrelid))?;
     dropped_attr_before_actual_column(&relation.desc, actual_name).or_else(|| {
         relation
             .desc
@@ -1270,9 +1270,6 @@ fn render_target_entry(
     {
         rendered = format!("({inner} AT LOCAL)");
     }
-    if target_name == "?column?" {
-        return rendered;
-    }
     if !target.sql_type.is_array
         && matches!(target.sql_type.kind, SqlTypeKind::Text)
         && matches!(
@@ -1291,6 +1288,9 @@ fn render_target_entry(
             .is_some_and(|name| name.eq_ignore_ascii_case(target_name));
     if ctx.options.parenthesize_top_level_ops && matches!(target.expr, Expr::Op(_)) {
         rendered = format!("({rendered})");
+    }
+    if output_name.is_none() && target_name == "?column?" {
+        return rendered;
     }
     let quoted_target_name = quote_target_output_name(target, target_name, ctx);
     if natural_output_matches && visible_source_count(ctx.query) == 1 && ctx.outers.is_empty() {
@@ -2573,7 +2573,8 @@ fn render_set_operation_query(
     let mut parts = Vec::new();
     for (index, input) in set_operation.inputs.iter().enumerate() {
         let child = ctx.child(input);
-        let rendered = render_plain_query(&child, Some(&output_names))
+        let branch_output_names = (index == 0).then_some(output_names.as_slice());
+        let rendered = render_plain_query(&child, branch_output_names)
             .trim_end_matches(';')
             .to_string();
         if index == 0 {

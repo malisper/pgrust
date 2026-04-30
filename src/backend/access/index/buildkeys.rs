@@ -153,7 +153,10 @@ impl IndexBuildKeyProjector {
                 datetime_config: expr_ctx.datetime_config.clone(),
                 statement_timestamp_usecs:
                     crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-                gucs: std::collections::HashMap::new(),
+                gucs: std::collections::HashMap::from([(
+                    "search_path".into(),
+                    "pg_catalog, pg_temp".into(),
+                )]),
                 interrupts: ctx.interrupts.clone(),
                 stats: expr_ctx.stats.clone(),
                 session_stats: expr_ctx.session_stats.clone(),

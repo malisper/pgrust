@@ -5780,6 +5780,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
             }
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::TidScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }

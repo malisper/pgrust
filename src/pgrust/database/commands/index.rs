@@ -5,6 +5,7 @@ use super::tablespace::{
     resolve_relation_tablespace_oid, tablespace_oid_by_name,
 };
 use crate::backend::access::nbtree::nbtree::UNIQUE_BUILD_DETAIL_SEPARATOR;
+use crate::backend::catalog::indexing::rebuild_system_catalog_index_in_pool_for_db;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
     reinitialize_index_relation, row_matches_index_predicate,
@@ -28,8 +29,9 @@ use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
-    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
+    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PgOpclassRow, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
     builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::RelOption;
@@ -1146,16 +1148,15 @@ impl Database {
 
     fn validate_index_opclass_options(
         access_method_oid: u32,
-        opfamily_oid: u32,
+        opclass: &PgOpclassRow,
         column: &crate::backend::parser::IndexColumnDef,
     ) -> Result<(), ExecError> {
         if column.opclass_options.is_empty() {
             return Ok(());
         }
-        if access_method_oid != GIST_AM_OID || opfamily_oid != GIST_TSVECTOR_FAMILY_OID {
-            let option = &column.opclass_options[0];
+        if access_method_oid != GIST_AM_OID || opclass.opcfamily != GIST_TSVECTOR_FAMILY_OID {
             return Err(ExecError::DetailedError {
-                message: format!("unrecognized parameter \"{}\"", option.name),
+                message: format!("operator class {} has no options", opclass.opcname),
                 detail: None,
                 hint: None,
                 sqlstate: "22023",
@@ -1532,7 +1533,7 @@ impl Database {
                     type_name: type_name.clone(),
                 })
             })?;
-            Self::validate_index_opclass_options(access_method.oid, opclass.opcfamily, column)?;
+            Self::validate_index_opclass_options(access_method.oid, &opclass, column)?;
             indclass_options.push(
                 column
                     .opclass_options
@@ -2329,7 +2330,7 @@ impl Database {
                 datetime_config: DateTimeConfig::default(),
                 statement_timestamp_usecs:
                     crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-                gucs: std::collections::HashMap::new(),
+                gucs: super::maintenance_safe_gucs(),
                 interrupts,
                 stats: std::sync::Arc::clone(&self.stats),
                 session_stats: self.session_stats_state(client_id),
@@ -2916,6 +2917,16 @@ impl Database {
                 catalog_effects,
             );
         }
+        if let Some(descriptor) = system_catalog_index_by_oid(index.relation_oid).copied() {
+            rebuild_system_catalog_index_in_pool_for_db(
+                &self.pool,
+                &self.txns,
+                self.database_oid,
+                descriptor,
+            )
+            .map_err(map_catalog_error)?;
+            return Ok(());
+        }
         let interrupts = self.interrupt_state(client_id);
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut rebuilt_index = index.clone();
@@ -2929,6 +2940,23 @@ impl Database {
         )? {
             rebuilt_index.rel = rel;
         }
+        let has_expression_eval = rebuilt_index.index_meta.indexprs.as_ref().is_some()
+            || rebuilt_index
+                .index_meta
+                .indpred
+                .as_deref()
+                .is_some_and(|predicate| !predicate.trim().is_empty());
+        let visible_catalog = if visible_catalog.is_none() && has_expression_eval {
+            let maintenance_search_path = vec!["pg_catalog".into(), "pg_temp".into()];
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, cid)),
+                Some(&maintenance_search_path),
+            );
+            Some(crate::backend::executor::executor_catalog(catalog))
+        } else {
+            visible_catalog
+        };
         let mut ctx = ExecutorContext {
             pool: self.pool.clone(),
             data_dir: None,
@@ -2945,7 +2973,7 @@ impl Database {
             datetime_config: DateTimeConfig::default(),
             statement_timestamp_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
+            gucs: super::maintenance_safe_gucs(),
             interrupts,
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
