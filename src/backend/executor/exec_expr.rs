@@ -2708,51 +2708,21 @@ fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
     Value::Tid(tid)
 }
 
-fn eval_tablesample_bernoulli(values: &[Value]) -> Result<Value, ExecError> {
-    let [ctid, Value::Float64(percent), Value::Float64(repeatable)] = values else {
-        return Err(malformed_expr_error("TABLESAMPLE BERNOULLI"));
-    };
-    if matches!(ctid, Value::Null) {
-        return Ok(Value::Bool(false));
-    }
-    if !(0.0..=100.0).contains(percent) || percent.is_nan() {
-        return Err(ExecError::DetailedError {
-            message: "sample percentage must be between 0 and 100".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "2202H",
-        });
-    }
-    let (block, offset) = match ctid {
-        Value::Tid(tid) => (tid.block_number, u32::from(tid.offset_number)),
-        other => {
-            let Some((block, offset)) = other.as_text().and_then(parse_ctid_text) else {
-                return Err(malformed_expr_error("TABLESAMPLE BERNOULLI ctid"));
-            };
-            (block, offset)
-        }
-    };
-    let cutoff = ((u64::from(u32::MAX) + 1) as f64 * *percent / 100.0).round() as u64;
-    let seed = hashfloat8_for_tablesample(*repeatable);
-    Ok(Value::Bool(
-        u64::from(pg_hash_three_u32(block, offset, seed)) < cutoff,
-    ))
-}
-
-fn parse_ctid_text(text: &str) -> Option<(u32, u32)> {
-    let inner = text.strip_prefix('(')?.strip_suffix(')')?;
-    let (block, offset) = inner.split_once(',')?;
-    Some((block.parse().ok()?, offset.parse().ok()?))
-}
-
-fn hashfloat8_for_tablesample(value: f64) -> u32 {
+pub(crate) fn hashfloat8_for_tablesample(value: f64) -> u32 {
     if value == 0.0 {
         return 0;
     }
     pg_hash_bytes(&value.to_le_bytes())
 }
 
-fn pg_hash_three_u32(first: u32, second: u32, third: u32) -> u32 {
+pub(crate) fn pg_hash_two_u32(first: u32, second: u32) -> u32 {
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(&first.to_le_bytes());
+    bytes.extend_from_slice(&second.to_le_bytes());
+    pg_hash_bytes(&bytes)
+}
+
+pub(crate) fn pg_hash_three_u32(first: u32, second: u32, third: u32) -> u32 {
     let mut bytes = Vec::with_capacity(12);
     bytes.extend_from_slice(&first.to_le_bytes());
     bytes.extend_from_slice(&second.to_le_bytes());
@@ -13456,9 +13426,6 @@ pub(crate) fn eval_builtin_function(
     }
     if matches!(func, BuiltinScalarFunction::PgRustDomainCheckUpperLessThan) {
         return eval_domain_check_upper_less_than(&values);
-    }
-    if matches!(func, BuiltinScalarFunction::PgRustTablesampleBernoulli) {
-        return eval_tablesample_bernoulli(&values);
     }
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;

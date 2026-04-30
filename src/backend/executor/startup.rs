@@ -8,7 +8,8 @@ use crate::include::nodes::execnodes::{
     LockRowsState, MaterializeState, MemoizeState, MergeAppendState, MergeJoinState,
     NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
     RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState, SetOpState,
-    SubqueryScanState, UniqueState, ValuesState, WindowAggState, WorkTableScanState,
+    SubqueryScanState, TableSampleState, UniqueState, ValuesState, WindowAggState,
+    WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
@@ -538,7 +539,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             relispopulated,
             disabled,
             toast,
-            tablesample: _,
+            tablesample,
             desc,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -562,6 +563,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 desc,
                 attr_descs,
                 scan: None,
+                tablesample: tablesample.map(TableSampleState::new),
                 scan_rows: Vec::new(),
                 scan_index: 0,
                 sequence_emitted: false,
@@ -1080,7 +1082,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relispopulated,
                 disabled,
                 toast,
-                tablesample: _,
+                tablesample,
                 desc,
             } = *input
             else {
@@ -1108,6 +1110,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 desc,
                 attr_descs,
                 scan: None,
+                tablesample: tablesample.map(TableSampleState::new),
                 scan_rows: Vec::new(),
                 scan_index: 0,
                 sequence_emitted: false,

@@ -360,6 +360,12 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
             .with_position(sql_position_from_byte_offset(sql, leading + position)),
         );
     }
+    if (lowered.starts_with("select ") || lowered.starts_with("with "))
+        && let Some(position) = derived_table_tablesample_syntax_error_position(trimmed)
+    {
+        let token = syntax_error_token_at(trimmed, position);
+        return Some(syntax_error_at(sql, leading + position, &token));
+    }
 
     if lowered.starts_with("select ")
         && keyword_boundary(trimmed, "group by grouping sets").is_some()
@@ -371,6 +377,70 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     }
 
     None
+}
+
+fn derived_table_tablesample_syntax_error_position(input: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(relative) = find_keyword_any_depth(input, "tablesample", start) {
+        let position = relative;
+        let depth = nesting_depth_at(input, position);
+        if let Some(item_start) = find_from_item_start_before(input, position, depth) {
+            let item = input[item_start..position].trim_start();
+            if parenthesized_from_item_starts_with_query(item) {
+                return Some(position);
+            }
+        }
+        start = position + "tablesample".len();
+    }
+    None
+}
+
+fn find_from_item_start_before(input: &str, position: usize, target_depth: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    let mut item_start = None;
+    while index < bytes.len() && index < position {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == target_depth => item_start = Some(index + 1),
+            _ if depth == target_depth && keyword_at_boundary(input, index, "from") => {
+                item_start = Some(index + "from".len());
+            }
+            _ if depth == target_depth && keyword_at_boundary(input, index, "join") => {
+                item_start = Some(index + "join".len());
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    item_start
+}
+
+fn parenthesized_from_item_starts_with_query(item: &str) -> bool {
+    if !item.starts_with('(') {
+        return false;
+    }
+    let Ok((inner, _rest)) = take_parenthesized_segment(item) else {
+        return false;
+    };
+    let inner = inner.trim_start();
+    keyword_at_start(inner, "select") || keyword_at_start(inner, "with")
 }
 
 fn json_table_exists_on_empty_behavior_position(input: &str) -> Option<usize> {
@@ -20909,13 +20979,19 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             }
             Ok(item)
         }
-        Rule::aliased_from_item => {
+        Rule::aliased_from_item | Rule::sampled_from_item | Rule::unsampled_from_item => {
             let mut source = None;
             let mut alias = None;
             let mut column_aliases = AliasColumnSpec::None;
             let mut sample = None;
             for part in pair.into_inner() {
                 match part.as_rule() {
+                    Rule::sampled_from_item | Rule::unsampled_from_item => {
+                        source = Some(build_from_item(part)?)
+                    }
+                    Rule::sampleable_from_primary | Rule::unsampleable_from_primary => {
+                        source = Some(build_from_item(part)?)
+                    }
                     Rule::only_table_from_item
                     | Rule::table_from_item
                     | Rule::lateral_from_item
@@ -20960,6 +21036,10 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 };
             }
             Ok(item)
+        }
+        Rule::sampleable_from_primary | Rule::unsampleable_from_primary => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_from_item(inner)
         }
         Rule::only_table_from_item => Ok(FromItem::Table {
             name: build_identifier(

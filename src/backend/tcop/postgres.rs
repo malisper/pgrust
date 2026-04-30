@@ -478,6 +478,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         {
             return find_last_case_insensitive_token_position(sql, "ON");
         }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+            if message.starts_with("tablesample method ")
+                || message
+                    == "TABLESAMPLE clause can only be applied to tables and materialized views" =>
+        {
+            return find_case_insensitive_token_position(sql, "TABLESAMPLE");
+        }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInsertTargetCount {
             expected,
             actual,
