@@ -177,6 +177,9 @@ fn commuted_op_expr_kind(kind: OpExprKind) -> Option<OpExprKind> {
         OpExprKind::LtEq => OpExprKind::GtEq,
         OpExprKind::Gt => OpExprKind::Lt,
         OpExprKind::GtEq => OpExprKind::LtEq,
+        OpExprKind::ArrayOverlap => OpExprKind::ArrayOverlap,
+        OpExprKind::ArrayContains => OpExprKind::ArrayContained,
+        OpExprKind::ArrayContained => OpExprKind::ArrayContains,
         _ => return None,
     })
 }

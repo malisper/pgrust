@@ -2549,6 +2549,7 @@ fn bind_window_func_call(
     args: &[SqlFunctionArg],
     func_variadic: bool,
     null_treatment: Option<WindowNullTreatment>,
+    filter: Option<&SqlExpr>,
     over: &RawWindowSpec,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
@@ -2656,7 +2657,7 @@ fn bind_window_func_call(
                 &[],
                 false,
                 resolved.func_variadic,
-                None,
+                filter,
                 over,
                 scope,
                 catalog,
@@ -2672,7 +2673,7 @@ fn bind_window_func_call(
             &[],
             false,
             func_variadic,
-            None,
+            filter,
             over,
             scope,
             catalog,
@@ -2982,6 +2983,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     varattno: system_column.varattno,
                     varlevelsup: system_column.varlevelsup,
                     vartype: system_column.sql_type,
+                    collation_oid: None,
                 })
             } else {
                 match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
@@ -3976,29 +3978,34 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     domain.as_ref(),
                 ));
             }
-            if target_type.kind == SqlTypeKind::RegRole
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegRole
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regrole);
             }
-            if target_type.kind == SqlTypeKind::RegClass
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegClass
                 && let Some(bound_regclass) =
                     bind_regclass_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regclass);
             }
-            if target_type.kind == SqlTypeKind::RegOperator
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegOperator
                 && let Some(bound_regoperator) =
                     bind_regoperator_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regoperator);
             }
-            if target_type.kind == SqlTypeKind::RegType
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegType
                 && let Some(bound_regtype) = bind_regtype_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regtype);
             }
-            if target_type.kind == SqlTypeKind::RegProcedure
+            if !target_type.is_array
+                && target_type.kind == SqlTypeKind::RegProcedure
                 && let Some(bound_regprocedure) =
                     bind_regprocedure_literal_cast(inner, target_type, catalog)?
             {
@@ -5542,6 +5549,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     args_list,
                     *func_variadic,
                     *null_treatment,
+                    filter.as_deref(),
                     raw_over,
                     scope,
                     catalog,
@@ -5582,6 +5590,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 );
+            }
+            if name.eq_ignore_ascii_case("merge_action") {
+                return Err(ParseError::DetailedError {
+                    message:
+                        "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command"
+                            .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
             }
             if !order_by.is_empty() || *distinct || filter.is_some() || args.is_star() {
                 return Err(ParseError::UnexpectedToken {
@@ -7076,6 +7094,12 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
                 return true;
             }
         }
+        if !source_type.is_array
+            && is_text_like_type(source_type)
+            && user_defined_base_type_has_input_oid(target_oid, catalog)
+        {
+            return true;
+        }
         if is_user_defined_base_type_oid(source_oid, catalog)
             || is_user_defined_base_type_oid(target_oid, catalog)
         {
@@ -7138,6 +7162,14 @@ fn is_user_defined_base_type_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> 
                 && !row.sql_type.is_multirange()
                 && matches!(row.sql_type.kind, SqlTypeKind::Text)
                 && row.typrelid == 0
+        })
+}
+
+fn user_defined_base_type_has_input_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> bool {
+    type_oid != 0
+        && builtin_type_name_for_oid(type_oid).is_none()
+        && catalog.type_by_oid(type_oid).is_some_and(|row| {
+            row.typtype == 'b' && row.typrelid == 0 && !row.sql_type.is_array && row.typinput != 0
         })
 }
 

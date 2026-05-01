@@ -15,9 +15,10 @@ use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, PlanEstimate, PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind,
-    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TABLE_OID_ATTR_NO,
-    TargetEntry, WindowClause, expr_contains_set_returning, set_returning_call_exprs, user_attrno,
+    AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, BuiltinWindowFunction, Expr, JoinType,
+    OpExprKind, ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TABLE_OID_ATTR_NO,
+    TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncKind, attrno_index,
+    expr_contains_set_returning, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::bestpath;
@@ -2028,6 +2029,291 @@ fn window_pathkeys(clause: &WindowClause) -> Vec<PathKey> {
     pathkeys
 }
 
+fn window_clause_sort_key(clause: &WindowClause) -> Vec<PathKey> {
+    let mut keys = Vec::with_capacity(clause.spec.partition_by.len() + clause.spec.order_by.len());
+    for expr in &clause.spec.partition_by {
+        keys.push(PathKey {
+            expr: expr.clone(),
+            ressortgroupref: 0,
+            descending: false,
+            nulls_first: None,
+            collation_oid: None,
+        });
+    }
+    for item in &clause.spec.order_by {
+        if clause
+            .spec
+            .partition_by
+            .iter()
+            .any(|expr| *expr == item.expr)
+        {
+            continue;
+        }
+        keys.push(PathKey {
+            expr: item.expr.clone(),
+            ressortgroupref: item.ressortgroupref,
+            descending: item.descending,
+            nulls_first: item.nulls_first,
+            collation_oid: item.collation_oid,
+        });
+    }
+    keys
+}
+
+fn window_query_order_prefix_len(keys: &[PathKey], query_pathkeys: &[PathKey]) -> usize {
+    keys.iter()
+        .zip(query_pathkeys.iter())
+        .take_while(|(left, right)| window_pathkeys_equivalent(left, right))
+        .count()
+}
+
+fn window_pathkeys_equivalent(left: &PathKey, right: &PathKey) -> bool {
+    let same_identity = if left.ressortgroupref != 0 && right.ressortgroupref != 0 {
+        left.ressortgroupref == right.ressortgroupref
+    } else {
+        left.expr == right.expr
+    };
+    same_identity
+        && left.descending == right.descending
+        && left.nulls_first.unwrap_or(left.descending)
+            == right.nulls_first.unwrap_or(right.descending)
+}
+
+fn compare_window_clause_sort_keys(
+    left: &[PathKey],
+    right: &[PathKey],
+    query_pathkeys: &[PathKey],
+) -> Ordering {
+    for (left_key, right_key) in left.iter().zip(right.iter()) {
+        if left_key.expr != right_key.expr {
+            let left_prefix = window_query_order_prefix_len(left, query_pathkeys);
+            let right_prefix = window_query_order_prefix_len(right, query_pathkeys);
+            match left_prefix.cmp(&right_prefix) {
+                Ordering::Equal => match window_pathkey_expr_fallback_cmp(left_key, right_key) {
+                    Ordering::Equal => {}
+                    ordering => return ordering,
+                },
+                ordering => return ordering,
+            }
+        }
+        match right_key.ressortgroupref.cmp(&left_key.ressortgroupref) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        match right_key.descending.cmp(&left_key.descending) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        match right_key.nulls_first.cmp(&left_key.nulls_first) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        match right_key.collation_oid.cmp(&left_key.collation_oid) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    right.len().cmp(&left.len())
+}
+
+fn window_pathkey_expr_fallback_cmp(left: &PathKey, right: &PathKey) -> Ordering {
+    match window_pathkey_expr_rank(&left.expr).cmp(&window_pathkey_expr_rank(&right.expr)) {
+        Ordering::Equal => {}
+        ordering => return ordering,
+    }
+    match (
+        window_pathkey_core_expr(&left.expr),
+        window_pathkey_core_expr(&right.expr),
+    ) {
+        (Expr::Var(left_var), Expr::Var(right_var))
+            if left_var.varno == right_var.varno
+                && left_var.varlevelsup == right_var.varlevelsup =>
+        {
+            left_var.varattno.cmp(&right_var.varattno)
+        }
+        (Expr::Op(left_op), Expr::Op(right_op))
+            if left_op.op == OpExprKind::Concat
+                && right_op.op == OpExprKind::Concat
+                && left_op.args.len() == 2
+                && right_op.args.len() == 2 =>
+        {
+            concat_const_side_rank(&left_op.args).cmp(&concat_const_side_rank(&right_op.args))
+        }
+        _ => Ordering::Equal,
+    }
+}
+
+fn window_pathkey_expr_rank(expr: &Expr) -> usize {
+    match window_pathkey_core_expr(expr) {
+        Expr::Op(op) if op.op == OpExprKind::Concat && op.args.len() == 2 => {
+            concat_const_side_rank(&op.args)
+        }
+        _ => 1,
+    }
+}
+
+fn window_pathkey_core_expr(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => window_pathkey_core_expr(inner),
+        other => other,
+    }
+}
+
+fn concat_const_side_rank(args: &[Expr]) -> usize {
+    if args.first().and_then(expr_const_value).is_some() {
+        0
+    } else if args.get(1).and_then(expr_const_value).is_some() {
+        2
+    } else {
+        1
+    }
+}
+
+fn builtin_window_optimized_frame(func: BuiltinWindowFunction) -> Option<WindowFrame> {
+    match func {
+        BuiltinWindowFunction::RowNumber
+        | BuiltinWindowFunction::Rank
+        | BuiltinWindowFunction::DenseRank
+        | BuiltinWindowFunction::PercentRank
+        | BuiltinWindowFunction::CumeDist
+        | BuiltinWindowFunction::Ntile => Some(WindowFrame {
+            mode: crate::include::nodes::parsenodes::WindowFrameMode::Rows,
+            start_bound: WindowFrameBound::UnboundedPreceding,
+            end_bound: WindowFrameBound::CurrentRow,
+            exclusion: crate::include::nodes::parsenodes::WindowFrameExclusion::NoOthers,
+        }),
+        _ => None,
+    }
+}
+
+fn optimized_window_clause_frame(clause: &WindowClause) -> Option<WindowFrame> {
+    let mut optimized = None;
+    for func in &clause.functions {
+        let WindowFuncKind::Builtin(kind) = func.kind else {
+            return None;
+        };
+        let Some(frame) = builtin_window_optimized_frame(kind) else {
+            return None;
+        };
+        match &optimized {
+            Some(existing) if existing != &frame => return None,
+            Some(_) => {}
+            None => optimized = Some(frame),
+        }
+    }
+    optimized
+}
+
+fn optimize_window_clause_frame(
+    mut clause: WindowClause,
+    all_clauses: &[WindowClause],
+) -> WindowClause {
+    if all_clauses
+        .iter()
+        .any(|peer| peer.spec == clause.spec && optimized_window_clause_frame(peer).is_none())
+    {
+        return clause;
+    }
+    if let Some(frame) = optimized_window_clause_frame(&clause) {
+        clause.spec.frame = frame;
+    }
+    clause
+}
+
+fn merge_equivalent_window_clauses(clauses: Vec<WindowClause>) -> Vec<WindowClause> {
+    let mut merged: Vec<WindowClause> = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.spec == clause.spec)
+        {
+            for func in clause.functions {
+                if !existing.functions.contains(&func) {
+                    existing.functions.push(func);
+                }
+            }
+        } else {
+            merged.push(clause);
+        }
+    }
+    merged
+}
+
+fn optimize_window_clauses(clauses: Vec<WindowClause>) -> Vec<WindowClause> {
+    merge_equivalent_window_clauses(
+        clauses
+            .iter()
+            .cloned()
+            .map(|clause| optimize_window_clause_frame(clause, &clauses))
+            .collect(),
+    )
+}
+
+fn window_partition_expr_single_valued(root: &PlannerInfo, expr: &Expr) -> bool {
+    if matches!(expr, Expr::Const(_)) {
+        return true;
+    }
+    let Some(where_qual) = root.parse.where_qual.as_ref() else {
+        return false;
+    };
+    let expr = normalized_equivalence_expr(root, expr);
+    flatten_and_conjuncts(where_qual)
+        .into_iter()
+        .filter_map(equality_const_expr)
+        .any(|(candidate, _)| normalized_equivalence_expr(root, candidate) == expr)
+}
+
+fn prune_single_valued_window_partition_keys(
+    root: &PlannerInfo,
+    mut clause: WindowClause,
+) -> WindowClause {
+    clause
+        .spec
+        .partition_by
+        .retain(|expr| !window_partition_expr_single_valued(root, expr));
+    clause
+}
+
+fn active_window_clauses(root: &PlannerInfo, mut clauses: Vec<WindowClause>) -> Vec<WindowClause> {
+    clauses = merge_equivalent_window_clauses(
+        clauses
+            .into_iter()
+            .map(|clause| prune_single_valued_window_partition_keys(root, clause))
+            .collect(),
+    );
+    clauses.sort_by(|left, right| {
+        compare_window_clause_sort_keys(
+            &window_clause_sort_key(left),
+            &window_clause_sort_key(right),
+            &root.query_pathkeys,
+        )
+    });
+    for (index, clause) in clauses.iter_mut().enumerate() {
+        for func in &mut clause.functions {
+            func.winref = index + 1;
+        }
+    }
+    clauses
+}
+
+fn path_contains_explicit_sort(path: &Path) -> bool {
+    match path {
+        Path::OrderBy { .. } | Path::IncrementalSort { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_explicit_sort(input),
+        _ => false,
+    }
+}
+
+fn path_satisfies_without_explicit_sort(path: &Path, required_pathkeys: &[PathKey]) -> bool {
+    bestpath::pathkeys_satisfy(&path.pathkeys(), required_pathkeys)
+        && !path_contains_explicit_sort(path)
+}
+
 fn make_window_rel(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
@@ -2089,30 +2375,59 @@ fn make_window_rel(
             );
         }
     }
-    let has_ordered_input_path = !ordered_input_paths.is_empty();
+    let has_native_ordered_input_path = !ordered_input_paths.is_empty()
+        || input_rel
+            .pathlist
+            .iter()
+            .any(|path| path_satisfies_without_explicit_sort(path, &required_pathkeys));
     // When an index can deliver the required window order, keep that native
     // ordering instead of adding a cheaper explicit sort on an unordered path.
     for path in input_rel
         .pathlist
         .into_iter()
         .filter(|path| {
-            !has_ordered_input_path
-                || bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)
+            !has_native_ordered_input_path
+                || path_satisfies_without_explicit_sort(path, &required_pathkeys)
         })
         .chain(ordered_input_paths.into_iter())
     {
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-            optimize_path_with_config(
-                Path::OrderBy {
-                    plan_info: PlanEstimate::default(),
-                    pathtarget: path.semantic_output_target(),
-                    items: pathkeys_to_order_items(&required_pathkeys),
-                    display_items: Vec::new(),
-                    input: Box::new(path),
-                },
-                catalog,
-                root.config,
-            )
+            let presorted_count = common_presorted_prefix_len(&path.pathkeys(), &required_pathkeys);
+            let display_items = sort_key_display_items(root, &required_pathkeys, catalog);
+            if presorted_count > 0 && presorted_count < required_pathkeys.len() {
+                let mut presorted_display_pathkeys = required_pathkeys[..presorted_count].to_vec();
+                for key in &mut presorted_display_pathkeys {
+                    key.descending = false;
+                    key.nulls_first = None;
+                }
+                let presorted_display_items =
+                    sort_key_display_items(root, &presorted_display_pathkeys, catalog);
+                optimize_path_with_config(
+                    Path::IncrementalSort {
+                        plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
+                        items: pathkeys_to_order_items(&required_pathkeys),
+                        presorted_count,
+                        display_items,
+                        presorted_display_items,
+                        input: Box::new(path),
+                    },
+                    catalog,
+                    root.config,
+                )
+            } else {
+                optimize_path_with_config(
+                    Path::OrderBy {
+                        plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
+                        items: pathkeys_to_order_items(&required_pathkeys),
+                        display_items,
+                        input: Box::new(path),
+                    },
+                    catalog,
+                    root.config,
+                )
+            }
         } else {
             path
         };
@@ -2124,6 +2439,8 @@ fn make_window_rel(
                 output_columns: window_output_columns(&path, &clause),
                 input: Box::new(path),
                 clause: clause.clone(),
+                run_condition: None,
+                top_qual: None,
             },
             catalog,
             root.config,
@@ -2788,6 +3105,26 @@ fn pathkey_same_expr(left: &PathKey, right: &PathKey) -> bool {
         || left.expr == right.expr
 }
 
+fn pathkey_expr_identity(root: &PlannerInfo, expr: &Expr) -> Expr {
+    let expr = match expr {
+        Expr::GroupingKey(grouping_key) => grouping_key.expr.as_ref().clone(),
+        _ => expr.clone(),
+    };
+    strip_binary_coercible_casts(&flatten_join_alias_vars(root, expr))
+}
+
+fn pathkey_same_expr_for_root(root: &PlannerInfo, left: &PathKey, right: &PathKey) -> bool {
+    pathkey_same_expr(left, right)
+        || pathkey_expr_identity(root, &left.expr) == pathkey_expr_identity(root, &right.expr)
+}
+
+fn pathkey_matches_for_root(root: &PlannerInfo, left: &PathKey, right: &PathKey) -> bool {
+    pathkey_same_expr_for_root(root, left, right)
+        && left.descending == right.descending
+        && left.nulls_first.unwrap_or(left.descending)
+            == right.nulls_first.unwrap_or(right.descending)
+}
+
 fn pathkey_position(target: &PathTarget, key: &PathKey) -> Option<usize> {
     if key.ressortgroupref != 0
         && let Some(index) = target
@@ -2819,32 +3156,49 @@ fn append_missing_distinct_pathkeys(required: &mut Vec<PathKey>, key_pathkeys: &
     }
 }
 
+fn append_missing_distinct_pathkeys_for_root(
+    root: &PlannerInfo,
+    required: &mut Vec<PathKey>,
+    key_pathkeys: &[PathKey],
+) {
+    for key in key_pathkeys {
+        if !required
+            .iter()
+            .any(|existing| pathkey_same_expr_for_root(root, existing, key))
+        {
+            required.push(key.clone());
+        }
+    }
+}
+
 fn distinct_on_has_order_by_tiebreakers(root: &PlannerInfo, key_pathkeys: &[PathKey]) -> bool {
     root.query_pathkeys.iter().any(|key| {
         !key_pathkeys
             .iter()
-            .any(|distinct_key| pathkey_same_expr(key, distinct_key))
+            .any(|distinct_key| pathkey_same_expr_for_root(root, key, distinct_key))
     })
 }
 
 fn reordered_distinct_pathkeys_for_path(
+    root: &PlannerInfo,
     path: &Path,
     key_pathkeys: &[PathKey],
+    required_pathkeys: &[PathKey],
 ) -> Option<Vec<PathKey>> {
     let actual = path.pathkeys();
-    if actual.len() < key_pathkeys.len() {
-        return None;
-    }
-    let mut required = Vec::with_capacity(key_pathkeys.len());
-    for actual_key in actual.iter().take(key_pathkeys.len()) {
-        let distinct_key = key_pathkeys
+    let mut required = Vec::with_capacity(required_pathkeys.len().max(key_pathkeys.len()));
+    for actual_key in actual.iter() {
+        let Some(distinct_key) = key_pathkeys
             .iter()
-            .find(|key| pathkey_same_expr(actual_key, key))?;
+            .find(|key| pathkey_same_expr_for_root(root, actual_key, key))
+        else {
+            break;
+        };
         if required
             .iter()
-            .any(|existing: &PathKey| pathkey_same_expr(existing, distinct_key))
+            .any(|existing: &PathKey| pathkey_same_expr_for_root(root, existing, distinct_key))
         {
-            return None;
+            break;
         }
         required.push(PathKey {
             expr: distinct_key.expr.clone(),
@@ -2854,6 +3208,18 @@ fn reordered_distinct_pathkeys_for_path(
             collation_oid: actual_key.collation_oid,
         });
     }
+    if required.is_empty() {
+        return None;
+    }
+    append_missing_distinct_pathkeys_for_root(root, &mut required, key_pathkeys);
+    for key in required_pathkeys {
+        if !required
+            .iter()
+            .any(|existing: &PathKey| pathkey_same_expr_for_root(root, existing, key))
+        {
+            required.push(key.clone());
+        }
+    }
     Some(required)
 }
 
@@ -2862,18 +3228,19 @@ fn distinct_on_required_pathkeys_for_path(
     path: &Path,
     key_pathkeys: &[PathKey],
 ) -> Vec<PathKey> {
-    if !root.query_pathkeys.is_empty() && distinct_on_has_order_by_tiebreakers(root, key_pathkeys) {
-        return root.query_pathkeys.clone();
-    }
-    if let Some(reordered) = reordered_distinct_pathkeys_for_path(path, key_pathkeys) {
-        return reordered;
-    }
     let mut required = if root.query_pathkeys.is_empty() {
         key_pathkeys.to_vec()
+    } else if distinct_on_has_order_by_tiebreakers(root, key_pathkeys) {
+        root.query_pathkeys.clone()
     } else {
         root.query_pathkeys.clone()
     };
-    append_missing_distinct_pathkeys(&mut required, key_pathkeys);
+    append_missing_distinct_pathkeys_for_root(root, &mut required, key_pathkeys);
+    if let Some(reordered) =
+        reordered_distinct_pathkeys_for_path(root, path, key_pathkeys, &required)
+    {
+        return reordered;
+    }
     required
 }
 
@@ -2885,7 +3252,7 @@ fn distinct_on_index_pathkeys(key_pathkeys: &[PathKey]) -> Vec<Vec<PathKey>> {
     candidates
 }
 
-fn expr_equated_to_constant(predicate: &Expr, key: &Expr) -> bool {
+fn expr_equated_to_constant(root: &PlannerInfo, predicate: &Expr, key: &Expr) -> bool {
     match predicate {
         Expr::Bool(bool_expr)
             if matches!(
@@ -2896,14 +3263,17 @@ fn expr_equated_to_constant(predicate: &Expr, key: &Expr) -> bool {
             bool_expr
                 .args
                 .iter()
-                .any(|arg| expr_equated_to_constant(arg, key))
+                .any(|arg| expr_equated_to_constant(root, arg, key))
         }
         Expr::Op(op)
             if matches!(op.op, crate::include::nodes::primnodes::OpExprKind::Eq)
                 && op.args.len() == 2 =>
         {
-            (op.args[0] == *key && matches!(op.args[1], Expr::Const(_)))
-                || (op.args[1] == *key && matches!(op.args[0], Expr::Const(_)))
+            let key = pathkey_expr_identity(root, key);
+            (pathkey_expr_identity(root, &op.args[0]) == key
+                && matches!(op.args[1], Expr::Const(_)))
+                || (pathkey_expr_identity(root, &op.args[1]) == key
+                    && matches!(op.args[0], Expr::Const(_)))
         }
         _ => false,
     }
@@ -2915,18 +3285,27 @@ fn distinct_on_keys_are_constant(root: &PlannerInfo, key_pathkeys: &[PathKey]) -
     };
     key_pathkeys
         .iter()
-        .all(|key| expr_equated_to_constant(predicate, &key.expr))
+        .all(|key| expr_equated_to_constant(root, predicate, &key.expr))
 }
 
 fn nonconstant_order_pathkeys(root: &PlannerInfo, key_pathkeys: &[PathKey]) -> Vec<PathKey> {
+    let distinct_prefix_len = key_pathkeys.len().max(root.parse.distinct_on.len());
     root.query_pathkeys
         .iter()
+        .enumerate()
         .filter(|key| {
-            !key_pathkeys
-                .iter()
-                .any(|distinct_key| pathkey_same_expr(key, distinct_key))
+            let (position, key) = key;
+            *position >= distinct_prefix_len
+                && !key_pathkeys
+                    .iter()
+                    .any(|distinct_key| pathkey_same_expr_for_root(root, key, distinct_key))
+                && !root
+                    .parse
+                    .where_qual
+                    .as_ref()
+                    .is_some_and(|predicate| expr_equated_to_constant(root, predicate, &key.expr))
         })
-        .cloned()
+        .map(|(_, key)| key.clone())
         .collect()
 }
 
@@ -3042,6 +3421,130 @@ fn common_presorted_prefix_len(pathkeys: &[PathKey], required: &[PathKey]) -> us
         .count()
 }
 
+fn common_presorted_prefix_len_for_root(
+    root: &PlannerInfo,
+    pathkeys: &[PathKey],
+    required: &[PathKey],
+) -> usize {
+    pathkeys
+        .iter()
+        .zip(required.iter())
+        .take_while(|(left, right)| pathkey_matches_for_root(root, left, right))
+        .count()
+}
+
+fn display_pathkey_for_input(path: &Path, key: &PathKey) -> PathKey {
+    if let Some(expr) = subquery_display_expr_for_key(path, key) {
+        return PathKey {
+            expr,
+            ..key.clone()
+        };
+    }
+    let target = path.semantic_output_target();
+    if key.ressortgroupref != 0
+        && let Some(index) = target
+            .sortgrouprefs
+            .iter()
+            .position(|sortgroupref| *sortgroupref == key.ressortgroupref)
+        && let Some(expr) = target.exprs.get(index)
+    {
+        return PathKey {
+            expr: expr.clone(),
+            ..key.clone()
+        };
+    }
+    if let Some(index) = target.exprs.iter().position(|expr| *expr == key.expr)
+        && let Some(expr) = target.exprs.get(index)
+    {
+        return PathKey {
+            expr: expr.clone(),
+            ..key.clone()
+        };
+    }
+    key.clone()
+}
+
+fn pathkey_expr_is_subquery_var(root: &PlannerInfo, expr: &Expr) -> bool {
+    let Expr::Var(var) = expr else {
+        return false;
+    };
+    var.varlevelsup == 0
+        && root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Subquery { .. }))
+}
+
+fn subquery_display_expr_for_key(path: &Path, key: &PathKey) -> Option<Expr> {
+    match path {
+        Path::SubqueryScan {
+            rtindex,
+            output_columns,
+            ..
+        } => {
+            let Expr::Var(var) = &key.expr else {
+                return None;
+            };
+            let index = attrno_index(var.varattno)?;
+            let column = output_columns.get(index)?;
+            Some(Expr::Var(crate::include::nodes::primnodes::Var {
+                varno: *rtindex,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+                collation_oid: key.collation_oid,
+            }))
+        }
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. } => subquery_display_expr_for_key(input, key),
+        _ => None,
+    }
+}
+
+fn display_pathkeys_for_input(path: &Path, pathkeys: &[PathKey]) -> Vec<PathKey> {
+    pathkeys
+        .iter()
+        .map(|key| display_pathkey_for_input(path, key))
+        .collect()
+}
+
+fn strip_redundant_order_path(path: Path) -> Path {
+    match path {
+        Path::OrderBy { input, .. } | Path::IncrementalSort { input, .. } => *input,
+        Path::Projection {
+            plan_info,
+            pathtarget,
+            slot_id,
+            input,
+            targets,
+        } => Path::Projection {
+            plan_info,
+            pathtarget,
+            slot_id,
+            input: Box::new(strip_redundant_order_path(*input)),
+            targets,
+        },
+        Path::Filter {
+            plan_info,
+            pathtarget,
+            input,
+            predicate,
+        } => Path::Filter {
+            plan_info,
+            pathtarget,
+            input: Box::new(strip_redundant_order_path(*input)),
+            predicate,
+        },
+        other => other,
+    }
+}
+
 fn order_path_for_distinct(
     root: &PlannerInfo,
     path: Path,
@@ -3049,19 +3552,22 @@ fn order_path_for_distinct(
     catalog: &dyn CatalogLookup,
 ) -> Option<Path> {
     if bestpath::pathkeys_satisfy(&path.pathkeys(), required_pathkeys) {
+        let display_pathkeys = display_pathkeys_for_input(&path, required_pathkeys);
         return Some(path_with_sort_display_items(
             path,
-            &sort_key_display_items(root, required_pathkeys, catalog),
+            &sort_key_display_items(root, &display_pathkeys, catalog),
         ));
     }
     if !root.config.enable_sort {
         return None;
     }
-    let presorted_count = common_presorted_prefix_len(&path.pathkeys(), required_pathkeys);
-    let display_items = sort_key_display_items(root, required_pathkeys, catalog);
+    let presorted_count =
+        common_presorted_prefix_len_for_root(root, &path.pathkeys(), required_pathkeys);
+    let display_pathkeys = display_pathkeys_for_input(&path, required_pathkeys);
+    let display_items = sort_key_display_items(root, &display_pathkeys, catalog);
     if presorted_count > 0 && presorted_count < required_pathkeys.len() {
         let presorted_display_items =
-            sort_key_display_items(root, &required_pathkeys[..presorted_count], catalog);
+            sort_key_display_items(root, &display_pathkeys[..presorted_count], catalog);
         Some(optimize_path_with_config(
             Path::IncrementalSort {
                 plan_info: PlanEstimate::default(),
@@ -3109,8 +3615,18 @@ fn equality_const_expr<'a>(expr: &'a Expr) -> Option<(&'a Expr, &'a Value)> {
         return None;
     }
     match (&op.args[0], &op.args[1]) {
-        (left, Expr::Const(value)) => Some((left, value)),
-        (Expr::Const(value), right) => Some((right, value)),
+        (left, right) if expr_const_value(right).is_some() => {
+            Some((left, expr_const_value(right)?))
+        }
+        (left, right) if expr_const_value(left).is_some() => Some((right, expr_const_value(left)?)),
+        _ => None,
+    }
+}
+
+fn expr_const_value(expr: &Expr) -> Option<&Value> {
+    match expr {
+        Expr::Const(value) => Some(value),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_const_value(inner),
         _ => None,
     }
 }
@@ -3470,20 +3986,13 @@ fn make_distinct_on_rel(
             reltarget.clone(),
         );
         for path in input_paths {
-            let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-                let display_items = sort_key_display_items(root, &required_pathkeys, catalog);
-                optimize_path_with_config(
-                    Path::OrderBy {
-                        plan_info: PlanEstimate::default(),
-                        pathtarget: path.semantic_output_target(),
-                        items: pathkeys_to_order_items(&required_pathkeys),
-                        display_items,
-                        input: Box::new(path),
-                    },
-                    catalog,
-                    root.config,
-                )
+            let path = if required_pathkeys.is_empty() {
+                strip_redundant_order_path(path)
             } else {
+                let Some(path) = order_path_for_distinct(root, path, &required_pathkeys, catalog)
+                else {
+                    continue;
+                };
                 path
             };
             rel.add_path(optimize_path_with_config(
@@ -3521,21 +4030,8 @@ fn make_distinct_on_rel(
     );
     for path in input_paths {
         let required_pathkeys = distinct_on_required_pathkeys_for_path(root, &path, &key_pathkeys);
-        let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-            let display_items = sort_key_display_items(root, &required_pathkeys, catalog);
-            optimize_path_with_config(
-                Path::OrderBy {
-                    plan_info: PlanEstimate::default(),
-                    pathtarget: path.semantic_output_target(),
-                    items: pathkeys_to_order_items(&required_pathkeys),
-                    display_items,
-                    input: Box::new(path),
-                },
-                catalog,
-                root.config,
-            )
-        } else {
-            path
+        let Some(path) = order_path_for_distinct(root, path, &required_pathkeys, catalog) else {
+            continue;
         };
         let key_indices = unique_key_indices(&path, &key_pathkeys);
         rel.add_path(optimize_path_with_config(
@@ -3625,19 +4121,23 @@ fn sort_key_display_items(
             .query_pathkeys
             .iter()
             .find(|query_key| {
-                key.ressortgroupref != 0 && query_key.ressortgroupref == key.ressortgroupref
+                key.ressortgroupref != 0
+                    && query_key.ressortgroupref == key.ressortgroupref
+                    && !pathkey_expr_is_subquery_var(root, &key.expr)
             })
             .map(|query_key| query_key.expr.clone())
             .unwrap_or_else(|| key.expr.clone());
         let dedupe_expr = expand_join_rte_vars(root, display_expr.clone());
         if display_exprs
             .iter()
-            .any(|existing| inner_join_equates_exprs(root, existing, &dedupe_expr))
+            .any(|existing| sort_display_exprs_equivalent(root, existing, &dedupe_expr))
         {
             continue;
         }
         let mut rendered =
-            render_sort_key_expr(root, &display_expr, catalog, qualify_relation_vars);
+            render_subquery_alias_sort_key_expr(root, &display_expr).unwrap_or_else(|| {
+                render_sort_key_expr(root, &display_expr, catalog, qualify_relation_vars)
+            });
         if sort_key_needs_extra_expression_parens(&display_expr)
             || sort_key_rendering_needs_expression_parens(&rendered)
         {
@@ -3670,6 +4170,25 @@ fn sort_key_display_items(
         }
     }
     display_items
+}
+
+fn render_subquery_alias_sort_key_expr(root: &PlannerInfo, expr: &Expr) -> Option<String> {
+    let Expr::Var(var) = expr else {
+        return None;
+    };
+    if var.varlevelsup != 0 {
+        return None;
+    }
+    let rte = root.parse.rtable.get(var.varno.saturating_sub(1))?;
+    if !matches!(rte.kind, RangeTblEntryKind::Subquery { .. }) {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    let column = rte.desc.columns.get(index)?;
+    rte.alias
+        .as_ref()
+        .map(|alias| format!("{alias}.{}", column.name))
+        .or_else(|| Some(column.name.clone()))
 }
 
 fn sort_key_is_bare_identifier(item: &str) -> bool {
@@ -3749,6 +4268,58 @@ fn set_sort_display_items(path: &mut Path, display_items: &[String]) -> bool {
 
 fn sort_input_is_index_scan(path: &Path) -> bool {
     matches!(path, Path::IndexOnlyScan { .. } | Path::IndexScan { .. })
+}
+
+fn normalized_equivalence_expr(root: &PlannerInfo, expr: &Expr) -> Expr {
+    strip_equivalence_casts(&strip_binary_coercible_casts(&flatten_join_alias_vars(
+        root,
+        expand_join_rte_vars(root, expr.clone()),
+    )))
+}
+
+fn strip_equivalence_casts(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Cast(inner, target_type)
+            if integer_widening_cast(expr_sql_type(inner), *target_type) =>
+        {
+            strip_equivalence_casts(inner)
+        }
+        other => other.clone(),
+    }
+}
+
+fn integer_widening_cast(source_type: SqlType, target_type: SqlType) -> bool {
+    use SqlTypeKind::{Int2, Int4, Int8};
+    matches!(
+        (source_type.kind, target_type.kind),
+        (Int2, Int4) | (Int2, Int8) | (Int4, Int8)
+    )
+}
+
+fn where_qual_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    let Some(where_qual) = root.parse.where_qual.as_ref() else {
+        return false;
+    };
+    let left = normalized_equivalence_expr(root, left);
+    let right = normalized_equivalence_expr(root, right);
+    flatten_and_conjuncts(where_qual).into_iter().any(|clause| {
+        let Expr::Op(op) = clause else {
+            return false;
+        };
+        if op.op != OpExprKind::Eq {
+            return false;
+        }
+        let [op_left, op_right] = op.args.as_slice() else {
+            return false;
+        };
+        let op_left = normalized_equivalence_expr(root, op_left);
+        let op_right = normalized_equivalence_expr(root, op_right);
+        (op_left == left && op_right == right) || (op_left == right && op_right == left)
+    })
+}
+
+fn sort_display_exprs_equivalent(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    inner_join_equates_exprs(root, left, right) || where_qual_equates_exprs(root, left, right)
 }
 
 fn inner_join_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
@@ -4273,7 +4844,10 @@ pub(super) fn grouping_planner(
                 false,
             );
         }
-        for clause in root.parse.window_clauses.clone() {
+        for clause in active_window_clauses(
+            root,
+            optimize_window_clauses(root.parse.window_clauses.clone()),
+        ) {
             current_rel = make_window_rel(root, current_rel, &clause, catalog);
         }
     }

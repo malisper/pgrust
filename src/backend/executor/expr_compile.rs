@@ -408,6 +408,7 @@ mod tests {
             varattno: user_attrno(index),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: None,
         })
     }
 
@@ -462,6 +463,7 @@ mod tests {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: SqlType::new(SqlTypeKind::Text),
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Text("I- .*".into())),
             ],

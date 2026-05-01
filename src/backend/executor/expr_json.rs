@@ -11,7 +11,7 @@ use crate::backend::executor::jsonb::{
     JsonbValue, RawJsonValue, decode_json_string_text, decode_jsonb, encode_jsonb,
     jsonb_builder_key, jsonb_from_value, jsonb_get, jsonb_object_from_pairs, jsonb_path,
     jsonb_to_text_value, jsonb_to_value, parse_json_text_input, parse_jsonb_text,
-    parse_raw_json_with_decoding, render_jsonb_bytes, render_jsonb_value_text,
+    parse_raw_json_with_decoding, render_jsonb_bytes, render_jsonb_pretty, render_jsonb_value_text,
     render_temporal_jsonb_value, validate_json_text_input,
 };
 use crate::backend::executor::jsonpath::{
@@ -906,9 +906,9 @@ pub(crate) fn eval_json_builtin_function(
             BuiltinScalarFunction::JsonbPretty => {
                 let json =
                     parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_pretty")?;
-                Ok(Value::Text(CompactString::from_owned(
-                    serde_json::to_string_pretty(&json.to_serde()).unwrap(),
-                )))
+                Ok(Value::Text(CompactString::from_owned(render_jsonb_pretty(
+                    &json,
+                ))))
             }
             BuiltinScalarFunction::JsonbConcat => {
                 let left =
@@ -4129,9 +4129,14 @@ pub(crate) fn apply_jsonb_subscript_assignment(
     subscripts: &[Value],
     new_value: &Value,
 ) -> Result<Value, ExecError> {
-    let target = parse_jsonb_target(target, "jsonb subscript assignment")?;
     let replacement = parse_jsonb_target(new_value, "jsonb subscript assignment")?;
-    let updated = assign_jsonb_subscripts(&target, subscripts, replacement)?;
+    let updated = if matches!(target, Value::Null) && !subscripts.is_empty() {
+        let seed = seed_container_for_assignment(&subscripts[0]);
+        assign_jsonb_subscripts(&seed, subscripts, replacement)?
+    } else {
+        let target = parse_jsonb_target(target, "jsonb subscript assignment")?;
+        assign_jsonb_subscripts(&target, subscripts, replacement)?
+    };
     Ok(Value::Jsonb(encode_jsonb(&updated)))
 }
 
@@ -4186,25 +4191,18 @@ fn assign_jsonb_subscripts_inner(
                 details: "array subscript must be integer".into(),
             })
         }
-        (JsonbValue::Null, JsonbAssignmentStep::Key(key)) => {
-            let mut out = Vec::new();
-            let value = if last {
-                replacement
-            } else {
-                let seed = seed_container_for_assignment(&subscripts[position + 1]);
-                assign_jsonb_subscripts_inner(&seed, subscripts, position + 1, replacement)?
-            };
-            out.push((key, value));
-            Ok(JsonbValue::Object(out))
-        }
-        (JsonbValue::Null, JsonbAssignmentStep::Index(_)) => {
-            let seeded = JsonbValue::Array(Vec::new());
-            assign_jsonb_subscripts_inner(&seeded, subscripts, position, replacement)
-        }
-        (_, _) => Err(ExecError::InvalidStorageValue {
-            column: "jsonb".into(),
-            details: "cannot replace existing key".into(),
-        }),
+        (_, _) => Err(jsonb_scalar_assignment_error()),
+    }
+}
+
+fn jsonb_scalar_assignment_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot replace existing key".into(),
+        detail: Some(
+            "The path assumes key is a composite object, but it is a scalar value.".into(),
+        ),
+        hint: None,
+        sqlstate: "22023",
     }
 }
 

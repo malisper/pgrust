@@ -7,8 +7,8 @@ use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
     derived_pg_depend_rows, foreign_key_constraint_depend_rows,
-    index_backed_constraint_depend_rows, inheritance_depend_rows,
-    primary_key_owned_not_null_depend_rows, relation_constraint_depend_rows, sort_pg_depend_rows,
+    index_backed_constraint_depend_rows, primary_key_owned_not_null_depend_rows,
+    relation_constraint_depend_rows, relation_inheritance_depend_rows, sort_pg_depend_rows,
     trigger_depend_rows,
 };
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
@@ -254,7 +254,7 @@ fn btree_reloptions(options: Option<BtreeOptions>) -> Option<Vec<String>> {
     })
 }
 
-fn explicit_btree_opclass_oid(opclass_name: &str, type_oid: u32) -> Option<u32> {
+fn explicit_opclass_oid(am_oid: u32, opclass_name: &str, type_oid: u32) -> Option<u32> {
     let opclass_name = opclass_name
         .rsplit_once('.')
         .map(|(_, name)| name)
@@ -262,14 +262,14 @@ fn explicit_btree_opclass_oid(opclass_name: &str, type_oid: u32) -> Option<u32> 
     crate::include::catalog::bootstrap_pg_opclass_rows()
         .into_iter()
         .find(|row| {
-            row.opcmethod == crate::include::catalog::BTREE_AM_OID
+            row.opcmethod == am_oid
                 && row.opcname.eq_ignore_ascii_case(opclass_name)
-                && btree_opclass_accepts_type(row.opcintype, type_oid)
+                && opclass_accepts_type(row.opcintype, type_oid)
         })
         .map(|row| row.oid)
 }
 
-fn btree_opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
+fn opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
     use crate::include::catalog::{
         ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, BPCHAR_TYPE_OID,
         TEXT_TYPE_OID, VARCHAR_TYPE_OID,
@@ -318,7 +318,7 @@ fn default_index_build_options_for_entry(
             return Err(CatalogError::UnknownType("index column type".into()));
         }
         let opclass_oid = if let Some(opclass_name) = column_name.opclass.as_deref() {
-            explicit_btree_opclass_oid(opclass_name, type_oid)
+            explicit_opclass_oid(am_oid, opclass_name, type_oid)
                 .ok_or_else(|| CatalogError::UnknownType("index operator class".into()))?
         } else {
             crate::include::catalog::default_opclass_oid_for_am(am_oid, type_oid, sql_type)
@@ -1732,8 +1732,12 @@ impl Catalog {
                 return Err(CatalogError::UnknownType("index column type".into()));
             }
             let opclass_oid = if let Some(opclass_name) = column_name.opclass.as_deref() {
-                explicit_btree_opclass_oid(opclass_name, type_oid)
-                    .ok_or_else(|| CatalogError::UnknownType("index operator class".into()))?
+                explicit_opclass_oid(
+                    crate::include::catalog::BTREE_AM_OID,
+                    opclass_name,
+                    type_oid,
+                )
+                .ok_or_else(|| CatalogError::UnknownType("index operator class".into()))?
             } else {
                 crate::include::catalog::default_opclass_oid_for_am(
                     crate::include::catalog::BTREE_AM_OID,
@@ -2669,8 +2673,8 @@ impl Catalog {
                 }
             }
         }
-        self.depends.extend(inheritance_depend_rows(
-            entry.relation_oid,
+        self.depends.extend(relation_inheritance_depend_rows(
+            entry,
             &self
                 .inheritance_parents(entry.relation_oid)
                 .into_iter()

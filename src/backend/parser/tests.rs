@@ -3,10 +3,10 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, JSON_TYPE_OID,
-    PUBLIC_NAMESPACE_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPolicyRow,
-    PgProcRow, PgRangeRow, PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEFAULT_COLLATION_OID,
+    JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID,
     bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
@@ -20,18 +20,18 @@ use crate::include::nodes::parsenodes::{
     CommentOnColumnStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
     CommentOnSubscriptionStatement, CommentOnTypeStatement, CommentOnViewStatement,
     CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
-    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCompositeTypeStatement,
-    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, CursorScrollOption,
-    DeclareCursorStatement, DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement,
-    DropSubscriptionStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind,
-    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
-    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SetTransactionScope,
-    SqlCallArgs, SubscriptionOptionValue, TableConstraint, TransactionEndOptions, TriggerEvent,
-    TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser,
-    ViewCheckOption,
+    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCollationKind,
+    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, CursorScrollOption, DeclareCursorStatement, DomainConstraintSpecKind,
+    DropAggregateStatement, DropCastStatement, DropSubscriptionStatement, DropTriggerStatement,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
+    GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy, PublicationObjectSpec,
+    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
+    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, RelOption,
+    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
+    TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -607,6 +607,78 @@ fn parse_select_with_default_collation_keeps_raw_ast() {
             collation: "default".into(),
         }
     );
+}
+
+#[test]
+fn parse_create_collation_from_source() {
+    match parse_statement("create collation regress_c from \"C\"").unwrap() {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_c");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::From {
+                    source_collation: "C".into()
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_create_collation_builtin_options() {
+    match parse_statement("create collation regress_builtin_c (provider = builtin, locale = 'C')")
+        .unwrap()
+    {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_builtin_c");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::Options {
+                    options: vec![
+                        RelOption {
+                            name: "provider".into(),
+                            value: "builtin".into(),
+                        },
+                        RelOption {
+                            name: "locale".into(),
+                            value: "C".into(),
+                        },
+                    ]
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_create_collation_builtin_locale_alias() {
+    match parse_statement(
+        "create collation regress_builtin_c_utf8 (provider=builtin, locale='C.UTF8')",
+    )
+    .unwrap()
+    {
+        Statement::CreateCollation(stmt) => {
+            assert_eq!(stmt.collation_name, "regress_builtin_c_utf8");
+            assert_eq!(
+                stmt.kind,
+                CreateCollationKind::Options {
+                    options: vec![
+                        RelOption {
+                            name: "provider".into(),
+                            value: "builtin".into(),
+                        },
+                        RelOption {
+                            name: "locale".into(),
+                            value: "C.UTF8".into(),
+                        },
+                    ]
+                }
+            );
+        }
+        other => panic!("expected CreateCollation, got {other:?}"),
+    }
 }
 
 fn is_outer_user_var(expr: &Expr, index: usize) -> bool {
@@ -2100,6 +2172,7 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype: SqlType::new(SqlTypeKind::Int4),
+                    collation_oid: None,
                 })
             );
         }
@@ -2112,6 +2185,7 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     );
 }
@@ -3951,6 +4025,35 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
 }
 
 #[test]
+fn parse_create_table_exclusion_constraint_captures_predicate_sql() {
+    let stmt = parse_statement(
+        "create table room_bookings (
+            room int4,
+            active bool,
+            exclude using gist (room with =) where (active)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let exclusion = ct
+        .elements
+        .iter()
+        .find_map(|element| match element {
+            CreateTableElement::Constraint(TableConstraint::Exclusion {
+                using_method,
+                predicate_sql,
+                ..
+            }) => Some((using_method, predicate_sql)),
+            _ => None,
+        })
+        .expect("exclusion constraint");
+    assert_eq!(exclusion.0, "gist");
+    assert_eq!(exclusion.1.as_deref(), Some("(active)"));
+}
+
+#[test]
 fn parse_alter_table_add_column_statement() {
     let stmt = parse_statement("alter table items add column note text default 'hello'").unwrap();
     assert_eq!(
@@ -5687,6 +5790,22 @@ fn parse_alter_role_option_statement() {
                 RoleOption::Inherit(true),
                 RoleOption::Login(true),
             ]),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_role_set_config_statement() {
+    let stmt =
+        parse_statement("alter role regress_rol_lock1 set search_path = lock_schema1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterRole(AlterRoleStatement {
+            role_name: "regress_rol_lock1".into(),
+            action: AlterRoleAction::SetConfig {
+                name: "search_path".into(),
+                value: Some("lock_schema1".into()),
+            },
         })
     );
 }
@@ -10827,14 +10946,17 @@ fn parse_cluster_table_using_index() {
     let stmt = parse_statement("cluster sorttest using sorttest_idx").unwrap();
     assert!(matches!(
         stmt,
-        Statement::Cluster(ClusterStatement { table_name, index_name, rewrite: true })
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: false })
             if table_name == "sorttest" && index_name == "sorttest_idx"
     ));
+}
 
+#[test]
+fn parse_alter_table_cluster_on_index() {
     let stmt = parse_statement("alter table sorttest cluster on sorttest_idx").unwrap();
     assert!(matches!(
         stmt,
-        Statement::Cluster(ClusterStatement { table_name, index_name, rewrite: false })
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: true })
             if table_name == "sorttest" && index_name == "sorttest_idx"
     ));
 }
@@ -11911,10 +12033,13 @@ fn parse_lock_table_statement_modes() {
     assert!(matches!(
         stmt,
         Statement::LockTable(LockTableStatement {
-            table_names,
+            targets,
             mode: LockTableMode::AccessExclusive,
             nowait: false,
-        }) if table_names == vec!["atest1"]
+        }) if targets.len() == 1
+            && targets[0].name == "atest1"
+            && !targets[0].only
+            && !targets[0].recurse
     ));
 
     let stmt =
@@ -11922,10 +12047,31 @@ fn parse_lock_table_statement_modes() {
     assert!(matches!(
         stmt,
         Statement::LockTable(LockTableStatement {
-            table_names,
+            targets,
             mode: LockTableMode::AccessShare,
             nowait: true,
-        }) if table_names == vec!["public.atest1", "atest2"]
+        }) if targets.iter().map(|target| target.name.as_str()).collect::<Vec<_>>()
+            == vec!["public.atest1", "atest2"]
+    ));
+
+    let stmt = parse_statement("lock table lock_tbl1 * in access exclusive mode").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::LockTable(LockTableStatement { targets, mode: LockTableMode::AccessExclusive, .. })
+            if targets.len() == 1
+                && targets[0].name == "lock_tbl1"
+                && !targets[0].only
+                && targets[0].recurse
+    ));
+
+    let stmt = parse_statement("lock table only lock_tbl1").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::LockTable(LockTableStatement { targets, .. })
+            if targets.len() == 1
+                && targets[0].name == "lock_tbl1"
+                && targets[0].only
+                && !targets[0].recurse
     ));
 
     for (sql, expected_mode) in [
@@ -12253,7 +12399,7 @@ fn plan_merge_rejects_target_reference_in_source_subquery() {
     };
     assert!(matches!(
         plan_merge(&stmt, &catalog),
-        Err(ParseError::UnknownColumn(name)) if name == "p.id"
+        Err(ParseError::InvalidFromClauseReference(name)) if name == "p"
     ));
 }
 
@@ -14039,11 +14185,13 @@ fn parse_with_recursive_cte_union_all() {
                 crate::backend::parser::CteBody::RecursiveUnion {
                     all,
                     left_nested,
+                    anchor_with_is_subquery,
                     anchor,
                     recursive,
                 } => {
                     assert!(*all);
                     assert!(!*left_nested);
+                    assert!(*anchor_with_is_subquery);
                     assert!(matches!(
                         anchor.as_ref(),
                         crate::backend::parser::CteBody::Values(_)
@@ -14446,6 +14594,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             } => plan_contains_cte_scan(anchor) || plan_contains_cte_scan(recursive),
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::TidScan { .. }
             | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }
@@ -15025,6 +15174,31 @@ fn lower_create_table_accepts_check_not_enforced() {
     assert_eq!(lowered.check_actions.len(), 1);
     assert_eq!(lowered.check_actions[0].constraint_name, "items_id_check");
     assert!(!lowered.check_actions[0].enforced);
+}
+
+#[test]
+fn lower_create_table_names_column_checks_from_referenced_columns() {
+    let stmt = parse_statement(
+        "create table items (
+            a int4,
+            b int4 check (a > 0),
+            c int4 check (a > b),
+            d int4 check (d > 0)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .expect("lower create table");
+    let names = lowered
+        .check_actions
+        .iter()
+        .map(|action| action.constraint_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["items_a_check", "items_check", "items_d_check"]);
 }
 
 #[test]
@@ -16748,6 +16922,75 @@ fn parse_rollup_group_by_items() {
 }
 
 #[test]
+fn parse_grouping_sets_query_shapes_do_not_fallback() {
+    let queries = [
+        "select sum(c) from gstest2
+          group by grouping sets((), grouping sets((), grouping sets(())))
+          order by 1 desc",
+        "select sum(c) from gstest2
+          group by grouping sets(grouping sets(rollup(c), grouping sets(cube(c))))
+          order by 1 desc",
+        "select sum(c) from gstest2
+          group by grouping sets(grouping sets(a, grouping sets(a, grouping sets(a), ((a)), a, grouping sets(a), (a)), a))
+          order by 1 desc",
+        "select a, b, sum(v), count(*) from gstest_empty
+          group by grouping sets ((a,b),a)",
+        "select four, x
+          from (select four, ten, 'foo'::text as x from tenk1) as t
+          group by grouping sets (four, x)
+          having x = 'foo'",
+        "select a, b, c, d from gstest2
+          group by rollup(a,b),grouping sets(c,d)",
+        "select distinct on (a, b) a, b
+          from gstest2
+          group by grouping sets ((a, b), (a))
+          order by a, b",
+        "select v.c, (select count(*) from gstest2 group by () having v.c)
+          from (values (false),(true)) v(c) order by v.c",
+        "select ten, sum(distinct four) from onek a
+          group by grouping sets((ten,four),(ten))
+          having exists (select 1 from onek b where sum(distinct a.four) = b.four)",
+        "select *
+          from (values (1),(2)) v(x),
+               lateral (select a, b, sum(v.x) from gstest_data(v.x) group by grouping sets (a,b)) s",
+        "select * from (values (1),(2)) v(a)
+          left join lateral
+            (select v.a, four, ten, count(*) from onek group by grouping sets(four,ten)) s
+          on true order by v.a,four,ten",
+        "select array(select row(v.a,s1.*)
+          from (select two,four, count(*) from onek group by grouping sets(two,four) order by two,four) s1)
+          from (values (1),(2)) v(a)",
+        "select a, b, c
+          from (values (1, 2, 3), (4, null, 6), (7, 8, 9)) as t (a, b, c)
+          group by all rollup(a, b), rollup(a, c)
+          order by a, b, c",
+        "select a, b, c
+          from (values (1, 2, 3), (4, null, 6), (7, 8, 9)) as t (a, b, c)
+          group by distinct rollup(a, b), rollup(a, c)
+          order by a, b, c",
+        "select grouping((select t1.v from gstest5 t2 where id = t1.id)),
+                 (select t1.v from gstest5 t2 where id = t1.id) as s
+          from gstest5 t1
+          group by grouping sets(v, s)
+          order by case when grouping((select t1.v from gstest5 t2 where id = t1.id)) = 0
+                        then (select t1.v from gstest5 t2 where id = t1.id)
+                        else null end
+                   nulls first",
+        "select distinct on (a, b+1) a, b+1
+          from (values (1, 0), (2, 1)) as t (a, b) where a = b+1
+          group by grouping sets((a, b+1), (a))
+          order by a, b+1",
+        "select a, b, row_number() over (order by a, b nulls first)
+          from (values (1, 1), (2, 2)) as t (a, b) where a = b
+          group by grouping sets((a, b), (a))",
+    ];
+
+    for sql in queries {
+        parse_select(sql).unwrap_or_else(|err| panic!("{sql}\n{err:?}"));
+    }
+}
+
+#[test]
 fn parse_window_calls_capture_over_clause() {
     let stmt = parse_select(
         "select row_number() over (), sum(id) over (partition by name order by id) from people",
@@ -17038,6 +17281,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
         varattno: 2,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Text),
+        collation_oid: Some(DEFAULT_COLLATION_OID),
     });
 
     assert_eq!(query.group_by, vec![name_var.clone()]);
@@ -17050,6 +17294,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varattno: 2,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: Some(DEFAULT_COLLATION_OID),
         }))))
     );
     assert_eq!(query.sort_clause.len(), 1);
@@ -17060,6 +17305,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
             varattno: 2,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: Some(DEFAULT_COLLATION_OID),
         })
     );
 }
@@ -17412,6 +17658,7 @@ fn analyze_group_by_resolves_select_alias_when_no_input_column_matches() {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })]
     );
 }
@@ -17430,12 +17677,14 @@ fn analyze_group_by_prefers_input_column_over_select_alias() {
                 varattno: 2,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Text),
+                collation_oid: Some(DEFAULT_COLLATION_OID),
             }),
             Expr::Var(Var {
                 varno: 1,
                 varattno: 1,
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Int4),
+                collation_oid: None,
             }),
         ]
     );
@@ -17563,6 +17812,20 @@ fn aggregate_rejects_nested_subquery_reference_to_local_cte() {
 }
 
 #[test]
+fn outer_level_aggregate_rejects_nested_cte_reference() {
+    let stmt = parse_select(
+        "select id, (with cte1(x,y) as (select 1,2)
+                    select count((select p.id from cte1))) as ss
+         from people p",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::OuterLevelAggregateNestedCte(name)) if name == "cte1"
+    ));
+}
+
+#[test]
 fn recursive_cte_allows_self_reference_inside_intermediate_setop_with() {
     let stmt = parse_select(
         "with recursive outermost(x) as (
@@ -17648,11 +17911,58 @@ fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() 
         select * from outermost order by 1",
     )
     .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    let unpositioned = err.unpositioned();
+    assert!(
+        matches!(
+            unpositioned,
+            ParseError::InvalidRecursion(message)
+                if message
+                    == "recursive reference to query \"outermost\" must not appear within a subquery"
+        ),
+        "got {unpositioned:?}"
+    );
+}
+
+#[test]
+fn recursive_cte_rejects_parenthesized_left_with_self_reference_as_non_recursive_term() {
+    let stmt = parse_select(
+        "with recursive x(n) as (
+            (with x1 as (select 1 from x) select * from x1)
+            union
+            select 0
+        )
+        select * from x",
+    )
+    .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
     assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::InvalidRecursion(message))
+        err.unpositioned(),
+        ParseError::InvalidRecursion(message)
             if message
-                == "recursive reference to query \"outermost\" must not appear within a subquery"
+                == "recursive reference to query \"x\" must not appear within its non-recursive term"
+    ));
+}
+
+#[test]
+fn recursive_cte_reports_target_operator_error_before_filter_operator_error() {
+    let stmt = parse_select(
+        "with recursive t(n) as (
+            select '7'
+            union all
+            select n + 1 from t where n < 10
+        )
+        select n, pg_typeof(n) from t",
+    )
+    .unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::UndefinedOperator {
+            op: "+",
+            left_type,
+            right_type
+        } if left_type == "text" && right_type == "integer"
     ));
 }
 
@@ -20455,6 +20765,7 @@ fn analyze_simple_case_uses_case_test_expr() {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype,
+                    ..
                 })) if *vartype == SqlType::new(SqlTypeKind::Int4)
             ));
             assert_eq!(case_expr.args.len(), 1);

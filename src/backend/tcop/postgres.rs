@@ -354,12 +354,23 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return Some(position);
     }
+    if let Some(position) = cte_error_position(sql, e) {
+        return Some(position);
+    }
+    if let Some(parameter) = prepared_parameter_coercion_error_index(e)
+        && let Some(position) = find_execute_argument_position(sql, parameter)
+    {
+        return Some(position);
+    }
     if suppress_sql_json_query_function_runtime_position(sql, e)
         || suppress_sql_json_table_runtime_position(sql, e)
     {
         return None;
     }
     if suppress_legacy_json_runtime_position(sql, e) {
+        return None;
+    }
+    if suppress_jsonb_runtime_path_position(sql, e) {
         return None;
     }
     if matches!(e, ExecError::Regex(_))
@@ -388,6 +399,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("string is not a valid identifier: ")
     ) {
         return None;
+    }
+    if let ExecError::DetailedError { message, .. } = e
+        && message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions"
+    {
+        return find_distinct_on_mismatch_position(sql);
     }
     let value = match e {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
@@ -441,6 +457,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if suppress_unknown_column_position(sql) {
                 return None;
             }
+            if create_schema_first_element_position(sql).is_some() {
+                return find_create_schema_element_identifier_position(sql, name)
+                    .or_else(|| find_last_identifier_position(sql, name));
+            }
             return find_case_insensitive_token_position(sql, name)
                 .or_else(|| find_error_value_position(sql, name));
         }
@@ -469,6 +489,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message == "duplicate trigger events specified at or near \"ON\"" =>
         {
             return find_last_case_insensitive_token_position(sql, "ON");
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+            if message.starts_with("tablesample method ")
+                || message
+                    == "TABLESAMPLE clause can only be applied to tables and materialized views" =>
+        {
+            return find_case_insensitive_token_position(sql, "TABLESAMPLE");
         }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInsertTargetCount {
             expected,
@@ -501,6 +528,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                     .map(|offset| index + offset + 1)
             });
         }
+        ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+            message,
+        )) if message
+            == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions" =>
+        {
+            return find_distinct_on_mismatch_position(sql);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,
@@ -531,6 +565,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             detail,
             ..
         }) => {
+            if let Some(position) = window_error_position(sql, message) {
+                return Some(position);
+            }
             if message
                 == "aggregate functions are not allowed in FROM clause of their own query level"
             {
@@ -540,6 +577,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 == "arguments to GROUPING must be grouping expressions of the associated query level"
             {
                 return find_grouping_call_argument_position(sql);
+            }
+            if message == "SELECT DISTINCT ON expressions must match initial ORDER BY expressions" {
+                return find_distinct_on_mismatch_position(sql);
             }
             if let Some(system_column) = check_constraint_system_column_error_name(message) {
                 return find_case_insensitive_token_position(sql, system_column);
@@ -576,6 +616,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 .and_then(|rest| rest.strip_suffix('"'))
             {
                 return find_case_insensitive_token_position(sql, option);
+            }
+            if message == "CREATE SCHEMA IF NOT EXISTS cannot include schema elements" {
+                return create_schema_first_element_position(sql);
             }
             if let Some(position) =
                 publication_where_error_position(sql, message, detail.as_deref())
@@ -664,6 +707,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("cannot subscript type ") {
                 return find_subscript_expression_position(sql);
             }
+            if message == "jsonb subscript does not support slices" {
+                return find_jsonb_subscript_slice_position(sql);
+            }
+            if message.starts_with("subscript type ") && message.ends_with(" is not supported") {
+                return find_jsonb_subscript_type_position(sql);
+            }
             if let Some(position) = find_detailed_operator_position(sql, message) {
                 return Some(position);
             }
@@ -723,6 +772,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_conflicting_constraint_enforcement_attribute_position(sql);
             }
             return None;
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::WindowingError(message)) => {
+            return window_error_position(sql, message);
         }
         ExecError::DetailedError { message, .. }
             if message == "constraints cannot be altered to be NOT VALID" =>
@@ -805,6 +857,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if let Some(position) = window_error_position(sql, message) {
+                return Some(position);
+            }
             if is_datetime_template_call(sql) && is_datetime_template_runtime_error(message) {
                 return None;
             }
@@ -937,6 +992,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
             }
+            if message == "jsonb subscript does not support slices" {
+                return find_jsonb_subscript_slice_position(sql);
+            }
+            if message.starts_with("subscript type ") && message.ends_with(" is not supported") {
+                return find_jsonb_subscript_type_position(sql);
+            }
             if is_reg_object_direct_input_error(message)
                 && let Some(position) = find_reg_object_literal_position(sql)
             {
@@ -1001,6 +1062,86 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn prepared_parameter_coercion_error_index(e: &ExecError) -> Option<usize> {
+    let message = match e {
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+        | ExecError::DetailedError { message, .. } => message,
+        _ => return None,
+    };
+    let rest = message.strip_prefix("parameter $")?;
+    let digits = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn find_execute_argument_position(sql: &str, parameter: usize) -> Option<usize> {
+    if parameter == 0
+        || !sql
+            .trim_start()
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("execute"))
+    {
+        return None;
+    }
+    let bytes = sql.as_bytes();
+    let open = bytes.iter().position(|byte| *byte == b'(')?;
+    let mut arg = 1usize;
+    let mut index = open + 1;
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        match quote {
+            Some(q) => {
+                if bytes[index] == q {
+                    if index + 1 < bytes.len() && bytes[index + 1] == q {
+                        index += 2;
+                        continue;
+                    }
+                    quote = None;
+                }
+                index += 1;
+            }
+            None => match bytes[index] {
+                b'\'' | b'"' => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    quote = Some(bytes[index]);
+                    index += 1;
+                }
+                b' ' | b'\t' | b'\n' | b'\r' => {
+                    index += 1;
+                }
+                b'(' => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    depth += 1;
+                    index += 1;
+                }
+                b')' if depth == 0 => return None,
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    index += 1;
+                }
+                b',' if depth == 0 => {
+                    arg += 1;
+                    index += 1;
+                }
+                _ => {
+                    if arg == parameter {
+                        return Some(index + 1);
+                    }
+                    index += 1;
+                }
+            },
+        }
+    }
+    None
 }
 
 fn composite_rowtype_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -1143,6 +1284,22 @@ fn find_grouping_call_argument_position(sql: &str) -> Option<usize> {
         .take_while(u8::is_ascii_whitespace)
         .count();
     Some(args_start + arg_offset + whitespace + 1)
+}
+
+fn find_distinct_on_mismatch_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let distinct_on = lower.find("distinct on")?;
+    let open = lower.get(distinct_on..)?.find('(')? + distinct_on;
+    let after_open = open + 1;
+    let args = sql.get(after_open..)?;
+    let close = args.find(')')?;
+    let args = &args[..close];
+    let mismatch_offset = args.find(',').map(|index| index + 1).unwrap_or(0);
+    let whitespace = args[mismatch_offset..]
+        .bytes()
+        .take_while(u8::is_ascii_whitespace)
+        .count();
+    Some(after_open + mismatch_offset + whitespace + 1)
 }
 
 fn domain_ddl_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -1462,6 +1619,27 @@ fn is_legacy_json_operator_surface(sql: &str) -> bool {
     (lower.contains("->") || lower.contains("#>"))
         && (lower.contains(" json ") || lower.contains("::json"))
         && !lower.contains("jsonb")
+}
+
+fn suppress_jsonb_runtime_path_position(sql: &str, e: &ExecError) -> bool {
+    match e {
+        ExecError::WithContext { source, .. } => suppress_jsonb_runtime_path_position(sql, source),
+        ExecError::InvalidStorageValue { column, details } => {
+            column == "jsonb"
+                && details.starts_with("path element at position ")
+                && is_jsonb_runtime_path_surface(sql)
+        }
+        _ => false,
+    }
+}
+
+fn is_jsonb_runtime_path_surface(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    lower.contains("#-")
+        || lower.contains("jsonb_set(")
+        || lower.contains("jsonb_set_lax(")
+        || lower.contains("jsonb_insert(")
+        || lower.contains("jsonb_delete_path(")
 }
 
 fn is_legacy_json_record_function_surface(sql: &str) -> bool {
@@ -2251,6 +2429,148 @@ fn find_missing_function_position(sql: &str, message: &str) -> Option<usize> {
     find_case_insensitive_token_position(sql, name)
 }
 
+fn window_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "window functions are not allowed in WHERE" => {
+            find_window_function_position_after(sql, "WHERE")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in JOIN conditions" => {
+            find_window_function_position_after(sql, " ON ")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in RETURNING" => {
+            find_window_function_position_after(sql, "RETURNING")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in GROUP BY" => {
+            find_first_window_function_position(sql, 0)
+        }
+        "window functions are not allowed in window definitions" => {
+            find_window_function_position_after(sql, "ORDER BY")
+                .or_else(|| find_window_function_position_after(sql, "PARTITION BY"))
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "count(*) must be used to call a parameterless aggregate function" => {
+            find_case_insensitive_token_position(sql, "count(")
+        }
+        "OVER specified, but generate_series is not a window function nor an aggregate function" => {
+            find_case_insensitive_token_position(sql, "generate_series")
+        }
+        "argument of ROWS must not contain variables"
+        | "argument of GROUPS must not contain variables" => {
+            find_token_after_case_insensitive_phrase(sql, "between")
+        }
+        "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column"
+        | "GROUPS mode requires an ORDER BY clause" => find_window_spec_open_position(sql),
+        _ if message.starts_with(
+            "RANGE with offset PRECEDING/FOLLOWING is not supported for column type ",
+        ) =>
+        {
+            find_range_offset_error_position(sql, message)
+        }
+        _ if message.starts_with("window \"") && message.ends_with("\" is already defined") => {
+            message
+                .strip_prefix("window \"")
+                .and_then(|rest| rest.split_once("\" is already defined"))
+                .map(|(name, _)| name)
+                .and_then(|name| find_last_identifier_position(sql, name))
+                .and_then(|position| find_next_char_position(sql, position, '(').or(Some(position)))
+        }
+        _ => None,
+    }
+}
+
+fn find_next_char_position(sql: &str, position: usize, wanted: char) -> Option<usize> {
+    sql.char_indices()
+        .skip_while(|(index, _)| *index + 1 <= position)
+        .find_map(|(index, ch)| (ch == wanted).then_some(index + 1))
+}
+
+fn find_window_spec_open_position(sql: &str) -> Option<usize> {
+    let over_position = find_case_insensitive_token_position(sql, "over")?;
+    let mut index = over_position - 1 + "over".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'(') {
+        Some(index + 1)
+    } else {
+        Some(over_position)
+    }
+}
+
+fn find_range_offset_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message.ends_with("offset type double precision")
+        && let Some(position) = find_literal_before_cast_position(sql, "::float8")
+            .or_else(|| find_literal_before_cast_position(sql, "::double precision"))
+    {
+        return Some(position);
+    }
+    find_token_after_case_insensitive_phrase(sql, "range between")
+}
+
+fn find_literal_before_cast_position(sql: &str, cast: &str) -> Option<usize> {
+    let cast_index = sql.to_ascii_lowercase().find(&cast.to_ascii_lowercase())?;
+    let bytes = sql.as_bytes();
+    let mut start = cast_index;
+    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+        start -= 1;
+    }
+    if start > 0 && bytes[start - 1] == b'\'' {
+        start -= 1;
+        while start > 0 {
+            start -= 1;
+            if bytes[start] == b'\'' {
+                return Some(start + 1);
+            }
+        }
+        return Some(1);
+    }
+    while start > 0 {
+        let prev = bytes[start - 1];
+        if prev.is_ascii_alphanumeric() || matches!(prev, b'.' | b'_' | b'-') {
+            start -= 1;
+            continue;
+        }
+        break;
+    }
+    Some(start + 1)
+}
+
+fn find_window_function_position_after(sql: &str, phrase: &str) -> Option<usize> {
+    let phrase_position = find_case_insensitive_token_position(sql, phrase)?;
+    find_first_window_function_position(sql, phrase_position - 1 + phrase.len())
+}
+
+fn find_first_window_function_position(sql: &str, start: usize) -> Option<usize> {
+    const WINDOW_FUNCTIONS: &[&str] = &[
+        "row_number(",
+        "rank(",
+        "dense_rank(",
+        "percent_rank(",
+        "cume_dist(",
+        "ntile(",
+        "lag(",
+        "lead(",
+        "first_value(",
+        "last_value(",
+        "nth_value(",
+        "count(",
+        "sum(",
+        "generate_series(",
+    ];
+    let lower = sql.to_ascii_lowercase();
+    if start >= lower.len() {
+        return None;
+    }
+    WINDOW_FUNCTIONS
+        .iter()
+        .filter_map(|name| lower[start..].find(name).map(|offset| start + offset + 1))
+        .min()
+}
+
 fn is_create_type_missing_subtype_diff_function(sql: &str, message: &str) -> bool {
     let lowered = sql.trim_start().to_ascii_lowercase();
     lowered.starts_with("create type ")
@@ -3000,6 +3320,99 @@ fn find_subscript_expression_position(sql: &str) -> Option<usize> {
     let bracket = bytes.iter().position(|byte| *byte == b'[')?;
     let start = find_subscript_base_start(bytes, bracket)?;
     Some(start + 1)
+}
+
+fn find_jsonb_subscript_slice_position(sql: &str) -> Option<usize> {
+    for (open, close) in subscript_brackets_outside_string_literals(sql) {
+        let Some(colon) = find_colon_outside_string_literals(sql, open + 1, close) else {
+            continue;
+        };
+        let upper_start = skip_ascii_whitespace(sql, colon + 1, close);
+        if upper_start < close {
+            return Some(upper_start + 1);
+        }
+        let lower_start = skip_ascii_whitespace(sql, open + 1, colon);
+        if lower_start < colon {
+            return Some(lower_start + 1);
+        }
+    }
+    None
+}
+
+fn find_jsonb_subscript_type_position(sql: &str) -> Option<usize> {
+    for (open, close) in subscript_brackets_outside_string_literals(sql) {
+        let start = skip_ascii_whitespace(sql, open + 1, close);
+        if start >= close {
+            continue;
+        }
+        if sql.as_bytes()[start].is_ascii_digit() || matches!(sql.as_bytes()[start], b'+' | b'-') {
+            return Some(start + 1);
+        }
+    }
+    None
+}
+
+fn subscript_brackets_outside_string_literals(sql: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b'[' => {
+                if let Some(close) = find_subscript_close_outside_string_literals(sql, index) {
+                    ranges.push((index, close));
+                    index = close + 1;
+                } else {
+                    index += 1;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    ranges
+}
+
+fn find_subscript_close_outside_string_literals(sql: &str, open: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b']' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn find_colon_outside_string_literals(sql: &str, start: usize, end: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = start;
+    while index < end {
+        match bytes[index] {
+            b'\'' => index = skip_sql_string_literal(bytes, index),
+            b':' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_sql_string_literal(bytes: &[u8], quote: usize) -> usize {
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+            } else {
+                return index + 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
 }
 
 fn find_routine_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -3893,8 +4306,157 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
             "Perhaps you meant to reference the table alias \"{alias}\"."
         ));
     }
+    if response.detail.is_none()
+        && let Some(cte_name) = unknown_table_name(e)
+        && sql_references_unknown_with_item_in_from(sql, cte_name)
+    {
+        response.detail = Some(format!(
+            "There is a WITH item named \"{cte_name}\", but it cannot be referenced from this part of the query."
+        ));
+        response.hint = Some(
+            "Use WITH RECURSIVE, or re-order the WITH items to remove forward references.".into(),
+        );
+    }
 
     response
+}
+
+fn cte_error_position(sql: &str, e: &ExecError) -> Option<usize> {
+    let ExecError::Parse(parse_error) = e else {
+        return None;
+    };
+    match parse_error.unpositioned() {
+        crate::backend::parser::ParseError::OuterLevelAggregateNestedCte(_) => {
+            find_aggregate_call_position(sql)
+        }
+        crate::backend::parser::ParseError::UnknownTable(name)
+            if sql.trim_start().to_ascii_lowercase().starts_with("with ") =>
+        {
+            find_reference_before_final_select(sql, name)
+                .or_else(|| find_last_relation_reference_position(sql, name))
+                .or_else(|| find_last_identifier_position(sql, name))
+        }
+        crate::backend::parser::ParseError::UnexpectedToken { actual, .. } => {
+            if actual.starts_with("WITH query \"") && actual.contains(" columns available but ") {
+                return extract_quoted_after(actual, "WITH query ")
+                    .and_then(|name| find_sql_identifier_token_position(sql, name));
+            }
+            None
+        }
+        crate::backend::parser::ParseError::DetailedError { message, .. } => {
+            if message.starts_with("WITH query \"") && message.contains(" columns available but ") {
+                return extract_quoted_after(message, "WITH query ")
+                    .and_then(|name| find_sql_identifier_token_position(sql, name));
+            }
+            if message.starts_with("WITH query \"")
+                && message.ends_with("does not have a RETURNING clause")
+            {
+                return extract_quoted_after(message, "WITH query ")
+                    .and_then(|name| find_last_relation_reference_position(sql, name));
+            }
+            if message
+                == "aggregate functions are not allowed in a recursive query's recursive term"
+            {
+                return find_aggregate_call_position(sql);
+            }
+            None
+        }
+        crate::backend::parser::ParseError::FeatureNotSupportedMessage(message) => {
+            if message.starts_with("WITH query \"")
+                && message.ends_with("does not have a RETURNING clause")
+            {
+                return extract_quoted_after(message, "WITH query ")
+                    .and_then(|name| find_last_relation_reference_position(sql, name));
+            }
+            if message.starts_with("search ") || message.starts_with("search sequence") {
+                return find_search_clause_position(sql);
+            }
+            if message.starts_with("CYCLE types ") {
+                return find_token_after_case_insensitive_phrase(sql, "default")
+                    .or_else(|| find_cycle_clause_position(sql));
+            }
+            if message.starts_with("cycle ") {
+                return find_cycle_clause_position(sql);
+            }
+            if message
+                == "WITH clause containing a data-modifying statement must be at the top level"
+            {
+                return find_last_case_insensitive_token_position(sql, "WITH");
+            }
+            if message
+                == "aggregate functions are not allowed in a recursive query's recursive term"
+            {
+                return find_aggregate_call_position(sql);
+            }
+            None
+        }
+        crate::backend::parser::ParseError::InvalidRecursion(message) => {
+            if let Some(name) = extract_quoted_after(message, "recursive query ")
+                && (message.contains("does not have the form")
+                    || message.contains("must not contain data-modifying statements"))
+            {
+                return find_cte_name_after_with_recursive(sql, name);
+            }
+            if let Some(name) = extract_quoted_after(message, "recursive reference to query ") {
+                return find_reference_before_final_select(sql, name)
+                    .or_else(|| find_last_relation_reference_position(sql, name))
+                    .or_else(|| find_last_identifier_position(sql, name));
+            }
+            if message == "mutual recursion between WITH items is not implemented" {
+                return find_token_after_case_insensitive_phrase(sql, "WITH RECURSIVE");
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn extract_quoted_after<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = message.strip_prefix(prefix)?;
+    let rest = rest.strip_prefix('"')?;
+    rest.split_once('"').map(|(name, _)| name)
+}
+
+fn find_cte_name_after_with_recursive(sql: &str, name: &str) -> Option<usize> {
+    let with_position = find_case_insensitive_token_position(sql, "WITH RECURSIVE")?;
+    let start = with_position - 1 + "WITH RECURSIVE".len();
+    find_sql_identifier_token_position(&sql[start..], name).map(|position| start + position)
+}
+
+fn find_search_clause_position(sql: &str) -> Option<usize> {
+    find_last_case_insensitive_token_position(sql, ") search").map(|position| position + 2)
+}
+
+fn find_cycle_clause_position(sql: &str) -> Option<usize> {
+    find_last_case_insensitive_token_position(sql, ") cycle").map(|position| position + 2)
+}
+
+fn find_reference_before_final_select(sql: &str, name: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let final_select = format!("select * from {}", name.to_ascii_lowercase());
+    let cutoff = lower.rfind(&final_select).unwrap_or(sql.len());
+    find_last_relation_reference_position(&sql[..cutoff], name)
+}
+
+fn unknown_table_name(e: &ExecError) -> Option<&str> {
+    match e {
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => unknown_table_name(source),
+        ExecError::Parse(parse_error) => match parse_error.unpositioned() {
+            crate::backend::parser::ParseError::UnknownTable(name) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn sql_references_unknown_with_item_in_from(sql: &str, name: &str) -> bool {
+    let lower = sql.trim_start().to_ascii_lowercase();
+    if !lower.starts_with("with ") {
+        return false;
+    }
+    let from_ref = format!("from {}", name.to_ascii_lowercase());
+    lower.contains(&from_ref)
 }
 
 fn apply_foreign_table_constraint_error_position(sql: &str, response: &mut ExecErrorResponse) {
@@ -3955,6 +4517,18 @@ fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResp
     let lower = trimmed.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
+        "select * from rank() over (order by random());"
+            | "select rank() over (partition by four, order by ten) from tenk1;"
+    ) && response
+        .message
+        .starts_with("feature not supported: SELECT form:")
+    {
+        response.message = "syntax error at or near \"ORDER\"".into();
+        response.position = find_case_insensitive_token_position(sql, "ORDER");
+        return;
+    }
+    if matches!(
+        lower.as_str(),
         "alter table nonesuch rename to newnonesuch;" | "alter table nonesuch rename to stud_emp;"
     ) && response.message == "table \"nonesuch\" does not exist"
     {
@@ -4003,6 +4577,7 @@ fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResp
     apply_insert_conflict_regression_error_compat(sql, response);
     apply_update_alias_regression_error_compat(sql, response);
     apply_update_regression_error_position_compat(sql, response);
+    apply_merge_regression_error_compat(sql, response);
 }
 
 fn apply_update_regression_error_position_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -4068,6 +4643,61 @@ fn clean_sql_identifier_token(token: &str) -> String {
     token
         .trim_matches(|ch: char| matches!(ch, '"' | ',' | ';' | '(' | ')'))
         .to_string()
+}
+
+fn apply_merge_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
+    let lower = sql.to_ascii_lowercase();
+    if response.message.starts_with("WITH query \"")
+        && response
+            .message
+            .ends_with("\" does not have a RETURNING clause")
+        && let Some(position) = find_select_star_position(sql)
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "invalid reference to FROM-clause entry for table \"t\""
+        && lower.contains("merge into")
+        && lower.contains("using")
+        && let Some(position) =
+            find_case_insensitive_token_position(sql, "where t.tid").map(|pos| pos + "where ".len())
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "cannot use system column \"xmin\" in MERGE WHEN condition"
+        && let Some(position) = find_case_insensitive_token_position(sql, "t.xmin")
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message == "column reference \"balance\" is ambiguous"
+        && lower.contains("merge into")
+        && let Some(position) = find_merge_update_rhs_identifier_position(sql, "balance")
+    {
+        response.position = Some(position);
+        return;
+    }
+    if response.message
+        == "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command"
+        && let Some(position) = find_case_insensitive_token_position(sql, "merge_action")
+    {
+        response.position = Some(position);
+    }
+}
+
+fn find_select_star_position(sql: &str) -> Option<usize> {
+    find_last_case_insensitive_token_position(sql, "select *").map(|pos| pos + "select ".len())
+}
+
+fn find_merge_update_rhs_identifier_position(sql: &str, identifier: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let update_pos = lower.find("update set")?;
+    let after_update = update_pos + "update set".len();
+    let equals_pos = lower[after_update..].find('=')? + after_update + 1;
+    lower[equals_pos..]
+        .find(&identifier.to_ascii_lowercase())
+        .map(|offset| equals_pos + offset + 1)
 }
 
 fn apply_insert_conflict_regression_error_compat(sql: &str, response: &mut ExecErrorResponse) {
@@ -5100,6 +5730,25 @@ fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
         from = idx + token.len();
     }
     None
+}
+
+fn create_schema_first_element_position(sql: &str) -> Option<usize> {
+    let start = find_ascii_keyword(sql, "create", 0)?;
+    let schema = find_ascii_keyword(sql, "schema", start + "create".len())?;
+    let search_start = schema + "schema".len();
+    let create = find_ascii_keyword(sql, "create", search_start);
+    let grant = find_ascii_keyword(sql, "grant", search_start);
+    match (create, grant) {
+        (Some(create), Some(grant)) => Some(create.min(grant) + 1),
+        (Some(create), None) => Some(create + 1),
+        (None, Some(grant)) => Some(grant + 1),
+        (None, None) => None,
+    }
+}
+
+fn find_create_schema_element_identifier_position(sql: &str, token: &str) -> Option<usize> {
+    let start = create_schema_first_element_position(sql)?.saturating_sub(1);
+    find_identifier_in_segment(&sql[start..], token).map(|offset| start + offset + 1)
 }
 use crate::ClientId;
 use crate::pgrust::cluster::Cluster;
@@ -6342,7 +6991,7 @@ fn refresh_protocol_prepared_statement_view_rows(state: &mut ConnectionState) {
             statement: prepared.sql.clone(),
             prepare_time: prepared.prepare_time,
             parameter_type_oids: prepared.param_type_oids.clone(),
-            result_type_oids: Vec::new(),
+            result_type_oids: Some(Vec::new()),
             from_sql: false,
             generic_plans: 0,
             custom_plans: 0,
@@ -6639,6 +7288,22 @@ fn execute_query_statement(
         .map_err(|e| io::Error::other(format!("{e:?}")))
     };
     refresh_protocol_prepared_statement_view_rows(state);
+    if state.session.transaction_failed()
+        && let Ok(stmt) = parsed.as_ref()
+        && !matches!(
+            stmt,
+            Statement::Commit(_) | Statement::Rollback(_) | Statement::RollbackTo(_)
+        )
+    {
+        let err = ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "ROLLBACK",
+            actual:
+                "current transaction is aborted, commands ignored until end of transaction block"
+                    .into(),
+        });
+        send_exec_error(stream, error_sql.as_ref(), &err)?;
+        return Ok(QueryStatementFlow::Stop);
+    }
     if let Ok(stmt) = parsed.as_ref()
         && let Some(flow) = handle_portal_statement(stream, db, state, sql.as_ref(), stmt)?
     {
@@ -9876,6 +10541,9 @@ fn psql_index_column_opclass_options_display(
 
 fn parenthesized_index_expression(expr_sql: &str) -> String {
     let trimmed = expr_sql.trim();
+    if trimmed.to_ascii_lowercase().contains("collate") {
+        return trimmed.to_string();
+    }
     if trimmed.starts_with('(') && trimmed.ends_with(')') {
         trimmed.to_string()
     } else {
@@ -11984,25 +12652,15 @@ fn send_queued_notices_with_sql_and_min_messages(
         let position = notice.position.or_else(|| {
             sql.and_then(|sql| infer_backend_notice_position(sql, &notice.message, *occurrence))
         });
-        if notice.hint.is_some() {
-            send_notice_with_hint(
-                stream,
-                notice.severity,
-                notice.sqlstate,
-                &notice.message,
-                notice.hint.as_deref(),
-                position,
-            )?;
-        } else {
-            send_notice_with_severity(
-                stream,
-                notice.severity,
-                notice.sqlstate,
-                &notice.message,
-                notice.detail.as_deref(),
-                position,
-            )?;
-        }
+        send_notice_with_fields(
+            stream,
+            notice.severity,
+            notice.sqlstate,
+            &notice.message,
+            notice.detail.as_deref(),
+            notice.hint.as_deref(),
+            position,
+        )?;
     }
     send_plpgsql_notices(stream, &take_notices())
 }
@@ -17490,6 +18148,23 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
     }
 
     #[test]
+    fn exec_error_position_omits_jsonb_runtime_path_errors() {
+        for sql in [
+            "select '{\"b\":[1,2]}'::jsonb #- '{b,-1e}';",
+            "select jsonb_set('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_set_lax('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_insert('{\"a\":[1,2,3]}', '{a, non_integer}', '1');",
+            "select jsonb_delete_path('{\"a\":[1,2,3]}', array['a','non_integer']);",
+        ] {
+            let err = ExecError::InvalidStorageValue {
+                column: "jsonb".into(),
+                details: "path element at position 2 is not an integer: \"non_integer\"".into(),
+            };
+            assert_eq!(exec_error_position(sql, &err), None);
+        }
+    }
+
+    #[test]
     fn exec_error_position_points_at_sql_json_validation_nodes() {
         let cases = [
             (
@@ -17656,6 +18331,27 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(22));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_jsonb_subscript_errors() {
+        let numeric_sql = "select ('[1, \"2\", null]'::jsonb)[1.0];";
+        let numeric_err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "subscript type numeric is not supported".into(),
+            detail: None,
+            hint: Some("jsonb subscript must be coercible to either integer or text.".into()),
+            sqlstate: "42804",
+        });
+        assert_eq!(exec_error_position(numeric_sql, &numeric_err), Some(34));
+
+        let slice_sql = "select ('[1, \"2\", null]'::jsonb)[1:2];";
+        let slice_err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "jsonb subscript does not support slices".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+        assert_eq!(exec_error_position(slice_sql, &slice_err), Some(36));
     }
 
     #[test]

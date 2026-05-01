@@ -1106,6 +1106,9 @@ pub(super) fn normalize_builtin_function_name(name: &str) -> &str {
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
     let builtin_by_src = builtin_scalar_function_for_proc_src(&row.prosrc);
+    if row.prosrc.eq_ignore_ascii_case("test_atomic_ops") {
+        return Some(BuiltinScalarFunction::PgRustTestAtomicOps);
+    }
     if row.pronamespace != PG_CATALOG_NAMESPACE_OID {
         return builtin_by_src.filter(|func| is_dynamic_range_scalar_function(*func));
     }
@@ -1140,6 +1143,7 @@ fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RangeIntersect
             | BuiltinScalarFunction::RangeDifference
             | BuiltinScalarFunction::RangeMerge
+            | BuiltinScalarFunction::PgRustTestAtomicOps
     )
 }
 
@@ -2446,11 +2450,11 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
             BuiltinScalarFunction::PgRustDomainCheckUpperLessThan => args.len() == 3,
-            BuiltinScalarFunction::PgRustTablesampleBernoulli => args.len() == 3,
             BuiltinScalarFunction::PgRustTestOpclassOptionsFunc => args.len() == 1,
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
+            BuiltinScalarFunction::PgRustTestAtomicOps => args.is_empty(),
             BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid => args.len() == 1,
             BuiltinScalarFunction::PgRustTestWidgetIn
             | BuiltinScalarFunction::PgRustTestWidgetOut
@@ -2472,6 +2476,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
             BuiltinScalarFunction::PgRelationSize => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgNumaAvailable => args.is_empty(),
+            BuiltinScalarFunction::GinCleanPendingList => args.len() == 1,
             BuiltinScalarFunction::BrinSummarizeNewValues => args.len() == 1,
             BuiltinScalarFunction::BrinSummarizeRange
             | BuiltinScalarFunction::BrinDesummarizeRange => args.len() == 2,
@@ -2657,6 +2662,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::BitLength
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Upper
+            | BuiltinScalarFunction::Casefold
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Scale
             | BuiltinScalarFunction::MinScale
@@ -3240,6 +3246,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         }
         BuiltinScalarFunction::TextStartsWith => {
             return Some(SqlType::new(SqlTypeKind::Bool));
+        }
+        BuiltinScalarFunction::Repeat => {
+            return Some(SqlType::new(SqlTypeKind::Text));
         }
         BuiltinScalarFunction::ParseIdent => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
@@ -3900,6 +3909,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustTestEncConversion,
         ),
         (
+            "test_atomic_ops",
+            BuiltinScalarFunction::PgRustTestAtomicOps,
+        ),
+        (
             "pg_rust_is_catalog_text_unique_index_oid",
             BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid,
         ),
@@ -3948,6 +3961,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
         ("pg_numa_available", BuiltinScalarFunction::PgNumaAvailable),
+        (
+            "gin_clean_pending_list",
+            BuiltinScalarFunction::GinCleanPendingList,
+        ),
         (
             "brin_summarize_new_values",
             BuiltinScalarFunction::BrinSummarizeNewValues,
@@ -4908,6 +4925,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("enum_range_bounds", BuiltinScalarFunction::EnumRange),
         ("lower", BuiltinScalarFunction::Lower),
         ("upper", BuiltinScalarFunction::Upper),
+        ("casefold", BuiltinScalarFunction::Casefold),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
@@ -5815,6 +5833,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationSize
             | BuiltinScalarFunction::PgNumaAvailable
+            | BuiltinScalarFunction::GinCleanPendingList
             | BuiltinScalarFunction::BrinSummarizeNewValues
             | BuiltinScalarFunction::BrinSummarizeRange
             | BuiltinScalarFunction::BrinDesummarizeRange
@@ -5846,6 +5865,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgEncodingToChar
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler
+            | BuiltinScalarFunction::PgRustTestAtomicOps
             | BuiltinScalarFunction::AmValidate
             | BuiltinScalarFunction::BtEqualImage
             | BuiltinScalarFunction::PgNotify
@@ -5919,6 +5939,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ArrayUpper
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Upper
+            | BuiltinScalarFunction::Casefold
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Ascii
             | BuiltinScalarFunction::Chr
@@ -6162,6 +6183,13 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
                 | SqlTypeKind::RegConfig
                 | SqlTypeKind::RegDictionary
         ) {
+            return true;
+        }
+        if row.typtype == 'b'
+            && row.typrelid == 0
+            && row.typinput != 0
+            && builtin_type_name_for_oid(row.oid).is_none()
+        {
             return true;
         }
     }

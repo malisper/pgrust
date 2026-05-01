@@ -226,9 +226,7 @@ fn subquery_comparison_op_expr_kind(op: SubqueryComparisonOp) -> Option<OpExprKi
         | SubqueryComparisonOp::ILike
         | SubqueryComparisonOp::NotILike
         | SubqueryComparisonOp::Similar
-        | SubqueryComparisonOp::NotSimilar
-        | SubqueryComparisonOp::RegexMatch
-        | SubqueryComparisonOp::NotRegexMatch => return None,
+        | SubqueryComparisonOp::NotSimilar => return None,
     })
 }
 
@@ -1155,6 +1153,7 @@ fn jointree_output_exprs(query: &Query, node: &JoinTreeNode) -> Option<Vec<Expr>
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),

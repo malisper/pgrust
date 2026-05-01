@@ -363,6 +363,12 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
             .with_position(sql_position_from_byte_offset(sql, leading + position)),
         );
     }
+    if (lowered.starts_with("select ") || lowered.starts_with("with "))
+        && let Some(position) = derived_table_tablesample_syntax_error_position(trimmed)
+    {
+        let token = syntax_error_token_at(trimmed, position);
+        return Some(syntax_error_at(sql, leading + position, &token));
+    }
 
     if lowered.starts_with("select ")
         && keyword_boundary(trimmed, "group by grouping sets").is_some()
@@ -374,6 +380,70 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     }
 
     None
+}
+
+fn derived_table_tablesample_syntax_error_position(input: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(relative) = find_keyword_any_depth(input, "tablesample", start) {
+        let position = relative;
+        let depth = nesting_depth_at(input, position);
+        if let Some(item_start) = find_from_item_start_before(input, position, depth) {
+            let item = input[item_start..position].trim_start();
+            if parenthesized_from_item_starts_with_query(item) {
+                return Some(position);
+            }
+        }
+        start = position + "tablesample".len();
+    }
+    None
+}
+
+fn find_from_item_start_before(input: &str, position: usize, target_depth: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    let mut item_start = None;
+    while index < bytes.len() && index < position {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == target_depth => item_start = Some(index + 1),
+            _ if depth == target_depth && keyword_at_boundary(input, index, "from") => {
+                item_start = Some(index + "from".len());
+            }
+            _ if depth == target_depth && keyword_at_boundary(input, index, "join") => {
+                item_start = Some(index + "join".len());
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    item_start
+}
+
+fn parenthesized_from_item_starts_with_query(item: &str) -> bool {
+    if !item.starts_with('(') {
+        return false;
+    }
+    let Ok((inner, _rest)) = take_parenthesized_segment(item) else {
+        return false;
+    };
+    let inner = inner.trim_start();
+    keyword_at_start(inner, "select") || keyword_at_start(inner, "with")
 }
 
 fn json_table_exists_on_empty_behavior_position(input: &str) -> Option<usize> {
@@ -1156,7 +1226,7 @@ fn try_parse_alter_table_cluster_on_statement(sql: &str) -> Result<Option<Statem
         index_name: schema_name
             .map(|schema| format!("{schema}.{index_name}"))
             .unwrap_or(index_name),
-        rewrite: false,
+        mark_only: true,
     })))
 }
 
@@ -1626,6 +1696,7 @@ fn try_parse_prepared_statement(
 }
 
 fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<Statement, ParseError> {
+    let source_sql = normalize_prepared_source_sql(sql);
     let rest = consume_keyword(sql, "prepare").trim_start();
     let (name, mut rest) = parse_unqualified_identifier(rest, "prepared statement name")?;
     rest = rest.trim_start();
@@ -1657,9 +1728,10 @@ fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<State
         Statement::Select(select) => PreparedStatementQuery::Select(select),
         Statement::Insert(insert) => PreparedStatementQuery::Insert(insert),
         Statement::Update(update) => PreparedStatementQuery::Update(update),
+        Statement::Merge(merge) => PreparedStatementQuery::Merge(merge),
         other => {
             return Err(ParseError::UnexpectedToken {
-                expected: "SELECT, INSERT, or UPDATE",
+                expected: "SELECT, INSERT, UPDATE, or MERGE",
                 actual: format!("{other:?}"),
             });
         }
@@ -1669,7 +1741,13 @@ fn build_raw_prepare_statement(sql: &str, options: ParseOptions) -> Result<State
         parameter_types,
         query,
         query_sql,
+        source_sql,
     }))
+}
+
+fn normalize_prepared_source_sql(sql: &str) -> String {
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    format!("{trimmed};")
 }
 
 fn build_raw_execute_statement(sql: &str) -> Result<Statement, ParseError> {
@@ -2533,6 +2611,9 @@ fn is_create_schema_element_start(input: &str) -> bool {
         rest = consume_keyword(rest, "temp").trim_start();
     } else if keyword_at_start(rest, "temporary") {
         rest = consume_keyword(rest, "temporary").trim_start();
+    }
+    if keyword_at_start(rest, "unique") {
+        rest = consume_keyword(rest, "unique").trim_start();
     }
     keyword_at_start(rest, "sequence")
         || keyword_at_start(rest, "table")
@@ -10075,6 +10156,12 @@ fn normalize_grantee_identifier(input: &str) -> Result<String, ParseError> {
     let trimmed = input.trim();
     if keyword_at_start(trimmed, "group") {
         normalize_simple_identifier(consume_keyword(trimmed, "group"))
+    } else if keyword_at_start(trimmed, "current_user")
+        && consume_keyword(trimmed, "current_user").trim().is_empty()
+    {
+        // :HACK: GRANT stores grantees as names today; resolve CURRENT_USER to
+        // the bootstrap role until privilege statements carry RoleSpec values.
+        Ok("postgres".into())
     } else {
         normalize_simple_identifier(trimmed)
     }
@@ -17765,6 +17852,22 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
     let collation_name = schema_name
         .map(|schema| format!("{schema}.{base_name}"))
         .unwrap_or(base_name);
+    let rest = rest.trim_start();
+    if rest.starts_with('(') {
+        let (options_sql, trailing) = take_parenthesized_segment(rest)?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: trailing.trim().into(),
+            });
+        }
+        return Ok(CreateCollationStatement {
+            collation_name,
+            kind: CreateCollationKind::Options {
+                options: parse_collation_option_assignments(&options_sql)?,
+            },
+        });
+    }
     let Some(rest) = consume_keyword_if_present(rest, "from") else {
         return Err(ParseError::UnexpectedToken {
             expected: "FROM",
@@ -17783,8 +17886,49 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
         .unwrap_or(source_base);
     Ok(CreateCollationStatement {
         collation_name,
-        source_collation,
+        kind: CreateCollationKind::From { source_collation },
     })
+}
+
+fn parse_collation_option_assignments(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    split_comma_separated_sql(input)?
+        .into_iter()
+        .map(|part| {
+            let (name_sql, value_sql) =
+                part.split_once('=')
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "collation option assignment",
+                        actual: part.trim().into(),
+                    })?;
+            let (name, tail) = parse_sql_identifier(name_sql)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "collation option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            let value_sql = value_sql.trim();
+            let value = if let Some(literal_len) = scan_string_literal_token_len(value_sql) {
+                if !value_sql[literal_len..].trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "end of collation option",
+                        actual: value_sql[literal_len..].trim().into(),
+                    });
+                }
+                decode_string_literal(&value_sql[..literal_len])?
+            } else {
+                let (value, tail) = parse_sql_identifier(value_sql)?;
+                if !tail.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "collation option value",
+                        actual: tail.trim().into(),
+                    });
+                }
+                value
+            };
+            Ok(RelOption { name, value })
+        })
+        .collect()
 }
 
 fn build_drop_conversion_statement(sql: &str) -> Result<DropConversionStatement, ParseError> {
@@ -18807,7 +18951,7 @@ fn build_cluster(pair: Pair<'_, Rule>) -> Result<ClusterStatement, ParseError> {
     Ok(ClusterStatement {
         table_name: table_name.clone(),
         index_name: index_name.clone(),
-        rewrite: true,
+        mark_only: false,
     })
 }
 
@@ -18899,6 +19043,7 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
 }
 
 fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
+    let source_sql = normalize_prepared_source_sql(pair.as_str());
     let mut name = None;
     let mut query = None;
     let mut query_sql = None;
@@ -18922,9 +19067,10 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
                     Ok(Statement::Select(select)) => Some(PreparedStatementQuery::Select(select)),
                     Ok(Statement::Insert(insert)) => Some(PreparedStatementQuery::Insert(insert)),
                     Ok(Statement::Update(update)) => Some(PreparedStatementQuery::Update(update)),
+                    Ok(Statement::Merge(merge)) => Some(PreparedStatementQuery::Merge(merge)),
                     Ok(statement) => {
                         return Err(ParseError::UnexpectedToken {
-                            expected: "prepared SELECT, INSERT, or UPDATE statement",
+                            expected: "prepared SELECT, INSERT, UPDATE, or MERGE statement",
                             actual: format!("{statement:?}"),
                         });
                     }
@@ -18940,6 +19086,7 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
         parameter_types,
         query: query.ok_or(ParseError::UnexpectedEof)?,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
+        source_sql,
     })
 }
 
@@ -19073,6 +19220,7 @@ fn build_create_role(pair: Pair<'_, Rule>) -> Result<CreateRoleStatement, ParseE
 fn build_alter_role(pair: Pair<'_, Rule>) -> Result<AlterRoleStatement, ParseError> {
     let mut role_name = None;
     let mut rename_to = None;
+    let mut set_config = None;
     let mut options = Vec::new();
 
     for part in pair.into_inner() {
@@ -19081,6 +19229,9 @@ fn build_alter_role(pair: Pair<'_, Rule>) -> Result<AlterRoleStatement, ParseErr
             Rule::alter_role_rename_clause => {
                 rename_to = Some(build_alter_role_rename(part)?);
             }
+            Rule::alter_role_set_clause => {
+                set_config = Some(build_alter_role_set(part)?);
+            }
             Rule::alter_role_option => options.push(build_role_option(part)?),
             _ => {}
         }
@@ -19088,6 +19239,8 @@ fn build_alter_role(pair: Pair<'_, Rule>) -> Result<AlterRoleStatement, ParseErr
 
     let action = if let Some(new_name) = rename_to {
         AlterRoleAction::Rename { new_name }
+    } else if let Some((name, value)) = set_config {
+        AlterRoleAction::SetConfig { name, value }
     } else {
         AlterRoleAction::Options(options)
     };
@@ -19167,6 +19320,19 @@ fn build_alter_role_rename(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
         .find(|part| part.as_rule() == Rule::identifier)
         .map(build_identifier)
         .ok_or(ParseError::UnexpectedEof)
+}
+
+fn build_alter_role_set(pair: Pair<'_, Rule>) -> Result<(String, Option<String>), ParseError> {
+    let mut name = None;
+    let mut value = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::guc_name if name.is_none() => name = Some(build_set_guc_name(part)),
+            Rule::set_value_list => value = Some(build_set_value_list_value(part)),
+            _ => {}
+        }
+    }
+    Ok((name.ok_or(ParseError::UnexpectedEof)?, value.flatten()))
 }
 
 fn build_create_database(pair: Pair<'_, Rule>) -> Result<CreateDatabaseStatement, ParseError> {
@@ -20482,6 +20648,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             Ok(CteBody::RecursiveUnion {
                 all,
                 left_nested: false,
+                anchor_with_is_subquery: true,
                 anchor: Box::new(anchor),
                 recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
             })
@@ -20498,6 +20665,7 @@ fn select_statement_as_cte_body(stmt: SelectStatement) -> CteBody {
         return CteBody::RecursiveUnion {
             all,
             left_nested,
+            anchor_with_is_subquery: false,
             anchor: Box::new(select_term_as_cte_body(anchor)),
             recursive: Box::new(recursive),
         };
@@ -20967,13 +21135,19 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             }
             Ok(item)
         }
-        Rule::aliased_from_item => {
+        Rule::aliased_from_item | Rule::sampled_from_item | Rule::unsampled_from_item => {
             let mut source = None;
             let mut alias = None;
             let mut column_aliases = AliasColumnSpec::None;
             let mut sample = None;
             for part in pair.into_inner() {
                 match part.as_rule() {
+                    Rule::sampled_from_item | Rule::unsampled_from_item => {
+                        source = Some(build_from_item(part)?)
+                    }
+                    Rule::sampleable_from_primary | Rule::unsampleable_from_primary => {
+                        source = Some(build_from_item(part)?)
+                    }
                     Rule::only_table_from_item
                     | Rule::table_from_item
                     | Rule::lateral_from_item
@@ -21018,6 +21192,10 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 };
             }
             Ok(item)
+        }
+        Rule::sampleable_from_primary | Rule::unsampleable_from_primary => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_from_item(inner)
         }
         Rule::only_table_from_item => Ok(FromItem::Table {
             name: build_identifier(
@@ -23216,12 +23394,14 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::exclusion_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
-            let (using_method, elements, include_columns) = build_exclusion_constraint_body(body)?;
+            let (using_method, elements, include_columns, predicate_sql) =
+                build_exclusion_constraint_body(body)?;
             Ok(TableConstraint::Exclusion {
                 attributes,
                 using_method,
                 elements,
                 include_columns,
+                predicate_sql,
             })
         }
         Rule::check_table_constraint => {
@@ -23293,10 +23473,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
 
 fn build_exclusion_constraint_body(
     pair: Pair<'_, Rule>,
-) -> Result<(String, Vec<ExclusionElement>, Vec<String>), ParseError> {
+) -> Result<(String, Vec<ExclusionElement>, Vec<String>, Option<String>), ParseError> {
     let mut using_method = None;
     let mut elements = Vec::new();
     let mut include_columns = Vec::new();
+    let mut predicate_sql = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier if using_method.is_none() => {
@@ -23347,6 +23528,13 @@ fn build_exclusion_constraint_body(
                         .flat_map(|inner| inner.into_inner().map(build_identifier)),
                 );
             }
+            Rule::create_index_where_clause => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                predicate_sql = Some(expr.as_str().trim().to_string());
+            }
             _ => {}
         }
     }
@@ -23357,6 +23545,7 @@ fn build_exclusion_constraint_body(
         using_method.unwrap_or_else(|| "gist".into()),
         elements,
         include_columns,
+        predicate_sql,
     ))
 }
 
@@ -24723,31 +24912,54 @@ fn build_qualified_identifier_list(pair: Pair<'_, Rule>) -> Vec<String> {
 }
 
 fn build_lock_table(pair: Pair<'_, Rule>) -> Result<LockTableStatement, ParseError> {
-    let mut table_names = Vec::new();
+    let mut targets = Vec::new();
     let mut mode = LockTableMode::AccessExclusive;
     let mut nowait = false;
 
-    // :HACK: PostgreSQL's LockStmt carries RangeVar details for ONLY,
-    // inheritance recursion, trailing '*', and view recursion. This raw node
-    // keeps just direct relation names until those semantics are modeled.
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::qualified_ident_list => {
-                table_names.extend(build_qualified_identifier_list(part));
+            Rule::lock_table_target_list => {
+                targets.extend(build_lock_table_targets(part));
             }
             Rule::lock_table_mode_clause => mode = build_lock_table_mode_clause(part)?,
             Rule::lock_nowait_clause => nowait = true,
             _ => {}
         }
     }
-    if table_names.is_empty() {
+    if targets.is_empty() {
         return Err(ParseError::UnexpectedEof);
     }
     Ok(LockTableStatement {
-        table_names,
+        targets,
         mode,
         nowait,
     })
+}
+
+fn build_lock_table_targets(pair: Pair<'_, Rule>) -> Vec<LockTableTarget> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::lock_table_target)
+        .map(build_lock_table_target)
+        .collect()
+}
+
+fn build_lock_table_target(pair: Pair<'_, Rule>) -> LockTableTarget {
+    let mut name = String::new();
+    let mut only = false;
+    let mut recurse = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::lock_table_only => only = true,
+            Rule::qualified_identifier => name = build_qualified_identifier_string(part),
+            Rule::lock_table_recurse => recurse = true,
+            _ => {}
+        }
+    }
+    LockTableTarget {
+        name,
+        only,
+        recurse,
+    }
 }
 
 fn build_lock_table_mode_clause(pair: Pair<'_, Rule>) -> Result<LockTableMode, ParseError> {
@@ -25173,6 +25385,8 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         let expr_pair = item_inner.next().ok_or(ParseError::UnexpectedEof)?;
         let expr_is_extract = top_level_extract_expr(expr_pair.clone());
         let expr_is_power_operator = top_level_power_operator_expr(expr_pair.clone());
+        let expr_is_case_insensitive_regex_operator =
+            top_level_case_insensitive_regex_operator_expr(expr_pair.clone());
         let expr = build_expr(expr_pair)?;
         let output_name = if let Some(alias_pair) = item_inner.next() {
             let alias = alias_pair
@@ -25183,6 +25397,8 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         } else if expr_is_extract {
             "extract".into()
         } else if expr_is_power_operator {
+            "?column?".into()
+        } else if expr_is_case_insensitive_regex_operator {
             "?column?".into()
         } else {
             select_item_name(&expr, index)
@@ -25348,6 +25564,42 @@ fn top_level_power_operator_expr(pair: Pair<'_, Rule>) -> bool {
                 return false;
             }
             top_level_power_operator_expr(first)
+        }
+        _ => false,
+    }
+}
+
+fn top_level_case_insensitive_regex_operator_expr(pair: Pair<'_, Rule>) -> bool {
+    match pair.as_rule() {
+        Rule::cmp_expr => {
+            let input = pair.as_str();
+            find_top_level_operator(input, b'~', Some(b'*')).is_some()
+                || find_top_level_operator(input, b'!', Some(b'~'))
+                    .is_some_and(|index| input.as_bytes().get(index + 2) == Some(&b'*'))
+        }
+        Rule::expr
+        | Rule::or_expr
+        | Rule::and_expr
+        | Rule::not_expr
+        | Rule::json_access_expr
+        | Rule::concat_expr
+        | Rule::add_expr
+        | Rule::bit_expr
+        | Rule::shift_expr
+        | Rule::mul_expr
+        | Rule::unary_expr
+        | Rule::positive_expr
+        | Rule::negated_expr
+        | Rule::postfix_expr
+        | Rule::primary_expr => {
+            let mut inner = pair.into_inner();
+            let Some(first) = inner.next() else {
+                return false;
+            };
+            if inner.next().is_some() {
+                return false;
+            }
+            top_level_case_insensitive_regex_operator_expr(first)
         }
         _ => false,
     }

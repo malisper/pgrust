@@ -5,6 +5,7 @@ use super::tablespace::{
     resolve_relation_tablespace_oid, tablespace_oid_by_name,
 };
 use crate::backend::access::nbtree::nbtree::UNIQUE_BUILD_DETAIL_SEPARATOR;
+use crate::backend::catalog::indexing::rebuild_system_catalog_index_in_pool_for_db;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
     reinitialize_index_relation, row_matches_index_predicate,
@@ -28,8 +29,9 @@ use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     ANYMULTIRANGEOID, ANYRANGEOID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID,
-    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
+    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PgOpclassRow, RANGE_GIST_OPCLASS_OID, SPGIST_AM_OID,
     builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::RelOption;
@@ -781,6 +783,81 @@ pub(super) fn catalog_entry_from_bound_index_relation(
     }
 }
 
+fn index_columns_for_reindex(
+    relation: &crate::backend::parser::BoundRelation,
+    index: &crate::backend::parser::BoundIndexRelation,
+) -> Result<Vec<crate::backend::parser::IndexColumnDef>, ExecError> {
+    let mut expr_sqls = index
+        .index_meta
+        .indexprs
+        .as_deref()
+        .map(|json| {
+            serde_json::from_str::<Vec<String>>(json).map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index expression metadata",
+                    actual: "invalid index expression metadata".into(),
+                })
+            })
+        })
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter();
+    let mut columns = Vec::with_capacity(index.index_meta.indkey.len());
+    for (position, attnum) in index.index_meta.indkey.iter().copied().enumerate() {
+        let indoption = index
+            .index_meta
+            .indoption
+            .get(position)
+            .copied()
+            .unwrap_or_default();
+        if attnum == 0 {
+            let expr_sql = expr_sqls.next().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index expression SQL",
+                    actual: "missing expression index metadata".into(),
+                })
+            })?;
+            columns.push(crate::backend::parser::IndexColumnDef {
+                name: String::new(),
+                expr_sql: Some(expr_sql),
+                expr_type: index
+                    .desc
+                    .columns
+                    .get(position)
+                    .map(|column| column.sql_type),
+                collation: None,
+                opclass: None,
+                opclass_options: Vec::new(),
+                descending: indoption & 0x0001 != 0,
+                nulls_first: (indoption & 0x0002 != 0).then_some(true),
+            });
+            continue;
+        }
+        let column = relation
+            .desc
+            .columns
+            .get(attnum.saturating_sub(1) as usize)
+            .filter(|column| !column.dropped)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index column",
+                    actual: format!("invalid attnum {attnum}"),
+                })
+            })?;
+        columns.push(crate::backend::parser::IndexColumnDef {
+            name: column.name.clone(),
+            expr_sql: None,
+            expr_type: None,
+            collation: None,
+            opclass: None,
+            opclass_options: Vec::new(),
+            descending: indoption & 0x0001 != 0,
+            nulls_first: (indoption & 0x0002 != 0).then_some(true),
+        });
+    }
+    Ok(columns)
+}
+
 fn btree_reloptions(options: Option<BtreeOptions>) -> Option<Vec<String>> {
     options.map(|options| {
         vec![
@@ -1146,16 +1223,15 @@ impl Database {
 
     fn validate_index_opclass_options(
         access_method_oid: u32,
-        opfamily_oid: u32,
+        opclass: &PgOpclassRow,
         column: &crate::backend::parser::IndexColumnDef,
     ) -> Result<(), ExecError> {
         if column.opclass_options.is_empty() {
             return Ok(());
         }
-        if access_method_oid != GIST_AM_OID || opfamily_oid != GIST_TSVECTOR_FAMILY_OID {
-            let option = &column.opclass_options[0];
+        if access_method_oid != GIST_AM_OID || opclass.opcfamily != GIST_TSVECTOR_FAMILY_OID {
             return Err(ExecError::DetailedError {
-                message: format!("unrecognized parameter \"{}\"", option.name),
+                message: format!("operator class {} has no options", opclass.opcname),
                 detail: None,
                 hint: None,
                 sqlstate: "22023",
@@ -1532,7 +1608,7 @@ impl Database {
                     type_name: type_name.clone(),
                 })
             })?;
-            Self::validate_index_opclass_options(access_method.oid, opclass.opcfamily, column)?;
+            Self::validate_index_opclass_options(access_method.oid, &opclass, column)?;
             indclass_options.push(
                 column
                     .opclass_options
@@ -1643,8 +1719,7 @@ impl Database {
         ) {
             Ok(options) => Ok(options),
             Err(ExecError::Parse(ParseError::MissingDefaultOpclass { access_method, .. }))
-                if access_method.eq_ignore_ascii_case("gist")
-                    && columns.iter().any(|column| column.expr_sql.is_some()) =>
+                if access_method.eq_ignore_ascii_case("gist") =>
             {
                 let access_method =
                     crate::backend::utils::cache::lsyscache::access_method_row_by_name(
@@ -1656,16 +1731,67 @@ impl Database {
                             actual: "unsupported index access method".into(),
                         })
                     })?;
+                let indclass = columns
+                    .iter()
+                    .map(|column| {
+                        let sql_type = if column.expr_sql.is_some() {
+                            column.expr_type.ok_or_else(|| {
+                                ExecError::Parse(ParseError::UnexpectedToken {
+                                    expected: "inferred expression index type",
+                                    actual: "missing expression index type".into(),
+                                })
+                            })?
+                        } else {
+                            relation
+                                .desc
+                                .columns
+                                .iter()
+                                .find(|desc| {
+                                    !desc.dropped && desc.name.eq_ignore_ascii_case(&column.name)
+                                })
+                                .ok_or_else(|| {
+                                    ExecError::Parse(ParseError::UnknownColumn(column.name.clone()))
+                                })?
+                                .sql_type
+                        };
+                        let type_oid = index_type_oid_for_sql_type(self, client_id, sql_type)
+                            .ok_or_else(|| {
+                                ExecError::Parse(ParseError::UnsupportedType(
+                                    column
+                                        .expr_sql
+                                        .clone()
+                                        .unwrap_or_else(|| column.name.clone()),
+                                ))
+                            })?;
+                        crate::include::catalog::default_btree_opclass_oid(type_oid).ok_or_else(
+                            || {
+                                ExecError::Parse(ParseError::MissingDefaultOpclass {
+                                    access_method: "gist".into(),
+                                    type_name: index_type_name_for_oid(
+                                        self, client_id, txn_ctx, type_oid,
+                                    ),
+                                })
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .or_else(|err| {
+                        if columns.iter().any(|column| column.expr_sql.is_some()) {
+                            Ok(vec![RANGE_GIST_OPCLASS_OID; columns.len()])
+                        } else {
+                            Err(err)
+                        }
+                    })?;
                 // :HACK: pgrust does not ship PostgreSQL's btree_gist opclasses
-                // yet. The inherit regression uses an empty-table expression
-                // exclusion constraint only for catalog semantics, so use a
-                // GiST opclass placeholder while leaving enforcement deferred.
+                // yet. Use scalar btree opclasses as catalog placeholders for
+                // heap-scan enforced equality exclusions; expression exclusions
+                // still fall back to a generic GiST placeholder.
                 Ok((
                     access_method.oid,
                     access_method.amhandler,
                     CatalogIndexBuildOptions {
                         am_oid: access_method.oid,
-                        indclass: vec![RANGE_GIST_OPCLASS_OID; columns.len()],
+                        indclass,
                         indclass_options: vec![Vec::new(); columns.len()],
                         indcollation: vec![0; columns.len()],
                         indoption: vec![0; columns.len()],
@@ -2387,7 +2513,7 @@ impl Database {
                 datetime_config: DateTimeConfig::default(),
                 statement_timestamp_usecs:
                     crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-                gucs: std::collections::HashMap::new(),
+                gucs: super::maintenance_safe_gucs(),
                 interrupts,
                 stats: std::sync::Arc::clone(&self.stats),
                 session_stats: self.session_stats_state(client_id),
@@ -2973,6 +3099,16 @@ impl Database {
                 catalog_effects,
             );
         }
+        if let Some(descriptor) = system_catalog_index_by_oid(index.relation_oid).copied() {
+            rebuild_system_catalog_index_in_pool_for_db(
+                &self.pool,
+                &self.txns,
+                self.database_oid,
+                descriptor,
+            )
+            .map_err(map_catalog_error)?;
+            return Ok(());
+        }
         let interrupts = self.interrupt_state(client_id);
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut rebuilt_index = index.clone();
@@ -2986,6 +3122,23 @@ impl Database {
         )? {
             rebuilt_index.rel = rel;
         }
+        let has_expression_eval = rebuilt_index.index_meta.indexprs.as_ref().is_some()
+            || rebuilt_index
+                .index_meta
+                .indpred
+                .as_deref()
+                .is_some_and(|predicate| !predicate.trim().is_empty());
+        let visible_catalog = if visible_catalog.is_none() && has_expression_eval {
+            let maintenance_search_path = vec!["pg_catalog".into(), "pg_temp".into()];
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, cid)),
+                Some(&maintenance_search_path),
+            );
+            Some(crate::backend::executor::executor_catalog(catalog))
+        } else {
+            visible_catalog
+        };
         let mut ctx = ExecutorContext {
             pool: self.pool.clone(),
             data_dir: None,
@@ -3002,7 +3155,7 @@ impl Database {
             datetime_config: DateTimeConfig::default(),
             statement_timestamp_usecs:
                 crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
-            gucs: std::collections::HashMap::new(),
+            gucs: super::maintenance_safe_gucs(),
             interrupts,
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
@@ -3181,6 +3334,32 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
         );
+        if reindex_stmt.concurrently
+            && matches!(
+                reindex_stmt.kind,
+                crate::backend::parser::ReindexTargetKind::Index
+            )
+            && result.is_err()
+            && !catalog_effects.is_empty()
+        {
+            let err = result.err().expect("checked is_err");
+            let commit_result = self.finish_txn(
+                client_id,
+                xid,
+                Ok(StatementResult::AffectedRows(0)),
+                &catalog_effects,
+                &[],
+                &[],
+            );
+            guard.disarm();
+            if let Some(rel) = locked_rel {
+                self.table_locks.unlock_table(rel, client_id);
+            }
+            return match commit_result {
+                Ok(_) => Err(err),
+                Err(commit_err) => Err(commit_err),
+            };
+        }
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
         if let Some(rel) = locked_rel {
@@ -3518,6 +3697,17 @@ impl Database {
         if concurrently && index.index_meta.indisexclusion {
             return Err(cannot_reindex_exclusion_index_concurrently_error());
         }
+        if concurrently && !index.index_meta.indisvalid {
+            return self.reindex_invalid_index_concurrently_in_transaction(
+                client_id,
+                &heap,
+                &index,
+                target_tablespace,
+                xid,
+                cid,
+                catalog_effects,
+            );
+        }
         self.rebuild_index_relation_in_transaction(
             client_id,
             &heap,
@@ -3542,6 +3732,77 @@ impl Database {
                 .note_relation_have_stats_false_once(index.relation_oid);
         }
         Ok(())
+    }
+
+    fn reindex_invalid_index_concurrently_in_transaction(
+        &self,
+        client_id: ClientId,
+        heap: &crate::backend::parser::BoundRelation,
+        index: &crate::backend::parser::BoundIndexRelation,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let columns = index_columns_for_reindex(heap, index)?;
+        let access_method_handler = index.index_meta.am_handler_oid.ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index access method handler",
+                actual: format!(
+                    "missing handler for access method {}",
+                    index.index_meta.am_oid
+                ),
+            })
+        })?;
+        let build_options = CatalogIndexBuildOptions {
+            am_oid: index.index_meta.am_oid,
+            indclass: index.index_meta.indclass.clone(),
+            indclass_options: index.index_meta.indclass_options.clone(),
+            indcollation: index.index_meta.indcollation.clone(),
+            indoption: index.index_meta.indoption.clone(),
+            reloptions: None,
+            indnullsnotdistinct: index.index_meta.indnullsnotdistinct,
+            indisexclusion: index.index_meta.indisexclusion,
+            indimmediate: index.index_meta.indimmediate,
+            btree_options: index.index_meta.btree_options,
+            brin_options: index.index_meta.brin_options.clone(),
+            gist_options: index.index_meta.gist_options,
+            gin_options: index.index_meta.gin_options.clone(),
+            hash_options: index.index_meta.hash_options,
+        };
+        let ccnew_name = format!("{}_ccnew", index.name);
+        let ccnew = self.build_simple_index_in_transaction(
+            client_id,
+            heap,
+            &ccnew_name,
+            None,
+            &columns,
+            index.index_meta.indpred.as_deref(),
+            index.index_meta.indisunique,
+            index.index_meta.indisprimary,
+            index.index_meta.indnullsnotdistinct,
+            target_tablespace
+                .map(|target| target.oid)
+                .or_else(|| (index.rel.spc_oid != 0).then_some(index.rel.spc_oid)),
+            xid,
+            cid,
+            index.index_meta.am_oid,
+            access_method_handler,
+            &build_options,
+            65_536,
+            true,
+            false,
+            catalog_effects,
+        )?;
+        self.cleanup_failed_index_build(
+            client_id,
+            xid,
+            cid,
+            &ccnew,
+            catalog_effects,
+            self.interrupt_state(client_id),
+        );
+        self.mark_reindexed_index_ready_valid(client_id, xid, cid, index, catalog_effects)
     }
 
     fn reindex_table_indexes_in_transaction(
@@ -3570,10 +3831,36 @@ impl Database {
             cid,
             catalog_effects,
         )?;
+        Ok(())
+    }
+
+    fn reindex_relation_index_set_in_transaction(
+        &self,
+        client_id: ClientId,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        relation: &crate::backend::parser::BoundRelation,
+        concurrently: bool,
+        verbose: bool,
+        target_tablespace: Option<&ReindexTablespaceTarget>,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        self.reindex_relation_indexes_in_transaction(
+            client_id,
+            catalog,
+            relation,
+            concurrently,
+            verbose,
+            target_tablespace,
+            xid,
+            cid,
+            catalog_effects,
+        )?;
         if let Some(toast) = relation.toast
             && let Some(toast_relation) = catalog.lookup_relation_by_oid(toast.relation_oid)
         {
-            self.reindex_relation_index_set_in_transaction(
+            self.reindex_relation_indexes_in_transaction(
                 client_id,
                 catalog,
                 &toast_relation,
@@ -3588,7 +3875,7 @@ impl Database {
         Ok(())
     }
 
-    fn reindex_relation_index_set_in_transaction(
+    fn reindex_relation_indexes_in_transaction(
         &self,
         client_id: ClientId,
         catalog: &dyn crate::backend::parser::CatalogLookup,

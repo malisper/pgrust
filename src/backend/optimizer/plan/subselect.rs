@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::plannodes::{Plan, PlannedStmt};
+use crate::include::nodes::plannodes::{Plan, PlannedStmt, TidScanCond, TidScanSource};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, RowsFromItem, RowsFromSource,
     SetReturningCall, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
@@ -79,6 +79,7 @@ fn plan_contains_volatile_expr(plan: &Plan) -> bool {
     match plan {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -1513,6 +1514,45 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         | Plan::SeqScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. } => plan,
+        Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond,
+            filter,
+        } => Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond: TidScanCond {
+                sources: tid_cond
+                    .sources
+                    .into_iter()
+                    .map(|source| match source {
+                        TidScanSource::Scalar(expr) => {
+                            TidScanSource::Scalar(rebase_expr_subplan_ids(expr, base))
+                        }
+                        TidScanSource::Array(expr) => {
+                            TidScanSource::Array(rebase_expr_subplan_ids(expr, base))
+                        }
+                    })
+                    .collect(),
+                display_expr: rebase_expr_subplan_ids(tid_cond.display_expr, base),
+            },
+            filter: filter.map(|expr| rebase_expr_subplan_ids(expr, base)),
+        },
         Plan::MergeAppend {
             plan_info,
             source_id,
@@ -1944,11 +1984,15 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             clause: rebase_window_clause_subplan_ids(clause, base),
+            run_condition: run_condition.map(|expr| rebase_expr_subplan_ids(expr, base)),
+            top_qual: top_qual.map(|expr| rebase_expr_subplan_ids(expr, base)),
             output_columns,
         },
         Plan::FunctionScan {
@@ -2086,6 +2130,45 @@ pub(super) fn finalize_plan_subqueries(
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::WorkTableScan { .. } => plan,
+        Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond,
+            filter,
+        } => Plan::TidScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            tid_cond: TidScanCond {
+                sources: tid_cond
+                    .sources
+                    .into_iter()
+                    .map(|source| match source {
+                        TidScanSource::Scalar(expr) => {
+                            TidScanSource::Scalar(finalize_expr_subqueries(expr, catalog, subplans))
+                        }
+                        TidScanSource::Array(expr) => {
+                            TidScanSource::Array(finalize_expr_subqueries(expr, catalog, subplans))
+                        }
+                    })
+                    .collect(),
+                display_expr: finalize_expr_subqueries(tid_cond.display_expr, catalog, subplans),
+            },
+            filter: filter.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+        },
         Plan::BitmapOr {
             plan_info,
             children,
@@ -2494,6 +2577,8 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => {
             Plan::WindowAgg {
@@ -2567,6 +2652,9 @@ pub(super) fn finalize_plan_subqueries(
                                 })
                                 .collect(),
                     },
+                run_condition: run_condition
+                    .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+                top_qual: top_qual.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
                 output_columns,
             }
         }

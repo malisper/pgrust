@@ -95,6 +95,13 @@ pub fn record_free_index_page(
     store_free_pages(pool, rel, &free)
 }
 
+pub fn clear_free_index_pages(
+    pool: &BufferPool<SmgrStorageBackend>,
+    rel: RelFileLocator,
+) -> Result<(), String> {
+    store_free_pages(pool, rel, &BTreeSet::new())
+}
+
 pub fn finalize_pending_index_pages(
     pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,

@@ -7,7 +7,7 @@ use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::commands::tablecmds::{
     apply_sql_type_array_subscript_assignment, collect_matching_rows_heap, execute_delete,
-    execute_insert, execute_update,
+    execute_insert, execute_merge, execute_update,
 };
 use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::function_guc::{
@@ -28,8 +28,8 @@ use crate::backend::parser::{
     TriggerLevel, TriggerTiming, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_statement,
     pg_plan_query_with_outer_scopes_and_ctes_config,
-    pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
-    with_external_param_types,
+    pg_plan_values_query_with_outer_scopes_and_ctes_config, plan_merge_with_outer_scopes_and_ctes,
+    resolve_raw_type_name, with_external_param_types,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::record::{
@@ -62,7 +62,8 @@ use super::compile::{
     CompiledIndirectAssignTarget, CompiledSelectIntoTarget, CompiledStmt, CompiledStrictParam,
     DeclaredCursorParam, FunctionReturnContract, QueryCompareOp, RuntimeSqlScope,
     TriggerReturnedRow, compile_event_trigger_function_from_proc, compile_function_from_proc,
-    compile_trigger_function_from_proc, runtime_sql_bound_scope,
+    compile_trigger_function_from_proc, runtime_sql_bound_scope, runtime_sql_param_bound_scope,
+    runtime_sql_param_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3017,10 +3018,12 @@ fn exec_function_runtime_sql(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let result = execute_dynamic_sql_statement(sql, false, Some(scope), compiled, state, ctx)?;
-    state.values[compiled.found_slot] = match result {
-        StatementResult::Query { rows, .. } => Value::Bool(!rows.is_empty()),
-        StatementResult::AffectedRows(rows) => Value::Bool(rows != 0),
+    let row_count = match result {
+        StatementResult::Query { rows, .. } => rows.len(),
+        StatementResult::AffectedRows(rows) => rows,
     };
+    state.last_row_count = row_count;
+    state.values[compiled.found_slot] = Value::Bool(row_count != 0);
     Ok(())
 }
 
@@ -3683,13 +3686,14 @@ fn exec_dynamic_create_table_as(
     })?;
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
+    let search_path = plpgsql_configured_search_path(ctx);
     let effect_start = ctx.catalog_effects.len();
     let result = db.execute_create_table_as_stmt_in_transaction_with_search_path(
         ctx.client_id,
         stmt,
         xid,
         cid,
-        None,
+        search_path.as_deref(),
         planner_config_from_executor_gucs(&ctx.gucs),
         Some(&ctx.gucs),
         &mut ctx.catalog_effects,
@@ -4394,6 +4398,10 @@ fn execute_dynamic_sql_statement(
         .map(runtime_sql_bound_scope)
         .into_iter()
         .collect::<Vec<_>>();
+    let param_scopes = runtime_scope
+        .map(runtime_sql_param_bound_scope)
+        .into_iter()
+        .collect::<Vec<_>>();
 
     let result = execute_function_query_with_bindings(
         compiled,
@@ -4472,6 +4480,30 @@ fn execute_dynamic_sql_statement(
                             .map_err(ExecError::Parse)?;
                     let stmt = bind_delete_current_of(&stmt, compiled, state)?;
                     let result = execute_delete(stmt, catalog.as_ref(), ctx, xid);
+                    if result.is_ok() {
+                        advance_plpgsql_command_id(ctx);
+                    }
+                    result
+                }
+                crate::backend::parser::Statement::Merge(stmt) => {
+                    let xid = ctx.ensure_write_xid()?;
+                    let cid = ctx.next_command_id;
+                    if let Some(scope) = runtime_scope {
+                        install_runtime_sql_external_params(scope, state, ctx);
+                    }
+                    let merge_outer_scopes = if runtime_scope.is_some() {
+                        param_scopes.as_slice()
+                    } else {
+                        outer_scopes.as_slice()
+                    };
+                    let stmt = plan_merge_with_outer_scopes_and_ctes(
+                        &stmt,
+                        catalog.as_ref(),
+                        merge_outer_scopes,
+                        &compiled.local_ctes,
+                    )
+                    .map_err(ExecError::Parse)?;
+                    let result = execute_merge(stmt, catalog.as_ref(), ctx, xid, cid);
                     if result.is_ok() {
                         advance_plpgsql_command_id(ctx);
                     }
@@ -4793,6 +4825,31 @@ fn execute_function_query_with_bindings<T>(
     ctx.expr_bindings.exec_params = saved_exec_params;
     ctx.expr_bindings.external_params = saved_external_params;
     result
+}
+
+fn install_runtime_sql_external_params(
+    scope: &RuntimeSqlScope,
+    state: &FunctionState,
+    ctx: &mut ExecutorContext,
+) {
+    let mut installed = HashSet::new();
+    for column in scope.columns.iter().chain(
+        scope
+            .relation_scopes
+            .iter()
+            .flat_map(|(_, columns)| columns),
+    ) {
+        if installed.insert(column.slot) {
+            let value = state
+                .values
+                .get(column.slot)
+                .cloned()
+                .unwrap_or(Value::Null);
+            ctx.expr_bindings
+                .external_params
+                .insert(runtime_sql_param_id(column.slot), value);
+        }
+    }
 }
 
 fn statement_result_to_query_result(
@@ -5527,12 +5584,14 @@ fn current_of_predicate(binding: SystemVarBinding) -> Result<Expr, ExecError> {
         varattno: TABLE_OID_ATTR_NO,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Oid),
+        collation_oid: None,
     });
     let ctid = Expr::Var(Var {
         varno: 1,
         varattno: SELF_ITEM_POINTER_ATTR_NO,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Tid),
+        collation_oid: None,
     });
     Ok(Expr::and(
         Expr::op_auto(

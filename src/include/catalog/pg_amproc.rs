@@ -624,22 +624,24 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
             oid = oid.saturating_add(1);
         }
     }
-    for (procnum, proc_oid) in [
-        (1_i16, GIN_COMPARE_JSONB_PROC_OID),
-        (2, GIN_EXTRACT_JSONB_PROC_OID),
-        (3, GIN_EXTRACT_JSONB_QUERY_PROC_OID),
-        (4, GIN_CONSISTENT_JSONB_PROC_OID),
-        (6, GIN_TRICONSISTENT_JSONB_PROC_OID),
-    ] {
-        rows.push(PgAmprocRow {
-            oid,
-            amprocfamily: GIN_JSONB_FAMILY_OID,
-            amproclefttype: JSONB_TYPE_OID,
-            amprocrighttype: JSONB_TYPE_OID,
-            amprocnum: procnum,
-            amproc: proc_oid,
-        });
-        oid = oid.saturating_add(1);
+    for family in [GIN_JSONB_FAMILY_OID, GIN_JSONB_PATH_FAMILY_OID] {
+        for (procnum, proc_oid) in [
+            (1_i16, GIN_COMPARE_JSONB_PROC_OID),
+            (2, GIN_EXTRACT_JSONB_PROC_OID),
+            (3, GIN_EXTRACT_JSONB_QUERY_PROC_OID),
+            (4, GIN_CONSISTENT_JSONB_PROC_OID),
+            (6, GIN_TRICONSISTENT_JSONB_PROC_OID),
+        ] {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: JSONB_TYPE_OID,
+                amprocrighttype: JSONB_TYPE_OID,
+                amprocnum: procnum,
+                amproc: proc_oid,
+            });
+            oid = oid.saturating_add(1);
+        }
     }
     for (family, type_oid, proc_oid) in [
         (HASH_ARRAY_FAMILY_OID, ANYARRAYOID, HASH_ARRAY_PROC_OID),

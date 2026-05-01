@@ -1,14 +1,13 @@
 use super::inherit::append_translation;
 use super::pathnodes::{
     aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_id, rte_slot_varno,
-    slot_output_target,
 };
 use super::plan::append_uncorrelated_planned_subquery;
 use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base_and_config};
-use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
+use crate::backend::parser::{CatalogLookup, SubqueryComparisonOp};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     Query, QueryRowMark, RangeTblEntryKind, TableSampleClause,
@@ -18,15 +17,15 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{
     ExecParamSource, IndexScanKey, IndexScanKeyArgument, PartitionPruneChildDomain,
-    PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark,
+    PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark, TidScanCond, TidScanSource,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, BuiltinScalarFunction, Expr, ExprArraySubscript, FuncExpr,
-    INNER_VAR, JoinType, OUTER_VAR, OpExpr, OrderByEntry, Param, ParamKind, QueryColumn,
-    RowsFromSource, ScalarArrayOpExpr, ScalarFunctionImpl, SetReturningCall, SubPlan, TargetEntry,
-    Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
-    is_executor_special_varno, is_rule_pseudo_varno, is_special_varno, is_system_attr,
-    set_returning_call_exprs, user_attrno,
+    AggAccum, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript,
+    FuncExpr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry, Param, ParamKind,
+    QueryColumn, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl,
+    SetReturningCall, SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind,
+    XmlExpr, attrno_index, is_executor_special_varno, is_rule_pseudo_varno, is_special_varno,
+    is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 struct IndexedTlistEntry {
     index: usize,
     sql_type: crate::backend::parser::SqlType,
+    collation_oid: Option<u32>,
     ressortgroupref: usize,
     match_exprs: Vec<Expr>,
 }
@@ -51,24 +51,34 @@ impl IndexedTlist {
                 .iter()
                 .find(|entry| {
                     entry.match_exprs.iter().any(|candidate| {
-                        matches!(candidate, Expr::Var(candidate_var) if candidate_var == var)
+                        matches!(candidate, Expr::Var(candidate_var) if vars_match_for_setrefs(candidate_var, var))
                             || matches!(candidate, Expr::GroupingKey(grouping_key)
                                 if matches!(grouping_key.expr.as_ref(), Expr::Var(candidate_var)
-                                    if candidate_var == var))
+                                    if vars_match_for_setrefs(candidate_var, var)))
                     })
                 })
                 .or_else(|| {
                     self.entries.iter().find(|entry| {
                         entry.match_exprs.iter().any(|candidate| match candidate {
                             Expr::Var(candidate_var) => root.is_some_and(|root| {
-                                flatten_join_alias_vars(root, Expr::Var(candidate_var.clone()))
-                                    == flatten_join_alias_vars(root, expr.clone())
+                                exprs_match_for_setrefs(
+                                    &flatten_join_alias_vars(
+                                        root,
+                                        Expr::Var(candidate_var.clone()),
+                                    ),
+                                    &flatten_join_alias_vars(root, expr.clone()),
+                                )
                             }),
                             Expr::GroupingKey(grouping_key) => {
-                                grouping_key.expr.as_ref() == expr
+                                exprs_match_for_setrefs(grouping_key.expr.as_ref(), expr)
                                     || root.is_some_and(|root| {
-                                        flatten_join_alias_vars(root, *grouping_key.expr.clone())
-                                            == flatten_join_alias_vars(root, expr.clone())
+                                        exprs_match_for_setrefs(
+                                            &flatten_join_alias_vars(
+                                                root,
+                                                *grouping_key.expr.clone(),
+                                            ),
+                                            &flatten_join_alias_vars(root, expr.clone()),
+                                        )
                                     })
                             }
                             _ => output_component_matches_expr(candidate, expr),
@@ -190,13 +200,65 @@ fn recurse_with_root(ctx: &mut SetRefsContext<'_>, root: Option<&PlannerInfo>, p
     plan
 }
 
-fn special_slot_var(varno: usize, index: usize, sql_type: crate::backend::parser::SqlType) -> Expr {
+fn expr_collation_oid(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::Var(var) => var.collation_oid,
+        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        Expr::Cast(inner, _) => expr_collation_oid(inner),
+        Expr::GroupingKey(grouping_key) => expr_collation_oid(&grouping_key.expr),
+        Expr::Func(func) => func
+            .collation_oid
+            .or_else(|| func.args.iter().find_map(expr_collation_oid)),
+        _ => None,
+    }
+}
+
+fn vars_match_for_setrefs(left: &Var, right: &Var) -> bool {
+    // PostgreSQL's search_indexed_tlist_for_var matches Vars by varno/varattno
+    // and copies the caller's Var into the replacement.  Do the same logical
+    // match here: type and collation are expression metadata, not tlist lookup
+    // keys, and can legitimately be missing from intermediate path targets.
+    left.varno == right.varno
+        && left.varattno == right.varattno
+        && left.varlevelsup == right.varlevelsup
+}
+
+fn exprs_match_for_setrefs(left: &Expr, right: &Expr) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left, right) {
+        (Expr::Var(left_var), Expr::Var(right_var)) => vars_match_for_setrefs(left_var, right_var),
+        (Expr::GroupingKey(left_key), Expr::GroupingKey(right_key)) => {
+            left_key.ref_id == right_key.ref_id
+                && exprs_match_for_setrefs(&left_key.expr, &right_key.expr)
+        }
+        _ => false,
+    }
+}
+
+fn special_slot_var(
+    varno: usize,
+    index: usize,
+    sql_type: crate::backend::parser::SqlType,
+    collation_oid: Option<u32>,
+) -> Expr {
     Expr::Var(Var {
         varno,
         varattno: user_attrno(index),
         varlevelsup: 0,
         vartype: sql_type,
+        collation_oid,
     })
+}
+
+fn special_slot_var_for_expr(varno: usize, entry: &IndexedTlistEntry, expr: &Expr) -> Expr {
+    special_slot_var(
+        varno,
+        entry.index,
+        entry.sql_type,
+        expr_collation_oid(expr).or(entry.collation_oid),
+    )
 }
 
 fn build_simple_tlist_from_exprs(output_vars: &[Expr]) -> IndexedTlist {
@@ -207,6 +269,7 @@ fn build_simple_tlist_from_exprs(output_vars: &[Expr]) -> IndexedTlist {
             .map(|(index, expr)| IndexedTlistEntry {
                 index,
                 sql_type: expr_sql_type(expr),
+                collation_oid: expr_collation_oid(expr),
                 ressortgroupref: 0,
                 match_exprs: vec![expr.clone()],
             })
@@ -219,7 +282,19 @@ fn build_base_scan_tlist(
     source_id: usize,
     desc: &crate::include::nodes::primnodes::RelationDesc,
 ) -> IndexedTlist {
-    let output_vars = slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs;
+    let output_vars = desc
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            slot_var_with_collation(
+                source_id,
+                user_attrno(index),
+                column.sql_type,
+                (column.collation_oid != 0).then_some(column.collation_oid),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut tlist = build_simple_tlist_from_exprs(&output_vars);
     if let Some(rtindex) = rte_slot_varno(source_id) {
         for (index, entry) in tlist.entries.iter_mut().enumerate() {
@@ -228,6 +303,7 @@ fn build_base_scan_tlist(
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: entry.sql_type,
+                collation_oid: entry.collation_oid,
             }));
             entry.match_exprs = dedup_match_exprs(std::mem::take(&mut entry.match_exprs));
         }
@@ -237,7 +313,7 @@ fn build_base_scan_tlist(
             if info
                 .translated_vars
                 .get(index)
-                .is_some_and(|translated| translated == &output_vars[index])
+                .is_some_and(|translated| exprs_match_for_setrefs(translated, &output_vars[index]))
             {
                 entry.match_exprs = dedup_match_exprs(vec![
                     entry.match_exprs[0].clone(),
@@ -246,6 +322,7 @@ fn build_base_scan_tlist(
                         varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: entry.sql_type,
+                        collation_oid: entry.collation_oid,
                     }),
                 ]);
             }
@@ -263,6 +340,9 @@ fn build_simple_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
     for (index, entry) in tlist.entries.iter_mut().enumerate() {
         if let Some(semantic_expr) = semantic_target.exprs.get(index) {
             entry.match_exprs.push(semantic_expr.clone());
+            entry.collation_oid = entry
+                .collation_oid
+                .or_else(|| expr_collation_oid(semantic_expr));
             if let Some(root) = root {
                 entry
                     .match_exprs
@@ -276,7 +356,7 @@ fn build_simple_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             if info
                 .translated_vars
                 .get(index)
-                .is_some_and(|translated| translated == &output_vars[index])
+                .is_some_and(|translated| exprs_match_for_setrefs(translated, &output_vars[index]))
             {
                 entry.match_exprs = dedup_match_exprs(vec![
                     entry.match_exprs[0].clone(),
@@ -285,6 +365,7 @@ fn build_simple_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
                         varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: entry.sql_type,
+                        collation_oid: None,
                     }),
                 ]);
             }
@@ -479,6 +560,7 @@ fn build_projection_tlist(
                 IndexedTlistEntry {
                     index,
                     sql_type: target.sql_type,
+                    collation_oid: expr_collation_oid(&target.expr),
                     ressortgroupref: target.ressortgroupref,
                     match_exprs: dedup_match_exprs(match_exprs),
                 }
@@ -527,6 +609,7 @@ fn build_aggregate_tlist(
         entries.push(IndexedTlistEntry {
             index,
             sql_type: expr_sql_type(expr),
+            collation_oid: expr_collation_oid(expr),
             ressortgroupref: 0,
             match_exprs: dedup_match_exprs(match_exprs),
         });
@@ -543,6 +626,7 @@ fn build_aggregate_tlist(
         entries.push(IndexedTlistEntry {
             index,
             sql_type: expr_sql_type(expr),
+            collation_oid: expr_collation_oid(expr),
             ressortgroupref: 0,
             match_exprs: dedup_match_exprs(match_exprs),
         });
@@ -558,6 +642,7 @@ fn build_aggregate_tlist(
         entries.push(IndexedTlistEntry {
             index,
             sql_type: output_type,
+            collation_oid: None,
             ressortgroupref: 0,
             match_exprs: dedup_match_exprs(vec![
                 slot_var(slot_id, user_attrno(index), output_type),
@@ -641,11 +726,14 @@ fn build_project_set_tlist(
                         ],
                     ),
                 };
+                let match_exprs = dedup_match_exprs(std::mem::take(&mut match_exprs));
+                let collation_oid = match_exprs.iter().find_map(expr_collation_oid);
                 IndexedTlistEntry {
                     index,
                     sql_type,
+                    collation_oid,
                     ressortgroupref,
-                    match_exprs: dedup_match_exprs(std::mem::take(&mut match_exprs)),
+                    match_exprs,
                 }
             })
             .collect(),
@@ -691,9 +779,11 @@ fn build_window_tlist(
                 match_exprs.push(flatten_join_alias_vars(root, func_expr));
             }
         }
+        let collation_oid = match_exprs.iter().find_map(expr_collation_oid);
         entries.push(IndexedTlistEntry {
             index,
             sql_type: column.sql_type,
+            collation_oid,
             ressortgroupref,
             match_exprs: dedup_match_exprs(match_exprs),
         });
@@ -718,45 +808,55 @@ fn build_join_tlist(
         let ressortgroupref = semantic_target.get_pathtarget_sortgroupref(logical_index);
         let left_match = search_tlist_entry(root, semantic_expr, &left_tlist);
         let right_match = search_tlist_entry(root, semantic_expr, &right_tlist);
-        let (physical_index, sql_type, mut match_exprs) = match (left_match, right_match) {
-            (Some(entry), None) => (entry.index, entry.sql_type, entry.match_exprs.clone()),
-            (None, Some(entry)) => (
-                left_physical_width + entry.index,
-                entry.sql_type,
-                entry.match_exprs.clone(),
-            ),
-            (Some(left_entry), Some(right_entry)) => {
-                let left_index = left_tlist
-                    .entries
-                    .iter()
-                    .position(|entry| entry.index == left_entry.index);
-                let right_index = right_tlist
-                    .entries
-                    .iter()
-                    .position(|entry| entry.index == right_entry.index);
-                if logical_index < left_tlist.entries.len()
-                    && left_index == Some(logical_index)
-                    && right_index != Some(logical_index)
-                {
-                    (
-                        left_entry.index,
-                        left_entry.sql_type,
-                        left_entry.match_exprs.clone(),
-                    )
-                } else {
-                    (
-                        left_physical_width + right_entry.index,
-                        right_entry.sql_type,
-                        right_entry.match_exprs.clone(),
-                    )
+        let (physical_index, sql_type, collation_oid, mut match_exprs) =
+            match (left_match, right_match) {
+                (Some(entry), None) => (
+                    entry.index,
+                    entry.sql_type,
+                    entry.collation_oid,
+                    entry.match_exprs.clone(),
+                ),
+                (None, Some(entry)) => (
+                    left_physical_width + entry.index,
+                    entry.sql_type,
+                    entry.collation_oid,
+                    entry.match_exprs.clone(),
+                ),
+                (Some(left_entry), Some(right_entry)) => {
+                    let left_index = left_tlist
+                        .entries
+                        .iter()
+                        .position(|entry| entry.index == left_entry.index);
+                    let right_index = right_tlist
+                        .entries
+                        .iter()
+                        .position(|entry| entry.index == right_entry.index);
+                    if logical_index < left_tlist.entries.len()
+                        && left_index == Some(logical_index)
+                        && right_index != Some(logical_index)
+                    {
+                        (
+                            left_entry.index,
+                            left_entry.sql_type,
+                            left_entry.collation_oid,
+                            left_entry.match_exprs.clone(),
+                        )
+                    } else {
+                        (
+                            left_physical_width + right_entry.index,
+                            right_entry.sql_type,
+                            right_entry.collation_oid,
+                            right_entry.match_exprs.clone(),
+                        )
+                    }
                 }
-            }
-            (None, None) => (
-                logical_index,
-                expr_sql_type(semantic_expr),
-                vec![semantic_expr.clone()],
-            ),
-        };
+                (None, None) => (
+                    logical_index,
+                    expr_sql_type(semantic_expr),
+                    expr_collation_oid(semantic_expr),
+                    vec![semantic_expr.clone()],
+                ),
+            };
 
         if let Some(output_expr) = output_target.exprs.get(physical_index) {
             match_exprs.push(output_expr.clone());
@@ -765,6 +865,7 @@ fn build_join_tlist(
         entries.push(IndexedTlistEntry {
             index: physical_index,
             sql_type,
+            collation_oid,
             ressortgroupref,
             match_exprs: dedup_match_exprs(match_exprs),
         });
@@ -789,12 +890,14 @@ fn build_subquery_tlist(
                         varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: column.sql_type,
+                        collation_oid: None,
                     }),
                     slot_var(rte_slot_id(rtindex), user_attrno(index), column.sql_type),
                 ];
                 IndexedTlistEntry {
                     index,
                     sql_type: column.sql_type,
+                    collation_oid: None,
                     ressortgroupref: 0,
                     match_exprs: dedup_match_exprs(match_exprs),
                 }
@@ -1255,7 +1358,7 @@ fn expr_references_join_alias_var(root: &PlannerInfo, expr: &Expr) -> bool {
 }
 
 fn output_component_matches_expr(candidate: &Expr, expr: &Expr) -> bool {
-    if candidate == expr {
+    if exprs_match_for_setrefs(candidate, expr) {
         return true;
     }
     match candidate {
@@ -1291,9 +1394,10 @@ fn lower_top_level_input_var(
                 && !is_special_varno(var.varno)
                 && !is_system_attr(var.varattno) =>
         {
+            let expr = Expr::Var(var.clone());
             search_input_tlist_entry(root, &Expr::Var(var.clone()), input, tlist)
                 .filter(|entry| entry.sql_type == var.vartype)
-                .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+                .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, &expr))
                 .unwrap_or(Expr::Var(var))
         }
         other => other,
@@ -1309,7 +1413,7 @@ fn lower_projection_expr_by_input_target(
     if let Some(entry) = search_input_tlist_entry(root, &expr, input, input_tlist)
         && entry.sql_type == expr_sql_type(&expr)
     {
-        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
+        return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }
     let map_var = |var: Var| {
         if var.varlevelsup != 0 || is_special_varno(var.varno) || is_system_attr(var.varattno) {
@@ -1318,7 +1422,7 @@ fn lower_projection_expr_by_input_target(
         let expr = Expr::Var(var.clone());
         search_input_tlist_entry(root, &expr, input, input_tlist)
             .filter(|entry| entry.sql_type == var.vartype)
-            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, &expr))
             .unwrap_or(Expr::Var(var))
     };
     match expr {
@@ -1623,7 +1727,7 @@ fn lower_order_by_expr_for_input(
 ) -> OrderByEntry {
     if let Some(entry) = search_tlist_entry_by_sortgroupref(item.ressortgroupref, input_tlist) {
         return OrderByEntry {
-            expr: special_slot_var(OUTER_VAR, entry.index, entry.sql_type),
+            expr: special_slot_var_for_expr(OUTER_VAR, entry, &item.expr),
             ..item
         };
     }
@@ -2009,10 +2113,14 @@ fn fix_immediate_subquery_output_expr(
                 fully_expand_output_expr_with_root(root, input_expr.clone(), subquery_input);
             (exprs_equivalent(root, input_expr, expr) || exprs_equivalent(root, &expanded, expr))
                 .then(|| {
-                    input_tlist
-                        .entries
-                        .get(index)
-                        .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+                    input_tlist.entries.get(index).map(|entry| {
+                        special_slot_var(
+                            OUTER_VAR,
+                            entry.index,
+                            entry.sql_type,
+                            entry.collation_oid,
+                        )
+                    })
                 })
                 .flatten()
         })
@@ -2046,8 +2154,9 @@ fn fix_executor_join_var_for_input(expr: &Expr, input: &Path) -> Option<Expr> {
             } else {
                 left_width + index
             };
-            (physical_index < input.output_vars().len())
-                .then(|| special_slot_var(OUTER_VAR, physical_index, var.vartype))
+            (physical_index < input.output_vars().len()).then(|| {
+                special_slot_var(OUTER_VAR, physical_index, var.vartype, var.collation_oid)
+            })
         }
         Path::Filter { input, .. }
         | Path::OrderBy { input, .. }
@@ -2078,7 +2187,14 @@ fn fix_semantic_output_expr_for_input(
                     &flatten_join_alias_vars(root, expr.clone()),
                 )
             });
-            (direct || flattened).then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(expr)))
+            (direct || flattened).then(|| {
+                special_slot_var(
+                    OUTER_VAR,
+                    index,
+                    expr_sql_type(expr),
+                    expr_collation_oid(expr),
+                )
+            })
         })
 }
 
@@ -2090,7 +2206,7 @@ fn fix_input_tlist_expr(
 ) -> Option<Expr> {
     search_input_tlist_entry(root, expr, input, input_tlist)
         .filter(|entry| entry.sql_type == expr_sql_type(expr))
-        .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+        .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
 }
 
 fn fix_join_rte_var_for_input(
@@ -2113,7 +2229,12 @@ fn fix_join_rte_var_for_input(
         return None;
     }
     if path_single_relid(input) == Some(var.varno) {
-        return Some(special_slot_var(OUTER_VAR, index, var.vartype));
+        return Some(special_slot_var(
+            OUTER_VAR,
+            index,
+            var.vartype,
+            var.collation_oid,
+        ));
     }
     if !root
         .parse
@@ -2123,7 +2244,12 @@ fn fix_join_rte_var_for_input(
     {
         return None;
     }
-    Some(special_slot_var(OUTER_VAR, index, var.vartype))
+    Some(special_slot_var(
+        OUTER_VAR,
+        index,
+        var.vartype,
+        var.collation_oid,
+    ))
 }
 
 fn fix_upper_expr_for_input(
@@ -2190,23 +2316,29 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
     match mode {
         LowerMode::Scalar => None,
         LowerMode::Input { tlist, .. } => search_tlist_entry(None, expr, tlist)
-            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr)),
         LowerMode::Aggregate { layout, tlist, .. } => search_tlist_entry(None, expr, tlist)
-            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
             .or_else(|| {
                 layout.iter().enumerate().find_map(|(index, candidate)| {
-                    (candidate == expr)
-                        .then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(candidate)))
+                    exprs_match_for_setrefs(candidate, expr).then(|| {
+                        special_slot_var(
+                            OUTER_VAR,
+                            index,
+                            expr_sql_type(candidate),
+                            expr_collation_oid(candidate),
+                        )
+                    })
                 })
             }),
         LowerMode::Join {
             outer_tlist,
             inner_tlist,
         } => search_tlist_entry(None, expr, outer_tlist)
-            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
             .or_else(|| {
                 search_tlist_entry(None, expr, inner_tlist)
-                    .map(|entry| special_slot_var(INNER_VAR, entry.index, entry.sql_type))
+                    .map(|entry| special_slot_var_for_expr(INNER_VAR, entry, expr))
             }),
     }
 }
@@ -4279,6 +4411,25 @@ fn collect_index_scan_key_external_exec_paramids(
     }
 }
 
+fn collect_tid_scan_external_exec_paramids(
+    tid_cond: &TidScanCond,
+    filter: Option<&Expr>,
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    for source in &tid_cond.sources {
+        match source {
+            TidScanSource::Scalar(expr) | TidScanSource::Array(expr) => {
+                collect_external_expr_exec_paramids(expr, bound, out);
+            }
+        }
+    }
+    collect_external_expr_exec_paramids(&tid_cond.display_expr, bound, out);
+    if let Some(filter) = filter {
+        collect_external_expr_exec_paramids(filter, bound, out);
+    }
+}
+
 fn collect_plan_external_exec_paramids(
     plan: &Plan,
     bound: &BTreeSet<usize>,
@@ -4286,6 +4437,9 @@ fn collect_plan_external_exec_paramids(
 ) {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => {}
+        Plan::TidScan {
+            tid_cond, filter, ..
+        } => collect_tid_scan_external_exec_paramids(tid_cond, filter.as_ref(), bound, out),
         Plan::Append { children, .. }
         | Plan::BitmapOr { children, .. }
         | Plan::BitmapAnd { children, .. }
@@ -4496,9 +4650,21 @@ fn collect_plan_external_exec_paramids(
                 collect_external_expr_exec_paramids(having, bound, out);
             }
         }
-        Plan::WindowAgg { input, clause, .. } => {
+        Plan::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
             collect_plan_external_exec_paramids(input, bound, out);
             collect_window_clause_exec_paramids(clause, out);
+            if let Some(run_condition) = run_condition {
+                collect_external_expr_exec_paramids(run_condition, bound, out);
+            }
+            if let Some(top_qual) = top_qual {
+                collect_external_expr_exec_paramids(top_qual, bound, out);
+            }
         }
         Plan::FunctionScan { call, .. } => {
             collect_set_returning_call_external_exec_paramids(call, bound, out)
@@ -4782,6 +4948,29 @@ fn validate_executable_plan(plan: &Plan) {
 fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTreeSet<usize>) {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } => {}
+        Plan::TidScan {
+            tid_cond, filter, ..
+        } => {
+            for source in &tid_cond.sources {
+                match source {
+                    TidScanSource::Scalar(expr) => {
+                        validate_executable_expr(expr, "TidScan", "tid_cond", allowed_exec_params)
+                    }
+                    TidScanSource::Array(expr) => {
+                        validate_executable_expr(expr, "TidScan", "tid_cond", allowed_exec_params)
+                    }
+                }
+            }
+            validate_executable_expr(
+                &tid_cond.display_expr,
+                "TidScan",
+                "display_expr",
+                allowed_exec_params,
+            );
+            if let Some(filter) = filter {
+                validate_executable_expr(filter, "TidScan", "filter", allowed_exec_params);
+            }
+        }
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             for child in children {
                 validate_executable_plan_with_params(child, allowed_exec_params);
@@ -5018,7 +5207,13 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
             }
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
-        Plan::WindowAgg { input, clause, .. } => {
+        Plan::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
             for expr in &clause.spec.partition_by {
                 validate_executable_expr(expr, "WindowAgg", "partition_by", allowed_exec_params);
             }
@@ -5042,6 +5237,17 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
                         );
                     }
                 }
+            }
+            if let Some(run_condition) = run_condition {
+                validate_executable_expr(
+                    run_condition,
+                    "WindowAgg",
+                    "run_condition",
+                    allowed_exec_params,
+                );
+            }
+            if let Some(top_qual) = top_qual {
+                validate_executable_expr(top_qual, "WindowAgg", "top_qual", allowed_exec_params);
             }
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
@@ -5518,7 +5724,13 @@ fn validate_planner_path(path: &Path) {
             }
             validate_planner_path(input);
         }
-        Path::WindowAgg { input, clause, .. } => {
+        Path::WindowAgg {
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            ..
+        } => {
             for expr in &clause.spec.partition_by {
                 validate_planner_expr(expr, "WindowAgg", "partition_by");
             }
@@ -5538,6 +5750,12 @@ fn validate_planner_path(path: &Path) {
                         validate_planner_expr(filter, "WindowAgg", "functions");
                     }
                 }
+            }
+            if let Some(run_condition) = run_condition {
+                validate_planner_expr(run_condition, "WindowAgg", "run_condition");
+            }
+            if let Some(top_qual) = top_qual {
+                validate_planner_expr(top_qual, "WindowAgg", "top_qual");
             }
             validate_planner_path(input);
         }
@@ -5613,6 +5831,59 @@ fn set_filter_references(
         },
     );
     match input {
+        Path::SeqScan {
+            plan_info: seq_plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            disabled,
+            toast,
+            tablesample,
+            desc,
+            pathtarget: _,
+        } => {
+            if tablesample.is_none()
+                && let Some(spec) = extract_tid_scan_spec(&predicate, source_id)
+            {
+                Plan::TidScan {
+                    plan_info,
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    relkind,
+                    relispopulated,
+                    toast,
+                    desc,
+                    tid_cond: TidScanCond {
+                        sources: spec.sources,
+                        display_expr: spec.display_expr,
+                    },
+                    filter: spec.filter,
+                }
+            } else {
+                Plan::Filter {
+                    plan_info,
+                    input: Box::new(Plan::SeqScan {
+                        plan_info: seq_plan_info,
+                        source_id,
+                        rel,
+                        relation_name,
+                        relation_oid,
+                        relkind,
+                        relispopulated,
+                        disabled,
+                        toast,
+                        tablesample,
+                        desc,
+                    }),
+                    predicate,
+                }
+            }
+        }
         Path::SubqueryScan {
             rtindex,
             subroot,
@@ -5636,6 +5907,149 @@ fn set_filter_references(
             predicate,
         },
     }
+}
+
+#[derive(Debug)]
+struct TidScanSpec {
+    sources: Vec<TidScanSource>,
+    display_expr: Expr,
+    filter: Option<Expr>,
+}
+
+#[derive(Debug)]
+struct TidScanBranch {
+    sources: Vec<TidScanSource>,
+    display_expr: Expr,
+    residual: Option<Expr>,
+}
+
+fn extract_tid_scan_spec(predicate: &Expr, source_id: usize) -> Option<TidScanSpec> {
+    let disjuncts = flatten_or_disjuncts(predicate);
+    if disjuncts.len() > 1 {
+        let mut sources = Vec::new();
+        let mut display_exprs = Vec::new();
+        let mut needs_full_filter = false;
+        for disjunct in &disjuncts {
+            let branch = extract_tid_scan_branch(disjunct, source_id)?;
+            sources.extend(branch.sources);
+            display_exprs.push(branch.display_expr);
+            needs_full_filter |= branch.residual.is_some();
+        }
+        return Some(TidScanSpec {
+            sources,
+            display_expr: combine_bool_exprs(BoolExprType::Or, display_exprs),
+            filter: needs_full_filter.then(|| predicate.clone()),
+        });
+    }
+
+    extract_tid_scan_branch(predicate, source_id).map(|branch| TidScanSpec {
+        sources: branch.sources,
+        display_expr: branch.display_expr,
+        filter: branch.residual,
+    })
+}
+
+fn extract_tid_scan_branch(expr: &Expr, source_id: usize) -> Option<TidScanBranch> {
+    if let Some((source, display_expr)) = extract_tid_scan_source(expr, source_id) {
+        return Some(TidScanBranch {
+            sources: vec![source],
+            display_expr,
+            residual: None,
+        });
+    }
+
+    let conjuncts = flatten_and_conjuncts(expr);
+    if conjuncts.len() <= 1 {
+        return None;
+    }
+
+    let mut tid_parts = Vec::new();
+    let mut residual = Vec::new();
+    for conjunct in conjuncts {
+        if let Some((source, display_expr)) = extract_tid_scan_source(&conjunct, source_id) {
+            tid_parts.push((source, display_expr));
+        } else {
+            residual.push(conjunct);
+        }
+    }
+    if tid_parts.is_empty() {
+        return None;
+    }
+
+    let mut sources = Vec::new();
+    let mut display_exprs = Vec::new();
+    for (source, display_expr) in tid_parts {
+        sources.push(source);
+        display_exprs.push(display_expr);
+    }
+    let residual = if display_exprs.len() > 1 {
+        Some(expr.clone())
+    } else if residual.is_empty() {
+        None
+    } else {
+        Some(combine_bool_exprs(BoolExprType::And, residual))
+    };
+
+    Some(TidScanBranch {
+        sources,
+        display_expr: combine_bool_exprs(BoolExprType::And, display_exprs),
+        residual,
+    })
+}
+
+fn extract_tid_scan_source(expr: &Expr, source_id: usize) -> Option<(TidScanSource, Expr)> {
+    match expr {
+        Expr::Op(op) if op.op == OpExprKind::Eq && op.args.len() == 2 => {
+            let left = &op.args[0];
+            let right = &op.args[1];
+            if is_ctid_var(left, source_id) {
+                Some((TidScanSource::Scalar(right.clone()), expr.clone()))
+            } else if is_ctid_var(right, source_id) {
+                Some((TidScanSource::Scalar(left.clone()), expr.clone()))
+            } else {
+                None
+            }
+        }
+        Expr::ScalarArrayOp(saop)
+            if saop.use_or
+                && saop.op == SubqueryComparisonOp::Eq
+                && is_ctid_var(&saop.left, source_id) =>
+        {
+            Some((TidScanSource::Array((*saop.right).clone()), expr.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn is_ctid_var(expr: &Expr, source_id: usize) -> bool {
+    matches!(
+        expr,
+        Expr::Var(var)
+            if var.varlevelsup == 0
+                && var.varno == source_id
+                && var.varattno == SELF_ITEM_POINTER_ATTR_NO
+    )
+}
+
+fn flatten_or_disjuncts(expr: &Expr) -> Vec<Expr> {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => bool_expr
+            .args
+            .iter()
+            .flat_map(flatten_or_disjuncts)
+            .collect(),
+        other => vec![other.clone()],
+    }
+}
+
+fn combine_bool_exprs(boolop: BoolExprType, mut exprs: Vec<Expr>) -> Expr {
+    if exprs.len() == 1 {
+        return exprs.remove(0);
+    }
+    Expr::Bool(Box::new(BoolExpr {
+        boolop,
+        args: exprs,
+    }))
 }
 
 fn set_append_references(
@@ -5812,6 +6226,7 @@ fn append_source_alias(ctx: &SetRefsContext<'_>, source_id: usize) -> Option<Str
 fn apply_single_append_scan_alias(plan: &mut Plan, alias: &str) {
     match plan {
         Plan::SeqScan { relation_name, .. }
+        | Plan::TidScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => {
@@ -6295,15 +6710,7 @@ fn set_seq_scan_references(
 }
 
 fn lower_tablesample_metadata_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
-    // :HACK: TableSampleClause is EXPLAIN metadata while pgrust executes
-    // TABLESAMPLE through the lowered sampling qual. Lateral sample arguments
-    // can still contain same-level semantic Vars here, so keep those display
-    // expressions intact instead of forcing them through Scalar lowering.
-    if expr_contains_local_semantic_var(&expr) {
-        expr
-    } else {
-        lower_expr(ctx, expr, LowerMode::Scalar)
-    }
+    lower_expr(ctx, expr, LowerMode::Scalar)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6790,6 +7197,7 @@ fn plan_contains_values_scan(plan: &Plan) -> bool {
         }
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -6843,6 +7251,7 @@ fn plan_contains_sql_xml_table_scan(plan: &Plan) -> bool {
         }
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::IndexOnlyScan { .. }
         | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
@@ -6914,6 +7323,7 @@ fn annotate_runtime_index_labels(plan: &mut Plan, param_labels: &BTreeMap<usize,
         }
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::Values { .. }
         | Plan::WorkTableScan { .. } => {}
@@ -6984,6 +7394,7 @@ fn runtime_label_for_single_param(
             .or_else(|| runtime_label_for_single_param(recursive, paramid, param_labels)),
         Plan::Result { .. }
         | Plan::SeqScan { .. }
+        | Plan::TidScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::Values { .. }
         | Plan::WorkTableScan { .. } => None,
@@ -7341,7 +7752,7 @@ fn set_projection_references(
         let expr = target
             .input_resno
             .and_then(|input_resno| input_tlist.entries.get(input_resno.saturating_sub(1)))
-            .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+            .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, &target.expr))
             .unwrap_or_else(|| {
                 let lowered = lower_projection_expr_by_input_target(
                     root,
@@ -7660,6 +8071,15 @@ fn lower_window_clause_for_input(
             },
         )
     };
+    let lower_moving_sensitive_expr = |ctx: &mut SetRefsContext<'_>, expr: Expr| {
+        if !expr_contains_window_moving_volatile(&expr) {
+            return lower_expr_for_input(ctx, expr);
+        }
+        let lowered = rebuild_setrefs_expr(root, expr, |inner| {
+            lower_projection_expr_by_input_target(root, inner, input, input_tlist)
+        });
+        lower_expr(ctx, lowered, LowerMode::Scalar)
+    };
     WindowClause {
         spec: crate::include::nodes::primnodes::WindowSpec {
             partition_by: clause
@@ -7715,35 +8135,136 @@ fn lower_window_clause_for_input(
         functions: clause
             .functions
             .into_iter()
-            .map(|func| crate::include::nodes::primnodes::WindowFuncExpr {
-                kind: match func.kind {
-                    WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
-                        args: aggref
-                            .args
-                            .into_iter()
-                            .map(|arg| lower_expr_for_input(ctx, arg))
-                            .collect(),
-                        aggorder: aggref
-                            .aggorder
-                            .into_iter()
-                            .map(|item| OrderByEntry {
-                                expr: lower_expr_for_input(ctx, item.expr),
-                                ..item
-                            })
-                            .collect(),
-                        aggfilter: aggref.aggfilter.map(|expr| lower_expr_for_input(ctx, expr)),
-                        ..aggref
-                    }),
-                    WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
-                },
-                args: func
-                    .args
-                    .into_iter()
-                    .map(|arg| lower_expr_for_input(ctx, arg))
-                    .collect(),
-                ..func
+            .map(|func| {
+                let args_are_moving_sensitive = matches!(func.kind, WindowFuncKind::Aggregate(_));
+                crate::include::nodes::primnodes::WindowFuncExpr {
+                    kind: match func.kind {
+                        WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                            args: aggref
+                                .args
+                                .into_iter()
+                                .map(|arg| lower_moving_sensitive_expr(ctx, arg))
+                                .collect(),
+                            aggorder: aggref
+                                .aggorder
+                                .into_iter()
+                                .map(|item| OrderByEntry {
+                                    expr: lower_expr_for_input(ctx, item.expr),
+                                    ..item
+                                })
+                                .collect(),
+                            aggfilter: aggref
+                                .aggfilter
+                                .map(|expr| lower_moving_sensitive_expr(ctx, expr)),
+                            ..aggref
+                        }),
+                        WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+                    },
+                    args: func
+                        .args
+                        .into_iter()
+                        .map(|arg| {
+                            if args_are_moving_sensitive {
+                                lower_moving_sensitive_expr(ctx, arg)
+                            } else {
+                                lower_expr_for_input(ctx, arg)
+                            }
+                        })
+                        .collect(),
+                    ..func
+                }
             })
             .collect(),
+    }
+}
+
+fn expr_contains_window_moving_volatile(expr: &Expr) -> bool {
+    match expr {
+        Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => op.args.iter().any(expr_contains_window_moving_volatile),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_window_moving_volatile),
+        Expr::Func(func) => {
+            matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(
+                    BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal
+                )
+            ) || func.args.iter().any(expr_contains_window_moving_volatile)
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_window_moving_volatile(inner)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_window_moving_volatile(expr)
+                || expr_contains_window_moving_volatile(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_window_moving_volatile(expr))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_window_moving_volatile(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_window_moving_volatile(left)
+                || expr_contains_window_moving_volatile(right)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_window_moving_volatile(&saop.left)
+                || expr_contains_window_moving_volatile(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(expr_contains_window_moving_volatile)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_window_moving_volatile(expr)),
+        Expr::FieldSelect { expr, .. } => expr_contains_window_moving_volatile(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_window_moving_volatile(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_window_moving_volatile)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_window_moving_volatile)
+                })
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_contains_window_moving_volatile(expr))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_window_moving_volatile(&arm.expr)
+                        || expr_contains_window_moving_volatile(&arm.result)
+                })
+                || expr_contains_window_moving_volatile(&case_expr.defresult)
+        }
+        Expr::SetReturning(_) | Expr::SubLink(_) | Expr::SubPlan(_) => false,
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_window_moving_volatile),
+        _ => false,
     }
 }
 
@@ -7753,15 +8274,31 @@ fn set_window_references(
     slot_id: usize,
     input: Box<Path>,
     clause: WindowClause,
+    run_condition: Option<Expr>,
+    top_qual: Option<Expr>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
     let input_tlist = build_path_tlist(ctx.root, &input);
     let clause = lower_window_clause_for_input(ctx, &input, &input_tlist, clause);
-    let _ = build_window_tlist(ctx.root, slot_id, &input, &clause, &output_columns);
+    let window_tlist = build_window_tlist(ctx.root, slot_id, &input, &clause, &output_columns);
+    let lower_window_output_qual = |ctx: &mut SetRefsContext<'_>, expr: Expr| {
+        lower_expr(
+            ctx,
+            expr,
+            LowerMode::Input {
+                path: None,
+                tlist: &window_tlist,
+            },
+        )
+    };
+    let run_condition = run_condition.map(|expr| lower_window_output_qual(ctx, expr));
+    let top_qual = top_qual.map(|expr| lower_window_output_qual(ctx, expr));
     Plan::WindowAgg {
         plan_info,
         input: Box::new(set_plan_refs(ctx, *input)),
         clause,
+        run_condition,
+        top_qual,
         output_columns,
     }
 }
@@ -7827,7 +8364,15 @@ fn set_subquery_scan_references(
     filter: Option<Expr>,
     force_display: bool,
 ) -> Plan {
-    let force_display = force_display || matches!(input.as_ref(), Path::ProjectSet { .. });
+    let force_display = force_display
+        || matches!(input.as_ref(), Path::ProjectSet { .. })
+        || path_contains_visible_window_top_qual(input.as_ref())
+        || (path_contains_window_run_condition(input.as_ref())
+            && parent_filter_uses_unselected_subquery_attr(ctx.root, rtindex))
+        || (path_contains_window_agg(input.as_ref())
+            && path_contains_function_scan(input.as_ref()))
+        || (subroot.as_ref().parse.where_qual.is_some()
+            && path_contains_window_agg(input.as_ref()));
     if filter.is_none() && !force_display {
         let input_columns = input.columns();
         if input_columns == output_columns {
@@ -7846,6 +8391,7 @@ fn set_subquery_scan_references(
                             varattno: user_attrno(index),
                             varlevelsup: 0,
                             vartype: column.sql_type,
+                            collation_oid: None,
                         })
                     });
                     let ressortgroupref =
@@ -7887,20 +8433,309 @@ fn set_subquery_scan_references(
     if input.columns() == output_columns && filter.is_none() && !force_display {
         input
     } else {
+        let scan_name = subquery_scan_name(ctx, rtindex, &input, &output_columns);
         Plan::SubqueryScan {
             plan_info,
             input: Box::new(input),
-            scan_name: subquery_scan_name(ctx, rtindex),
+            scan_name,
             filter,
             output_columns,
         }
     }
 }
 
-fn subquery_scan_name(ctx: &SetRefsContext<'_>, rtindex: usize) -> Option<String> {
-    ctx.root
+fn path_contains_window_agg(path: &Path) -> bool {
+    match path {
+        Path::WindowAgg { .. } => true,
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_window_agg(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(path_contains_window_agg),
+        Path::BitmapHeapScan { bitmapqual, .. } => path_contains_window_agg(bitmapqual),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => path_contains_window_agg(left) || path_contains_window_agg(right),
+        _ => false,
+    }
+}
+
+fn path_contains_function_scan(path: &Path) -> bool {
+    match path {
+        Path::FunctionScan { .. } => true,
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_function_scan(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(path_contains_function_scan),
+        Path::BitmapHeapScan { bitmapqual, .. } => path_contains_function_scan(bitmapqual),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => path_contains_function_scan(left) || path_contains_function_scan(right),
+        _ => false,
+    }
+}
+
+fn path_contains_window_run_condition(path: &Path) -> bool {
+    match path {
+        Path::WindowAgg {
+            input,
+            run_condition,
+            top_qual,
+            ..
+        } => {
+            run_condition.is_some()
+                || top_qual.is_some()
+                || path_contains_window_run_condition(input)
+        }
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_window_run_condition(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(path_contains_window_run_condition),
+        Path::BitmapHeapScan { bitmapqual, .. } => path_contains_window_run_condition(bitmapqual),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => path_contains_window_run_condition(left) || path_contains_window_run_condition(right),
+        _ => false,
+    }
+}
+
+fn path_contains_visible_window_top_qual(path: &Path) -> bool {
+    match path {
+        Path::WindowAgg {
+            input, top_qual, ..
+        } => {
+            top_qual
+                .as_ref()
+                .is_some_and(|qual| !matches!(qual, Expr::Const(Value::Bool(true))))
+                || path_contains_visible_window_top_qual(input)
+        }
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_contains_visible_window_top_qual(input),
+        Path::Append { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::SetOp { children, .. } => {
+            children.iter().any(path_contains_visible_window_top_qual)
+        }
+        Path::BitmapHeapScan { bitmapqual, .. } => {
+            path_contains_visible_window_top_qual(bitmapqual)
+        }
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. }
+        | Path::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => {
+            path_contains_visible_window_top_qual(left)
+                || path_contains_visible_window_top_qual(right)
+        }
+        _ => false,
+    }
+}
+
+fn parent_filter_uses_unselected_subquery_attr(root: Option<&PlannerInfo>, rtindex: usize) -> bool {
+    let Some(root) = root else {
+        return false;
+    };
+    let mut target_attrs = BTreeSet::new();
+    for target in &root.parse.target_list {
+        collect_rte_attrs(&target.expr, rtindex, &mut target_attrs);
+    }
+    let Some(where_qual) = root.parse.where_qual.as_ref() else {
+        return false;
+    };
+    let mut filter_attrs = BTreeSet::new();
+    collect_rte_attrs(where_qual, rtindex, &mut filter_attrs);
+    filter_attrs.iter().any(|attr| !target_attrs.contains(attr))
+}
+
+fn collect_rte_attrs(expr: &Expr, rtindex: usize, attrs: &mut BTreeSet<usize>) {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varno == rtindex => {
+            if let Some(index) = attrno_index(var.varattno) {
+                attrs.insert(index);
+            }
+        }
+        Expr::Aggref(aggref) => {
+            for expr in aggref.direct_args.iter().chain(aggref.args.iter()) {
+                collect_rte_attrs(expr, rtindex, attrs);
+            }
+            for item in &aggref.aggorder {
+                collect_rte_attrs(&item.expr, rtindex, attrs);
+            }
+            if let Some(filter) = aggref.aggfilter.as_ref() {
+                collect_rte_attrs(filter, rtindex, attrs);
+            }
+        }
+        Expr::WindowFunc(func) => {
+            for expr in &func.args {
+                collect_rte_attrs(expr, rtindex, attrs);
+            }
+            if let WindowFuncKind::Aggregate(aggref) = &func.kind {
+                for expr in aggref.direct_args.iter().chain(aggref.args.iter()) {
+                    collect_rte_attrs(expr, rtindex, attrs);
+                }
+                for item in &aggref.aggorder {
+                    collect_rte_attrs(&item.expr, rtindex, attrs);
+                }
+                if let Some(filter) = aggref.aggfilter.as_ref() {
+                    collect_rte_attrs(filter, rtindex, attrs);
+                }
+            }
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_rte_attrs(arg, rtindex, attrs);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_rte_attrs(arg, rtindex, attrs);
+            }
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_rte_attrs(arg, rtindex, attrs);
+            }
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => collect_rte_attrs(inner, rtindex, attrs),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            collect_rte_attrs(left, rtindex, attrs);
+            collect_rte_attrs(right, rtindex, attrs);
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = case_expr.arg.as_ref() {
+                collect_rte_attrs(arg, rtindex, attrs);
+            }
+            for arm in &case_expr.args {
+                collect_rte_attrs(&arm.expr, rtindex, attrs);
+                collect_rte_attrs(&arm.result, rtindex, attrs);
+            }
+            collect_rte_attrs(&case_expr.defresult, rtindex, attrs);
+        }
+        _ => {}
+    }
+}
+
+fn subquery_scan_name(
+    ctx: &SetRefsContext<'_>,
+    rtindex: usize,
+    input: &Plan,
+    output_columns: &[QueryColumn],
+) -> Option<String> {
+    let name = ctx
+        .root
         .and_then(|root| root.parse.rtable.get(rtindex.saturating_sub(1)))
-        .and_then(|rte| rte.alias.clone())
+        .and_then(|rte| {
+            rte.alias
+                .clone()
+                .or_else(|| (!rte.eref.aliasname.is_empty()).then(|| rte.eref.aliasname.clone()))
+        });
+    if name.as_deref() == Some("subquery") && plan_contains_function_scan(input) {
+        return output_columns.first().map(|column| column.name.clone());
+    }
+    name
+}
+
+fn plan_contains_function_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::FunctionScan { .. } => true,
+        Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. } => plan_contains_function_scan(input),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().any(plan_contains_function_scan),
+        Plan::BitmapHeapScan { bitmapqual, .. } => plan_contains_function_scan(bitmapqual),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => plan_contains_function_scan(left) || plan_contains_function_scan(right),
+        _ => false,
+    }
 }
 
 fn set_worktable_scan_references(
@@ -8082,7 +8917,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relation_oid,
             relkind,
             relispopulated,
-            disabled,
+            disabled || ctx.root.is_some_and(|root| !root.config.enable_seqscan),
             toast,
             tablesample,
             desc,
@@ -8364,9 +9199,20 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             slot_id,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
             ..
-        } => set_window_references(ctx, plan_info, slot_id, input, clause, output_columns),
+        } => set_window_references(
+            ctx,
+            plan_info,
+            slot_id,
+            input,
+            clause,
+            run_condition,
+            top_qual,
+            output_columns,
+        ),
         Path::Values {
             plan_info,
             rows,
@@ -8652,7 +9498,7 @@ fn lower_join_clause_list(
 
 fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, tlist: &IndexedTlist) -> Expr {
     if let Some(entry) = search_tlist_entry(root, &expr, tlist) {
-        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
+        return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }
     if let (Expr::Var(var), Some(root)) = (&expr, root)
         && root
@@ -8685,7 +9531,7 @@ fn fix_join_expr_for_inputs(
 }
 
 fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bool {
-    if left == right {
+    if exprs_match_for_setrefs(left, right) {
         return true;
     }
     if let (Expr::WindowFunc(left_window), Expr::WindowFunc(right_window)) = (left, right) {
@@ -8699,7 +9545,6 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
             _ => false,
         };
         if same_kind
-            && left_window.winref == right_window.winref
             && left_window.winno == right_window.winno
             && left_window.result_type == right_window.result_type
         {
@@ -8720,9 +9565,9 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     let flattened_right = maybe_flatten_join_alias_vars(root, right);
     match (flattened_left.as_ref(), flattened_right.as_ref()) {
         (None, None) => false,
-        (Some(left), None) => left == right,
-        (None, Some(right)) => left == right,
-        (Some(left), Some(right)) => left == right,
+        (Some(left), None) => exprs_match_for_setrefs(left, right),
+        (None, Some(right)) => exprs_match_for_setrefs(left, right),
+        (Some(left), Some(right)) => exprs_match_for_setrefs(left, right),
     }
 }
 
@@ -8894,11 +9739,21 @@ fn slot_var(
     attno: crate::include::nodes::primnodes::AttrNumber,
     vartype: crate::backend::parser::SqlType,
 ) -> Expr {
+    slot_var_with_collation(slot_id, attno, vartype, None)
+}
+
+fn slot_var_with_collation(
+    slot_id: usize,
+    attno: crate::include::nodes::primnodes::AttrNumber,
+    vartype: crate::backend::parser::SqlType,
+    collation_oid: Option<u32>,
+) -> Expr {
     Expr::Var(Var {
         varno: slot_id,
         varattno: attno,
         varlevelsup: 0,
         vartype,
+        collation_oid,
     })
 }
 
@@ -9118,10 +9973,10 @@ fn fix_join_expr(
     inner_tlist: &IndexedTlist,
 ) -> Expr {
     if let Some(entry) = search_tlist_entry(root, &expr, outer_tlist) {
-        return special_slot_var(OUTER_VAR, entry.index, entry.sql_type);
+        return special_slot_var_for_expr(OUTER_VAR, entry, &expr);
     }
     if let Some(entry) = search_tlist_entry(root, &expr, inner_tlist) {
-        return special_slot_var(INNER_VAR, entry.index, entry.sql_type);
+        return special_slot_var_for_expr(INNER_VAR, entry, &expr);
     }
     if let (Expr::Var(var), Some(root)) = (&expr, root)
         && root

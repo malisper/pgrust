@@ -591,7 +591,7 @@ pub struct LoadStatement {
 pub struct ClusterStatement {
     pub table_name: String,
     pub index_name: String,
-    pub rewrite: bool,
+    pub mark_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,6 +645,7 @@ impl Query {
     pub fn columns(&self) -> Vec<QueryColumn> {
         self.target_list
             .iter()
+            .filter(|target| !target.resjunk)
             .map(|target| QueryColumn {
                 name: target.name.clone(),
                 sql_type: target.sql_type,
@@ -1780,6 +1781,7 @@ pub enum CteBody {
     RecursiveUnion {
         all: bool,
         left_nested: bool,
+        anchor_with_is_subquery: bool,
         anchor: Box<CteBody>,
         recursive: Box<SelectStatement>,
     },
@@ -2458,6 +2460,7 @@ pub struct PrepareStatement {
     pub parameter_types: Vec<RawTypeName>,
     pub query: PreparedStatementQuery,
     pub query_sql: String,
+    pub source_sql: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2465,6 +2468,7 @@ pub enum PreparedStatementQuery {
     Select(SelectStatement),
     Insert(InsertStatement),
     Update(UpdateStatement),
+    Merge(MergeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3614,7 +3618,13 @@ pub struct CreateConversionStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateCollationStatement {
     pub collation_name: String,
-    pub source_collation: String,
+    pub kind: CreateCollationKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateCollationKind {
+    From { source_collation: String },
+    Options { options: Vec<RelOption> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3753,6 +3763,7 @@ pub struct AlterRoleStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterRoleAction {
     Rename { new_name: String },
+    SetConfig { name: String, value: Option<String> },
     Options(Vec<RoleOption>),
 }
 
@@ -4231,9 +4242,16 @@ pub struct AlterUserMappingStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockTableStatement {
-    pub table_names: Vec<String>,
+    pub targets: Vec<LockTableTarget>,
     pub mode: LockTableMode,
     pub nowait: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockTableTarget {
+    pub name: String,
+    pub only: bool,
+    pub recurse: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4614,6 +4632,7 @@ pub enum TableConstraint {
         using_method: String,
         elements: Vec<ExclusionElement>,
         include_columns: Vec<String>,
+        predicate_sql: Option<String>,
     },
     ForeignKey {
         attributes: ConstraintAttributes,

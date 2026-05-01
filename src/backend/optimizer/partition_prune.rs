@@ -459,6 +459,7 @@ fn translate_partition_key_expr_to_relation(
         varattno: user_attrno(relation_index),
         varlevelsup: var.varlevelsup,
         vartype: parent_column.sql_type.clone(),
+        collation_oid: None,
     }))
 }
 
@@ -2840,6 +2841,7 @@ mod tests {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: None,
         })
     }
 
@@ -2851,6 +2853,7 @@ mod tests {
             funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
             funcvariadic: false,
             implementation: ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Substring),
+            collation_oid: None,
             display_args: None,
             args: vec![key_expr(), Expr::Const(Value::Int32(1))],
         }))
@@ -2866,6 +2869,7 @@ mod tests {
             varattno,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     }
 
@@ -2875,6 +2879,7 @@ mod tests {
             varattno,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Text),
+            collation_oid: None,
         })
     }
 
@@ -2884,6 +2889,7 @@ mod tests {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Bool),
+            collation_oid: None,
         })
     }
 

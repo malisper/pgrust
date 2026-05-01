@@ -1,5 +1,6 @@
 use crate::backend::parser::{
-    BoundRelation, CatalogLookup, ParseError, rewrite_local_vars_for_output_exprs,
+    BoundRelation, CatalogLookup, ParseError, bind_generated_expr,
+    rewrite_local_vars_for_output_exprs,
 };
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
@@ -23,6 +24,7 @@ const AGGREGATE_DETAIL: &str =
 const WINDOW_DETAIL: &str = "Views that return window functions are not automatically updatable.";
 const PROJECT_SET_DETAIL: &str =
     "Views that return set-returning functions are not automatically updatable.";
+const TABLESAMPLE_DETAIL: &str = "Views containing TABLESAMPLE are not automatically updatable.";
 const TARGET_LIST_DETAIL: &str =
     "Views that do not select simple base table columns are not automatically updatable.";
 const RECURSIVE_DETAIL: &str =
@@ -164,7 +166,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
         .map_err(map_parse_error)?;
     let query = load_view_return_query(relation_oid, relation_desc, None, catalog, expanded_views)
         .map_err(map_parse_error)?;
-    let analyzed = analyze_simple_view_query(&select, &query, relation_desc)?;
+    let mut analyzed = analyze_simple_view_query(&select, &query, relation_desc)?;
     let Some(base_relation) = catalog
         .lookup_relation_by_oid(analyzed.base_relation_oid)
         .or_else(|| catalog.relation_by_oid(analyzed.base_relation_oid))
@@ -174,6 +176,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
             display_name, analyzed.base_relation_oid
         )));
     };
+    map_virtual_generated_view_columns(&mut analyzed, &base_relation.desc, catalog)?;
 
     if matches!(analyzed.base_relkind, 'r' | 'p') {
         let all_view_predicates = query
@@ -373,6 +376,51 @@ fn view_check_option(catalog: &dyn CatalogLookup, relation_oid: u32) -> ViewChec
     crate::backend::rewrite::split_stored_view_definition_sql(&sql).1
 }
 
+fn map_virtual_generated_view_columns(
+    analyzed: &mut SimpleViewAnalysis,
+    base_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ViewDmlRewriteError> {
+    for (view_index, expr) in analyzed.output_exprs.iter().enumerate() {
+        if analyzed
+            .updatable_column_map
+            .get(view_index)
+            .copied()
+            .flatten()
+            .is_some()
+        {
+            continue;
+        }
+        let Some(base_index) = matching_virtual_generated_column(expr, base_desc, catalog)? else {
+            continue;
+        };
+        analyzed.updatable_column_map[view_index] = Some(base_index);
+        analyzed.non_updatable_column_reasons[view_index] = None;
+    }
+    Ok(())
+}
+
+fn matching_virtual_generated_column(
+    expr: &Expr,
+    base_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<usize>, ViewDmlRewriteError> {
+    for (column_index, column) in base_desc.columns.iter().enumerate() {
+        if column.generated != Some(crate::backend::parser::ColumnGeneratedKind::Virtual) {
+            continue;
+        }
+        let Some(generated_expr) =
+            bind_generated_expr(base_desc, column_index, catalog).map_err(map_parse_error)?
+        else {
+            continue;
+        };
+        if expr == &generated_expr {
+            return Ok(Some(column_index));
+        }
+    }
+    Ok(None)
+}
+
 struct SimpleViewAnalysis {
     base_rtindex: usize,
     base_relation_oid: u32,
@@ -425,11 +473,15 @@ fn analyze_simple_view_query(
     let RangeTblEntryKind::Relation {
         relation_oid,
         relkind,
+        tablesample,
         ..
     } = &base_rte.kind
     else {
         return Err(unsupported(SINGLE_RELATION_DETAIL));
     };
+    if tablesample.is_some() {
+        return Err(unsupported(TABLESAMPLE_DETAIL));
+    }
 
     if query.target_list.len() != relation_desc.columns.len() {
         return Err(unsupported(TARGET_LIST_DETAIL));

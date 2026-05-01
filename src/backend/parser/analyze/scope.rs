@@ -1,4 +1,4 @@
-use super::expr::bind_legacy_scalar_function_call;
+use super::expr::{bind_legacy_scalar_function_call, bind_resolved_scalar_function_call};
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
 use crate::backend::parser::parse_statement;
@@ -12,9 +12,9 @@ use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
     AttrNumber, BoolExpr, BuiltinScalarFunction, CaseExpr, CaseWhen, ColumnDesc, FuncExpr,
     JoinType, JsonRecordFunction, RULE_NEW_VAR, RULE_OLD_VAR, RowsFromItem, RowsFromSource,
-    SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SqlJsonTable, SqlJsonTableBehavior,
-    SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
-    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
+    SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
+    SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan, SqlJsonTableQuotes,
+    SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
     SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, expr_sql_type_hint,
     user_attrno,
 };
@@ -83,6 +83,20 @@ pub(crate) struct BoundCte {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct BoundWritableCte {
+    pub(crate) cte: BoundCte,
+    pub(crate) source: BoundModifyingCte,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum BoundModifyingCte {
+    Insert(BoundInsertStatement),
+    Update(BoundUpdateStatement),
+    Delete(BoundDeleteStatement),
+    Merge(BoundMergeStatement),
+}
+
+#[derive(Debug, Clone)]
 pub struct BoundRelation {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
@@ -129,15 +143,28 @@ fn default_scope_output_exprs(varno: usize, desc: &RelationDesc) -> Vec<Expr> {
     desc.columns
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
+        .map(|(index, column)| scope_column_var_expr(varno, index, column))
         .collect()
+}
+
+fn scope_column_var_expr(varno: usize, index: usize, column: &ColumnDesc) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+        collation_oid: (column.collation_oid != 0).then_some(column.collation_oid),
+    })
+}
+
+fn scope_query_column_var_expr(varno: usize, index: usize, column: &QueryColumn) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+        collation_oid: None,
+    })
 }
 
 pub(super) fn bind_values_rows(
@@ -890,7 +917,9 @@ fn passthrough_cte_target<'a>(cte: &'a BoundCte, ctes: &'a [BoundCte]) -> Option
             return None;
         }
     }
-    ctes.iter().find(|candidate| candidate.cte_id == cte_id)
+    ctes.iter().find(|candidate| {
+        candidate.cte_id == cte_id && candidate.desc.columns.len() == cte.desc.columns.len()
+    })
 }
 
 pub(super) fn bind_from_item_with_ctes(
@@ -1184,16 +1213,8 @@ pub(super) fn bind_from_item_with_ctes(
                     )
                 })
                 .transpose()?;
-            let sample_qual = table_sample_qual(&sample.method, &args, repeatable.as_ref())?;
-            attach_table_sample(
-                &mut plan,
-                TableSampleClause {
-                    method: sample.method.clone(),
-                    args,
-                    repeatable,
-                },
-                sample_qual,
-            )?;
+            let sample = bind_table_sample_clause(&sample.method, args, repeatable)?;
+            attach_table_sample(&mut plan, sample)?;
             Ok((plan, scope))
         }
         FromItem::Alias {
@@ -1287,7 +1308,6 @@ pub(super) fn bind_from_item_with_ctes(
 fn attach_table_sample(
     plan: &mut AnalyzedFrom,
     sample: TableSampleClause,
-    sample_qual: Expr,
 ) -> Result<(), ParseError> {
     let relation_indexes = plan
         .rtable
@@ -1298,9 +1318,7 @@ fn attach_table_sample(
         })
         .collect::<Vec<_>>();
     if relation_indexes.len() != 1 {
-        return Err(ParseError::FeatureNotSupported(
-            "TABLESAMPLE on non-table relation".into(),
-        ));
+        return Err(table_sample_non_table_error());
     }
     let rte = &mut plan.rtable[relation_indexes[0]];
     let RangeTblEntryKind::Relation {
@@ -1312,34 +1330,36 @@ fn attach_table_sample(
         unreachable!();
     };
     if !matches!(*relkind, 'r' | 'm' | 'p') {
-        return Err(ParseError::DetailedError {
-            message: "TABLESAMPLE clause can only be applied to tables and materialized views"
-                .into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42809",
-        });
+        return Err(table_sample_non_table_error());
     }
     *tablesample = Some(sample);
-    // :HACK: Store TABLESAMPLE as a relation security qual so it is evaluated
-    // before normal WHERE predicates, matching the rowsecurity regression path
-    // without introducing a full SampleScan plan node yet.
-    rte.security_quals.insert(0, sample_qual);
     Ok(())
 }
 
-fn table_sample_qual(
+fn table_sample_non_table_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "TABLESAMPLE clause can only be applied to tables and materialized views".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn bind_table_sample_clause(
     method: &str,
-    args: &[Expr],
-    repeatable: Option<&Expr>,
-) -> Result<Expr, ParseError> {
+    args: Vec<Expr>,
+    repeatable: Option<Expr>,
+) -> Result<TableSampleClause, ParseError> {
     let normalized_method = method.to_ascii_lowercase();
     if !matches!(normalized_method.as_str(), "bernoulli" | "system") {
-        return Err(ParseError::FeatureNotSupported(format!(
-            "TABLESAMPLE method {method}"
-        )));
+        return Err(ParseError::DetailedError {
+            message: format!("tablesample method {normalized_method} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        });
     }
-    let [percent_arg] = args else {
+    if args.len() != 1 {
         return Err(ParseError::DetailedError {
             message: format!(
                 "tablesample method {normalized_method} requires 1 argument, not {}",
@@ -1347,46 +1367,25 @@ fn table_sample_qual(
             ),
             detail: None,
             hint: None,
-            sqlstate: "42804",
+            sqlstate: "2202H",
         });
-    };
-    // :HACK: Lower SYSTEM to the same deterministic row-level predicate as
-    // BERNOULLI until pgrust has block-level sample scan support.
-    let percent = table_sample_float_expr(percent_arg.clone());
-    let seed = repeatable
-        .cloned()
-        .map(table_sample_float_expr)
-        .unwrap_or(Expr::Const(Value::Float64(0.0)));
-    Ok(Expr::Func(Box::new(FuncExpr {
-        funcid: 0,
-        funcname: Some("pgrust_tablesample_bernoulli".into()),
-        funcresulttype: Some(SqlType::new(SqlTypeKind::Bool)),
-        funcvariadic: false,
-        implementation: ScalarFunctionImpl::Builtin(
-            BuiltinScalarFunction::PgRustTablesampleBernoulli,
-        ),
-        display_args: None,
-        args: vec![
-            Expr::Var(Var {
-                varno: 1,
-                varattno: SELF_ITEM_POINTER_ATTR_NO,
-                varlevelsup: 0,
-                vartype: SqlType::new(SqlTypeKind::Tid),
-            }),
-            percent,
-            seed,
-        ],
-    })))
-}
-
-fn table_sample_float_expr(expr: Expr) -> Expr {
-    match expr {
-        Expr::Const(Value::Int16(value)) => Expr::Const(Value::Float64(f64::from(value))),
-        Expr::Const(Value::Int32(value)) => Expr::Const(Value::Float64(f64::from(value))),
-        Expr::Const(Value::Int64(value)) => Expr::Const(Value::Float64(value as f64)),
-        Expr::Const(Value::Float64(_)) => expr,
-        other => Expr::Cast(Box::new(other), SqlType::new(SqlTypeKind::Float8)),
     }
+    let percent_arg = args.into_iter().next().expect("one TABLESAMPLE argument");
+    Ok(TableSampleClause {
+        method: normalized_method,
+        args: vec![Expr::Cast(
+            Box::new(percent_arg),
+            SqlType::new(SqlTypeKind::Float4)
+                .with_identity(crate::include::catalog::FLOAT4_TYPE_OID, 0),
+        )],
+        repeatable: repeatable.map(|expr| {
+            Expr::Cast(
+                Box::new(expr),
+                SqlType::new(SqlTypeKind::Float8)
+                    .with_identity(crate::include::catalog::FLOAT8_TYPE_OID, 0),
+            )
+        }),
+    })
 }
 
 fn bind_rows_from_item_with_ctes(
@@ -3700,7 +3699,6 @@ fn bind_function_from_item_with_ctes(
                     grouped_outer,
                     &resolved,
                 )?;
-                let alias_single_function_output = resolved_row_columns.is_none();
                 let output_columns = resolved_row_columns.unwrap_or_else(|| {
                     vec![QueryColumn {
                         name: resolved.proname.clone(),
@@ -3718,6 +3716,8 @@ fn bind_function_from_item_with_ctes(
                     &mut output_columns,
                     &mut desc_columns,
                 );
+                let alias_single_function_output =
+                    output_columns.len() == 1 || (with_ordinality && output_columns.len() == 2);
                 if let Some((plan, scope, alias_single_function_output)) =
                     try_inline_sql_set_function_from_item(
                         name,
@@ -4056,7 +4056,6 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
         grouped_outer,
         &resolved,
     )?;
-    let alias_single_function_output = resolved_row_columns.is_none();
     let output_columns = resolved_row_columns.unwrap_or_else(|| {
         vec![QueryColumn {
             name: resolved.proname.clone(),
@@ -4070,6 +4069,8 @@ fn bind_resolved_user_defined_function_from_item_with_ctes(
         .map(|col| column_desc(col.name.clone(), col.sql_type, true))
         .collect::<Vec<_>>();
     maybe_append_function_ordinality(with_ordinality, &mut output_columns, &mut desc_columns);
+    let alias_single_function_output =
+        output_columns.len() == 1 || (with_ordinality && output_columns.len() == 2);
     if let Some((plan, scope, alias_single_function_output)) =
         try_inline_sql_set_function_from_item(
             name,
@@ -4123,6 +4124,57 @@ fn bind_single_row_function_from_item_with_ctes(
             hint: None,
             sqlstate: "0A000",
         });
+    }
+    if resolved.scalar_impl.is_some() && resolved_row_columns.is_none() {
+        let expr = bind_resolved_scalar_function_call(
+            resolved,
+            args,
+            &empty_scope(),
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            _ctes,
+        )?;
+        let sql_type = expr_sql_type_hint(&expr).unwrap_or(resolved.result_type);
+        let mut output_columns = resolved_row_columns.unwrap_or_else(|| {
+            vec![QueryColumn {
+                name: resolved.proname.clone(),
+                sql_type,
+                wire_type_oid: None,
+            }]
+        });
+        if output_columns.len() != 1 {
+            return Err(function_coldeflist_error(
+                "a column definition list is only allowed for functions returning \"record\"",
+            ));
+        }
+        let mut targets = vec![TargetEntry::new(
+            output_columns[0].name.clone(),
+            coerce_bound_expr(expr, sql_type, output_columns[0].sql_type),
+            output_columns[0].sql_type,
+            1,
+        )];
+        if with_ordinality {
+            let ordinality_type = SqlType::new(SqlTypeKind::Int8);
+            output_columns.push(QueryColumn {
+                name: "ordinality".into(),
+                sql_type: ordinality_type,
+                wire_type_oid: None,
+            });
+            targets.push(TargetEntry::new(
+                "ordinality",
+                Expr::Const(Value::Int64(1)),
+                ordinality_type,
+                2,
+            ));
+        }
+        let plan = AnalyzedFrom::result().with_projection(targets);
+        let desc = plan.desc();
+        let scope = scope_with_output_exprs(
+            scope_for_relation(Some(&resolved.proname), &desc),
+            &plan.output_exprs,
+        );
+        return Ok((plan, scope, true));
     }
     if let Some(mut output_columns) = resolved_row_columns {
         let bound_args = bind_resolved_user_defined_table_function_args(
@@ -4773,14 +4825,7 @@ fn retarget_analyzed_from_output_columns(
     plan.output_exprs = output_columns
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno: rtindex,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
+        .map(|(index, column)| scope_query_column_var_expr(rtindex, index, column))
         .collect();
     plan.output_columns = output_columns;
 }
@@ -5487,18 +5532,21 @@ fn bind_join_constraint_with_ctes(
             }
             Ok((Expr::Const(Value::Bool(true)), None, None))
         }
-        JoinConstraint::On(on) => Ok((
-            bind_expr_with_outer_and_ctes(
-                on,
-                raw_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
-            None,
-            None,
-        )),
+        JoinConstraint::On(on) => {
+            reject_window_clause(on, "JOIN conditions")?;
+            Ok((
+                bind_expr_with_outer_and_ctes(
+                    on,
+                    raw_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                None,
+                None,
+            ))
+        }
         JoinConstraint::Using(columns) => {
             bind_join_using_projection(kind, columns, left_scope, right_scope)
         }
@@ -5626,10 +5674,7 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: false,
             qualified_only: false,
-            relation_names: join_using_relation_names(
-                &left_scope.columns[*left_index],
-                &right_scope.columns[*right_index],
-            ),
+            relation_names: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: None,
@@ -5638,6 +5683,48 @@ fn bind_join_using_projection(
                 &left_scope.columns[*left_index],
                 &right_scope.columns[*right_index],
             ),
+        });
+    }
+
+    for (name, left_index, right_index) in &using_pairs {
+        let left_ty = left_scope.desc.columns[*left_index].sql_type;
+        alias_exprs.push(left_scope.output_exprs[*left_index].clone());
+        output_columns.push(QueryColumn {
+            name: name.clone(),
+            sql_type: left_ty,
+            wire_type_oid: None,
+        });
+        desc_columns.push(column_desc(name.clone(), left_ty, true));
+        scope_columns.push(ScopeColumn {
+            output_name: name.clone(),
+            hidden: true,
+            qualified_only: true,
+            relation_names: left_scope.columns[*left_index].relation_names.clone(),
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
+            source_relation_oid: left_scope.columns[*left_index].source_relation_oid,
+            source_attno: left_scope.columns[*left_index].source_attno,
+            source_columns: scope_column_sources(&left_scope.columns[*left_index]),
+        });
+
+        let right_ty = right_scope.desc.columns[*right_index].sql_type;
+        alias_exprs.push(right_scope.output_exprs[*right_index].clone());
+        output_columns.push(QueryColumn {
+            name: name.clone(),
+            sql_type: right_ty,
+            wire_type_oid: None,
+        });
+        desc_columns.push(column_desc(name.clone(), right_ty, true));
+        scope_columns.push(ScopeColumn {
+            output_name: name.clone(),
+            hidden: true,
+            qualified_only: true,
+            relation_names: right_scope.columns[*right_index].relation_names.clone(),
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
+            source_relation_oid: right_scope.columns[*right_index].source_relation_oid,
+            source_attno: right_scope.columns[*right_index].source_attno,
+            source_columns: scope_column_sources(&right_scope.columns[*right_index]),
         });
     }
 

@@ -338,6 +338,26 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
         | Plan::BitmapIndexScan { rel, .. } => {
             rels.insert(*rel);
         }
+        Plan::TidScan {
+            rel,
+            tid_cond,
+            filter,
+            ..
+        } => {
+            rels.insert(*rel);
+            for source in &tid_cond.sources {
+                match source {
+                    crate::include::nodes::plannodes::TidScanSource::Scalar(expr)
+                    | crate::include::nodes::plannodes::TidScanSource::Array(expr) => {
+                        collect_rels_from_expr(expr, rels);
+                    }
+                }
+            }
+            collect_rels_from_expr(&tid_cond.display_expr, rels);
+            if let Some(filter) = filter {
+                collect_rels_from_expr(filter, rels);
+            }
+        }
         Plan::BitmapHeapScan {
             rel, bitmapqual, ..
         } => {
