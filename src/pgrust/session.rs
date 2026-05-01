@@ -2925,19 +2925,20 @@ fn statement_result_processed_rows(result: &StatementResult) -> usize {
 fn cursor_options_from_declare(
     stmt: &crate::backend::parser::DeclareCursorStatement,
 ) -> CursorOptions {
-    let scroll = matches!(
+    let explicit_scroll = matches!(
         stmt.scroll,
         crate::backend::parser::CursorScrollOption::Scroll
     );
-    let no_scroll = matches!(
+    let explicit_no_scroll = matches!(
         stmt.scroll,
         crate::backend::parser::CursorScrollOption::NoScroll
     );
+    let locking_clause = stmt.query.locking_clause.is_some();
     CursorOptions {
         holdable: stmt.hold,
         binary: stmt.binary,
-        scroll,
-        no_scroll,
+        scroll: explicit_scroll || (stmt.binary && !explicit_no_scroll),
+        no_scroll: explicit_no_scroll || (!explicit_scroll && locking_clause),
         visible: true,
     }
 }
@@ -10000,10 +10001,14 @@ impl Session {
             }
             Statement::DeclareCursor(ref declare_stmt) => {
                 let options = cursor_options_from_declare(declare_stmt);
+                let mut source_text = sql.trim().to_string();
+                if !source_text.ends_with(';') {
+                    source_text.push(';');
+                }
                 let result = self.declare_cursor(
                     db,
                     &declare_stmt.name,
-                    sql.trim().trim_end_matches(';').to_string(),
+                    source_text,
                     &declare_stmt.query,
                     options,
                 );

@@ -5790,6 +5790,7 @@ struct ConnectionState {
     prepared: HashMap<String, PreparedStatement>,
     portals: HashMap<String, ()>,
     copy_in: Option<CopyInState>,
+    ignore_till_sync: bool,
 }
 
 struct CopyInState {
@@ -5945,6 +5946,7 @@ where
         prepared: HashMap::new(),
         portals: HashMap::new(),
         copy_in: None,
+        ignore_till_sync: false,
     };
     if let Err(err) = state.session.apply_startup_parameters(&startup_params) {
         db.clear_temp_backend_id(client_id);
@@ -6032,6 +6034,10 @@ where
             let mut body = vec![0u8; len - 4];
             reader.read_exact(&mut body)?;
 
+            if state.ignore_till_sync && !matches!(msg_type, b'S' | b'X') {
+                continue;
+            }
+
             match msg_type {
                 b'Q' => {
                     let sql = cstr_from_bytes(&body);
@@ -6062,6 +6068,7 @@ where
                     writer.flush()?;
                 }
                 b'S' => {
+                    state.ignore_till_sync = false;
                     state.session.interrupts().reset_statement_state();
                     db.interrupt_state(state.session.client_id)
                         .reset_statement_state();
@@ -6138,6 +6145,7 @@ fn handle_query(
     state.session.interrupts().reset_statement_state();
     db.interrupt_state(state.session.client_id)
         .reset_statement_state();
+    state.prepared.remove("");
     if sql_is_effectively_empty_after_comments(sql) {
         send_empty_query(stream)?;
         send_ready_with_pending_messages(stream, db, &state.session)?;
@@ -6871,23 +6879,30 @@ fn handle_portal_statement(
 ) -> io::Result<Option<QueryStatementFlow>> {
     match stmt {
         Statement::DeclareCursor(declare_stmt) => {
+            let explicit_scroll = matches!(
+                declare_stmt.scroll,
+                crate::backend::parser::CursorScrollOption::Scroll
+            );
+            let explicit_no_scroll = matches!(
+                declare_stmt.scroll,
+                crate::backend::parser::CursorScrollOption::NoScroll
+            );
+            let locking_clause = declare_stmt.query.locking_clause.is_some();
             let options = CursorOptions {
                 holdable: declare_stmt.hold,
                 binary: declare_stmt.binary,
-                scroll: matches!(
-                    declare_stmt.scroll,
-                    crate::backend::parser::CursorScrollOption::Scroll
-                ),
-                no_scroll: matches!(
-                    declare_stmt.scroll,
-                    crate::backend::parser::CursorScrollOption::NoScroll
-                ),
+                scroll: explicit_scroll || (declare_stmt.binary && !explicit_no_scroll),
+                no_scroll: explicit_no_scroll || (!explicit_scroll && locking_clause),
                 visible: true,
             };
+            let mut source_text = sql.trim().to_string();
+            if !source_text.ends_with(';') {
+                source_text.push(';');
+            }
             match state.session.declare_cursor(
                 db,
                 &declare_stmt.name,
-                sql.trim().trim_end_matches(';').to_string(),
+                source_text,
                 &declare_stmt.query,
                 options,
             ) {
@@ -12206,6 +12221,7 @@ fn handle_bind(
             None,
         )?;
         state.session.mark_transaction_failed();
+        state.ignore_till_sync = true;
         return Ok(());
     }
     let nparams = read_i16_bytes(body, &mut offset)? as usize;
@@ -12219,6 +12235,7 @@ fn handle_bind(
             None,
         )?;
         state.session.mark_transaction_failed();
+        state.ignore_till_sync = true;
         return Ok(());
     }
     let mut raw_params = Vec::with_capacity(nparams);
@@ -12248,39 +12265,35 @@ fn handle_bind(
             None,
         )?;
         state.session.mark_transaction_failed();
+        state.ignore_till_sync = true;
         return Ok(());
     }
 
     let Some(stmt) = state.prepared.get(&statement_name) else {
-        send_error(
-            stream,
-            "26000",
-            "unknown prepared statement",
-            None,
-            None,
-            None,
-        )?;
+        let message = if statement_name.is_empty() {
+            "unnamed prepared statement does not exist".to_string()
+        } else {
+            format!("prepared statement \"{statement_name}\" does not exist")
+        };
+        send_error(stream, "26000", &message, None, None, None)?;
         state.session.mark_transaction_failed();
+        state.ignore_till_sync = true;
         return Ok(());
     };
     let required_params = required_bind_param_count(stmt);
     if nparams != required_params {
-        let name = if statement_name.is_empty() {
-            "<unnamed>"
-        } else {
-            &statement_name
-        };
         send_error(
             stream,
             "08P01",
             &format!(
-                "bind message supplies {nparams} parameters, but prepared statement \"{name}\" requires {required_params}"
+                "bind message supplies {nparams} parameters, but prepared statement \"{statement_name}\" requires {required_params}"
             ),
             None,
             None,
             None,
         )?;
         state.session.mark_transaction_failed();
+        state.ignore_till_sync = true;
         return Ok(());
     }
     let catalog = state.session.catalog_lookup(db);
@@ -12306,6 +12319,7 @@ fn handle_bind(
                     None,
                 )?;
                 state.session.mark_transaction_failed();
+                state.ignore_till_sync = true;
                 return Ok(());
             }
         }
@@ -12338,6 +12352,7 @@ fn handle_bind(
                 )?;
                 state.session.close_portal(&portal_name).ok();
                 state.session.mark_transaction_failed();
+                state.ignore_till_sync = true;
                 return Ok(());
             }
             send_bind_complete(stream)
@@ -12346,6 +12361,7 @@ fn handle_bind(
             let message = format_exec_error(&e);
             let hint = format_exec_error_hint(&e);
             state.session.mark_transaction_failed();
+            state.ignore_till_sync = true;
             send_error_with_hint(
                 stream,
                 exec_error_sqlstate(&e),
@@ -12360,7 +12376,7 @@ fn handle_bind(
 fn handle_describe(
     stream: &mut impl Write,
     db: &Database,
-    state: &ConnectionState,
+    state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
     let mut offset = 0;
@@ -12384,7 +12400,16 @@ fn handle_describe(
                     None => send_no_data(stream),
                 }
             }
-            None => send_no_data(stream),
+            None => {
+                let message = if name.is_empty() {
+                    "unnamed prepared statement does not exist".to_string()
+                } else {
+                    format!("prepared statement \"{name}\" does not exist")
+                };
+                state.session.mark_transaction_failed();
+                state.ignore_till_sync = true;
+                send_error(stream, "26000", &message, None, None, None)
+            }
         },
         b'P' => match state.session.portal_columns(&name) {
             Some(mut cols) => {
@@ -12396,9 +12421,32 @@ fn handle_describe(
                     .unwrap_or_default();
                 send_row_description_with_formats(stream, &cols, &formats)
             }
-            None => send_error(stream, "34000", "portal does not exist", None, None, None),
+            None if state.session.portal_source_text(&name).is_some() => send_no_data(stream),
+            None => {
+                state.session.mark_transaction_failed();
+                state.ignore_till_sync = true;
+                send_error(
+                    stream,
+                    "34000",
+                    &format!("portal \"{name}\" does not exist"),
+                    None,
+                    None,
+                    None,
+                )
+            }
         },
-        _ => send_no_data(stream),
+        _ => {
+            state.session.mark_transaction_failed();
+            state.ignore_till_sync = true;
+            send_error(
+                stream,
+                "08P01",
+                &format!("invalid DESCRIBE message subtype {}", target_type as char),
+                None,
+                None,
+                None,
+            )
+        }
     }
 }
 
@@ -12416,7 +12464,19 @@ fn handle_execute(
     } else {
         PortalFetchLimit::Count(max_rows as usize)
     };
-    if let Some(source_text) = state.session.portal_source_text(&portal_name) {
+    let Some(source_text) = state.session.portal_source_text(&portal_name) else {
+        state.session.mark_transaction_failed();
+        state.ignore_till_sync = true;
+        return send_error(
+            stream,
+            "34000",
+            &format!("portal \"{portal_name}\" does not exist"),
+            None,
+            None,
+            None,
+        );
+    };
+    {
         match parse_portal_copy_to_statement(db, state, &source_text) {
             Ok(Some(copy_stmt)) => {
                 clear_backend_notices();
@@ -12430,6 +12490,8 @@ fn handle_execute(
                         {
                             let message = format_exec_error(&e);
                             let hint = format_exec_error_hint(&e);
+                            state.session.mark_transaction_failed();
+                            state.ignore_till_sync = true;
                             send_error_with_hint(
                                 stream,
                                 exec_error_sqlstate(&e),
@@ -12446,6 +12508,7 @@ fn handle_execute(
                         let message = format_exec_error(&e);
                         let hint = format_exec_error_hint(&e);
                         state.session.mark_transaction_failed();
+                        state.ignore_till_sync = true;
                         send_error_with_hint(
                             stream,
                             exec_error_sqlstate(&e),
@@ -12461,6 +12524,8 @@ fn handle_execute(
             Err(e) => {
                 let message = format_exec_error(&e);
                 let hint = format_exec_error_hint(&e);
+                state.session.mark_transaction_failed();
+                state.ignore_till_sync = true;
                 send_error_with_hint(
                     stream,
                     exec_error_sqlstate(&e),
@@ -12489,6 +12554,8 @@ fn handle_execute(
                 {
                     let message = format_exec_error(&e);
                     let hint = format_exec_error_hint(&e);
+                    state.session.mark_transaction_failed();
+                    state.ignore_till_sync = true;
                     send_error_with_hint(
                         stream,
                         exec_error_sqlstate(&e),
@@ -12504,6 +12571,8 @@ fn handle_execute(
                     if let Err(e) = ensure_no_deferred_column_errors(row) {
                         let message = format_exec_error(&e);
                         let hint = format_exec_error_hint(&e);
+                        state.session.mark_transaction_failed();
+                        state.ignore_till_sync = true;
                         send_error_with_hint(
                             stream,
                             exec_error_sqlstate(&e),
@@ -12551,6 +12620,7 @@ fn handle_execute(
             let message = format_exec_error(&e);
             let hint = format_exec_error_hint(&e);
             state.session.mark_transaction_failed();
+            state.ignore_till_sync = true;
             send_error_with_hint(
                 stream,
                 exec_error_sqlstate(&e),
@@ -12609,7 +12679,18 @@ fn handle_close(
         b'P' => {
             let _ = state.session.close_portal(&name);
         }
-        _ => {}
+        _ => {
+            state.session.mark_transaction_failed();
+            state.ignore_till_sync = true;
+            return send_error(
+                stream,
+                "08P01",
+                &format!("invalid CLOSE message subtype {}", target_type as char),
+                None,
+                None,
+                None,
+            );
+        }
     }
     send_close_complete(stream)
 }
@@ -14755,6 +14836,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -14804,6 +14886,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -14835,6 +14918,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -14859,6 +14943,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -14899,6 +14984,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -14929,6 +15015,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -14970,6 +15057,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -15018,6 +15106,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -15053,6 +15142,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -15116,6 +15206,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -15141,6 +15232,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -15338,12 +15430,14 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut sender = ConnectionState {
             session: Session::new(1),
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -15462,6 +15556,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
         handle_query(&mut output, &db, &mut listener, "listen alerts;").unwrap();
@@ -15490,6 +15585,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -15519,6 +15615,7 @@ mod tests {
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18586,6 +18683,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18602,6 +18700,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18629,6 +18728,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18653,6 +18753,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18677,6 +18778,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
         let sql = "insert into inserttest (col1, col2, col3) values (DEFAULT, DEFAULT)";
@@ -18698,6 +18800,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
         let sql = "insert into inserttest (f2[1], f2[2]) values (1, default)";
@@ -18841,6 +18944,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18861,6 +18965,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18908,6 +19013,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18938,6 +19044,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18954,6 +19061,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 
@@ -18987,6 +19095,7 @@ WHERE pol.polrelid = '{}' ORDER BY 1;",
             prepared: HashMap::new(),
             portals: HashMap::new(),
             copy_in: None,
+            ignore_till_sync: false,
         };
         let mut output = Vec::new();
 

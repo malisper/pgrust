@@ -115,6 +115,7 @@ pub struct Portal {
     pub created_savepoint_depth: usize,
     pub execution: PortalExecution,
     current_row: Option<PositionedCursorRow>,
+    position: usize,
 }
 
 impl Portal {
@@ -141,6 +142,7 @@ impl Portal {
             created_savepoint_depth,
             execution: PortalExecution::Streaming(guard),
             current_row: None,
+            position: 0,
         }
     }
 
@@ -176,6 +178,7 @@ impl Portal {
                 pos: 0,
             },
             current_row: None,
+            position: 0,
         }
     }
 
@@ -210,6 +213,7 @@ impl Portal {
                 column_names,
             },
             current_row: None,
+            position: 0,
         }
     }
 
@@ -265,6 +269,7 @@ impl Portal {
             pos: 0,
         };
         self.current_row = None;
+        self.position = 0;
         self.status = PortalStatus::Ready;
         Ok(())
     }
@@ -274,6 +279,7 @@ impl Portal {
             return Err(portal_cannot_run_error(&self.name));
         }
         self.status = PortalStatus::Active;
+        let was_streaming = matches!(self.execution, PortalExecution::Streaming(_));
         let mut result = match &mut self.execution {
             PortalExecution::Streaming(guard) => fetch_streaming_forward(guard, limit),
             PortalExecution::Materialized {
@@ -315,6 +321,9 @@ impl Portal {
             result.command_tag = Some(self.command_tag.clone());
         }
         if let Ok(result) = &result {
+            if was_streaming {
+                self.position = self.position.saturating_add(result.processed);
+            }
             self.current_row = result.current_row;
         } else {
             self.current_row = None;
@@ -330,22 +339,18 @@ impl Portal {
         if self.status == PortalStatus::Failed {
             return Err(portal_cannot_run_error(&self.name));
         }
-        if matches!(
-            direction,
-            PortalFetchDirection::Backward(_)
+        if self.options.no_scroll {
+            match direction {
+                PortalFetchDirection::Absolute(offset) => {
+                    return self.fetch_no_scroll_absolute(offset, move_only);
+                }
+                PortalFetchDirection::Backward(_)
                 | PortalFetchDirection::Prior
-                | PortalFetchDirection::Absolute(_)
                 | PortalFetchDirection::Relative(_)
                 | PortalFetchDirection::First
-                | PortalFetchDirection::Last
-        ) && self.options.no_scroll
-        {
-            return Err(ExecError::Parse(ParseError::DetailedError {
-                message: "cursor can only scan forward".into(),
-                detail: None,
-                hint: Some("Declare it with SCROLL option to enable backward scan.".into()),
-                sqlstate: "55000",
-            }));
+                | PortalFetchDirection::Last => return Err(cursor_can_only_scan_forward_error()),
+                PortalFetchDirection::Forward(_) | PortalFetchDirection::Next => {}
+            }
         }
         if !self.options.no_scroll {
             if let Err(err) = self.materialize_all() {
@@ -371,6 +376,51 @@ impl Portal {
         }
         self.current_row = result.current_row;
         Ok(result)
+    }
+
+    fn fetch_no_scroll_absolute(
+        &mut self,
+        offset: i64,
+        move_only: bool,
+    ) -> Result<PortalRunResult, ExecError> {
+        if offset <= 0 {
+            return Err(cursor_can_only_scan_forward_error());
+        }
+        let target = offset as usize;
+        let current = self.forward_position()?;
+        if target <= current {
+            return Err(cursor_can_only_scan_forward_error());
+        }
+        let skip = target.saturating_sub(current).saturating_sub(1);
+        if skip > 0 {
+            let skipped = self.fetch_forward(PortalFetchLimit::Count(skip))?;
+            if skipped.completed && skipped.processed < skip {
+                return Ok(PortalRunResult {
+                    columns: skipped.columns,
+                    column_names: skipped.column_names,
+                    rows: Vec::new(),
+                    processed: 0,
+                    completed: true,
+                    command_tag: None,
+                    current_row: None,
+                });
+            }
+        }
+        let mut result = self.fetch_forward(PortalFetchLimit::Count(1))?;
+        if move_only {
+            result.rows.clear();
+        }
+        Ok(result)
+    }
+
+    fn forward_position(&self) -> Result<usize, ExecError> {
+        match &self.execution {
+            PortalExecution::Streaming(_) => Ok(self.position),
+            PortalExecution::Materialized { pos, .. } => Ok(*pos),
+            PortalExecution::PendingSql { .. } | PortalExecution::CommandDone => {
+                Err(portal_cannot_run_error(&self.name))
+            }
+        }
     }
 
     fn fetch_materialized_backward(
@@ -637,20 +687,21 @@ fn fetch_materialized_forward(
         .flatten()
         .next()
         .copied();
-    *pos = match limit {
-        PortalFetchLimit::All => rows.len().saturating_add(1),
-        PortalFetchLimit::Count(requested) if requested > remaining => rows.len().saturating_add(1),
-        PortalFetchLimit::Count(_) if count == 0 && *pos == rows.len() => {
-            rows.len().saturating_add(1)
-        }
-        PortalFetchLimit::Count(_) => end,
+    let completed = match limit {
+        PortalFetchLimit::All => true,
+        PortalFetchLimit::Count(requested) => count < requested,
+    };
+    *pos = if completed {
+        rows.len().saturating_add(1)
+    } else {
+        end
     };
     PortalRunResult {
         columns: columns.to_vec(),
         column_names: column_names.to_vec(),
         processed: out.len(),
         rows: out,
-        completed: *pos >= rows.len(),
+        completed,
         command_tag: None,
         current_row,
     }
@@ -679,6 +730,15 @@ fn portal_cannot_run_error(name: &str) -> ExecError {
         message: format!("portal \"{name}\" cannot be run"),
         detail: None,
         hint: None,
+        sqlstate: "55000",
+    })
+}
+
+fn cursor_can_only_scan_forward_error() -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: "cursor can only scan forward".into(),
+        detail: None,
+        hint: Some("Declare it with SCROLL option to enable backward scan.".into()),
         sqlstate: "55000",
     })
 }
