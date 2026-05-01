@@ -2172,7 +2172,16 @@ pub(super) fn estimate_bitmap_candidate(
         .class_row_by_oid(spec.index.relation_oid)
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
-    let qual_selectivity = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
+    // :HACK: Bitmap OR path generation may combine an OR arm with outer
+    // restriction clauses to form branch-local index quals. PostgreSQL does
+    // not apply functional-dependency correction when the original OR arms
+    // reference incompatible extended-statistics targets, so those synthesized
+    // branch estimates opt into simple per-clause stats.
+    let qual_selectivity = if spec.disable_extended_selectivity {
+        clauses_selectivity_without_extended(&spec.used_quals, Some(stats), stats.reltuples)
+    } else {
+        clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples)
+    };
     let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
     let mut index_startup_cost = spec
         .used_quals
@@ -7440,6 +7449,7 @@ pub(super) fn build_index_path_spec(
         row_prefix: used_indexes
             .iter()
             .any(|idx| parsed_quals.get(*idx).is_some_and(|qual| qual.row_prefix)),
+        disable_extended_selectivity: false,
     })
 }
 
@@ -7461,6 +7471,7 @@ pub(super) fn full_index_scan_spec(
         removes_order: false,
         btree_prefix_columns: 0,
         row_prefix: false,
+        disable_extended_selectivity: false,
     }
 }
 
@@ -7476,6 +7487,23 @@ fn clauses_selectivity(clauses: &[Expr], stats: Option<&RelationStats>, reltuple
             &Expr::bool_expr(BoolExprType::And, clauses.to_vec()),
             stats,
             reltuples,
+        ),
+    }
+}
+
+fn clauses_selectivity_without_extended(
+    clauses: &[Expr],
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+) -> f64 {
+    match clauses {
+        [] => 1.0,
+        [clause] => clause_selectivity_simple(clause, stats, reltuples, None),
+        clauses => clause_selectivity_simple(
+            &Expr::bool_expr(BoolExprType::And, clauses.to_vec()),
+            stats,
+            reltuples,
+            None,
         ),
     }
 }
@@ -8160,7 +8188,7 @@ fn dependency_implied_target(item: &PgDependencyItem) -> Option<i16> {
     }
 }
 
-fn dependency_clause_target_id(expr: &Expr, ext: &ExtendedStatistic) -> Option<i16> {
+pub(super) fn dependency_clause_target_id(expr: &Expr, ext: &ExtendedStatistic) -> Option<i16> {
     match expr {
         Expr::IsNull(inner) => target_id_for_expr(inner, ext),
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
@@ -8261,40 +8289,82 @@ fn mcv_supported_target_ids(expr: &Expr, ext: &ExtendedStatistic, out: &mut BTre
 }
 
 fn mcv_expr_matches(expr: &Expr, ext: &ExtendedStatistic, item: &PgMcvItem) -> Option<bool> {
+    mcv_expr_truth(expr, ext, item).map(|truth| truth == SqlTruth::True)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlTruth {
+    True,
+    False,
+    Unknown,
+}
+
+fn mcv_expr_truth(expr: &Expr, ext: &ExtendedStatistic, item: &PgMcvItem) -> Option<SqlTruth> {
     match expr {
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            let mut saw_unknown = false;
             for arg in &bool_expr.args {
-                if !mcv_expr_matches(arg, ext, item)? {
-                    return Some(false);
+                match mcv_expr_truth(arg, ext, item)? {
+                    SqlTruth::False => return Some(SqlTruth::False),
+                    SqlTruth::Unknown => saw_unknown = true,
+                    SqlTruth::True => {}
                 }
             }
-            Some(true)
+            Some(if saw_unknown {
+                SqlTruth::Unknown
+            } else {
+                SqlTruth::True
+            })
         }
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            let mut saw_unknown = false;
             for arg in &bool_expr.args {
-                if mcv_expr_matches(arg, ext, item)? {
-                    return Some(true);
+                match mcv_expr_truth(arg, ext, item)? {
+                    SqlTruth::True => return Some(SqlTruth::True),
+                    SqlTruth::Unknown => saw_unknown = true,
+                    SqlTruth::False => {}
                 }
             }
-            Some(false)
+            Some(if saw_unknown {
+                SqlTruth::Unknown
+            } else {
+                SqlTruth::False
+            })
         }
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Not => {
             match bool_expr.args.as_slice() {
-                [arg] => Some(!mcv_expr_matches(arg, ext, item)?),
+                [arg] => Some(match mcv_expr_truth(arg, ext, item)? {
+                    SqlTruth::True => SqlTruth::False,
+                    SqlTruth::False => SqlTruth::True,
+                    SqlTruth::Unknown => SqlTruth::Unknown,
+                }),
                 _ => None,
             }
         }
         Expr::IsNull(inner) => {
             let target_id = target_id_for_expr(inner, ext)?;
-            Some(mcv_item_value(ext, item, target_id)?.is_none())
+            Some(if mcv_item_value(ext, item, target_id)?.is_none() {
+                SqlTruth::True
+            } else {
+                SqlTruth::False
+            })
         }
         Expr::IsNotNull(inner) => {
             let target_id = target_id_for_expr(inner, ext)?;
-            Some(mcv_item_value(ext, item, target_id)?.is_some())
+            Some(if mcv_item_value(ext, item, target_id)?.is_some() {
+                SqlTruth::True
+            } else {
+                SqlTruth::False
+            })
         }
         expr if target_id_for_expr(expr, ext).is_some() => {
             let target_id = target_id_for_expr(expr, ext)?;
-            Some(mcv_item_value(ext, item, target_id)? == Some("true"))
+            Some(match mcv_item_value(ext, item, target_id)? {
+                Some("true") => SqlTruth::True,
+                Some("false") => SqlTruth::False,
+                Some(_) => SqlTruth::False,
+                None => SqlTruth::Unknown,
+            })
         }
         Expr::Op(op)
             if matches!(
@@ -8310,13 +8380,13 @@ fn mcv_expr_matches(expr: &Expr, ext: &ExtendedStatistic, item: &PgMcvItem) -> O
             let (target_id, constant, flipped) =
                 target_const_key_pair_with_flip(&op.args[0], &op.args[1], ext)?;
             let Some(actual) = mcv_item_value(ext, item, target_id)? else {
-                return Some(false);
+                return Some(SqlTruth::Unknown);
             };
             let Some(constant) = constant.as_deref() else {
-                return Some(false);
+                return Some(SqlTruth::Unknown);
             };
             let ordering = compare_stat_keys(actual, constant);
-            Some(match (op.op, flipped) {
+            let matches = match (op.op, flipped) {
                 (OpExprKind::Eq, _) => ordering == Ordering::Equal,
                 (OpExprKind::NotEq, _) => ordering != Ordering::Equal,
                 (OpExprKind::Lt, false) | (OpExprKind::Gt, true) => ordering == Ordering::Less,
@@ -8328,6 +8398,11 @@ fn mcv_expr_matches(expr: &Expr, ext: &ExtendedStatistic, item: &PgMcvItem) -> O
                     matches!(ordering, Ordering::Greater | Ordering::Equal)
                 }
                 _ => false,
+            };
+            Some(if matches {
+                SqlTruth::True
+            } else {
+                SqlTruth::False
             })
         }
         Expr::ScalarArrayOp(saop)
@@ -8342,18 +8417,30 @@ fn mcv_expr_matches(expr: &Expr, ext: &ExtendedStatistic, item: &PgMcvItem) -> O
         {
             let target_id = target_id_for_expr(&saop.left, ext)?;
             let Some(actual) = mcv_item_value(ext, item, target_id)? else {
-                return Some(false);
+                return Some(SqlTruth::Unknown);
             };
             let keys = const_array_keys(&saop.right)?;
-            let matches = keys
+            let saw_null = keys.iter().any(Option::is_none);
+            let mut matches = keys
                 .iter()
                 .filter_map(|key| key.as_deref())
                 .map(|key| scalar_array_key_matches(saop.op, actual, key));
-            Some(if saop.use_or {
-                matches.into_iter().any(|matches| matches)
+            let matched = if saop.use_or {
+                if matches.any(|matches| matches) {
+                    SqlTruth::True
+                } else if saw_null {
+                    SqlTruth::Unknown
+                } else {
+                    SqlTruth::False
+                }
+            } else if matches.any(|matches| !matches) {
+                SqlTruth::False
+            } else if saw_null {
+                SqlTruth::Unknown
             } else {
-                matches.into_iter().all(|matches| matches)
-            })
+                SqlTruth::True
+            };
+            Some(matched)
         }
         _ => None,
     }
@@ -9274,15 +9361,13 @@ fn expression_const_pair_with_flip<'a>(
     right: &'a Expr,
     stats: &'a RelationStats,
 ) -> Option<(&'a PgStatisticRow, Value, bool)> {
-    match (left, right) {
-        (expr, Expr::Const(value)) => {
-            Some((expression_stats_row(expr, stats)?, value.clone(), false))
-        }
-        (Expr::Const(value), expr) => {
-            Some((expression_stats_row(expr, stats)?, value.clone(), true))
-        }
-        _ => None,
+    if let Some(value) = const_argument(right) {
+        return Some((expression_stats_row(left, stats)?, value, false));
     }
+    if let Some(value) = const_argument(left) {
+        return Some((expression_stats_row(right, stats)?, value, true));
+    }
+    None
 }
 
 fn expression_stats_row<'a>(expr: &Expr, stats: &'a RelationStats) -> Option<&'a PgStatisticRow> {
@@ -9300,19 +9385,23 @@ fn expression_stats_row<'a>(expr: &Expr, stats: &'a RelationStats) -> Option<&'a
 }
 
 fn column_const_pair<'a>(left: &'a Expr, right: &'a Expr) -> Option<(usize, Value)> {
-    match (left, right) {
-        (expr, Expr::Const(value)) => Some((expr_column_index(expr)?, value.clone())),
-        (Expr::Const(value), expr) => Some((expr_column_index(expr)?, value.clone())),
-        _ => None,
+    if let Some(value) = const_argument(right) {
+        return Some((expr_column_index(left)?, value));
     }
+    if let Some(value) = const_argument(left) {
+        return Some((expr_column_index(right)?, value));
+    }
+    None
 }
 
 fn ordered_column_const_pair<'a>(left: &'a Expr, right: &'a Expr) -> Option<(usize, Value, bool)> {
-    match (left, right) {
-        (expr, Expr::Const(value)) => Some((expr_column_index(expr)?, value.clone(), false)),
-        (Expr::Const(value), expr) => Some((expr_column_index(expr)?, value.clone(), true)),
-        _ => None,
+    if let Some(value) = const_argument(right) {
+        return Some((expr_column_index(left)?, value, false));
     }
+    if let Some(value) = const_argument(left) {
+        return Some((expr_column_index(right)?, value, true));
+    }
+    None
 }
 
 fn histogram_fraction(hist: &ArrayValue, constant: &Value) -> f64 {
@@ -11896,5 +11985,97 @@ fn expr_column_index(expr: &Expr) -> Option<usize> {
     match strip_casts(expr) {
         Expr::Var(var) if var.varlevelsup == 0 => attrno_index(var.varattno),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ext(target_ids: Vec<i16>) -> ExtendedStatistic {
+        ExtendedStatistic {
+            target_ids,
+            expressions: Vec::new(),
+            expression_stats: HashMap::new(),
+            statistics_target: 100,
+            ndistinct: None,
+            dependencies: None,
+            mcv: None,
+        }
+    }
+
+    fn test_var(attno: i32, kind: SqlTypeKind) -> Expr {
+        Expr::Var(Var {
+            varno: 1,
+            varattno: attno,
+            varlevelsup: 0,
+            vartype: SqlType::new(kind),
+            collation_oid: None,
+        })
+    }
+
+    fn test_mcv_item(values: Vec<Option<&str>>) -> PgMcvItem {
+        PgMcvItem {
+            values: values
+                .into_iter()
+                .map(|value| value.map(str::to_string))
+                .collect(),
+            frequency: 1.0,
+            base_frequency: 1.0,
+        }
+    }
+
+    #[test]
+    fn mcv_not_bool_does_not_match_null() {
+        let ext = test_ext(vec![1]);
+        let expr = Expr::bool_expr(BoolExprType::Not, vec![test_var(1, SqlTypeKind::Bool)]);
+
+        assert_eq!(
+            mcv_expr_matches(&expr, &ext, &test_mcv_item(vec![None])),
+            Some(false)
+        );
+        assert_eq!(
+            mcv_expr_matches(&expr, &ext, &test_mcv_item(vec![Some("false")])),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn mcv_all_array_with_null_is_unknown() {
+        let ext = test_ext(vec![1]);
+        let left = test_var(1, SqlTypeKind::Int4);
+        let without_null = Expr::scalar_array_op(
+            SubqueryComparisonOp::Lt,
+            false,
+            left.clone(),
+            Expr::Const(Value::Array(vec![Value::Int32(4), Value::Int32(5)])),
+        );
+        let with_null = Expr::scalar_array_op(
+            SubqueryComparisonOp::Lt,
+            false,
+            left,
+            Expr::Const(Value::Array(vec![
+                Value::Int32(4),
+                Value::Int32(5),
+                Value::Null,
+            ])),
+        );
+        let item = test_mcv_item(vec![Some("3")]);
+
+        assert_eq!(mcv_expr_matches(&without_null, &ext, &item), Some(true));
+        assert_eq!(mcv_expr_matches(&with_null, &ext, &item), Some(false));
+    }
+
+    #[test]
+    fn column_const_pair_recognizes_casted_constants() {
+        let left = test_var(2, SqlTypeKind::Varchar);
+        let right = Expr::Cast(
+            Box::new(Expr::Const(Value::Text("x".into()))),
+            SqlType::new(SqlTypeKind::Varchar),
+        );
+
+        let (column, value) = column_const_pair(&left, &right).unwrap();
+        assert_eq!(column, 1);
+        assert_eq!(value.as_text(), Some("x"));
     }
 }

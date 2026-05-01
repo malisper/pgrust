@@ -104,6 +104,7 @@ struct IndexPathSpec {
     removes_order: bool,
     btree_prefix_columns: usize,
     row_prefix: bool,
+    disable_extended_selectivity: bool,
 }
 
 #[derive(Debug, Clone)]

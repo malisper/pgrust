@@ -1627,6 +1627,26 @@ fn split_bitmap_or_filter(filter: &Expr) -> Option<BitmapOrFilter> {
     Some(BitmapOrFilter { arms, common_quals })
 }
 
+fn bitmap_or_arms_reference_multiple_dependency_targets(
+    arms: &[Expr],
+    stats: &super::super::RelationStats,
+) -> bool {
+    stats
+        .extended_stats
+        .iter()
+        .filter(|ext| ext.dependencies.is_some())
+        .any(|ext| {
+            let mut targets = BTreeSet::new();
+            for arm in arms {
+                let Some(target) = super::costsize::dependency_clause_target_id(arm, ext) else {
+                    continue;
+                };
+                targets.insert(target);
+            }
+            targets.len() > 1
+        })
+}
+
 fn or_exprs(mut exprs: Vec<Expr>) -> Option<Expr> {
     if exprs.is_empty() {
         return None;
@@ -1720,49 +1740,51 @@ fn collect_bitmap_or_paths(
         return Vec::new();
     }
 
-    let best_bitmap_child_for_filter = |candidate_filter: &Expr| -> Option<(Path, Expr)> {
-        let mut best_child = None;
-        for index in &indexes {
-            let Some(spec) = build_index_path_spec(
-                Some(candidate_filter),
-                None,
-                index,
-                config.retain_partial_index_filters,
-            ) else {
-                continue;
-            };
-            if spec.keys.is_empty() {
-                continue;
+    let best_bitmap_child_for_filter =
+        |candidate_filter: &Expr, disable_extended_selectivity: bool| -> Option<(Path, Expr)> {
+            let mut best_child = None;
+            for index in &indexes {
+                let Some(mut spec) = build_index_path_spec(
+                    Some(candidate_filter),
+                    None,
+                    index,
+                    config.retain_partial_index_filters,
+                ) else {
+                    continue;
+                };
+                if spec.keys.is_empty() {
+                    continue;
+                }
+                let Some(recheck) = bitmap_or_arm_recheck(&spec) else {
+                    continue;
+                };
+                spec.disable_extended_selectivity = disable_extended_selectivity;
+                let candidate = estimate_bitmap_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_name.clone(),
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    stats,
+                    spec,
+                    None,
+                    catalog,
+                );
+                let Path::BitmapHeapScan { bitmapqual, .. } = candidate.plan else {
+                    continue;
+                };
+                let child = *bitmapqual;
+                let child_cost = child.plan_info().total_cost.as_f64();
+                if best_child
+                    .as_ref()
+                    .is_none_or(|(best_cost, _, _)| child_cost < *best_cost)
+                {
+                    best_child = Some((child_cost, child, recheck));
+                }
             }
-            let Some(recheck) = bitmap_or_arm_recheck(&spec) else {
-                continue;
-            };
-            let candidate = estimate_bitmap_candidate(
-                rtindex,
-                heap_rel,
-                relation_name.clone(),
-                relation_oid,
-                toast,
-                desc.clone(),
-                stats,
-                spec,
-                None,
-                catalog,
-            );
-            let Path::BitmapHeapScan { bitmapqual, .. } = candidate.plan else {
-                continue;
-            };
-            let child = *bitmapqual;
-            let child_cost = child.plan_info().total_cost.as_f64();
-            if best_child
-                .as_ref()
-                .is_none_or(|(best_cost, _, _)| child_cost < *best_cost)
-            {
-                best_child = Some((child_cost, child, recheck));
-            }
-        }
-        best_child.map(|(_, child, recheck)| (child, recheck))
-    };
+            best_child.map(|(_, child, recheck)| (child, recheck))
+        };
     let bitmap_index_signature = |path: &Path| -> Option<(String, usize)> {
         match path {
             Path::BitmapIndexScan {
@@ -1792,15 +1814,19 @@ fn collect_bitmap_or_paths(
                 )
         };
 
+    let disable_extended_for_combined_arms =
+        bitmap_or_arms_reference_multiple_dependency_targets(&or_filter.arms, stats);
     let common_bitmap = and_exprs(or_filter.common_quals.clone())
-        .and_then(|common_filter| best_bitmap_child_for_filter(&common_filter));
+        .and_then(|common_filter| best_bitmap_child_for_filter(&common_filter, false));
     let mut combined_arm_choices = Vec::new();
     for arm in &or_filter.arms {
         let arm_filter = bitmap_or_arm_filter(arm, &or_filter.common_quals);
-        let Some((child, recheck)) = best_bitmap_child_for_filter(&arm_filter) else {
+        let Some((child, recheck)) =
+            best_bitmap_child_for_filter(&arm_filter, disable_extended_for_combined_arms)
+        else {
             return Vec::new();
         };
-        let display_recheck = best_bitmap_child_for_filter(arm)
+        let display_recheck = best_bitmap_child_for_filter(arm, false)
             .map(|(_, arm_recheck)| arm_recheck)
             .unwrap_or_else(|| recheck.clone());
         combined_arm_choices.push((child, display_recheck));
@@ -1808,7 +1834,7 @@ fn collect_bitmap_or_paths(
     let split_arm_choices = if common_bitmap.is_some() {
         let mut choices = Vec::new();
         for arm in &or_filter.arms {
-            let Some((child, recheck)) = best_bitmap_child_for_filter(arm) else {
+            let Some((child, recheck)) = best_bitmap_child_for_filter(arm, false) else {
                 return Vec::new();
             };
             choices.push((child, recheck));
