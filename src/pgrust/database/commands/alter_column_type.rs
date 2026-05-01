@@ -943,6 +943,7 @@ impl Database {
             .collect::<Vec<_>>();
         let mut store = self.catalog.write();
         let mut temp_replacements = Vec::new();
+        let mut updated_identity_sequence_oids = BTreeSet::new();
         for (target, statistics_oids) in targets.into_iter().zip(statistics_resets) {
             let effect = store
                 .alter_table_alter_column_type_mvcc(
@@ -958,6 +959,7 @@ impl Database {
                 && target.new_desc.columns[target.column_index]
                     .identity
                     .is_some()
+                && updated_identity_sequence_oids.insert(sequence_oid)
             {
                 let current = self.sequences.sequence_data(sequence_oid).ok_or_else(|| {
                     ExecError::Parse(ParseError::TableDoesNotExist(sequence_oid.to_string()))
@@ -970,10 +972,13 @@ impl Database {
                 };
                 let (options, restart) = apply_sequence_option_patch(&current.options, &patch)
                     .map_err(ExecError::Parse)?;
-                let mut next = current;
+                let mut next = current.clone();
                 next.options = options;
                 if let Some(state) = restart {
                     next.state = state;
+                }
+                if next == current {
+                    continue;
                 }
                 let effect = store
                     .upsert_sequence_row_mvcc(pg_sequence_row(sequence_oid, &next), &ctx)
