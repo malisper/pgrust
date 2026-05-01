@@ -346,6 +346,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         {
             return Some(position);
         }
+        if context.starts_with("COPY ") {
+            return None;
+        }
         return exec_error_position(sql, source);
     }
     if let ExecError::WithInternalQueryContext { .. } = e {
