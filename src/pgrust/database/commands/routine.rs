@@ -215,10 +215,12 @@ fn duplicate_routine_error(catalog: &dyn CatalogLookup, row: &PgProcRow) -> Exec
     }
 }
 
-fn routine_kind_article(kind: RoutineKind) -> &'static str {
+fn wrong_routine_kind_message(kind: RoutineKind, signature: &str) -> String {
     match kind {
-        RoutineKind::Aggregate => "an",
-        RoutineKind::Function | RoutineKind::Procedure | RoutineKind::Routine => "a",
+        RoutineKind::Aggregate => format!("function {signature} is not an aggregate"),
+        RoutineKind::Function => format!("{signature} is not a function"),
+        RoutineKind::Procedure => format!("{signature} is not a procedure"),
+        RoutineKind::Routine => format!("{signature} is not a routine"),
     }
 }
 
@@ -276,11 +278,7 @@ fn resolve_routine(
         [] if kind != RoutineKind::Routine && !all_signature_candidates.is_empty() => {
             let signature = routine_signature_display(&catalog, signature, &arg_specs);
             Err(ExecError::DetailedError {
-                message: format!(
-                    "{signature} is not {} {}",
-                    routine_kind_article(kind),
-                    routine_kind_name(kind)
-                ),
+                message: wrong_routine_kind_message(kind, &signature),
                 detail: None,
                 hint: None,
                 sqlstate: "42809",
