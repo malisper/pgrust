@@ -2871,9 +2871,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ArrayToJson | BuiltinScalarFunction::RowToJson => {
                 matches!(args.len(), 1 | 2)
             }
-            BuiltinScalarFunction::SqlJsonConstructor
-            | BuiltinScalarFunction::SqlJsonScalar
-            | BuiltinScalarFunction::SqlJsonSerialize => args.len() == 1,
+            BuiltinScalarFunction::SqlJsonConstructor => matches!(args.len(), 1..=3),
+            BuiltinScalarFunction::SqlJsonSerialize => args.len() == 1,
+            BuiltinScalarFunction::SqlJsonScalar => args.len() == 1,
             BuiltinScalarFunction::SqlJsonObject | BuiltinScalarFunction::SqlJsonArray => {
                 !args.is_empty()
             }

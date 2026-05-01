@@ -26103,20 +26103,30 @@ fn json_null_clause_is_null_on_null(pair: Pair<'_, Rule>) -> bool {
 fn json_key_uniqueness_constraint_is_with_unique(pair: Pair<'_, Rule>) -> bool {
     pair.as_str()
         .trim_start()
-        .to_ascii_lowercase()
-        .starts_with("with")
+        .split_ascii_whitespace()
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("with"))
 }
 
 fn build_json_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
-    let value = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::json_value_expr)
-        .ok_or(ParseError::UnexpectedEof)
-        .and_then(build_json_value_expr)?;
-    Ok(internal_sql_json_func_call(
-        SQL_JSON_FUNC,
-        vec![SqlFunctionArg::positional(value)],
-    ))
+    let mut value = None;
+    let mut unique_keys = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_value_expr => value = Some(build_json_value_expr(part)?),
+            Rule::json_key_uniqueness_constraint => {
+                unique_keys = json_key_uniqueness_constraint_is_with_unique(part);
+            }
+            _ => {}
+        }
+    }
+    let mut args = vec![SqlFunctionArg::positional(
+        value.ok_or(ParseError::UnexpectedEof)?,
+    )];
+    if unique_keys {
+        args.push(hidden_bool_arg(true));
+    }
+    Ok(internal_sql_json_func_call(SQL_JSON_FUNC, args))
 }
 
 fn build_json_scalar_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
@@ -26395,17 +26405,27 @@ fn build_json_objectagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, Par
     let mut key = None;
     let mut value = None;
     let mut order_by = Vec::new();
+    let mut absent_on_null = false;
+    let mut unique_keys = false;
     let mut returning = None;
     let mut filter = None;
     let mut over = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::json_objectagg_arg => {
-                let (parsed_key, parsed_value, parsed_order_by, parsed_returning) =
-                    build_json_objectagg_arg(part)?;
+                let (
+                    parsed_key,
+                    parsed_value,
+                    parsed_order_by,
+                    parsed_absent_on_null,
+                    parsed_unique_keys,
+                    parsed_returning,
+                ) = build_json_objectagg_arg(part)?;
                 key = Some(parsed_key);
                 value = Some(parsed_value);
                 order_by = parsed_order_by;
+                absent_on_null = parsed_absent_on_null;
+                unique_keys = parsed_unique_keys;
                 returning = parsed_returning;
             }
             Rule::agg_filter_clause => filter = Some(build_agg_filter_clause(part)?),
@@ -26413,8 +26433,15 @@ fn build_json_objectagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, Par
             _ => {}
         }
     }
+    let name = if unique_keys && absent_on_null {
+        "json_object_agg_unique_strict"
+    } else if unique_keys {
+        "json_object_agg_unique"
+    } else {
+        SQL_JSON_OBJECTAGG_FUNC
+    };
     let expr = SqlExpr::FuncCall {
-        name: SQL_JSON_OBJECTAGG_FUNC.into(),
+        name: name.into(),
         args: SqlCallArgs::Args(vec![
             SqlFunctionArg::positional(key.ok_or(ParseError::UnexpectedEof)?),
             SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
@@ -26432,10 +26459,22 @@ fn build_json_objectagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, Par
 
 fn build_json_objectagg_arg(
     pair: Pair<'_, Rule>,
-) -> Result<(SqlExpr, SqlExpr, Vec<OrderByItem>, Option<RawTypeName>), ParseError> {
+) -> Result<
+    (
+        SqlExpr,
+        SqlExpr,
+        Vec<OrderByItem>,
+        bool,
+        bool,
+        Option<RawTypeName>,
+    ),
+    ParseError,
+> {
     let mut key = None;
     let mut value = None;
     let mut order_by = Vec::new();
+    let mut absent_on_null = false;
+    let mut unique_keys = false;
     let mut returning = None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -26451,6 +26490,12 @@ fn build_json_objectagg_arg(
                     .map(build_order_by_item)
                     .collect::<Result<Vec<_>, _>>()?;
             }
+            Rule::json_object_constructor_null_clause => {
+                absent_on_null = !json_null_clause_is_null_on_null(part);
+            }
+            Rule::json_key_uniqueness_constraint => {
+                unique_keys = json_key_uniqueness_constraint_is_with_unique(part);
+            }
             Rule::json_returning_clause => returning = Some(build_json_returning_clause(part)?),
             _ => {}
         }
@@ -26459,6 +26504,8 @@ fn build_json_objectagg_arg(
         key.ok_or(ParseError::UnexpectedEof)?,
         value.ok_or(ParseError::UnexpectedEof)?,
         order_by,
+        absent_on_null,
+        unique_keys,
         returning,
     ))
 }
@@ -26466,6 +26513,7 @@ fn build_json_objectagg_arg(
 fn build_json_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut negated = false;
     let mut predicate_type = "value";
+    let mut unique_keys = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::kw_not => negated = true,
@@ -26477,14 +26525,22 @@ fn build_json_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, 
                     _ => "value",
                 };
             }
+            Rule::json_key_uniqueness_constraint => {
+                unique_keys = json_key_uniqueness_constraint_is_with_unique(part);
+            }
             _ => {}
         }
     }
+    let predicate = if unique_keys {
+        format!("{predicate_type}:unique")
+    } else {
+        predicate_type.into()
+    };
     let expr = internal_sql_json_func_call(
         SQL_JSON_IS_JSON_FUNC,
         vec![
             SqlFunctionArg::positional(left),
-            SqlFunctionArg::positional(SqlExpr::Const(Value::Text(predicate_type.into()))),
+            SqlFunctionArg::positional(SqlExpr::Const(Value::Text(predicate.into()))),
         ],
     );
     Ok(if negated {
