@@ -506,7 +506,7 @@ fn validate_return_stmt_in_stmt(
             returns_set,
             allows_bare_return,
         ),
-        Stmt::Continue => Ok(()),
+        Stmt::Continue { .. } => Ok(()),
         Stmt::If {
             branches,
             else_branch,

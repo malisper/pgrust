@@ -5391,6 +5391,30 @@ fn plpgsql_integer_for_loop_accepts_underscored_bounds() {
 }
 
 #[test]
+fn plpgsql_continue_when_regex_skips_remaining_loop_body() {
+    let db = Database::open(temp_dir("plpgsql_continue_when_regex"), 16).unwrap();
+    db.execute(
+        1,
+        "create function filter_buffers() returns setof text language plpgsql as $$
+         declare
+           ln text;
+         begin
+           for ln in values (' Seq Scan'), (' Buffers: shared hit=1 read=0 written=0') loop
+             continue when (ln ~ ' +Buffers: .*');
+             return next ln;
+           end loop;
+         end;
+         $$",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select filter_buffers()").unwrap(),
+        vec![vec![Value::Text(" Seq Scan".into())]],
+    );
+}
+
+#[test]
 fn select_case_without_from_uses_case_column_name() {
     let base = temp_dir("select_case_without_from");
     let txns = TransactionManager::new_durable(&base).unwrap();
