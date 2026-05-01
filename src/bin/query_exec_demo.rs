@@ -232,6 +232,7 @@ fn main() -> Result<(), ExecError> {
         stats,
         session_stats,
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        write_xid_override: None,
         transaction_state: None,
         client_id: 7,
         session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,

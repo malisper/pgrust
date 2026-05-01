@@ -82,6 +82,7 @@ impl SeededSqlHarness {
                     crate::pgrust::database::SessionStatsState::default(),
                 )),
                 snapshot: txns.snapshot(xid).unwrap(),
+                write_xid_override: None,
                 transaction_state: None,
                 client_id: 77,
                 current_database_name: "postgres".to_string(),

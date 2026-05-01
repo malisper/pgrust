@@ -919,6 +919,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
             crate::pgrust::database::SessionStatsState::default(),
         )),
         snapshot,
+        write_xid_override: None,
         transaction_state: None,
         client_id: 1,
         current_database_name: "postgres".to_string(),
@@ -1002,6 +1003,7 @@ fn run_plan(
             crate::pgrust::database::SessionStatsState::default(),
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        write_xid_override: None,
         transaction_state: None,
         client_id: 42,
         current_database_name: "postgres".to_string(),
@@ -1121,6 +1123,7 @@ fn first_tuple_slot_kind_for_sql(
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+            write_xid_override: None,
             transaction_state: None,
             client_id: 77,
             current_database_name: "postgres".to_string(),
@@ -1222,6 +1225,7 @@ fn first_tuple_slot_kind_for_plan(
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+            write_xid_override: None,
             transaction_state: None,
             client_id: 77,
             current_database_name: "postgres".to_string(),
@@ -1337,6 +1341,7 @@ fn run_sql_with_catalog(
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot: txns.snapshot(xid).unwrap(),
+            write_xid_override: None,
             transaction_state: None,
             client_id: 77,
             current_database_name: "postgres".to_string(),
@@ -11108,6 +11113,22 @@ fn xmlforest_constructs_xml() {
 }
 
 #[test]
+fn xmlforest_date_values_report_unsupported_xml_feature() {
+    let base = temp_dir("xmlforest_date_unsupported");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select xmlforest('2013-02-21'::date as c3)",
+    )
+    .unwrap_err();
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
 fn oidvector_text_values_support_array_functions() {
     let base = temp_dir("oidvector_array_functions");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -12306,6 +12327,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
             crate::pgrust::database::SessionStatsState::default(),
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        write_xid_override: None,
         transaction_state: None,
         client_id: 77,
         current_database_name: "postgres".to_string(),
@@ -23120,6 +23142,7 @@ fn jsonpath_remaining_regression_cases_work() {
     }
 
     for (input, expected) in [
+        ("", "invalid input syntax for type jsonpath: \"\""),
         ("last", "LAST is allowed only in array subscripts"),
         ("$ ? (last > 0)", "LAST is allowed only in array subscripts"),
         ("@ + 1", "@ is not allowed in root expressions"),

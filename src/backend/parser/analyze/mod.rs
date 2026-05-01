@@ -6795,6 +6795,22 @@ pub fn pg_plan_query_with_outer(
     )
 }
 
+pub fn pg_plan_query_with_sql_function_args(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    input_args: &[(Option<String>, SqlType)],
+) -> Result<PlannedStmt, ParseError> {
+    build_plan_with_outer(
+        stmt,
+        catalog,
+        &sql_function_arg_outer_scopes(catalog, input_args),
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
+}
+
 pub(crate) fn pg_plan_query_with_outer_scopes(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
@@ -6876,6 +6892,61 @@ pub fn pg_plan_values_query_with_outer(
         &[],
         PlannerConfig::default(),
     )
+}
+
+pub fn pg_plan_values_query_with_sql_function_args(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    input_args: &[(Option<String>, SqlType)],
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(
+        stmt,
+        catalog,
+        &sql_function_arg_outer_scopes(catalog, input_args),
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
+}
+
+fn sql_function_arg_outer_scopes(
+    catalog: &dyn CatalogLookup,
+    input_args: &[(Option<String>, SqlType)],
+) -> Vec<BoundScope> {
+    let mut scalar_columns = Vec::new();
+    let mut scopes = Vec::new();
+    for (name, ty) in input_args {
+        let Some(name) = name.as_ref() else {
+            continue;
+        };
+        if matches!(ty.kind, SqlTypeKind::Composite)
+            && ty.typrelid != 0
+            && let Some(relation) = catalog.lookup_relation_by_oid(ty.typrelid)
+        {
+            let desc = RelationDesc {
+                columns: relation
+                    .desc
+                    .columns
+                    .into_iter()
+                    .filter(|column| !column.dropped)
+                    .collect(),
+            };
+            scopes.push(scope_for_relation(Some(name), &desc));
+        } else {
+            scalar_columns.push((name.clone(), *ty));
+        }
+    }
+    if !scalar_columns.is_empty() {
+        let desc = RelationDesc {
+            columns: scalar_columns
+                .into_iter()
+                .map(|(name, sql_type)| column_desc(name, sql_type, true))
+                .collect(),
+        };
+        scopes.insert(0, scope_for_relation(None, &desc));
+    }
+    scopes
 }
 
 pub(crate) fn pg_plan_values_query_with_outer_scopes(
