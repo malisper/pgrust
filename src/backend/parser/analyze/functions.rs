@@ -2409,6 +2409,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgOpclassIsVisible
             | BuiltinScalarFunction::PgOpfamilyIsVisible
             | BuiltinScalarFunction::PgConversionIsVisible
+            | BuiltinScalarFunction::PgCollationIsVisible
             | BuiltinScalarFunction::PgTsParserIsVisible
             | BuiltinScalarFunction::PgTsDictIsVisible
             | BuiltinScalarFunction::PgTsTemplateIsVisible
@@ -3861,6 +3862,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_conversion_is_visible",
             BuiltinScalarFunction::PgConversionIsVisible,
+        ),
+        (
+            "pg_collation_is_visible",
+            BuiltinScalarFunction::PgCollationIsVisible,
         ),
         (
             "pg_ts_parser_is_visible",
@@ -5685,6 +5690,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgIndexHasProperty,
             BuiltinScalarFunction::PgIndexColumnHasProperty,
             BuiltinScalarFunction::PgTypeIsVisible,
+            BuiltinScalarFunction::PgCollationIsVisible,
             BuiltinScalarFunction::BoolAndStateFunc,
             BuiltinScalarFunction::BoolOrStateFunc,
         ] {
@@ -5819,6 +5825,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgOpclassIsVisible
             | BuiltinScalarFunction::PgOpfamilyIsVisible
             | BuiltinScalarFunction::PgConversionIsVisible
+            | BuiltinScalarFunction::PgCollationIsVisible
             | BuiltinScalarFunction::PgTsParserIsVisible
             | BuiltinScalarFunction::PgTsDictIsVisible
             | BuiltinScalarFunction::PgTsTemplateIsVisible
