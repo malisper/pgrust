@@ -123,6 +123,18 @@ fn lookup_partition_alter_parent(
             sqlstate: "42809",
         });
     }
+    if unsupported_action == "ATTACH PARTITION"
+        && (matches!(parent.relkind, 'i' | 'I')
+            || catalog.index_row_by_oid(parent.relation_oid).is_some())
+    {
+        let relation_name = relation_name_for_oid(catalog, parent.relation_oid);
+        return Err(ExecError::DetailedError {
+            message: format!("\"{relation_name}\" is not a partitioned table"),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
     if parent.relkind != 'p' || parent.partitioned_table.is_none() {
         let relation_name = relation_name_for_oid(catalog, parent.relation_oid);
         return Err(ExecError::DetailedError {

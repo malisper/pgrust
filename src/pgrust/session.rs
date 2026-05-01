@@ -16818,10 +16818,37 @@ impl Session {
                         &mut txn.catalog_effects,
                     )
                 }
-                Statement::AlterTableReplicaIdentity(_) => {
-                    Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "ALTER TABLE REPLICA IDENTITY in transaction".into(),
-                    )))
+                Statement::AlterTableReplicaIdentity(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) else {
+                        if alter_stmt.if_exists {
+                            return Ok(StatementResult::AffectedRows(0));
+                        }
+                        return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        )));
+                    };
+                    if !matches!(relation.relkind, 'r' | 'p') {
+                        return Err(ExecError::Parse(ParseError::WrongObjectType {
+                            name: alter_stmt.table_name.clone(),
+                            expected: "table",
+                        }));
+                    }
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_replica_identity_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
                 }
                 Statement::AlterPolicy(ref alter_stmt) => {
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);

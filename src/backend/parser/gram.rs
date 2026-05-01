@@ -248,6 +248,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_alter_table_cluster_on_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_cluster_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_trigger_state_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1347,11 +1350,75 @@ fn try_parse_alter_table_cluster_on_statement(sql: &str) -> Result<Option<Statem
     }
     Ok(Some(Statement::Cluster(ClusterStatement {
         table_name,
-        index_name: schema_name
-            .map(|schema| format!("{schema}.{index_name}"))
-            .unwrap_or(index_name),
+        index_name: qualify_schema_name(schema_name, index_name),
         mark_only: true,
     })))
+}
+
+fn try_parse_cluster_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "cluster") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "cluster").trim_start();
+    if keyword_at_start(rest, "verbose") {
+        rest = consume_keyword(rest, "verbose").trim_start();
+    }
+    if rest.is_empty() {
+        return Ok(Some(Statement::Cluster(ClusterStatement {
+            table_name: String::new(),
+            index_name: String::new(),
+            mark_only: false,
+        })));
+    }
+
+    let ((schema_name, first_name), tail) = parse_schema_qualified_name(rest)?;
+    let first_name = qualify_schema_name(schema_name, first_name);
+    let tail = tail.trim_start();
+    if tail.is_empty() {
+        return Ok(Some(Statement::Cluster(ClusterStatement {
+            table_name: first_name,
+            index_name: String::new(),
+            mark_only: false,
+        })));
+    }
+
+    if keyword_at_start(tail, "using") {
+        let rest = consume_keyword(tail, "using").trim_start();
+        let ((schema_name, index_name), rest) = parse_schema_qualified_name(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of CLUSTER statement",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(Some(Statement::Cluster(ClusterStatement {
+            table_name: first_name,
+            index_name: qualify_schema_name(schema_name, index_name),
+            mark_only: false,
+        })));
+    }
+
+    if keyword_at_start(tail, "on") {
+        let rest = consume_keyword(tail, "on").trim_start();
+        let ((schema_name, table_name), rest) = parse_schema_qualified_name(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of CLUSTER statement",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(Some(Statement::Cluster(ClusterStatement {
+            table_name: qualify_schema_name(schema_name, table_name),
+            index_name: first_name,
+            mark_only: false,
+        })));
+    }
+
+    Err(ParseError::UnexpectedToken {
+        expected: "USING, ON, or end of CLUSTER statement",
+        actual: tail.into(),
+    })
 }
 
 fn try_parse_alter_table_set_without_cluster_statement(
@@ -10654,6 +10721,12 @@ fn parse_schema_qualified_name(
         [schema, name] => Ok(((Some(schema.clone()), name.clone()), rest)),
         _ => Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
     }
+}
+
+fn qualify_schema_name(schema_name: Option<String>, name: String) -> String {
+    schema_name
+        .map(|schema| format!("{schema}.{name}"))
+        .unwrap_or(name)
 }
 
 fn parse_unqualified_identifier<'a>(

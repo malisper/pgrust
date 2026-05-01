@@ -31330,6 +31330,146 @@ fn create_gist_expression_index_builds_and_tracks_expression_metadata() {
 }
 
 #[test]
+fn large_pg_index_expression_metadata_reindexes_and_drops() {
+    let base = temp_dir("large_pg_index_expression_metadata");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table test_pg_index_toast_table (a int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create or replace function test_pg_index_toast_func(a int, b int[]) \
+         returns bool as $$ select true $$ language sql immutable",
+    )
+    .unwrap();
+
+    let array = (1..=10_000)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let literal = format!("'{{{array}}}'");
+
+    let create_concurrently = format!(
+        "create index concurrently test_pg_index_toast_index \
+         on test_pg_index_toast_table (test_pg_index_toast_func(a, {literal}))"
+    );
+    db.execute(1, &create_concurrently).unwrap();
+    db.execute(1, "reindex index concurrently test_pg_index_toast_index")
+        .unwrap();
+    db.execute(1, "drop index concurrently test_pg_index_toast_index")
+        .unwrap();
+
+    let create = format!(
+        "create index test_pg_index_toast_index \
+         on test_pg_index_toast_table (test_pg_index_toast_func(a, {literal}))"
+    );
+    db.execute(1, &create).unwrap();
+    db.execute(1, "reindex index test_pg_index_toast_index")
+        .unwrap();
+    db.execute(1, "drop index test_pg_index_toast_index")
+        .unwrap();
+}
+
+#[test]
+fn partitioned_index_creation_reuses_invalid_concurrent_child_index() {
+    let base = temp_dir("partitioned_invalid_child_index_reuse");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parted_isvalid_tab (a int, b int) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table parted_isvalid_tab_1 partition of parted_isvalid_tab \
+         for values from (1) to (10) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table parted_isvalid_tab_2 partition of parted_isvalid_tab \
+         for values from (10) to (20)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table parted_isvalid_tab_11 partition of parted_isvalid_tab_1 \
+         for values from (1) to (5)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table parted_isvalid_tab_12 partition of parted_isvalid_tab_1 \
+         for values from (5) to (10)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parted_isvalid_tab_11 values (1, 0)")
+        .unwrap();
+
+    assert!(matches!(
+        db.execute(
+            1,
+            "create index concurrently parted_isvalid_idx_11 \
+             on parted_isvalid_tab_11 ((a/b))",
+        ),
+        Err(ExecError::DivisionByZero("/"))
+    ));
+    db.execute(
+        1,
+        "create index parted_isvalid_idx on parted_isvalid_tab ((a/b))",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select idx.relname, pg_index.indisvalid, heap.relname, coalesce(parent.relname, '') \
+             from pg_index \
+             join pg_class idx on idx.oid = pg_index.indexrelid \
+             join pg_class heap on heap.oid = pg_index.indrelid \
+             left join pg_inherits inh on inh.inhrelid = pg_index.indexrelid \
+             left join pg_class parent on parent.oid = inh.inhparent \
+             where idx.relname like 'parted_isvalid%' \
+             order by idx.relname collate \"C\"",
+        ),
+        vec![
+            vec![
+                Value::Text("parted_isvalid_idx".into()),
+                Value::Bool(false),
+                Value::Text("parted_isvalid_tab".into()),
+                Value::Text("".into()),
+            ],
+            vec![
+                Value::Text("parted_isvalid_idx_11".into()),
+                Value::Bool(false),
+                Value::Text("parted_isvalid_tab_11".into()),
+                Value::Text("parted_isvalid_tab_1_expr_idx".into()),
+            ],
+            vec![
+                Value::Text("parted_isvalid_tab_12_expr_idx".into()),
+                Value::Bool(true),
+                Value::Text("parted_isvalid_tab_12".into()),
+                Value::Text("parted_isvalid_tab_1_expr_idx".into()),
+            ],
+            vec![
+                Value::Text("parted_isvalid_tab_1_expr_idx".into()),
+                Value::Bool(false),
+                Value::Text("parted_isvalid_tab_1".into()),
+                Value::Text("parted_isvalid_idx".into()),
+            ],
+            vec![
+                Value::Text("parted_isvalid_tab_2_expr_idx".into()),
+                Value::Bool(true),
+                Value::Text("parted_isvalid_tab_2".into()),
+                Value::Text("parted_isvalid_idx".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn gist_split_recovery_preserves_exact_and_knn_scans_after_reopen() {
     let base = temp_dir("gist_split_recovery");
     let exact_sql = "select id from boxes \
@@ -32907,6 +33047,415 @@ fn unique_include_constraint_uses_only_key_columns_for_enforcement_and_catalogs(
             "select pg_get_constraintdef(oid) from pg_constraint where conname = 'include_items_key'",
         ),
         vec![vec![Value::Text("UNIQUE (a, b) INCLUDE (payload)".into())]]
+    );
+}
+
+#[test]
+fn drop_table_drops_constraint_backed_include_index_for_name_reuse() {
+    let base = temp_dir("drop_include_index_name_reuse");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(
+        1,
+        "create table include_drop_items (
+            a int4,
+            b int4,
+            constraint covering unique (a) include (b)
+        )",
+    )
+    .unwrap();
+    db.execute(1, "drop table include_drop_items").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname = 'covering'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+
+    db.execute(
+        1,
+        "create table include_drop_items (
+            a int4 not null,
+            b int4,
+            constraint covering primary key (a) include (b)
+        )",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indexrelid::regclass::text from pg_index where indrelid = 'include_drop_items'::regclass",
+        ),
+        vec![vec![Value::Text("covering".into())]]
+    );
+}
+
+#[test]
+fn partitioned_exclusion_rejects_non_equal_partition_key_operator() {
+    let base = temp_dir("partitioned_exclusion_non_equal");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    match db.execute(
+        1,
+        "create table idxpart (
+            a int4range,
+            exclude using gist (a with -|-)
+        ) partition by range (a)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => assert_eq!(
+            message,
+            "cannot match partition key to index on column \"a\" using non-equal operator \"-|-\""
+        ),
+        other => panic!("expected non-equal exclusion partition key error, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_attach_partition_on_index_reports_not_partitioned_table() {
+    let base = temp_dir("attach_partition_on_index");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(
+        1,
+        "create table idxpart (a int4, c int4) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table idxpart1 partition of idxpart for values from (10) to (20)",
+    )
+    .unwrap();
+    db.execute(1, "create index idxpart_c on only idxpart (c)")
+        .unwrap();
+    db.execute(1, "create index idxpart1_c on idxpart1 (c)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table idxpart_c attach partition idxpart1_c for values from (10) to (20)",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "\"idxpart_c\" is not a partitioned table");
+        }
+        other => panic!("expected not-partitioned-table error, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_child_index_only_attrs_include_parent_target() {
+    let base = temp_dir("partition_child_index_only_parent_target");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(
+        1,
+        "create table idxpart (a int4, b text, c int4[]) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table idxpart1 partition of idxpart for values from (0) to (100000)",
+    )
+    .unwrap();
+    db.execute(1, "set enable_seqscan to off").unwrap();
+    db.execute(1, "create index idxpart_spgist on idxpart using spgist(b)")
+        .unwrap();
+
+    let lines = explain_lines(&db, 1, "select * from idxpart where b = 'abcd'");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on idxpart1 idxpart")),
+        "expected partition child query to fetch heap columns, got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("Index Only Scan")),
+        "expected non-covering partition child index to avoid index-only scan, got {lines:?}"
+    );
+}
+
+#[test]
+fn reset_search_path_keeps_public_partitioned_table_visible_to_create_index() {
+    let base = temp_dir("reset_search_path_partitioned_index");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table idxpart (a int4) partition by range (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart1 partition of idxpart for values from (0) to (100)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart2 partition of idxpart for values from (100) to (1000) \
+             partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart21 partition of idxpart2 for values from (100) to (200)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart22 partition of idxpart2 for values from (200) to (300)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on idxpart22 (a)")
+        .unwrap();
+    session
+        .execute(&db, "create index on only idxpart2 (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index idxpart2_a_idx attach partition idxpart22_a_idx",
+        )
+        .unwrap();
+    session.execute(&db, "create index on idxpart (a)").unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart_another (a int4, b int4, primary key (a, b)) \
+             partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart_another_1 partition of idxpart_another \
+             for values from (0) to (100)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart3 (c int4, b int4, a int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table idxpart3 drop column b, drop column c")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart31 partition of idxpart3 for values from (1000) to (1200)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart32 partition of idxpart3 for values from (1200) to (1400)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table idxpart attach partition idxpart3 for values from (1000) to (2000)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create schema regress_indexing")
+        .unwrap();
+    session
+        .execute(&db, "set search_path to regress_indexing")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pk (a int4 primary key) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pk1 partition of pk for values from (0) to (1000)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table pk2 (b int4, a int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table pk2 drop column b")
+        .unwrap();
+    session
+        .execute(&db, "alter table pk2 alter a set not null")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table pk attach partition pk2 for values from (1000) to (2000)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pk3 partition of pk for values from (2000) to (3000)",
+        )
+        .unwrap();
+    session.execute(&db, "create table pk4 (like pk)").unwrap();
+    session
+        .execute(
+            &db,
+            "alter table pk attach partition pk4 for values from (3000) to (4000)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table pk5 (like pk) partition by range (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pk51 partition of pk5 for values from (4000) to (4500)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pk52 partition of pk5 for values from (4500) to (5000)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table pk attach partition pk5 for values from (4000) to (5000)",
+        )
+        .unwrap();
+    session.execute(&db, "reset search_path").unwrap();
+    session
+        .execute(
+            &db,
+            "create table covidxpart (a int4, b int4) partition by list (a)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select n.nspname from pg_class c \
+             join pg_namespace n on n.oid = c.relnamespace \
+             where c.relname = 'covidxpart'",
+        ),
+        vec![vec![Value::Text("public".into())]]
+    );
+    session
+        .execute(&db, "create unique index on covidxpart (a) include (b)")
+        .unwrap();
+}
+
+#[test]
+fn drop_partitioned_column_drops_dependent_child_indexes() {
+    let base = temp_dir("drop_partitioned_column_child_indexes");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_index_col_drop(a int4, b int4, c int4) \
+             partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_index_col_drop1 partition of parted_index_col_drop \
+             for values in (1) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_index_col_drop11 partition of parted_index_col_drop1 \
+             for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_index_col_drop2 partition of parted_index_col_drop \
+             for values in (2)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on parted_index_col_drop (c)")
+        .unwrap();
+    session
+        .execute(&db, "create index on parted_index_col_drop (b, c)")
+        .unwrap();
+    session
+        .execute(&db, "create index on parted_index_col_drop (b)")
+        .unwrap();
+    session
+        .execute(&db, "alter table parted_index_col_drop drop column c")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select indexrelid::regclass::text \
+             from pg_index \
+             where indrelid::regclass::text like 'parted_index_col_drop%' \
+             order by indexrelid::regclass::text collate \"C\"",
+        ),
+        vec![
+            vec![Value::Text("parted_index_col_drop11_b_idx".into())],
+            vec![Value::Text("parted_index_col_drop1_b_idx".into())],
+            vec![Value::Text("parted_index_col_drop2_b_idx".into())],
+            vec![Value::Text("parted_index_col_drop_b_idx".into())],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_replica_identity_using_index_works_in_transaction() {
+    let base = temp_dir("replica_identity_in_transaction");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table replident_items (id int4 not null, value int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index replident_items_id_idx on replident_items (id)",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "alter table only replident_items replica identity using index replident_items_id_idx",
+        )
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relreplident::text, i.indisreplident \
+             from pg_class c \
+             join pg_index i on i.indrelid = c.oid \
+             where c.relname = 'replident_items'",
+        ),
+        vec![vec![Value::Text("i".into()), Value::Bool(true)]]
     );
 }
 

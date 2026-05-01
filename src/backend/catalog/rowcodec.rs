@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use parking_lot::Mutex;
+
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -1287,8 +1289,9 @@ pub(crate) fn pg_opfamily_row_from_values(
 }
 
 pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow, CatalogError> {
+    let indexrelid = expect_oid(&values[0])?;
     Ok(PgIndexRow {
-        indexrelid: expect_oid(&values[0])?,
+        indexrelid,
         indrelid: expect_oid(&values[1])?,
         indnatts: expect_int16(&values[2])?,
         indnkeyatts: expect_int16(&values[3])?,
@@ -1307,8 +1310,16 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
         indcollation: parse_oidvector_value(&values[16])?,
         indclass: parse_oidvector_value(&values[17])?,
         indoption: parse_indkey_value(&values[18])?,
-        indexprs: expect_nullable_text(&values[19])?,
-        indpred: expect_nullable_text(&values[20])?,
+        indexprs: decode_large_pg_index_node_tree(
+            indexrelid,
+            "indexprs",
+            expect_nullable_text(&values[19])?,
+        ),
+        indpred: decode_large_pg_index_node_tree(
+            indexrelid,
+            "indpred",
+            expect_nullable_text(&values[20])?,
+        ),
     })
 }
 
@@ -2426,8 +2437,9 @@ fn pg_description_row_values(row: PgDescriptionRow) -> Vec<Value> {
 }
 
 fn pg_index_row_values(row: PgIndexRow) -> Vec<Value> {
+    let indexrelid = row.indexrelid;
     vec![
-        Value::Int32(row.indexrelid as i32),
+        Value::Int32(indexrelid as i32),
         Value::Int32(row.indrelid as i32),
         Value::Int16(row.indnatts),
         Value::Int16(row.indnkeyatts),
@@ -2446,9 +2458,63 @@ fn pg_index_row_values(row: PgIndexRow) -> Vec<Value> {
         Value::PgArray(oid_vector_value(row.indcollation)),
         Value::PgArray(oid_vector_value(row.indclass)),
         Value::PgArray(int16_vector_value(row.indoption)),
-        row.indexprs.map_or(Value::Null, |v| Value::Text(v.into())),
-        row.indpred.map_or(Value::Null, |v| Value::Text(v.into())),
+        encode_large_pg_index_node_tree(indexrelid, "indexprs", row.indexprs),
+        encode_large_pg_index_node_tree(indexrelid, "indpred", row.indpred),
     ]
+}
+
+const LARGE_PG_INDEX_NODE_TREE_LIMIT: usize = 2_048;
+const LARGE_PG_INDEX_NODE_TREE_PREFIX: &str = "__pgrust_large_pg_index_node_tree__:";
+
+fn large_pg_index_node_trees() -> &'static Mutex<HashMap<String, String>> {
+    static LARGE_PG_INDEX_NODE_TREES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    LARGE_PG_INDEX_NODE_TREES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn large_pg_index_node_tree_key(indexrelid: u32, column: &'static str) -> String {
+    format!("{indexrelid}:{column}")
+}
+
+fn encode_large_pg_index_node_tree(
+    indexrelid: u32,
+    column: &'static str,
+    value: Option<String>,
+) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    if value.len() <= LARGE_PG_INDEX_NODE_TREE_LIMIT {
+        return Value::Text(value.into());
+    }
+
+    let key = large_pg_index_node_tree_key(indexrelid, column);
+    // :HACK: pg_index has a bootstrap toast relation OID, but pgrust does not
+    // yet materialize bootstrap catalog toast heaps. Keep oversized expression
+    // metadata reachable to relcache while storing a small physical row marker.
+    large_pg_index_node_trees()
+        .lock()
+        .insert(key.clone(), value);
+    Value::Text(format!("{LARGE_PG_INDEX_NODE_TREE_PREFIX}{key}").into())
+}
+
+fn decode_large_pg_index_node_tree(
+    indexrelid: u32,
+    column: &'static str,
+    value: Option<String>,
+) -> Option<String> {
+    let value = value?;
+    let Some(key) = value.strip_prefix(LARGE_PG_INDEX_NODE_TREE_PREFIX) else {
+        return Some(value);
+    };
+    let expected_key = large_pg_index_node_tree_key(indexrelid, column);
+    if key != expected_key {
+        return Some(value);
+    }
+    large_pg_index_node_trees()
+        .lock()
+        .get(key)
+        .cloned()
+        .or(Some(value))
 }
 
 fn pg_opclass_row_values(row: PgOpclassRow) -> Vec<Value> {

@@ -287,6 +287,54 @@ fn foreign_key_dependency_detail(
 
 impl Database {
     #[allow(clippy::too_many_arguments)]
+    fn drop_indexes_for_column_attnum_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        relation_oid: u32,
+        target_attnum: i16,
+        catalog: &dyn CatalogLookup,
+        interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let mut next_cid = cid;
+        let dependent_indexes = catalog
+            .index_relations_for_heap(relation_oid)
+            .into_iter()
+            .filter(|index| index.index_meta.indkey.contains(&target_attnum))
+            .collect::<Vec<_>>();
+        for index in dependent_indexes {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: interrupts.clone(),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .drop_relation_entry_by_oid_mvcc(index.relation_oid, &ctx)
+                .map_err(|err| match err {
+                    CatalogError::UnknownTable(_) => ExecError::Parse(
+                        ParseError::TableDoesNotExist(index.relation_oid.to_string()),
+                    ),
+                    other => ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "dependent index for DROP COLUMN",
+                        actual: format!("{other:?}"),
+                    }),
+                })?
+                .1;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+        Ok(next_cid)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn drop_foreign_key_dependencies_for_column_in_transaction(
         &self,
         client_id: ClientId,
@@ -590,11 +638,6 @@ impl Database {
             &column_name,
             target_attnum,
         )?;
-        let dependent_indexes = catalog
-            .index_relations_for_heap(relation.relation_oid)
-            .into_iter()
-            .filter(|index| index.index_meta.indkey.contains(&target_attnum))
-            .collect::<Vec<_>>();
         self.drop_statistics_for_column_in_transaction(
             client_id,
             relation.relation_oid,
@@ -626,33 +669,16 @@ impl Database {
             catalog_effects.push(effect);
             next_cid = next_cid.saturating_add(1);
         }
-        for index in dependent_indexes {
-            let ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: next_cid,
-                client_id,
-                waiter: Some(self.txn_waiter.clone()),
-                interrupts: interrupts.clone(),
-            };
-            let effect = self
-                .catalog
-                .write()
-                .drop_relation_entry_by_oid_mvcc(index.relation_oid, &ctx)
-                .map_err(|err| match err {
-                    CatalogError::UnknownTable(_) => ExecError::Parse(
-                        ParseError::TableDoesNotExist(index.relation_oid.to_string()),
-                    ),
-                    other => ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "dependent index for DROP COLUMN",
-                        actual: format!("{other:?}"),
-                    }),
-                })?
-                .1;
-            catalog_effects.push(effect);
-            next_cid = next_cid.saturating_add(1);
-        }
+        next_cid = self.drop_indexes_for_column_attnum_in_transaction(
+            client_id,
+            xid,
+            next_cid,
+            relation.relation_oid,
+            target_attnum,
+            &catalog,
+            interrupts.clone(),
+            catalog_effects,
+        )?;
         let inheritance_targets = if drop_stmt.only {
             direct_inheritance_children(&catalog, relation.relation_oid)
                 .into_iter()
@@ -704,6 +730,23 @@ impl Database {
                 && relation.relkind == 'p'
                 && item.relation.relispartition
                 && column.attinhcount <= expected_parents;
+            let child_column_dropped = drop_partition_child_column
+                || (column.attinhcount <= expected_parents && !column.attislocal);
+            if child_column_dropped {
+                let child_attnum = visible_column_index(&item.relation, &drop_stmt.column_name)
+                    .map(|index| index.saturating_add(1) as i16)
+                    .unwrap_or(0);
+                next_cid = self.drop_indexes_for_column_attnum_in_transaction(
+                    client_id,
+                    xid,
+                    next_cid,
+                    item.relation.relation_oid,
+                    child_attnum,
+                    &catalog,
+                    interrupts.clone(),
+                    catalog_effects,
+                )?;
+            }
             let effect = if drop_stmt.only {
                 let new_attinhcount = column.attinhcount.saturating_sub(expected_parents);
                 let not_null_inhcount = column.not_null_constraint_oid.map(|_| {
@@ -723,9 +766,7 @@ impl Database {
                         &ctx,
                     )
                     .map_err(map_catalog_error)?
-            } else if drop_partition_child_column
-                || (column.attinhcount <= expected_parents && !column.attislocal)
-            {
+            } else if child_column_dropped {
                 self.catalog
                     .write()
                     .alter_table_drop_column_mvcc(
@@ -758,10 +799,7 @@ impl Database {
                     )
                     .map_err(map_catalog_error)?
             };
-            if !drop_stmt.only
-                && (drop_partition_child_column
-                    || (column.attinhcount <= expected_parents && !column.attislocal))
-            {
+            if !drop_stmt.only && child_column_dropped {
                 dropped_inheritance_oids.insert(item.relation.relation_oid);
             }
             self.apply_catalog_mutation_effect_immediate(&effect)?;

@@ -662,6 +662,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
         relation: BoundRelation,
         parent_index_oid: u32,
         spec: &PartitionedIndexSpec,
+        allow_invalid_existing: bool,
     ) -> Result<(u32, bool), ExecError> {
         let relation = self.current_relation(relation.relation_oid)?;
         if relation.relkind == 'f' {
@@ -692,7 +693,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 &relation,
                 spec,
                 &base_name,
-                false,
+                !allow_invalid_existing,
                 allow_constraint_backed,
             )? {
                 self.create_index_inheritance(existing.relation_oid, parent_index_oid)?;
@@ -705,9 +706,21 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 &relation,
                 index_entry.relation_oid,
                 spec,
+                allow_invalid_existing,
             )?;
             Ok((index_entry.relation_oid, valid))
         } else {
+            if allow_invalid_existing
+                && let Some(existing) = self.find_matching_unattached_index(
+                    &relation,
+                    spec,
+                    false,
+                    allow_constraint_backed,
+                )?
+            {
+                self.create_index_inheritance(existing.relation_oid, parent_index_oid)?;
+                return Ok((existing.relation_oid, existing.index_meta.indisvalid));
+            }
             let index_name = self.child_index_name(&relation, spec)?;
             let index_entry = self.create_physical_index(&relation, &index_name, spec)?;
             self.create_index_inheritance(index_entry.relation_oid, parent_index_oid)?;
@@ -732,10 +745,12 @@ impl<'a> PartitionedIndexInstaller<'a> {
         relation: &BoundRelation,
         index_oid: u32,
         spec: &PartitionedIndexSpec,
+        allow_invalid_existing: bool,
     ) -> Result<bool, ExecError> {
         let mut valid = true;
         for child in self.direct_partition_children(relation.relation_oid)? {
-            let (_, child_valid) = self.reconcile_relation_index_tree(child, index_oid, spec)?;
+            let (_, child_valid) =
+                self.reconcile_relation_index_tree(child, index_oid, spec, allow_invalid_existing)?;
             if !child_valid {
                 valid = false;
             }
@@ -966,6 +981,7 @@ impl Database {
                     &target,
                     index_entry.relation_oid,
                     &spec,
+                    false,
                 )?;
                 if !valid {
                     installer.set_index_valid(index_entry.relation_oid, false)?;
@@ -1111,6 +1127,7 @@ impl Database {
             relation,
             root.relation_oid,
             &spec,
+            true,
         )?;
         if let Some(meta) = root.index_meta.as_mut() {
             meta.indisvalid = valid;
@@ -1168,6 +1185,7 @@ impl Database {
                 child.clone(),
                 parent_index.relation_oid,
                 &spec,
+                false,
             )?;
             let _ = installer.validate_partitioned_index_upward(parent_index.relation_oid)?;
         }

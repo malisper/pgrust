@@ -1227,6 +1227,16 @@ impl Database {
         };
         for action in actions {
             let relation = installer.current_relation(relation.relation_oid)?;
+            if relation.relkind == 'p' {
+                let partition_spec = crate::backend::parser::relation_partition_spec(&relation)
+                    .map_err(ExecError::Parse)?;
+                crate::backend::parser::validate_partitioned_index_backed_constraints(
+                    &installer.relation_name(relation.relation_oid)?,
+                    Some(&partition_spec),
+                    std::slice::from_ref(action),
+                )
+                .map_err(ExecError::Parse)?;
+            }
             let spec = PartitionedKeySpec::from_action(action);
             let parent = installer.parent_key_for_spec(&relation, &spec)?;
             let _ = installer.reconcile_relation_key_tree(

@@ -8,7 +8,7 @@ use crate::backend::access::heap::heapam::{
     heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
 };
 use crate::backend::access::index::buildkeys::{
-    IndexBuildKeyProjector, materialize_heap_row_values,
+    IndexBuildKeyProjector, materialize_heap_row_values_with_toast,
 };
 use crate::backend::access::index::unique::{UniqueCandidateResult, classify_unique_candidate};
 use crate::backend::access::nbtree::nbtcompare::{
@@ -1182,6 +1182,16 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
     .map_err(|err| CatalogError::Io(format!("heap scan begin failed: {err:?}")))?;
     let attr_descs = ctx.heap_desc.attribute_descs();
     let mut key_projector = IndexBuildKeyProjector::new(ctx)?;
+    let toast =
+        ctx.heap_toast.map(
+            |relation| crate::include::nodes::execnodes::ToastFetchContext {
+                relation,
+                pool: ctx.pool.clone(),
+                txns: ctx.txns.clone(),
+                snapshot: ctx.snapshot.clone(),
+                client_id: ctx.client_id,
+            },
+        );
     let mut spool = crate::backend::access::nbtree::nbtsort::BtSpool::default();
     let mut result = IndexBuildResult::default();
     let mut approx_bytes = 0usize;
@@ -1199,7 +1209,8 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
         let datums = tuple
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
-        let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)?;
+        let row_values =
+            materialize_heap_row_values_with_toast(&ctx.heap_desc, &datums, toast.as_ref())?;
         let Some(all_values) = key_projector.project(ctx, &row_values, tid)? else {
             result.heap_tuples += 1;
             continue;

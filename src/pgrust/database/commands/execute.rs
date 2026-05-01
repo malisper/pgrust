@@ -1412,6 +1412,79 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_alter_table_replica_identity_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &crate::backend::parser::AlterTableReplicaIdentityStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let Some(relation) =
+            crate::pgrust::database::ddl::lookup_table_or_partitioned_table_for_alter_table(
+                &catalog,
+                &stmt.table_name,
+                stmt.if_exists,
+            )?
+        else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        let (identity, index_oid) = match &stmt.identity {
+            ReplicaIdentityKind::Default => ('d', None),
+            ReplicaIdentityKind::Full => ('f', None),
+            ReplicaIdentityKind::Nothing => ('n', None),
+            ReplicaIdentityKind::Index(index_name) => {
+                let index = catalog
+                    .index_relations_for_heap(relation.relation_oid)
+                    .into_iter()
+                    .find(|index| index.name.eq_ignore_ascii_case(index_name))
+                    .ok_or_else(|| {
+                        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                            expected: "index on table",
+                            actual: format!(
+                                "index \"{}\" does not exist for table \"{}\"",
+                                index_name, stmt.table_name
+                            ),
+                        })
+                    })?;
+                if !index.index_meta.indisunique {
+                    return Err(ExecError::Parse(
+                        crate::backend::parser::ParseError::DetailedError {
+                            message: format!(
+                                "cannot use non-unique index \"{}\" as replica identity",
+                                index_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42809",
+                        },
+                    ));
+                }
+                ('i', Some(index.relation_oid))
+            }
+        };
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .set_replica_identity_mvcc(relation.relation_oid, identity, index_oid, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_truncate_table_in_transaction_with_search_path(
         &self,
         client_id: ClientId,

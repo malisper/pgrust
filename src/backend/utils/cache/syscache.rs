@@ -2583,6 +2583,33 @@ pub fn ensure_class_rows(
         .unwrap_or_default()
 }
 
+pub fn scan_class_rows_without_catcache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgClassRow> {
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+    get_catalog_snapshot(db, client_id, txn_ctx, None)
+        .and_then(|snapshot| {
+            probe_system_catalog_rows_visible_in_db(
+                &db.pool,
+                &db.txns,
+                &snapshot,
+                client_id,
+                db.database_oid,
+                PG_CLASS_OID_INDEX_OID,
+                Vec::new(),
+            )
+            .ok()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|values| pg_class_row_from_values(values).ok())
+        .collect()
+}
+
 pub fn ensure_constraint_rows(
     db: &Database,
     client_id: ClientId,

@@ -4049,6 +4049,9 @@ fn expression_index_key_sql(
 
 fn format_expression_index_sql(expr_sql: &str) -> String {
     let trimmed = expr_sql.trim();
+    if let Some(rendered) = format_simple_unary_expression_index_sql(trimmed) {
+        return rendered;
+    }
     let Some(open_paren) = trimmed.find('(') else {
         return trimmed.to_string();
     };
@@ -4066,6 +4069,18 @@ fn format_expression_index_sql(expr_sql: &str) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{name}({args})")
+}
+
+fn format_simple_unary_expression_index_sql(expr_sql: &str) -> Option<String> {
+    let op = expr_sql.chars().next()?;
+    if !matches!(op, '+' | '-' | '~') {
+        return None;
+    }
+    let operand = expr_sql[op.len_utf8()..].trim();
+    if operand.is_empty() || operand.starts_with(op) {
+        return None;
+    }
+    Some(format!("({op} {operand})"))
 }
 
 fn split_expression_index_args(args: &str) -> Vec<&str> {

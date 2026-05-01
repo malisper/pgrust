@@ -18,7 +18,7 @@ use crate::backend::parser::{
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::parse_date_text;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
-use crate::include::catalog::{BTREE_AM_OID, HASH_AM_OID};
+use crate::include::catalog::{BTREE_AM_OID, HASH_AM_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind, TableSampleClause,
@@ -75,6 +75,24 @@ type PlannerIndexExprCache = RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>;
 
 fn spec_prefers_plain_index_scan(spec: &IndexPathSpec) -> bool {
     spec_prefers_plain_network_btree_scan(spec) || hash_index_gettuple_supported(&spec.index)
+}
+
+fn spec_suppresses_plain_index_scan(
+    spec: &IndexPathSpec,
+    target_index_only: bool,
+    config: PlannerConfig,
+) -> bool {
+    !config.enable_seqscan
+        && spec.index.index_meta.am_oid == SPGIST_AM_OID
+        && !target_index_only
+        && !spec.removes_order
+        && spec
+            .index
+            .index_meta
+            .opfamily_oids
+            .first()
+            .copied()
+            .is_some_and(|family| family == SPGIST_TEXT_FAMILY_OID)
 }
 
 fn spec_prefers_plain_network_btree_scan(spec: &IndexPathSpec) -> bool {
@@ -1950,6 +1968,9 @@ fn collect_required_index_only_attrs_for_root(
     order_items: Option<&[OrderByEntry]>,
 ) -> Vec<usize> {
     let mut attrs = BTreeSet::new();
+    let mut parent_attrs = BTreeSet::new();
+    let append_info = append_translation(root, rtindex);
+    let parent_rtindex = append_info.map(|info| info.parent_relid);
     let targets = if root.parse.window_clauses.is_empty() {
         vec![
             &root.scanjoin_target,
@@ -1967,18 +1988,37 @@ fn collect_required_index_only_attrs_for_root(
     for target in targets {
         for expr in &target.exprs {
             collect_expr_attrs_for_rel(expr, rtindex, &mut attrs);
+            if let Some(parent_rtindex) = parent_rtindex {
+                collect_expr_attrs_for_rel(expr, parent_rtindex, &mut parent_attrs);
+            }
         }
     }
     if let Some(filter) = filter {
         collect_expr_attrs_for_rel(filter, rtindex, &mut attrs);
+        if let Some(parent_rtindex) = parent_rtindex {
+            collect_expr_attrs_for_rel(filter, parent_rtindex, &mut parent_attrs);
+        }
     }
     if let Some(order_items) = order_items {
         for item in order_items {
             collect_expr_attrs_for_rel(&item.expr, rtindex, &mut attrs);
+            if let Some(parent_rtindex) = parent_rtindex {
+                collect_expr_attrs_for_rel(&item.expr, parent_rtindex, &mut parent_attrs);
+            }
         }
     }
     for restrict in &root.inner_join_clauses {
         collect_expr_attrs_for_rel(&restrict.clause, rtindex, &mut attrs);
+        if let Some(parent_rtindex) = parent_rtindex {
+            collect_expr_attrs_for_rel(&restrict.clause, parent_rtindex, &mut parent_attrs);
+        }
+    }
+    if let Some(append_info) = append_info {
+        for parent_attr in parent_attrs {
+            if let Some(translated) = append_info.translated_vars.get(parent_attr) {
+                collect_expr_attrs_for_rel(translated, rtindex, &mut attrs);
+            }
+        }
     }
     attrs.into_iter().collect()
 }
@@ -2381,7 +2421,10 @@ fn collect_relation_access_paths(
         let has_index_spec = index_spec.is_some();
         if let Some(spec) = index_spec {
             let prefer_plain_index_scan = spec_prefers_plain_index_scan(&spec);
-            if config.enable_indexscan && access_method_supports_index_scan_for_index(index) {
+            if config.enable_indexscan
+                && access_method_supports_index_scan_for_index(index)
+                && !spec_suppresses_plain_index_scan(&spec, target_index_only, config)
+            {
                 paths.push(
                     estimate_index_candidate(
                         rtindex,

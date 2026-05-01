@@ -1386,6 +1386,16 @@ pub(crate) fn validate_partition_relation_compatibility(
     let parent_name = relation_name_for_oid(catalog, parent.relation_oid);
     let child_name = relation_name_for_oid(catalog, child.relation_oid);
     if parent.relkind != 'p' || parent.partitioned_table.is_none() {
+        if matches!(parent.relkind, 'i' | 'I' | 'p')
+            || catalog.index_row_by_oid(parent.relation_oid).is_some()
+        {
+            return Err(ExecError::DetailedError {
+                message: format!("\"{parent_name}\" is not a partitioned table"),
+                detail: None,
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
         return Err(ExecError::DetailedError {
             message: format!(
                 "ALTER action ATTACH PARTITION cannot be performed on relation \"{parent_name}\""

@@ -22,7 +22,8 @@ use crate::backend::utils::cache::syscache::{
     ensure_am_rows, ensure_amop_rows, ensure_amproc_rows, ensure_attribute_rows, ensure_class_rows,
     ensure_collation_rows, ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows,
     ensure_namespace_rows, ensure_opclass_rows, ensure_proc_rows, ensure_rewrite_rows,
-    ensure_statistic_rows, ensure_type_rows, with_backend_catcache,
+    ensure_statistic_rows, ensure_type_rows, scan_class_rows_without_catcache,
+    with_backend_catcache,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
@@ -299,15 +300,22 @@ fn class_row_by_name_namespace(
     relname: &str,
     namespace_oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
-    catalog_name_lookup_keys(relname)
-        .into_iter()
-        .find_map(|key| {
+    let normalized = normalize_catalog_name(relname);
+    let mut lookup_names = vec![normalized.to_string()];
+    let folded = normalized.to_ascii_lowercase();
+    if folded != normalized {
+        lookup_names.push(folded);
+    }
+
+    lookup_names
+        .iter()
+        .find_map(|name| {
             SearchSysCache2(
                 db,
                 client_id,
                 txn_ctx,
                 SysCacheId::RELNAMENSP,
-                key,
+                Value::Text(name.clone().into()),
                 oid_key(namespace_oid),
             )
             .ok()
@@ -321,6 +329,19 @@ fn class_row_by_name_namespace(
                 }
                 _ => None,
             })
+        })
+        .or_else(|| {
+            // :HACK: Heavy partitioned-index DDL can currently leave
+            // pg_class_relname_nsp_index missing a visible pg_class row. Keep
+            // SQL name lookup PostgreSQL-compatible while catalog index
+            // maintenance converges without forcing a full backend catcache.
+            scan_class_rows_without_catcache(db, client_id, txn_ctx)
+                .into_iter()
+                .find(|row| {
+                    row.relnamespace == namespace_oid
+                        && lookup_names.iter().any(|name| row.relname == *name)
+                        && !db.other_session_temp_namespace_oid(client_id, row.relnamespace)
+                })
         })
         .or_else(|| bootstrap_class_row_by_name_namespace(relname, namespace_oid))
 }
