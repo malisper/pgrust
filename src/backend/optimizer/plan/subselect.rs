@@ -1986,11 +1986,15 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             clause: rebase_window_clause_subplan_ids(clause, base),
+            run_condition: run_condition.map(|expr| rebase_expr_subplan_ids(expr, base)),
+            top_qual: top_qual.map(|expr| rebase_expr_subplan_ids(expr, base)),
             output_columns,
         },
         Plan::FunctionScan {
@@ -2575,6 +2579,8 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => {
             Plan::WindowAgg {
@@ -2648,6 +2654,9 @@ pub(super) fn finalize_plan_subqueries(
                                 })
                                 .collect(),
                     },
+                run_condition: run_condition
+                    .map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
+                top_qual: top_qual.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
                 output_columns,
             }
         }

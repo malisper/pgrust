@@ -9,7 +9,7 @@ use super::expr_format::{
     format_roman, ordinal_suffix, to_char_float, to_char_float4, to_char_int, to_char_numeric,
     to_number_numeric,
 };
-use super::expr_ops::ensure_builtin_collation_supported;
+use super::expr_ops::{TextCollationSemantics, ensure_builtin_collation_supported};
 use super::expr_range::render_range_text_with_config;
 use super::node_types::Value;
 use super::render_macaddr_text;
@@ -1613,6 +1613,13 @@ pub(super) fn eval_repeat_function(values: &[Value]) -> Result<Value, ExecError>
 }
 
 pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_lower_function_with_collation(values, TextCollationSemantics::Default)
+}
+
+pub(super) fn eval_lower_function_with_collation(
+    values: &[Value],
+    collation: TextCollationSemantics,
+) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);
     };
@@ -1626,10 +1633,23 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
             left: text_value.clone(),
             right: Value::Text("".into()),
         })?;
-    Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
+    let lowered = match collation {
+        TextCollationSemantics::Ascii => map_ascii_case(text, |ch| ch.to_ascii_lowercase()),
+        TextCollationSemantics::PgCUtf8 => simple_lower(text),
+        TextCollationSemantics::PgUnicodeFast => full_lower(text),
+        TextCollationSemantics::Default => text.to_lowercase(),
+    };
+    Ok(Value::Text(CompactString::from_owned(lowered)))
 }
 
 pub(super) fn eval_upper_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_upper_function_with_collation(values, TextCollationSemantics::Default)
+}
+
+pub(super) fn eval_upper_function_with_collation(
+    values: &[Value],
+    collation: TextCollationSemantics,
+) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);
     };
@@ -1643,7 +1663,14 @@ pub(super) fn eval_upper_function(values: &[Value]) -> Result<Value, ExecError> 
             left: text_value.clone(),
             right: Value::Text("".into()),
         })?;
-    Ok(Value::Text(CompactString::from_owned(text.to_uppercase())))
+    let upper = match collation {
+        TextCollationSemantics::Ascii => map_ascii_case(text, |ch| ch.to_ascii_uppercase()),
+        TextCollationSemantics::PgCUtf8 => simple_upper(text),
+        TextCollationSemantics::Default | TextCollationSemantics::PgUnicodeFast => {
+            text.to_uppercase()
+        }
+    };
+    Ok(Value::Text(CompactString::from_owned(upper)))
 }
 
 pub(super) fn eval_text_starts_with_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -1790,6 +1817,13 @@ fn unicode_text_is_normalized(text: &str, form: UnicodeNormalForm) -> bool {
 }
 
 pub(super) fn eval_initcap_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_initcap_function_with_collation(values, TextCollationSemantics::Default)
+}
+
+pub(super) fn eval_initcap_function_with_collation(
+    values: &[Value],
+    collation: TextCollationSemantics,
+) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);
     };
@@ -1797,15 +1831,29 @@ pub(super) fn eval_initcap_function(values: &[Value]) -> Result<Value, ExecError
         return Ok(Value::Null);
     }
     let text = expect_text_arg("initcap", text_value, &Value::Null)?;
+    if matches!(collation, TextCollationSemantics::Ascii) {
+        return Ok(Value::Text(CompactString::from_owned(initcap_ascii(text))));
+    }
     let mut out = String::with_capacity(text.len());
     let mut capitalize = true;
     for ch in text.chars() {
-        if ch.is_alphanumeric() {
+        if initcap_is_alphanumeric(ch, collation) {
             if capitalize {
-                out.extend(ch.to_uppercase());
+                match collation {
+                    TextCollationSemantics::PgCUtf8 => out.push_str(&simple_title_char(ch)),
+                    TextCollationSemantics::PgUnicodeFast => out.push_str(&full_title_char(ch)),
+                    TextCollationSemantics::Default | TextCollationSemantics::Ascii => {
+                        out.extend(ch.to_uppercase())
+                    }
+                }
                 capitalize = false;
             } else {
-                out.extend(ch.to_lowercase());
+                match collation {
+                    TextCollationSemantics::PgCUtf8 => out.push_str(&simple_lower_char(ch)),
+                    TextCollationSemantics::Default
+                    | TextCollationSemantics::PgUnicodeFast
+                    | TextCollationSemantics::Ascii => out.extend(ch.to_lowercase()),
+                }
             }
         } else {
             capitalize = true;
@@ -1813,6 +1861,177 @@ pub(super) fn eval_initcap_function(values: &[Value]) -> Result<Value, ExecError
         }
     }
     Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+pub(super) fn eval_casefold_function_with_collation(
+    values: &[Value],
+    collation: TextCollationSemantics,
+) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("casefold", text_value, &Value::Null)?;
+    let folded = match collation {
+        TextCollationSemantics::Ascii => map_ascii_case(text, |ch| ch.to_ascii_lowercase()),
+        TextCollationSemantics::PgCUtf8 => simple_casefold(text),
+        TextCollationSemantics::Default | TextCollationSemantics::PgUnicodeFast => {
+            full_casefold(text)
+        }
+    };
+    Ok(Value::Text(CompactString::from_owned(folded)))
+}
+
+fn map_ascii_case(text: &str, mapper: impl Fn(char) -> char) -> String {
+    text.chars()
+        .map(|ch| if ch.is_ascii() { mapper(ch) } else { ch })
+        .collect()
+}
+
+fn simple_lower(text: &str) -> String {
+    text.chars()
+        .map(simple_lower_char)
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+fn simple_lower_char(ch: char) -> String {
+    ch.to_lowercase().collect()
+}
+
+fn full_lower(text: &str) -> String {
+    // :HACK: PostgreSQL ships generated Unicode SpecialCasing tables. Keep the
+    // focused final-sigma rule local until those tables are ported.
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '\u{03A3}' && is_final_sigma_context(&chars, index) {
+            out.push('\u{03C2}');
+        } else {
+            out.extend(ch.to_lowercase());
+        }
+    }
+    out
+}
+
+fn is_final_sigma_context(chars: &[char], index: usize) -> bool {
+    let has_cased_before = chars[..index]
+        .iter()
+        .rev()
+        .find(|ch| !is_case_ignorable(**ch))
+        .is_some_and(|ch| is_cased_char(*ch));
+    if !has_cased_before {
+        return false;
+    }
+    !chars[index + 1..]
+        .iter()
+        .find(|ch| !is_case_ignorable(**ch))
+        .is_some_and(|ch| is_cased_char(*ch))
+}
+
+fn is_case_ignorable(ch: char) -> bool {
+    matches!(
+        get_general_category(ch),
+        GeneralCategory::NonspacingMark
+            | GeneralCategory::EnclosingMark
+            | GeneralCategory::Format
+            | GeneralCategory::ModifierLetter
+            | GeneralCategory::SpacingMark
+    ) || matches!(
+        ch,
+        '\u{0027}' | '\u{00AD}' | '\u{2019}' | '\u{0345}' | '\u{0387}' | '\u{05F4}' | '\u{FF07}'
+    )
+}
+
+fn is_cased_char(ch: char) -> bool {
+    matches!(
+        get_general_category(ch),
+        GeneralCategory::UppercaseLetter
+            | GeneralCategory::LowercaseLetter
+            | GeneralCategory::TitlecaseLetter
+    ) || ch.is_uppercase()
+        || ch.is_lowercase()
+}
+
+fn simple_upper(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\u{00DF}' => "\u{00DF}".to_string(),
+            _ => ch.to_uppercase().collect(),
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+fn simple_title_char(ch: char) -> String {
+    match ch {
+        '\u{00DF}' => "\u{00DF}".into(),
+        '\u{01C4}' | '\u{01C5}' | '\u{01C6}' => "\u{01C4}".into(),
+        _ => simple_upper(&ch.to_string()),
+    }
+}
+
+fn full_title_char(ch: char) -> String {
+    match ch {
+        '\u{00DF}' => "Ss".into(),
+        '\u{01C4}' | '\u{01C5}' | '\u{01C6}' => "\u{01C5}".into(),
+        _ => ch.to_uppercase().collect(),
+    }
+}
+
+fn simple_casefold(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\u{0130}' => "\u{0130}".into(),
+            '\u{03C2}' => "\u{03C3}".into(),
+            '\u{1E9E}' | '\u{00DF}' => "\u{00DF}".into(),
+            _ => simple_lower_char(ch),
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+fn full_casefold(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '\u{0130}' => "i\u{0307}".into(),
+            '\u{1E9E}' | '\u{00DF}' => "ss".into(),
+            '\u{03C2}' => "\u{03C3}".into(),
+            _ => simple_lower_char(ch),
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+fn initcap_is_alphanumeric(ch: char, collation: TextCollationSemantics) -> bool {
+    match collation {
+        TextCollationSemantics::Ascii => ch.is_ascii_alphanumeric(),
+        TextCollationSemantics::PgCUtf8 => ch.is_alphabetic() || ch.is_ascii_digit(),
+        TextCollationSemantics::Default | TextCollationSemantics::PgUnicodeFast => {
+            ch.is_alphanumeric()
+        }
+    }
+}
+
+fn initcap_ascii(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut capitalize = true;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if capitalize {
+                out.push(ch.to_ascii_uppercase());
+                capitalize = false;
+            } else {
+                out.push(ch.to_ascii_lowercase());
+            }
+        } else {
+            capitalize = true;
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn decode_unistr_text(text: &str) -> Result<String, ExecError> {
@@ -3863,9 +4082,12 @@ fn validate_bytea_bit_index(bytes: &[u8], index: i32) -> Result<(), ExecError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        eval_like, eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_to_char_function,
+        eval_casefold_function_with_collation, eval_initcap_function_with_collation, eval_like,
+        eval_lower_function_with_collation, eval_pg_size_bytes_function,
+        eval_pg_size_pretty_function, eval_to_char_function, eval_upper_function_with_collation,
     };
     use crate::backend::executor::ExecError;
+    use crate::backend::executor::expr_ops::TextCollationSemantics;
     use crate::backend::libpq::pqformat::format_exec_error;
     use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
     use crate::backend::utils::time::timestamp::parse_timestamptz_text;
@@ -3903,6 +4125,74 @@ mod tests {
             ),
             Err(ExecError::DetailedError { sqlstate, .. }) if sqlstate == "0A000"
         ));
+    }
+
+    #[test]
+    fn text_case_functions_respect_builtin_utf8_collations() {
+        assert_eq!(
+            eval_lower_function_with_collation(
+                &[Value::Text("\u{03A3}".into())],
+                TextCollationSemantics::Ascii
+            )
+            .unwrap(),
+            Value::Text("\u{03A3}".into())
+        );
+        assert_eq!(
+            eval_lower_function_with_collation(
+                &[Value::Text("\u{0391}\u{03A3}".into())],
+                TextCollationSemantics::PgCUtf8
+            )
+            .unwrap(),
+            Value::Text("\u{03B1}\u{03C3}".into())
+        );
+        assert_eq!(
+            eval_lower_function_with_collation(
+                &[Value::Text("\u{0391}\u{03A3}".into())],
+                TextCollationSemantics::PgUnicodeFast
+            )
+            .unwrap(),
+            Value::Text("\u{03B1}\u{03C2}".into())
+        );
+        assert_eq!(
+            eval_upper_function_with_collation(
+                &[Value::Text("\u{00DF}".into())],
+                TextCollationSemantics::PgCUtf8
+            )
+            .unwrap(),
+            Value::Text("\u{00DF}".into())
+        );
+        assert_eq!(
+            eval_initcap_function_with_collation(
+                &[Value::Text("1a \u{FF11}a".into())],
+                TextCollationSemantics::PgCUtf8
+            )
+            .unwrap(),
+            Value::Text("1a \u{FF11}A".into())
+        );
+        assert_eq!(
+            eval_initcap_function_with_collation(
+                &[Value::Text("\u{00DF}ss".into())],
+                TextCollationSemantics::PgUnicodeFast
+            )
+            .unwrap(),
+            Value::Text("Ssss".into())
+        );
+        assert_eq!(
+            eval_casefold_function_with_collation(
+                &[Value::Text("\u{0130} \u{1E9E} \u{03A3}\u{03C2}".into())],
+                TextCollationSemantics::PgCUtf8
+            )
+            .unwrap(),
+            Value::Text("\u{0130} \u{00DF} \u{03C3}\u{03C3}".into())
+        );
+        assert_eq!(
+            eval_casefold_function_with_collation(
+                &[Value::Text("\u{0130} \u{1E9E} \u{03A3}\u{03C2}".into())],
+                TextCollationSemantics::PgUnicodeFast
+            )
+            .unwrap(),
+            Value::Text("i\u{0307} ss \u{03C3}\u{03C3}".into())
+        );
     }
 
     #[test]

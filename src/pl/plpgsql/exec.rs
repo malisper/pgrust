@@ -3686,13 +3686,14 @@ fn exec_dynamic_create_table_as(
     })?;
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
+    let search_path = plpgsql_configured_search_path(ctx);
     let effect_start = ctx.catalog_effects.len();
     let result = db.execute_create_table_as_stmt_in_transaction_with_search_path(
         ctx.client_id,
         stmt,
         xid,
         cid,
-        None,
+        search_path.as_deref(),
         planner_config_from_executor_gucs(&ctx.gucs),
         Some(&ctx.gucs),
         &mut ctx.catalog_effects,
@@ -5583,12 +5584,14 @@ fn current_of_predicate(binding: SystemVarBinding) -> Result<Expr, ExecError> {
         varattno: TABLE_OID_ATTR_NO,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Oid),
+        collation_oid: None,
     });
     let ctid = Expr::Var(Var {
         varno: 1,
         varattno: SELF_ITEM_POINTER_ATTR_NO,
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Tid),
+        collation_oid: None,
     });
     Ok(Expr::and(
         Expr::op_auto(

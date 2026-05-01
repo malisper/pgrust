@@ -1209,6 +1209,7 @@ fn rte_output_exprs(rtindex: usize, columns: &[QueryColumn]) -> Vec<Expr> {
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect()

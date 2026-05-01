@@ -2549,6 +2549,7 @@ fn bind_window_func_call(
     args: &[SqlFunctionArg],
     func_variadic: bool,
     null_treatment: Option<WindowNullTreatment>,
+    filter: Option<&SqlExpr>,
     over: &RawWindowSpec,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
@@ -2656,7 +2657,7 @@ fn bind_window_func_call(
                 &[],
                 false,
                 resolved.func_variadic,
-                None,
+                filter,
                 over,
                 scope,
                 catalog,
@@ -2672,7 +2673,7 @@ fn bind_window_func_call(
             &[],
             false,
             func_variadic,
-            None,
+            filter,
             over,
             scope,
             catalog,
@@ -2982,6 +2983,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     varattno: system_column.varattno,
                     varlevelsup: system_column.varlevelsup,
                     vartype: system_column.sql_type,
+                    collation_oid: None,
                 })
             } else {
                 match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
@@ -5542,6 +5544,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     args_list,
                     *func_variadic,
                     *null_treatment,
+                    filter.as_deref(),
                     raw_over,
                     scope,
                     catalog,

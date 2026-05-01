@@ -2105,6 +2105,7 @@ fn push_partitioned_view_merge_explain_lines(
             varattno: user_attrno(child_column_index),
             varlevelsup: 0,
             vartype: child_relation.desc.columns[child_column_index].sql_type,
+            collation_oid: None,
         });
         let prune_filter = Expr::op_auto(
             crate::include::nodes::primnodes::OpExprKind::Eq,
@@ -8311,6 +8312,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
                                     varattno: user_attrno(index),
                                     varlevelsup: 0,
                                     vartype: column.sql_type,
+                                    collation_oid: None,
                                 })
                             })
                             .collect(),
@@ -9986,6 +9988,7 @@ fn partition_parent_layout_exprs(
                         varattno: user_attrno(child_index),
                         varlevelsup: 0,
                         vartype: child_column.sql_type,
+                        collation_oid: None,
                     })
                 })
                 .unwrap_or(Expr::Const(Value::Null))

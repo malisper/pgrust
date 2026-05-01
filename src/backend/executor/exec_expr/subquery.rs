@@ -27,6 +27,7 @@ fn local_var(index: usize) -> Expr {
         varattno: user_attrno(index),
         varlevelsup: 0,
         vartype: SqlType::new(SqlTypeKind::Int4),
+        collation_oid: None,
     })
 }
 
@@ -979,7 +980,11 @@ pub(super) fn compare_subquery_values(
             }),
         },
         SubqueryComparisonOp::RegexMatch | SubqueryComparisonOp::NotRegexMatch => {
-            let matched = eval_regex_match_operator(&left, &right)?;
+            let matched = eval_regex_match_operator(
+                &left,
+                &right,
+                crate::backend::executor::expr_ops::TextCollationSemantics::Default,
+            )?;
             match (op, matched) {
                 (_, Value::Null) => Ok(Value::Null),
                 (SubqueryComparisonOp::RegexMatch, value) => Ok(value),

@@ -62,6 +62,7 @@ fn var(varno: usize, attno: usize) -> crate::include::nodes::primnodes::Expr {
         varattno: attno as AttrNumber,
         varlevelsup: 0,
         vartype: int4(),
+        collation_oid: None,
     })
 }
 
@@ -75,6 +76,7 @@ fn typed_var(
         varattno: attno as AttrNumber,
         varlevelsup: 0,
         vartype,
+        collation_oid: None,
     })
 }
 
@@ -86,6 +88,7 @@ fn text_substr_partition_key() -> Expr {
         funcresulttype: Some(SqlType::new(SqlTypeKind::Text)),
         funcvariadic: false,
         implementation: ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Substring),
+        collation_oid: None,
         display_args: None,
         args: vec![
             typed_var(1, 1, SqlType::new(SqlTypeKind::Text)),
@@ -332,6 +335,7 @@ fn project_set_pathtarget(
                         varattno: user_attrno(index),
                         varlevelsup: 0,
                         vartype: *sql_type,
+                        collation_oid: None,
                     })
                 }
             })
@@ -4261,6 +4265,28 @@ fn planner_keeps_index_scan_when_index_is_not_covering() {
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
         Plan::IndexOnlyScan { .. }
+    )));
+}
+
+#[test]
+fn planner_prefers_bitmap_heap_for_unordered_btree_range_window_input() {
+    let catalog = catalog_with_noncovering_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select sum(id) over (order by payload range between current row and unbounded following), id, payload from items where id < 42",
+        &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::BitmapHeapScan { .. }
+    )));
+    assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexScan { .. }
     )));
 }
 

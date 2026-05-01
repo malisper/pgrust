@@ -993,6 +993,8 @@ pub struct AggregateState {
 pub struct WindowAggState {
     pub(crate) input: PlanState,
     pub(crate) clause: WindowClause,
+    pub(crate) run_condition: Option<Expr>,
+    pub(crate) top_qual: Option<Expr>,
     pub(crate) output_columns: Vec<String>,
     pub(crate) result_rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
