@@ -5780,10 +5780,8 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: true,
             qualified_only: true,
-            relation_names: left_scope.columns[*left_index].relation_names.clone(),
-            relation_output_exprs: left_scope.columns[*left_index]
-                .relation_output_exprs
-                .clone(),
+            relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: left_scope.columns[*left_index].source_relation_oid,
@@ -5803,10 +5801,8 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: true,
             qualified_only: true,
-            relation_names: right_scope.columns[*right_index].relation_names.clone(),
-            relation_output_exprs: right_scope.columns[*right_index]
-                .relation_output_exprs
-                .clone(),
+            relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: right_scope.columns[*right_index].source_relation_oid,

@@ -17857,7 +17857,7 @@ fn recursive_cte_rejects_self_reference_inside_subquery_cte_of_recursive_term() 
             err.unpositioned(),
             ParseError::InvalidRecursion(message)
                 if message
-                    == "recursive reference to query \"outermost\" must not appear within its non-recursive term"
+                    == "recursive reference to query \"outermost\" must not appear within a subquery"
         ),
         "unexpected recursion error: {err:?}"
     );

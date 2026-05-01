@@ -23280,6 +23280,9 @@ mod tests {
                         vec![Value::Int32(1)],
                         vec![Value::Int32(2)],
                         vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
                     ]
                 );
             }
