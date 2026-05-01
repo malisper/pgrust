@@ -349,8 +349,8 @@ fn optimize_path_with_config(
     path::optimize_path_with_config(plan, catalog, config)
 }
 
-fn pull_up_sublinks(query: Query) -> Query {
-    sublink_pullup::pull_up_sublinks(query)
+fn pull_up_sublinks(query: Query, catalog: &dyn CatalogLookup) -> Query {
+    sublink_pullup::pull_up_sublinks(query, catalog)
 }
 
 fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {

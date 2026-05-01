@@ -1090,6 +1090,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 output_names,
                 right_rows: None,
                 right_matched: None,
+                lateral_right_cache: std::collections::HashMap::new(),
                 current_left: None,
                 current_nest_param_saves: None,
                 current_left_matched: false,

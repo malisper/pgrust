@@ -1073,6 +1073,7 @@ mod tests {
         Expr::SubLink(Box::new(SubLink {
             sublink_type: SubLinkType::ExprSubLink,
             testexpr: None,
+            comparison: None,
             subselect: Box::new(Query {
                 command_type: CommandType::Select,
                 depends_on_row_security: false,

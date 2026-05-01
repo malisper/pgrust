@@ -2825,7 +2825,7 @@ fn prepare_query_path_input(
     catalog: &dyn CatalogLookup,
 ) -> crate::include::nodes::parsenodes::Query {
     let query = super::super::root::prepare_query_for_planning(query, catalog);
-    pull_up_sublinks(query)
+    pull_up_sublinks(query, catalog)
 }
 
 fn plan_set_operation_child_path(

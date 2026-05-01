@@ -1586,6 +1586,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
     Some(Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::ExprSubLink,
         testexpr: None,
+        comparison: None,
         subselect: Box::new(subselect),
     })))
 }

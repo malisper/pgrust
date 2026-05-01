@@ -20281,6 +20281,19 @@ fn parse_in_subquery_expression() {
 fn parse_any_all_subquery_expressions() {
     assert!(parse_select("select id = any (select owner_id from pets) from people").is_ok());
     assert!(parse_select("select id < all (select owner_id from pets) from people").is_ok());
+    let stmt = parse_select("select id <> all (values (2), (3)) from people").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::QuantifiedSubquery {
+            is_all, subquery, ..
+        } => {
+            assert!(*is_all);
+            assert!(matches!(
+                subquery.from.as_ref(),
+                Some(FromItem::Values { rows }) if rows.len() == 2
+            ));
+        }
+        other => panic!("expected ALL VALUES subquery, got {other:?}"),
+    }
 }
 
 #[test]
