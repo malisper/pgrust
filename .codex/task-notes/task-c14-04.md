@@ -2,7 +2,7 @@ Goal:
 Tighten C14 namespace, GUC, random, and misc regression behavior.
 
 Key decisions:
-Fixed namespace by treating expression-index attstattarget -1 as analyzable during ANALYZE.
+Fixed namespace by evaluating expression-index attstattarget -1 during ANALYZE while only persisting expression-index stats for positive targets.
 Fixed GUC by normalizing quoted function-local SET values and supporting pg_settings_get_flags in value execution.
 Kept misc legacy failures out of this slice: first remaining mismatches are SELECT INTO TABLE, COPY BINARY, legacy PostQUEL function expansion, and C regresslib helpers.
 
