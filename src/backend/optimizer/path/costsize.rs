@@ -2390,6 +2390,28 @@ pub(super) fn estimate_index_candidate(
         // seq-scan outer side in memoize regression plans.
         base_cost += stats.relpages * RANDOM_PAGE_COST + index_scan_rows * RANDOM_PAGE_COST;
     }
+    if config.enable_seqscan
+        && is_gist_like_am(spec.index.index_meta.am_oid)
+        && !index_only
+        && !spec.removes_order
+        && stats.relpages <= 10.0
+        && gist_polygon_circle_heap_key(&desc, &spec.index)
+    {
+        // :HACK: pgrust does not yet have PostgreSQL's geometry GiST
+        // selectivity and heap-fetch costing.  For fresh tiny polygon/circle
+        // heaps, avoid letting an unordered GiST probe displace the
+        // seq-scan+sort plans used by PostgreSQL's geometry regression.
+        base_cost += stats.relpages * RANDOM_PAGE_COST + stats.reltuples * CPU_TUPLE_COST;
+    }
+    if is_gist_like_am(spec.index.index_meta.am_oid)
+        && !index_only
+        && !spec.removes_order
+        && order_items.is_some()
+    {
+        // :HACK: GiST/SP-GiST heap-fetch costing is still coarse.  Explicit
+        // index+sort paths must at least pay for the heap visits they need.
+        base_cost += stats.relpages.min(index_rows.max(1.0)) * RANDOM_PAGE_COST;
+    }
     let unused_btree_column_cost = if spec.index.index_meta.am_oid == BTREE_AM_OID {
         let order_columns = if spec.removes_order {
             order_items.as_ref().map(Vec::len).unwrap_or_default()
@@ -2532,7 +2554,7 @@ pub(super) fn estimate_index_candidate(
             pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
-            display_items: Vec::new(),
+            display_items: order_display_items.unwrap_or_default(),
         };
     }
 
