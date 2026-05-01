@@ -4639,6 +4639,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     testexpr: None,
                     first_col_type: Some(int4),
                     target_width: 1,
+                    target_attnos: vec![Some(0)],
                     plan_id: 0,
                     par_param: Vec::new(),
                     args: Vec::new(),

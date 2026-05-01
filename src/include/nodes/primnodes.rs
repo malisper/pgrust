@@ -2847,6 +2847,7 @@ pub struct SubPlan {
     pub testexpr: Option<Box<Expr>>,
     pub first_col_type: Option<SqlType>,
     pub target_width: usize,
+    pub target_attnos: Vec<Option<usize>>,
     pub plan_id: usize,
     pub par_param: Vec<usize>,
     pub args: Vec<Expr>,

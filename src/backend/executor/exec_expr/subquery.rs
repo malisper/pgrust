@@ -878,10 +878,28 @@ fn subplan_visible_values(
 ) -> Result<Vec<Value>, ExecError> {
     let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
     if subplan.target_width < values.len() {
+        if let Some(mut projected) = project_wide_subplan_values(subplan, &values) {
+            Value::materialize_all(&mut projected);
+            return Ok(projected);
+        }
         values.truncate(subplan.target_width);
     }
     Value::materialize_all(&mut values);
     Ok(values)
+}
+
+fn project_wide_subplan_values(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    values: &[Value],
+) -> Option<Vec<Value>> {
+    if subplan.target_attnos.len() != subplan.target_width {
+        return None;
+    }
+    subplan
+        .target_attnos
+        .iter()
+        .map(|attno| values.get((*attno)?).cloned())
+        .collect()
 }
 
 fn quantified_subquery_right_value(

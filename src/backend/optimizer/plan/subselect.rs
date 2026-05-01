@@ -5,7 +5,7 @@ use crate::include::nodes::plannodes::{Plan, PlannedStmt, TidScanCond, TidScanSo
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, RowsFromItem, RowsFromSource,
     SetReturningCall, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
-    SubPlan,
+    SubPlan, TargetEntry, attrno_index,
 };
 
 use super::planner::planner;
@@ -205,6 +205,7 @@ fn lower_sublink_to_subplan(
         .first()
         .map(|target| target.sql_type);
     let target_width = sublink.subselect.target_list.len();
+    let target_attnos = subplan_target_attnos(&sublink.subselect.target_list);
     let [subselect] = crate::backend::rewrite::pg_rewrite_query(*sublink.subselect, catalog)
         .expect("semantic rewrite should complete before subplan lowering")
         .try_into()
@@ -227,10 +228,21 @@ fn lower_sublink_to_subplan(
         testexpr,
         first_col_type,
         target_width,
+        target_attnos,
         plan_id,
         par_param,
         args,
     }))
+}
+
+fn subplan_target_attnos(target_list: &[TargetEntry]) -> Vec<Option<usize>> {
+    target_list
+        .iter()
+        .map(|target| match &target.expr {
+            Expr::Var(var) if var.varlevelsup == 0 => attrno_index(var.varattno),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(super) fn finalize_expr_subqueries(
@@ -1003,6 +1015,7 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .collect(),
             first_col_type: subplan.first_col_type,
             target_width: subplan.target_width,
+            target_attnos: subplan.target_attnos,
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
             par_param: subplan.par_param,

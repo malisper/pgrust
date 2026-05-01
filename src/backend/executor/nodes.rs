@@ -2572,11 +2572,19 @@ fn decode_index_only_values(
         let Some(attnum) = index_meta.indkey.get(index_pos).copied() else {
             continue;
         };
-        if attnum <= 0 {
+        let slot_index = if let Some(heap_index) = (attnum > 0)
+            .then(|| usize::try_from(attnum - 1).unwrap_or(usize::MAX))
+            .filter(|heap_index| *heap_index < values.len())
+        {
+            heap_index
+        } else if let Some(projected_index) =
+            projected_index_only_value_slot(desc, index_desc, index_meta, index_pos)
+        {
+            projected_index
+        } else {
             continue;
-        }
-        let heap_index = usize::try_from(attnum - 1).unwrap_or(usize::MAX);
-        if let Some(slot) = values.get_mut(heap_index) {
+        };
+        if let Some(slot) = values.get_mut(slot_index) {
             *slot = Some(value);
         }
     }
@@ -2585,6 +2593,24 @@ fn decode_index_only_values(
         .enumerate()
         .map(|(_index, value)| Ok(value.unwrap_or(Value::Null)))
         .collect()
+}
+
+fn projected_index_only_value_slot(
+    desc: &RelationDesc,
+    index_desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index_pos: usize,
+) -> Option<usize> {
+    let index_column = index_desc.columns.get(index_pos)?;
+    desc.columns
+        .iter()
+        .position(|column| {
+            column.name == index_column.name && column.sql_type == index_column.sql_type
+        })
+        .or_else(|| {
+            (desc.columns.len() == index_meta.indkey.len() && index_pos < desc.columns.len())
+                .then_some(index_pos)
+        })
 }
 
 impl PlanNode for IndexOnlyScanState {
@@ -3186,37 +3212,12 @@ impl PlanNode for IndexScanState {
                                 "index-only scan requested tuple payload but AM returned none",
                             )
                         })?;
-                    let index_values = decode_key_payload(&self.index_desc, &index_tuple.payload)?;
-                    let mut values = vec![Value::Null; self.desc.columns.len()];
-                    for (index_attno, value) in index_values.into_iter().enumerate() {
-                        let heap_attno = usize::try_from(
-                            *self.index_meta.indkey.get(index_attno).ok_or_else(|| {
-                                internal_exec_error(format!(
-                                    "missing indkey entry for index column {}",
-                                    index_attno + 1
-                                ))
-                            })?,
-                        )
-                        .map_err(|_| {
-                            internal_exec_error(format!(
-                                "invalid heap attno for index column {}",
-                                index_attno + 1
-                            ))
-                        })?;
-                        let heap_index = heap_attno.checked_sub(1).ok_or_else(|| {
-                            internal_exec_error(format!(
-                                "non-column indkey entry not supported for index-only scan: {}",
-                                heap_attno
-                            ))
-                        })?;
-                        let slot_value = values.get_mut(heap_index).ok_or_else(|| {
-                            internal_exec_error(format!(
-                                "heap attno {} out of bounds for relation {}",
-                                heap_attno, self.relation_name
-                            ))
-                        })?;
-                        *slot_value = value;
-                    }
+                    let values = decode_index_only_values(
+                        &self.desc,
+                        &self.index_desc,
+                        &self.index_meta,
+                        &index_tuple,
+                    )?;
                     self.slot
                         .store_virtual_row(values, Some(tid), Some(self.relation_oid));
                     self.current_bindings = vec![SystemVarBinding {
