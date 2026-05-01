@@ -225,7 +225,12 @@ mod tests {
     use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
     use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
     use crate::backend::catalog::column_desc;
-    use crate::backend::catalog::loader::load_physical_catalog_rows;
+    use crate::backend::catalog::loader::{
+        load_physical_catalog_rows, load_physical_catalog_rows_scoped,
+        load_visible_catalog_kind_in_pool_scoped, load_visible_class_rows,
+        load_visible_constraint_rows, load_visible_depend_rows, load_visible_index_rows,
+    };
+    use crate::backend::catalog::rowcodec::pg_description_row_from_values;
     use crate::backend::catalog::rows::physical_catalog_rows_for_catalog_entry;
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::storage::smgr::{
@@ -243,6 +248,7 @@ mod tests {
         PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, UCS_BASIC_COLLATION_OID, UNICODE_COLLATION_OID,
         VARCHAR_TYPE_OID, system_catalog_indexes,
     };
+    use crate::include::nodes::parsenodes::IndexColumnDef;
     use crate::include::nodes::primnodes::RelationDesc;
     use std::fs;
     #[cfg(unix)]
@@ -258,8 +264,9 @@ mod tests {
         std::env::temp_dir().join(format!("pgrust_catalog_{label}_{nanos}"))
     }
 
-    fn durable_write_context(
+    fn durable_write_context_for_db(
         base: &PathBuf,
+        db_oid: u32,
     ) -> (
         Arc<BufferPool<SmgrStorageBackend>>,
         Arc<RwLock<TransactionManager>>,
@@ -267,7 +274,7 @@ mod tests {
     ) {
         let mut smgr = MdStorageManager::new(base);
         for kind in crate::backend::catalog::bootstrap::bootstrap_catalog_kinds() {
-            smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
+            smgr.open(bootstrap_catalog_rel(kind, db_oid)).unwrap();
         }
         let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
         let txns = Arc::new(RwLock::new(
@@ -286,8 +293,224 @@ mod tests {
         (pool, txns, ctx)
     }
 
+    fn durable_write_context(
+        base: &PathBuf,
+    ) -> (
+        Arc<BufferPool<SmgrStorageBackend>>,
+        Arc<RwLock<TransactionManager>>,
+        CatalogWriteContext,
+    ) {
+        durable_write_context_for_db(base, 1)
+    }
+
     fn commit_catalog_write(txns: &Arc<RwLock<TransactionManager>>, xid: TransactionId) {
         txns.write().commit(xid).unwrap();
+    }
+
+    #[test]
+    fn catalog_store_foreign_key_constraint_uses_database_scope() {
+        let base = temp_dir("fk_constraint_scope");
+        let db_oid = 42;
+        let mut store = CatalogStore::load_database(&base, db_oid).unwrap();
+        let parent = store
+            .create_table(
+                "parents",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let child = store
+            .create_table(
+                "children",
+                RelationDesc {
+                    columns: vec![column_desc(
+                        "parent_id",
+                        SqlType::new(SqlTypeKind::Int4),
+                        true,
+                    )],
+                },
+            )
+            .unwrap();
+        let index = store
+            .create_index(
+                "parents_id_key",
+                "parents",
+                true,
+                &[IndexColumnDef::from("id")],
+            )
+            .unwrap();
+        let (_pool, txns, ctx) = durable_write_context_for_db(&base, db_oid);
+        let (constraint, _effect) = store
+            .create_foreign_key_constraint_mvcc(
+                child.relation_oid,
+                "children_parent_id_fkey",
+                false,
+                false,
+                true,
+                true,
+                &[1],
+                parent.relation_oid,
+                index.relation_oid,
+                &[1],
+                'a',
+                'a',
+                's',
+                None,
+                false,
+                0,
+                true,
+                0,
+                &ctx,
+            )
+            .unwrap();
+        commit_catalog_write(&txns, ctx.xid);
+
+        let kinds = [
+            BootstrapCatalogKind::PgConstraint,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        let db_rows = load_physical_catalog_rows_scoped(&base, db_oid, &kinds).unwrap();
+        assert!(db_rows.constraints.iter().any(|row| {
+            row.oid == constraint.oid
+                && row.contype == crate::include::catalog::CONSTRAINT_FOREIGN
+                && row.conrelid == child.relation_oid
+        }));
+        let default_db_rows = load_physical_catalog_rows_scoped(&base, 1, &kinds).unwrap();
+        assert!(
+            default_db_rows
+                .constraints
+                .iter()
+                .all(|row| row.oid != constraint.oid)
+        );
+    }
+
+    #[test]
+    fn catalog_store_drop_constraint_removes_description_row() {
+        let base = temp_dir("drop_constraint_comment_cleanup");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "notes",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), true)],
+                },
+            )
+            .unwrap();
+        let (pool, txns, mut ctx) = durable_write_context(&base);
+        let (constraint, _effect) = store
+            .create_check_constraint_mvcc_with_row(
+                entry.relation_oid,
+                "notes_id_check",
+                true,
+                true,
+                false,
+                "id > 0",
+                0,
+                true,
+                0,
+                &ctx,
+            )
+            .unwrap();
+        ctx.cid = 1;
+        store
+            .comment_constraint_mvcc(constraint.oid, Some("temporary check"), &ctx)
+            .unwrap();
+        ctx.cid = 2;
+        store
+            .drop_relation_constraint_mvcc(entry.relation_oid, "notes_id_check", &ctx)
+            .unwrap();
+        commit_catalog_write(&txns, ctx.xid);
+
+        let snapshot = txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
+        let txns_guard = txns.read();
+        let constraints =
+            load_visible_constraint_rows(&base, &pool, &txns_guard, &snapshot, 0).unwrap();
+        let descriptions = load_visible_catalog_kind_in_pool_scoped(
+            &pool,
+            &txns_guard,
+            &snapshot,
+            0,
+            BootstrapCatalogKind::PgDescription,
+            1,
+        )
+        .unwrap()
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        let depends = load_visible_depend_rows(&base, &pool, &txns_guard, &snapshot, 0).unwrap();
+        assert!(constraints.iter().all(|row| row.oid != constraint.oid));
+        assert!(descriptions.iter().all(|row| {
+            row.objoid != constraint.oid || row.classoid != PG_CONSTRAINT_RELATION_OID
+        }));
+        assert!(depends.iter().all(|row| {
+            row.objid != constraint.oid
+                && !(row.refclassid == PG_CONSTRAINT_RELATION_OID && row.refobjid == constraint.oid)
+        }));
+    }
+
+    #[test]
+    fn catalog_store_drop_table_removes_index_backed_constraint_index() {
+        let base = temp_dir("drop_table_index_backed_constraint_index");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let table = store
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let index = store
+            .create_index(
+                "widgets_id_key",
+                "widgets",
+                true,
+                &[IndexColumnDef::from("id")],
+            )
+            .unwrap();
+        let (pool, txns, mut ctx) = durable_write_context(&base);
+        store
+            .create_index_backed_constraint_for_entries_mvcc_with_period(
+                &table,
+                &index,
+                "widgets_id_key",
+                crate::include::catalog::CONSTRAINT_UNIQUE,
+                &[],
+                false,
+                None,
+                false,
+                false,
+                &ctx,
+            )
+            .unwrap();
+        ctx.cid = 1;
+        let (_dropped, effect) = store
+            .drop_relation_by_oid_mvcc(table.relation_oid, &ctx)
+            .unwrap();
+        commit_catalog_write(&txns, ctx.xid);
+
+        assert!(
+            effect.dropped_rels.iter().any(|rel| *rel == index.rel),
+            "table drop effect should include the owned index relation"
+        );
+        let snapshot = txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
+        let txns_guard = txns.read();
+        let classes = load_visible_class_rows(&base, &pool, &txns_guard, &snapshot, 0).unwrap();
+        let indexes = load_visible_index_rows(&base, &pool, &txns_guard, &snapshot, 0).unwrap();
+        let constraints =
+            load_visible_constraint_rows(&base, &pool, &txns_guard, &snapshot, 0).unwrap();
+        assert!(classes.iter().all(|row| row.oid != table.relation_oid));
+        assert!(classes.iter().all(|row| row.oid != index.relation_oid));
+        assert!(
+            indexes
+                .iter()
+                .all(|row| row.indexrelid != index.relation_oid)
+        );
+        assert!(constraints.iter().all(|row| {
+            row.conrelid != table.relation_oid && row.conindid != index.relation_oid
+        }));
     }
 
     #[cfg(unix)]
