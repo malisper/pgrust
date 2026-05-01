@@ -13507,8 +13507,50 @@ fn collect_relation_drop_oids(
             collect_relation_drop_oids(catalog, depend_rows, dependent.relation_oid, seen, order);
         }
     }
+    collect_constraint_backed_index_drop_oids(catalog, depend_rows, relation_oid, seen, order);
 
     order.push(relation_oid);
+}
+
+fn collect_constraint_backed_index_drop_oids(
+    catalog: &Catalog,
+    depend_rows: &[PgDependRow],
+    relation_oid: u32,
+    seen: &mut BTreeSet<u32>,
+    order: &mut Vec<u32>,
+) {
+    let constraint_oids = depend_rows
+        .iter()
+        .filter(|row| {
+            row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == relation_oid
+                && row.classid == PG_CONSTRAINT_RELATION_OID
+                && row.objsubid == 0
+        })
+        .map(|row| row.objid)
+        .collect::<BTreeSet<_>>();
+    for constraint_oid in constraint_oids {
+        for row in depend_rows {
+            if row.refclassid != PG_CONSTRAINT_RELATION_OID
+                || row.refobjid != constraint_oid
+                || row.classid != PG_CLASS_RELATION_OID
+                || row.objsubid != 0
+            {
+                continue;
+            }
+            if let Some(dependent) = catalog.get_by_oid(row.objid)
+                && matches!(dependent.relkind, 'i' | 'I')
+            {
+                collect_relation_drop_oids(
+                    catalog,
+                    depend_rows,
+                    dependent.relation_oid,
+                    seen,
+                    order,
+                );
+            }
+        }
+    }
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Vec<u32> {

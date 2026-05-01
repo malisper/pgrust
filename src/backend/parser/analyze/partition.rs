@@ -274,6 +274,19 @@ pub(crate) fn validate_partitioned_index_backed_constraints(
             .collect::<Vec<_>>();
         for key_column in &partition_spec.key_columns {
             if normalized_columns.contains(&key_column.to_ascii_lowercase()) {
+                if action.exclusion
+                    && let Some(operator) = exclusion_operator_for_partition_key(action, key_column)
+                    && operator != "="
+                {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "cannot match partition key to index on column \"{key_column}\" using non-equal operator \"{operator}\""
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
                 continue;
             }
             let constraint_kind = partition_constraint_kind(action);
@@ -290,6 +303,20 @@ pub(crate) fn validate_partitioned_index_backed_constraints(
         }
     }
     Ok(())
+}
+
+fn exclusion_operator_for_partition_key<'a>(
+    action: &'a IndexBackedConstraintAction,
+    key_column: &str,
+) -> Option<&'a str> {
+    action
+        .index_columns
+        .iter()
+        .position(|column| {
+            column.expr_sql.is_none() && column.name.eq_ignore_ascii_case(key_column)
+        })
+        .and_then(|index| action.exclusion_operators.get(index))
+        .map(String::as_str)
 }
 
 fn partition_constraint_kind(action: &IndexBackedConstraintAction) -> &'static str {

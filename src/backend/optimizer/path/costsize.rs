@@ -7405,6 +7405,8 @@ pub(super) fn build_index_path_spec(
             let qual = parsed_quals.get(*idx)?;
             if qual.row_prefix && row_prefix_qual_is_fully_covered(index, &qual.index_expr) {
                 None
+            } else if qual.row_prefix {
+                Some(qual.expr.clone())
             } else {
                 qual.residual_expr.clone()
             }
@@ -11066,8 +11068,34 @@ fn row_prefix_index_expr(index: &BoundIndexRelation, expr: &Expr, strategy: u16)
     if prefix_len == 0 {
         return None;
     }
-    let _ = (left_desc, right_desc, strategy, prefix_len);
-    Some(expr.clone())
+    let effective_strategy =
+        row_prefix_effective_strategy(strategy, prefix_len, left_fields.len())?;
+    let effective_kind = btree_strategy_expr_kind(effective_strategy)?;
+    if prefix_len == 1 {
+        return Some(Expr::op(
+            effective_kind,
+            SqlType::new(SqlTypeKind::Bool),
+            vec![left_fields[0].1.clone(), right_fields[0].1.clone()],
+        ));
+    }
+    let mut left_desc = left_desc;
+    let mut right_desc = right_desc;
+    left_desc.fields.truncate(prefix_len);
+    right_desc.fields.truncate(prefix_len);
+    Some(Expr::op(
+        effective_kind,
+        SqlType::new(SqlTypeKind::Bool),
+        vec![
+            Expr::Row {
+                descriptor: left_desc,
+                fields: left_fields.into_iter().take(prefix_len).collect(),
+            },
+            Expr::Row {
+                descriptor: right_desc,
+                fields: right_fields.into_iter().take(prefix_len).collect(),
+            },
+        ],
+    ))
 }
 
 fn row_prefix_qual_is_fully_covered(index: &BoundIndexRelation, expr: &Expr) -> bool {
@@ -11804,10 +11832,7 @@ fn index_order_match(
                 crate::include::access::relscan::ScanDirection::Forward,
             ));
         };
-        let Some(column) = expr_column_index(&item.expr) else {
-            break;
-        };
-        if simple_index_column(index, index_pos) != Some(column) {
+        if !order_expr_matches_index_key(index, index_pos, &item.expr) {
             break;
         }
         item_start += 1;
@@ -11818,17 +11843,7 @@ fn index_order_match(
         if index_pos >= index_key_count(index) {
             break;
         }
-        let matches_index_key = if let Some(index_column) = simple_index_column(index, index_pos) {
-            expr_column_index(&item.expr) == Some(index_column)
-        } else if let Some(expr_pos) = index_expression_position(index, index_pos) {
-            index
-                .index_exprs
-                .get(expr_pos)
-                .is_some_and(|index_expr| index_expression_matches_qual(index_expr, &item.expr))
-        } else {
-            false
-        };
-        if !matches_index_key {
+        if !order_expr_matches_index_key(index, index_pos, &item.expr) {
             break;
         }
         let null_order_irrelevant =
@@ -11866,6 +11881,19 @@ fn index_order_match(
         item_start + matched,
         direction.unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
     ))
+}
+
+fn order_expr_matches_index_key(index: &BoundIndexRelation, index_pos: usize, expr: &Expr) -> bool {
+    if let Some(index_column) = simple_index_column(index, index_pos) {
+        return expr_column_index(expr) == Some(index_column);
+    }
+    if let Some(expr_pos) = index_expression_position(index, index_pos) {
+        return index
+            .index_exprs
+            .get(expr_pos)
+            .is_some_and(|index_expr| index_expression_matches_qual(index_expr, expr));
+    }
+    false
 }
 
 fn gist_order_match(

@@ -11101,6 +11101,36 @@ fn parse_cluster_table_using_index() {
 }
 
 #[test]
+fn parse_cluster_old_index_on_table_syntax() {
+    let stmt = parse_statement("cluster sorttest_idx on sorttest").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: false })
+            if table_name == "sorttest" && index_name == "sorttest_idx"
+    ));
+}
+
+#[test]
+fn parse_cluster_table_uses_previously_clustered_index() {
+    let stmt = parse_statement("cluster sorttest").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: false })
+            if table_name == "sorttest" && index_name.is_empty()
+    ));
+}
+
+#[test]
+fn parse_cluster_all_marked_tables() {
+    let stmt = parse_statement("cluster").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Cluster(ClusterStatement { table_name, index_name, mark_only: false })
+            if table_name.is_empty() && index_name.is_empty()
+    ));
+}
+
+#[test]
 fn parse_alter_table_cluster_on_index() {
     let stmt = parse_statement("alter table sorttest cluster on sorttest_idx").unwrap();
     assert!(matches!(

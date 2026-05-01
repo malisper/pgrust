@@ -284,6 +284,22 @@ fn map_unique_index_build_violation(
     }
 }
 
+fn map_index_build_catalog_error(err: CatalogError) -> ExecError {
+    match err {
+        CatalogError::UniqueViolation(constraint) => {
+            map_unique_index_build_violation(constraint, None)
+        }
+        CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+        CatalogError::Io(message) if message.contains("DivisionByZero") => {
+            ExecError::DivisionByZero("/")
+        }
+        other => ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "index access method build",
+            actual: format!("index build failed: {other:?}"),
+        }),
+    }
+}
+
 fn invalid_fillfactor_error(value: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!("value {value} out of bounds for option \"fillfactor\""),
@@ -2247,16 +2263,7 @@ impl Database {
                 &build_ctx,
                 access_method_oid,
             )
-            .map_err(|err| match err {
-                CatalogError::UniqueViolation(constraint) => {
-                    map_unique_index_build_violation(constraint, None)
-                }
-                CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
-                _ => ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "index access method build",
-                    actual: format!("index build failed: {err:?}"),
-                }),
-            });
+            .map_err(map_index_build_catalog_error);
             if let Err(err) = build_result {
                 if !leave_invalid_on_failure {
                     self.cleanup_failed_index_build(
