@@ -612,6 +612,7 @@ fn scope_for_executor_relation(
                 hidden: column.dropped,
                 qualified_only: false,
                 relation_names: vec![relation_name.to_string()],
+                relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 source_relation_oid: None,

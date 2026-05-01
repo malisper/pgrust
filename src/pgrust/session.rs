@@ -4469,7 +4469,8 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(insert.with);
                 insert.with = with;
-                insert.with_recursive |= with_recursive;
+                insert.with_recursive =
+                    insert.with_recursive || (with_recursive && !ctes.is_empty());
                 CteBody::Insert(Box::new(insert))
             }
             CteBody::Update(update) => {
@@ -4477,7 +4478,8 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(update.with);
                 update.with = with;
-                update.with_recursive |= with_recursive;
+                update.with_recursive =
+                    update.with_recursive || (with_recursive && !ctes.is_empty());
                 CteBody::Update(Box::new(update))
             }
             CteBody::Delete(delete) => {
@@ -4485,7 +4487,8 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(delete.with);
                 delete.with = with;
-                delete.with_recursive |= with_recursive;
+                delete.with_recursive =
+                    delete.with_recursive || (with_recursive && !ctes.is_empty());
                 CteBody::Delete(Box::new(delete))
             }
             CteBody::Merge(merge) => {
@@ -4493,7 +4496,7 @@ impl Session {
                 let mut with = ctes.to_vec();
                 with.extend(merge.with);
                 merge.with = with;
-                merge.with_recursive |= with_recursive;
+                merge.with_recursive = merge.with_recursive || (with_recursive && !ctes.is_empty());
                 CteBody::Merge(Box::new(merge))
             }
             _ => body.clone(),
@@ -11527,6 +11530,7 @@ impl Session {
     ) -> Result<SelectStatement, ExecError> {
         Ok(SelectStatement {
             with_recursive: select.with_recursive,
+            with_from_recursive_union_outer: select.with_from_recursive_union_outer,
             with: select
                 .with
                 .iter()
@@ -11567,9 +11571,13 @@ impl Session {
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?,
             order_by: Self::substitute_order_by_items(&select.order_by, subst)?,
+            order_by_location: select.order_by_location,
             limit: select.limit,
+            limit_location: select.limit_location,
             offset: select.offset,
+            offset_location: select.offset_location,
             locking_clause: select.locking_clause,
+            locking_location: select.locking_location,
             locking_targets: select.locking_targets.clone(),
             locking_nowait: select.locking_nowait,
             set_operation: select
@@ -11578,6 +11586,7 @@ impl Session {
                 .map(|setop| {
                     Ok::<_, ExecError>(Box::new(crate::backend::parser::SetOperationStatement {
                         op: setop.op,
+                        location: setop.location,
                         inputs: setop
                             .inputs
                             .iter()
@@ -11764,6 +11773,7 @@ impl Session {
     ) -> Result<CommonTableExpr, ExecError> {
         Ok(CommonTableExpr {
             name: cte.name.clone(),
+            location: cte.location,
             column_names: cte.column_names.clone(),
             body: match &cte.body {
                 CteBody::Select(select) => {
@@ -11804,6 +11814,7 @@ impl Session {
                 .as_ref()
                 .map(|cycle| {
                     Ok::<_, ExecError>(CteCycleClause {
+                        location: cycle.location,
                         columns: cycle.columns.clone(),
                         mark_column: cycle.mark_column.clone(),
                         mark_value: cycle
@@ -11924,9 +11935,14 @@ impl Session {
         subst: &mut PreparedParamSubstitution<'_>,
     ) -> Result<FromItem, ExecError> {
         Ok(match from {
-            FromItem::Table { name, only } => FromItem::Table {
+            FromItem::Table {
+                name,
+                only,
+                location,
+            } => FromItem::Table {
                 name: name.clone(),
                 only: *only,
+                location: *location,
             },
             FromItem::Values { rows } => FromItem::Values {
                 rows: rows
@@ -12032,6 +12048,7 @@ impl Session {
         Ok(SelectItem {
             output_name: target.output_name.clone(),
             expr: Self::substitute_sql_expr(&target.expr, subst)?,
+            location: target.location,
         })
     }
 
@@ -12044,6 +12061,7 @@ impl Session {
             .map(|item| {
                 Ok(OrderByItem {
                     expr: Self::substitute_sql_expr(&item.expr, subst)?,
+                    location: item.location,
                     descending: item.descending,
                     nulls_first: item.nulls_first,
                     using_operator: item.using_operator.clone(),
@@ -23226,6 +23244,54 @@ mod tests {
     }
 
     #[test]
+    fn with_recursive_select_cte_feeds_writable_cte() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_recursive");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table dst (id int4)").unwrap();
+        match session
+            .execute(
+                &db,
+                "with recursive t(id) as ( \
+                    select 1 \
+                    union all \
+                    select id + 1 from t where id < 3 \
+                 ), ins as ( \
+                    insert into dst select id from t returning id \
+                 ) \
+                 select id from ins order by id",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "select count(*), min(id), max(id) from dst")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(3), Value::Int32(1), Value::Int32(3)]]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn writable_cte_base_table_write_is_not_visible_to_outer_scan() {
         let base =
             crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_visibility");
@@ -23437,6 +23503,57 @@ mod tests {
     }
 
     #[test]
+    fn writable_cte_insert_rule_select_action_returns_rows() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_insert_rule");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (i int4)").unwrap();
+        session.execute(&db, "create table dst (i int4)").unwrap();
+        session
+            .execute(&db, "create table rule_rows (i int4)")
+            .unwrap();
+        session
+            .execute(&db, "insert into src values (11), (12)")
+            .unwrap();
+        session
+            .execute(&db, "insert into rule_rows values (1), (2), (3)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create rule dst_ins as on insert to dst \
+                 do instead select i from rule_rows",
+            )
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "with t as (delete from src returning *) \
+                 insert into dst select * from t",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(3)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn writable_cte_insert_instead_select_rule_joins_original_source() {
         let base = crate::pgrust::test_support::seeded_temp_dir(
             "session",
@@ -23489,6 +23606,68 @@ mod tests {
         }
         match session.execute(&db, "select i from y").unwrap() {
             StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sublink_pruning_skips_unused_scalar_sublink_target() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "sublink_prune_target");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session
+            .execute(&db, "insert into src values (1), (2)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "select id from ( \
+                    select id, (select id from src) as unused_scalar_subquery \
+                    from src \
+                 ) s order by id",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sublink_delete_using_cte_keeps_joined_input_subplans() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "sublink_delete_using_cte");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table parent (id int4, payload text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into parent values (1, 'a'), (2, 'b')")
+            .unwrap();
+        assert!(matches!(
+            session
+                .execute(
+                    &db,
+                    "with rcte as (select max(id) as maxid from parent) \
+                     delete from parent using rcte where id = maxid",
+                )
+                .unwrap(),
+            StatementResult::AffectedRows(1)
+        ));
+
+        match session
+            .execute(&db, "select id from parent order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
             other => panic!("expected query result, got {other:?}"),
         }
     }

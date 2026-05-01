@@ -3731,6 +3731,48 @@ fn on_conflict_do_update_where_false_skips_row() {
 }
 
 #[test]
+fn on_conflict_update_skips_row_already_touched_by_writable_cte() {
+    let base = temp_dir("upsert_writable_cte_same_row");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table people (id int primary key, name text, note text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into people (id, name, note) values (2, 'seed', 'old')",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "with simpletup as (
+               select 2 id, 'green' name
+             ),
+             upsert_cte as (
+               insert into people (id, name) values (2, 'blue')
+               on conflict (id) do update
+               set name = (select name from simpletup where simpletup.id = people.id)
+               returning id, name
+             )
+             insert into people (id, name) values (2, 'red')
+             on conflict (id) do update
+             set name = (select name from upsert_cte where upsert_cte.id = people.id)
+             returning id, name",
+        )
+        .unwrap(),
+        Vec::new(),
+    );
+
+    assert_query_rows(
+        db.execute(1, "select id, name from people").unwrap(),
+        vec![vec![Value::Int32(2), Value::Text("green".into())]],
+    );
+}
+
+#[test]
 fn on_conflict_do_update_rejects_duplicate_input_rows() {
     let mut harness = SeededSqlHarness::new(
         "upsert_duplicate_input_rows",
@@ -25449,6 +25491,43 @@ fn aggregate_subquery_can_reference_outer_visible_cte() {
 }
 
 #[test]
+fn join_using_qualified_star_keeps_null_extended_side() {
+    let mut harness = SeededSqlHarness::new("join_using_qualified_star", Catalog::default());
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "with recursive
+                   x(id) as (
+                     values (1)
+                     union all
+                     select id + 1 from x where id < 5
+                   ),
+                   y(id) as (
+                     values (1)
+                     union all
+                     select id + 1 from y where id < 10
+                   )
+                 select y.*, x.* from y left join x using (id)",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(2)],
+            vec![Value::Int32(3), Value::Int32(3)],
+            vec![Value::Int32(4), Value::Int32(4)],
+            vec![Value::Int32(5), Value::Int32(5)],
+            vec![Value::Int32(6), Value::Null],
+            vec![Value::Int32(7), Value::Null],
+            vec![Value::Int32(8), Value::Null],
+            vec![Value::Int32(9), Value::Null],
+            vec![Value::Int32(10), Value::Null],
+        ],
+    );
+}
+
+#[test]
 fn insert_values_can_reference_statement_ctes() {
     let mut harness = SeededSqlHarness::new("insert_values_ctes", catalog());
     let xid = harness.txns.begin();
@@ -26616,6 +26695,81 @@ select count(*) from segments
     assert_query_rows(
         run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
         vec![vec![Value::Int64(31)]],
+    );
+}
+
+#[test]
+fn recursive_cte_resets_worktable_dependent_nested_ctes_each_iteration() {
+    let base = temp_dir("recursive_nested_cte_iteration_reset");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+with recursive
+  tab(id_key, link) as (values (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)),
+  iter(id_key, row_type, link) as (
+      select 0, 'base', 17
+    union all (
+      with remaining(id_key, row_type, link, min) as (
+        select tab.id_key, 'true'::text, iter.link, min(tab.id_key) over ()
+        from tab inner join iter using (link)
+        where tab.id_key > iter.id_key
+      ),
+      first_remaining as (
+        select id_key, row_type, link
+        from remaining
+        where id_key = min
+      ),
+      effect as (
+        select tab.id_key, 'new'::text, tab.link
+        from first_remaining e inner join tab on e.id_key = tab.id_key
+        where e.row_type = 'false'
+      )
+      select * from first_remaining
+      union all select * from effect
+    )
+  )
+select * from iter
+limit 7
+"#;
+
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Text("base".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(4),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(5),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(6),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+        ],
     );
 }
 

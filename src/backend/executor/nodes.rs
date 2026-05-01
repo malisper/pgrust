@@ -10861,11 +10861,13 @@ impl PlanNode for RecursiveUnionState {
                 return Ok(Some(&mut self.slot));
             } else {
                 if self.intermediate_rows.is_empty() {
+                    reset_recursive_union_iteration_ctes(self, ctx);
                     ctx.recursive_worktables.remove(&self.worktable_id);
                     finish_eof(&mut self.stats, start, ctx);
                     return Ok(None);
                 }
                 if !self.recursive_references_worktable {
+                    reset_recursive_union_iteration_ctes(self, ctx);
                     ctx.recursive_worktables.remove(&self.worktable_id);
                     finish_eof(&mut self.stats, start, ctx);
                     return Ok(None);

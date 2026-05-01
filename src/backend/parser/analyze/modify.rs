@@ -1651,6 +1651,7 @@ fn scope_with_hidden_invalid_relation(
             hidden: true,
             qualified_only: true,
             relation_names: Vec::new(),
+            relation_output_exprs: vec![],
             hidden_invalid_relation_names: vec![relation_name.to_string()],
             hidden_missing_relation_names: Vec::new(),
             source_relation_oid: None,
@@ -1714,6 +1715,7 @@ fn scope_with_returning_pseudo_row_exprs(
                 hidden: true,
                 qualified_only: true,
                 relation_names: vec![relation_name.to_string()],
+                relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 source_relation_oid: relation_oid,
@@ -1931,6 +1933,21 @@ fn update_from_projection_targets(
         .with_input_resno(tableoid_index + 1),
     );
     targets
+}
+
+fn align_relation_outputs_to_projected_slots(mut scope: BoundScope) -> BoundScope {
+    for (index, column) in scope.columns.iter_mut().enumerate() {
+        if column.relation_output_exprs.is_empty() {
+            continue;
+        }
+        let Some(expr) = scope.output_exprs.get(index).cloned() else {
+            continue;
+        };
+        for (_, relation_expr) in &mut column.relation_output_exprs {
+            *relation_expr = expr.clone();
+        }
+    }
+    scope
 }
 
 fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>) -> Query {
@@ -2214,6 +2231,7 @@ fn scope_with_merge_action_column(mut scope: BoundScope, merge_action_index: usi
         hidden: false,
         qualified_only: false,
         relation_names: Vec::new(),
+        relation_output_exprs: vec![],
         hidden_invalid_relation_names: Vec::new(),
         hidden_missing_relation_names: Vec::new(),
         source_relation_oid: None,
@@ -2231,6 +2249,7 @@ fn rewrite_merge_action_select_item(
         crate::include::nodes::parsenodes::SelectItem {
             output_name: item.output_name.clone(),
             expr,
+            location: item.location,
         },
         changed,
     )
@@ -2241,6 +2260,7 @@ fn rewrite_merge_action_order_by(item: &OrderByItem) -> (OrderByItem, bool) {
     (
         OrderByItem {
             expr,
+            location: item.location,
             descending: item.descending,
             nulls_first: item.nulls_first,
             using_operator: item.using_operator.clone(),
@@ -2293,6 +2313,7 @@ fn rewrite_merge_action_select(stmt: &SelectStatement) -> (SelectStatement, bool
         SelectStatement {
             with_recursive: stmt.with_recursive,
             with: stmt.with.clone(),
+            with_from_recursive_union_outer: stmt.with_from_recursive_union_outer,
             distinct: stmt.distinct,
             distinct_on,
             from: stmt.from.clone(),
@@ -2303,9 +2324,13 @@ fn rewrite_merge_action_select(stmt: &SelectStatement) -> (SelectStatement, bool
             having,
             window_clauses: stmt.window_clauses.clone(),
             order_by,
+            order_by_location: stmt.order_by_location,
             limit: stmt.limit,
+            limit_location: stmt.limit_location,
             offset: stmt.offset,
+            offset_location: stmt.offset_location,
             locking_clause: stmt.locking_clause,
+            locking_location: stmt.locking_location,
             locking_nowait: stmt.locking_nowait,
             locking_targets: stmt.locking_targets.clone(),
             set_operation: stmt.set_operation.clone(),
@@ -4141,6 +4166,7 @@ fn scope_for_pseudo_relation(relation_name: &str, desc: &RelationDesc, varno: us
                 hidden: column.dropped,
                 qualified_only: false,
                 relation_names: vec![relation_name.to_string()],
+                relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 source_relation_oid: None,
@@ -6113,6 +6139,7 @@ fn bind_update_from(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let eval_scope = align_relation_outputs_to_projected_slots(eval_scope);
     let returning_scope = scope_with_returning_pseudo_rows_with_generated(
         eval_scope.clone(),
         &entry.desc,
@@ -6571,6 +6598,7 @@ fn bind_delete_using(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let eval_scope = align_relation_outputs_to_projected_slots(eval_scope);
     let returning_scope = scope_with_returning_pseudo_rows_with_generated(
         eval_scope.clone(),
         &entry.desc,

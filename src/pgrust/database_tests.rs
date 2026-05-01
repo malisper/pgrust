@@ -2223,10 +2223,19 @@ fn recursive_cte_rejects_self_reference_inside_subquery() {
         .unwrap_err();
 
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::InvalidRecursion(message))
+        exec_parse_error(&err),
+        Some(ParseError::InvalidRecursion(message))
             if message == "recursive reference to query \"x\" must not appear within a subquery"
     ));
+}
+
+fn exec_parse_error(err: &ExecError) -> Option<&ParseError> {
+    match err {
+        ExecError::Parse(err) => Some(err.unpositioned()),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_parse_error(source),
+        _ => None,
+    }
 }
 
 #[test]
@@ -2262,8 +2271,8 @@ fn recursive_cte_rejects_mutual_recursion_before_binding() {
         .unwrap_err();
 
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::InvalidRecursion(message))
+        exec_parse_error(&err),
+        Some(ParseError::InvalidRecursion(message))
             if message == "mutual recursion between WITH items is not implemented"
     ));
 }
@@ -2282,8 +2291,8 @@ fn recursive_cte_rejects_non_union_self_reference_shape() {
         .unwrap_err();
 
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::InvalidRecursion(message))
+        exec_parse_error(&err),
+        Some(ParseError::InvalidRecursion(message))
             if message == "recursive query \"x\" does not have the form non-recursive-term UNION [ALL] recursive-term"
     ));
 }
@@ -2302,8 +2311,8 @@ fn recursive_cte_rejects_aggregate_in_recursive_term() {
         .unwrap_err();
 
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+        exec_parse_error(&err),
+        Some(ParseError::FeatureNotSupportedMessage(message))
             if message == "aggregate functions are not allowed in a recursive query's recursive term"
     ));
 }
@@ -2326,8 +2335,8 @@ fn recursive_cte_type_mismatch_uses_postgres_diagnostic() {
         .unwrap_err();
 
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::DetailedError { message, hint: Some(hint), .. })
+        exec_parse_error(&err),
+        Some(ParseError::DetailedError { message, hint: Some(hint), .. })
             if message == "recursive query \"foo\" column 1 has type numeric(3,0) in non-recursive term but type numeric overall"
                 && hint == "Cast the output of the non-recursive term to the correct type."
     ));
@@ -2350,8 +2359,8 @@ fn recursive_cte_search_cycle_clauses_parse_and_validate_names() {
         )
         .unwrap_err();
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+        exec_parse_error(&err),
+        Some(ParseError::FeatureNotSupportedMessage(message))
             if message == "search column \"missing\" not in WITH query column list"
     ));
 
@@ -2367,8 +2376,8 @@ fn recursive_cte_search_cycle_clauses_parse_and_validate_names() {
         )
         .unwrap_err();
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+        exec_parse_error(&err),
+        Some(ParseError::FeatureNotSupportedMessage(message))
             if message == "cycle mark column name \"t\" already used in WITH query column list"
     ));
 
@@ -2384,8 +2393,8 @@ fn recursive_cte_search_cycle_clauses_parse_and_validate_names() {
         )
         .unwrap_err();
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+        exec_parse_error(&err),
+        Some(ParseError::FeatureNotSupportedMessage(message))
             if message == "CYCLE types boolean and integer cannot be matched"
     ));
 
@@ -2401,8 +2410,8 @@ fn recursive_cte_search_cycle_clauses_parse_and_validate_names() {
         )
         .unwrap_err();
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+        exec_parse_error(&err),
+        Some(ParseError::FeatureNotSupportedMessage(message))
             if message == "could not identify an equality operator for type point"
     ));
 
@@ -2419,8 +2428,8 @@ fn recursive_cte_search_cycle_clauses_parse_and_validate_names() {
         )
         .unwrap_err();
     assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+        exec_parse_error(&err),
+        Some(ParseError::FeatureNotSupportedMessage(message))
             if message == "with a SEARCH or CYCLE clause, the recursive reference to WITH query \"x\" must be at the top level of its right-hand SELECT"
     ));
 }
@@ -2541,6 +2550,53 @@ fn correlated_set_operation_derived_table_can_see_outer_alias() {
 }
 
 #[test]
+fn recursive_cte_term_local_with_can_read_worktable() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table department(id int, parent_department int, name text)",
+        )
+        .expect("create department");
+    session
+        .execute(
+            &db,
+            "insert into department values
+                (0, null, 'ROOT'),
+                (1, 0, 'A'),
+                (2, 1, 'B'),
+                (3, 2, 'C'),
+                (4, 2, 'D'),
+                (5, 0, 'E'),
+                (6, 4, 'F'),
+                (7, 5, 'G')",
+        )
+        .expect("insert department rows");
+
+    let result = session
+        .execute(
+            &db,
+            "with recursive q as (
+                select * from department
+                union all
+                (with x as (select * from q)
+                 select * from x)
+             )
+             select count(*) from (select * from q limit 24) s",
+        )
+        .expect("execute recursive CTE");
+
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(24)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn recursive_cte_nested_union_ctes_inside_recursive_term_execute() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -2629,8 +2685,8 @@ fn recursive_cte_rejects_unsupported_term_decorations() {
     ] {
         let err = session.execute(&db, sql).unwrap_err();
         assert!(matches!(
-            err,
-            ExecError::Parse(ParseError::FeatureNotSupportedMessage(message)) if message == expected
+            exec_parse_error(&err),
+            Some(ParseError::FeatureNotSupportedMessage(message)) if message == expected
         ));
     }
 }

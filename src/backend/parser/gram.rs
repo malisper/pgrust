@@ -18584,6 +18584,7 @@ fn build_discard(pair: Pair<'_, Rule>) -> Result<DiscardStatement, ParseError> {
 }
 
 fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    let location = pair.as_span().start() + 1;
     let name = pair
         .into_inner()
         .find(|part| part.as_rule() == Rule::identifier)
@@ -18592,12 +18593,18 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
     Ok(SelectStatement {
         with: Vec::new(),
         with_recursive: false,
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
-        from: Some(FromItem::Table { name, only: false }),
+        from: Some(FromItem::Table {
+            name,
+            only: false,
+            location: Some(location),
+        }),
         targets: vec![SelectItem {
             expr: SqlExpr::Column("*".into()),
             output_name: "*".into(),
+            location: Some(location),
         }],
         where_clause: None,
         group_by: Vec::new(),
@@ -18605,9 +18612,13 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
+        order_by_location: None,
         limit: None,
+        limit_location: None,
         offset: None,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: None,
@@ -20106,9 +20117,13 @@ fn build_simple_select_statement(
     let mut having = None;
     let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
+    let mut order_by_location = None;
     let mut limit = None;
+    let mut limit_location = None;
     let mut offset = None;
+    let mut offset_location = None;
     let mut locking_clause = None;
+    let mut locking_location = None;
     let mut locking_targets = Vec::new();
     let mut locking_nowait = false;
     for part in parts {
@@ -20139,10 +20154,20 @@ fn build_simple_select_statement(
                         }
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
                         Rule::window_clause => window_clauses = build_window_clause(inner)?,
-                        Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
-                        Rule::limit_clause => limit = build_limit_clause(inner)?,
-                        Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
+                        Rule::order_by_clause => {
+                            order_by_location = Some(inner.as_span().start() + 1);
+                            order_by = build_order_by_clause(inner)?;
+                        }
+                        Rule::limit_clause => {
+                            limit_location = Some(inner.as_span().start() + 1);
+                            limit = build_limit_clause(inner)?;
+                        }
+                        Rule::offset_clause => {
+                            offset_location = Some(inner.as_span().start() + 1);
+                            offset = Some(build_offset_clause(inner)?);
+                        }
                         Rule::locking_clause => {
+                            locking_location = Some(inner.as_span().start() + 1);
                             let (strength, targets, nowait) = build_locking_clause(inner)?;
                             locking_clause = Some(strength);
                             locking_targets = targets;
@@ -20162,10 +20187,20 @@ fn build_simple_select_statement(
             }
             Rule::having_clause => having = Some(build_having_clause(part)?),
             Rule::window_clause => window_clauses = build_window_clause(part)?,
-            Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = build_limit_clause(part)?,
-            Rule::offset_clause => offset = Some(build_offset_clause(part)?),
+            Rule::order_by_clause => {
+                order_by_location = Some(part.as_span().start() + 1);
+                order_by = build_order_by_clause(part)?;
+            }
+            Rule::limit_clause => {
+                limit_location = Some(part.as_span().start() + 1);
+                limit = build_limit_clause(part)?;
+            }
+            Rule::offset_clause => {
+                offset_location = Some(part.as_span().start() + 1);
+                offset = Some(build_offset_clause(part)?);
+            }
             Rule::locking_clause => {
+                locking_location = Some(part.as_span().start() + 1);
                 let (strength, targets, nowait) = build_locking_clause(part)?;
                 locking_clause = Some(strength);
                 locking_targets = targets;
@@ -20177,6 +20212,7 @@ fn build_simple_select_statement(
     Ok(SelectStatement {
         with_recursive,
         with,
+        with_from_recursive_union_outer: false,
         distinct,
         distinct_on,
         from,
@@ -20187,9 +20223,13 @@ fn build_simple_select_statement(
         having,
         window_clauses,
         order_by,
+        order_by_location,
         limit,
+        limit_location,
         offset,
+        offset_location,
         locking_clause,
+        locking_location,
         locking_targets,
         locking_nowait,
         set_operation: None,
@@ -20308,9 +20348,13 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     let mut with = Vec::new();
     let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
+    let mut order_by_location = None;
     let mut limit = None;
+    let mut limit_location = None;
     let mut offset = None;
+    let mut offset_location = None;
     let mut locking_clause = None;
+    let mut locking_location = None;
     let mut locking_targets = Vec::new();
     let mut locking_nowait = false;
     let mut operators = Vec::new();
@@ -20325,6 +20369,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
             }
             Rule::set_operation_term => inputs.push(build_set_operation_term(part)?),
             Rule::set_operation_clause => {
+                let location = Some(part.as_span().start() + 1);
                 let raw = part.as_str().trim_start().to_ascii_lowercase();
                 let all = raw.split_ascii_whitespace().nth(1) == Some("all");
                 let op = if raw.starts_with("union") {
@@ -20334,13 +20379,23 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
                 } else {
                     SetOperator::Except { all }
                 };
-                operators.push(op);
+                operators.push((op, location));
             }
             Rule::window_clause => window_clauses = build_window_clause(part)?,
-            Rule::order_by_clause => order_by = build_order_by_clause(part)?,
-            Rule::limit_clause => limit = build_limit_clause(part)?,
-            Rule::offset_clause => offset = Some(build_offset_clause(part)?),
+            Rule::order_by_clause => {
+                order_by_location = Some(part.as_span().start() + 1);
+                order_by = build_order_by_clause(part)?;
+            }
+            Rule::limit_clause => {
+                limit_location = Some(part.as_span().start() + 1);
+                limit = build_limit_clause(part)?;
+            }
+            Rule::offset_clause => {
+                offset_location = Some(part.as_span().start() + 1);
+                offset = Some(build_offset_clause(part)?);
+            }
             Rule::locking_clause => {
+                locking_location = Some(part.as_span().start() + 1);
                 let (strength, targets, nowait) = build_locking_clause(part)?;
                 locking_clause = Some(strength);
                 locking_targets = targets;
@@ -20362,6 +20417,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     Ok(SelectStatement {
         with_recursive,
         with,
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: None,
@@ -20372,9 +20428,13 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         having: None,
         window_clauses,
         order_by,
+        order_by_location,
         limit,
+        limit_location,
         offset,
+        offset_location,
         locking_clause,
+        locking_location,
         locking_targets,
         locking_nowait,
         set_operation: Some(Box::new(nested_set_operation)),
@@ -20383,7 +20443,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
 
 fn build_set_operation_tree(
     inputs: Vec<SelectStatement>,
-    operators: Vec<SetOperator>,
+    operators: Vec<(SetOperator, Option<usize>)>,
 ) -> Result<SetOperationStatement, ParseError> {
     if inputs.len() != operators.len().saturating_add(1) {
         return Err(ParseError::UnexpectedToken {
@@ -20396,12 +20456,12 @@ fn build_set_operation_tree(
     let mut pending_ops = Vec::new();
     let mut current = inputs[0].clone();
 
-    for (op, next_input) in operators.into_iter().zip(inputs.into_iter().skip(1)) {
+    for ((op, location), next_input) in operators.into_iter().zip(inputs.into_iter().skip(1)) {
         if matches!(op, SetOperator::Intersect { .. }) {
-            current = select_statement_for_set_operation(op, current, next_input);
+            current = select_statement_for_set_operation(op, location, current, next_input);
         } else {
             pending_inputs.push(current);
-            pending_ops.push(op);
+            pending_ops.push((op, location));
             current = next_input;
         }
     }
@@ -20409,8 +20469,8 @@ fn build_set_operation_tree(
 
     let mut reduced_inputs = pending_inputs.into_iter();
     let mut nested = reduced_inputs.next().ok_or(ParseError::UnexpectedEof)?;
-    for (op, next_input) in pending_ops.into_iter().zip(reduced_inputs) {
-        nested = select_statement_for_set_operation(op, nested, next_input);
+    for ((op, location), next_input) in pending_ops.into_iter().zip(reduced_inputs) {
+        nested = select_statement_for_set_operation(op, location, nested, next_input);
     }
 
     nested
@@ -20421,12 +20481,14 @@ fn build_set_operation_tree(
 
 fn select_statement_for_set_operation(
     op: SetOperator,
+    op_location: Option<usize>,
     left: SelectStatement,
     right: SelectStatement,
 ) -> SelectStatement {
     SelectStatement {
         with_recursive: false,
         with: Vec::new(),
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: None,
@@ -20437,14 +20499,19 @@ fn select_statement_for_set_operation(
         having: None,
         window_clauses: Vec::new(),
         order_by: Vec::new(),
+        order_by_location: None,
         limit: None,
+        limit_location: None,
         offset: None,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: Some(Box::new(SetOperationStatement {
             op,
             inputs: vec![left, right],
+            location: op_location,
         })),
     }
 }
@@ -20484,12 +20551,14 @@ pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
     SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
+        with_from_recursive_union_outer: false,
         distinct: false,
         distinct_on: Vec::new(),
         from: Some(FromItem::Values { rows: stmt.rows }),
         targets: vec![SelectItem {
             output_name: "*".into(),
             expr: SqlExpr::Column("*".into()),
+            location: None,
         }],
         where_clause: None,
         group_by: Vec::new(),
@@ -20497,9 +20566,13 @@ pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         having: None,
         window_clauses: Vec::new(),
         order_by: stmt.order_by,
+        order_by_location: None,
         limit: stmt.limit,
+        limit_location: None,
         offset: stmt.offset,
+        offset_location: None,
         locking_clause: None,
+        locking_location: None,
         locking_targets: Vec::new(),
         locking_nowait: false,
         set_operation: None,
@@ -20524,13 +20597,17 @@ fn build_cte_clause(pair: Pair<'_, Rule>) -> Result<(bool, Vec<CommonTableExpr>)
 
 fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, ParseError> {
     let mut name = None;
+    let mut location = None;
     let mut column_names = Vec::new();
     let mut body = None;
     let mut search = None;
     let mut cycle = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::identifier if name.is_none() => {
+                location = Some(part.as_span().start() + 1);
+                name = Some(build_identifier(part));
+            }
             Rule::cte_column_list => {
                 if let Some(list) = part
                     .into_inner()
@@ -20551,6 +20628,7 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
     }
     Ok(CommonTableExpr {
         name: name.ok_or(ParseError::UnexpectedEof)?,
+        location,
         column_names,
         body: body.ok_or(ParseError::UnexpectedEof)?,
         search,
@@ -20559,6 +20637,7 @@ fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, Pars
 }
 
 fn build_cte_search_clause(pair: Pair<'_, Rule>) -> Result<CteSearchClause, ParseError> {
+    let location = Some(pair.as_span().start() + 1);
     let mut breadth_first = None;
     let mut columns = Vec::new();
     let mut sequence_column = None;
@@ -20573,6 +20652,7 @@ fn build_cte_search_clause(pair: Pair<'_, Rule>) -> Result<CteSearchClause, Pars
         }
     }
     Ok(CteSearchClause {
+        location,
         breadth_first: breadth_first.ok_or(ParseError::UnexpectedEof)?,
         columns,
         sequence_column: sequence_column.ok_or(ParseError::UnexpectedEof)?,
@@ -20580,6 +20660,7 @@ fn build_cte_search_clause(pair: Pair<'_, Rule>) -> Result<CteSearchClause, Pars
 }
 
 fn build_cte_cycle_clause(pair: Pair<'_, Rule>) -> Result<CteCycleClause, ParseError> {
+    let location = Some(pair.as_span().start() + 1);
     let mut columns = Vec::new();
     let mut mark_column = None;
     let mut mark_value = None;
@@ -20601,6 +20682,7 @@ fn build_cte_cycle_clause(pair: Pair<'_, Rule>) -> Result<CteCycleClause, ParseE
         }
     }
     Ok(CteCycleClause {
+        location,
         columns,
         mark_column: mark_column.ok_or(ParseError::UnexpectedEof)?,
         mark_value,
@@ -20680,9 +20762,13 @@ fn split_leftmost_union(
     let outer_with_recursive = stmt.with_recursive;
     let outer_with = std::mem::take(&mut stmt.with);
     let outer_order_by = std::mem::take(&mut stmt.order_by);
+    let outer_order_by_location = stmt.order_by_location.take();
     let outer_limit = stmt.limit.take();
+    let outer_limit_location = stmt.limit_location.take();
     let outer_offset = stmt.offset.take();
+    let outer_offset_location = stmt.offset_location.take();
     let outer_locking_clause = stmt.locking_clause.take();
+    let outer_locking_location = stmt.locking_location.take();
     let outer_locking_targets = std::mem::take(&mut stmt.locking_targets);
     let outer_locking_nowait = stmt.locking_nowait;
     let set_operation = stmt.set_operation?;
@@ -20695,16 +20781,24 @@ fn split_leftmost_union(
 
     if left.set_operation.is_some() {
         let (all, _left_nested, anchor, recursive_tail) = split_leftmost_union(left)?;
-        let mut recursive =
-            select_statement_for_set_operation(set_operation.op, recursive_tail, right);
+        let mut recursive = select_statement_for_set_operation(
+            set_operation.op,
+            set_operation.location,
+            recursive_tail,
+            right,
+        );
         attach_cte_body_select_context(
             &mut recursive,
             outer_with_recursive,
             &outer_with,
             outer_order_by,
+            outer_order_by_location,
             outer_limit,
+            outer_limit_location,
             outer_offset,
+            outer_offset_location,
             outer_locking_clause,
+            outer_locking_location,
             outer_locking_targets,
             outer_locking_nowait,
         );
@@ -20723,6 +20817,10 @@ fn split_leftmost_union(
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
+                None,
                 Vec::new(),
                 false,
             );
@@ -20731,9 +20829,13 @@ fn split_leftmost_union(
                 outer_with_recursive,
                 &outer_with,
                 outer_order_by,
+                outer_order_by_location,
                 outer_limit,
+                outer_limit_location,
                 outer_offset,
+                outer_offset_location,
                 outer_locking_clause,
+                outer_locking_location,
                 outer_locking_targets,
                 outer_locking_nowait,
             );
@@ -20748,9 +20850,13 @@ fn attach_cte_body_select_context(
     with_recursive: bool,
     with: &[CommonTableExpr],
     order_by: Vec<OrderByItem>,
+    order_by_location: Option<usize>,
     limit: Option<usize>,
+    limit_location: Option<usize>,
     offset: Option<usize>,
+    offset_location: Option<usize>,
     locking_clause: Option<SelectLockingClause>,
+    locking_location: Option<usize>,
     locking_targets: Vec<String>,
     locking_nowait: bool,
 ) {
@@ -20761,18 +20867,23 @@ fn attach_cte_body_select_context(
         let mut local_with = std::mem::take(&mut stmt.with);
         local_with.extend_from_slice(with);
         stmt.with = local_with;
+        stmt.with_from_recursive_union_outer = true;
     }
     if !order_by.is_empty() {
         stmt.order_by = order_by;
+        stmt.order_by_location = order_by_location;
     }
     if limit.is_some() {
         stmt.limit = limit;
+        stmt.limit_location = limit_location;
     }
     if offset.is_some() {
         stmt.offset = offset;
+        stmt.offset_location = offset_location;
     }
     if locking_clause.is_some() {
         stmt.locking_clause = locking_clause;
+        stmt.locking_location = locking_location;
         stmt.locking_targets = locking_targets;
         stmt.locking_nowait = locking_nowait;
     }
@@ -20798,6 +20909,7 @@ fn wrapped_values_statement(stmt: &SelectStatement) -> Option<ValuesStatement> {
             Some(SelectItem {
                 output_name,
                 expr: SqlExpr::Column(name),
+                ..
             }) if output_name == "*" && name == "*"
         )
         || stmt.where_clause.is_some()
@@ -20950,12 +21062,16 @@ fn build_locking_clause(
 
 fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> {
     let mut expr = None;
+    let mut location = None;
     let mut descending = false;
     let mut nulls_first = None;
     let mut using_operator = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::expr => expr = Some(build_expr(part)?),
+            Rule::expr => {
+                location = Some(part.as_span().start() + 1);
+                expr = Some(build_expr(part)?);
+            }
             Rule::kw_desc => descending = true,
             Rule::kw_asc => descending = false,
             Rule::operator_token => using_operator = Some(part.as_str().to_string()),
@@ -20977,6 +21093,7 @@ fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> 
         .unwrap_or(descending);
     Ok(OrderByItem {
         expr: expr.ok_or(ParseError::UnexpectedEof)?,
+        location,
         descending,
         nulls_first,
         using_operator,
@@ -21200,22 +21317,30 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
             build_from_item(inner)
         }
-        Rule::only_table_from_item => Ok(FromItem::Table {
-            name: build_identifier(
-                pair.into_inner()
-                    .find(|part| part.as_rule() == Rule::identifier)
-                    .ok_or(ParseError::UnexpectedEof)?,
-            ),
-            only: true,
-        }),
-        Rule::table_from_item | Rule::parenthesized_table_from_item => Ok(FromItem::Table {
-            name: build_identifier(
-                pair.into_inner()
-                    .find(|part| part.as_rule() == Rule::identifier)
-                    .ok_or(ParseError::UnexpectedEof)?,
-            ),
-            only: false,
-        }),
+        Rule::only_table_from_item => {
+            let identifier = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let location = identifier.as_span().start() + 1;
+            Ok(FromItem::Table {
+                name: build_identifier(identifier),
+                only: true,
+                location: Some(location),
+            })
+        }
+        Rule::table_from_item | Rule::parenthesized_table_from_item => {
+            let identifier = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let location = identifier.as_span().start() + 1;
+            Ok(FromItem::Table {
+                name: build_identifier(identifier),
+                only: false,
+                location: Some(location),
+            })
+        }
         Rule::values_from_item => Ok(FromItem::Values {
             rows: pair
                 .into_inner()
@@ -22930,6 +23055,7 @@ fn build_recursive_view_query(
         vec![SelectItem {
             output_name: "*".into(),
             expr: SqlExpr::Column("*".into()),
+            location: None,
         }]
     } else {
         column_names
@@ -22937,6 +23063,7 @@ fn build_recursive_view_query(
             .map(|name| SelectItem {
                 output_name: name.clone(),
                 expr: SqlExpr::Column(name.clone()),
+                location: None,
             })
             .collect()
     };
@@ -22954,16 +23081,19 @@ fn build_recursive_view_query(
             with_recursive: true,
             with: vec![CommonTableExpr {
                 name: view_name.to_string(),
+                location: None,
                 column_names: column_names.to_vec(),
                 body: select_statement_as_cte_body(body_query),
                 search: None,
                 cycle: None,
             }],
+            with_from_recursive_union_outer: false,
             distinct: false,
             distinct_on: Vec::new(),
             from: Some(FromItem::Table {
                 name: view_name.to_string(),
                 only: false,
+                location: None,
             }),
             targets,
             where_clause: None,
@@ -22972,9 +23102,13 @@ fn build_recursive_view_query(
             having: None,
             window_clauses: Vec::new(),
             order_by: Vec::new(),
+            order_by_location: None,
             limit: None,
+            limit_location: None,
             offset: None,
+            offset_location: None,
             locking_clause: None,
+            locking_location: None,
             locking_targets: Vec::new(),
             locking_nowait: false,
             set_operation: None,
@@ -25449,6 +25583,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         return Ok(vec![SelectItem {
             output_name: "*".into(),
             expr: SqlExpr::Column("*".into()),
+            location: Some(first.as_span().start() + 1),
         }]);
     }
 
@@ -25460,6 +25595,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
                 items.push(SelectItem {
                     output_name: "*".into(),
                     expr: SqlExpr::Column("*".into()),
+                    location: Some(first_part.as_span().start() + 1),
                 });
                 continue;
             }
@@ -25472,6 +25608,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
                 items.push(SelectItem {
                     output_name: "*".into(),
                     expr: SqlExpr::Column(format!("{relation}.*")),
+                    location: Some(first_part.as_span().start() + 1),
                 });
                 continue;
             }
@@ -25479,6 +25616,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
 
         let mut item_inner = item_pair.into_inner();
         let expr_pair = item_inner.next().ok_or(ParseError::UnexpectedEof)?;
+        let location = Some(expr_pair.as_span().start() + 1);
         let expr_is_extract = top_level_extract_expr(expr_pair.clone());
         let expr_is_power_operator = top_level_power_operator_expr(expr_pair.clone());
         let expr_is_case_insensitive_regex_operator =
@@ -25499,7 +25637,11 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         } else {
             select_item_name(&expr, index)
         };
-        items.push(SelectItem { output_name, expr });
+        items.push(SelectItem {
+            output_name,
+            expr,
+            location,
+        });
     }
 
     Ok(items)

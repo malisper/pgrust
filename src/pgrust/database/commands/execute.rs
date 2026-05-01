@@ -642,7 +642,7 @@ fn prepend_ctes_to_modifying_body(
             let mut with = ctes.to_vec();
             with.extend(insert.with);
             insert.with = with;
-            insert.with_recursive |= with_recursive;
+            insert.with_recursive = insert.with_recursive || (with_recursive && !ctes.is_empty());
             CteBody::Insert(Box::new(insert))
         }
         CteBody::Update(update) => {
@@ -650,7 +650,7 @@ fn prepend_ctes_to_modifying_body(
             let mut with = ctes.to_vec();
             with.extend(update.with);
             update.with = with;
-            update.with_recursive |= with_recursive;
+            update.with_recursive = update.with_recursive || (with_recursive && !ctes.is_empty());
             CteBody::Update(Box::new(update))
         }
         CteBody::Delete(delete) => {
@@ -658,7 +658,7 @@ fn prepend_ctes_to_modifying_body(
             let mut with = ctes.to_vec();
             with.extend(delete.with);
             delete.with = with;
-            delete.with_recursive |= with_recursive;
+            delete.with_recursive = delete.with_recursive || (with_recursive && !ctes.is_empty());
             CteBody::Delete(Box::new(delete))
         }
         CteBody::Merge(merge) => {
@@ -666,7 +666,7 @@ fn prepend_ctes_to_modifying_body(
             let mut with = ctes.to_vec();
             with.extend(merge.with);
             merge.with = with;
-            merge.with_recursive |= with_recursive;
+            merge.with_recursive = merge.with_recursive || (with_recursive && !ctes.is_empty());
             CteBody::Merge(Box::new(merge))
         }
         _ => body.clone(),

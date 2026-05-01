@@ -33,6 +33,7 @@ pub(crate) struct ScopeColumn {
     pub(crate) hidden: bool,
     pub(crate) qualified_only: bool,
     pub(crate) relation_names: Vec<String>,
+    pub(crate) relation_output_exprs: Vec<(String, Expr)>,
     pub(crate) hidden_invalid_relation_names: Vec<String>,
     pub(crate) hidden_missing_relation_names: Vec<String>,
     pub(crate) source_relation_oid: Option<u32>,
@@ -529,6 +530,28 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
     Ok(first.0)
 }
 
+fn relation_specific_output_expr(column: &ScopeColumn, relation: Option<&str>) -> Option<Expr> {
+    let relation = relation?;
+    column
+        .relation_output_exprs
+        .iter()
+        .find_map(|(visible_relation, expr)| {
+            relation_name_matches(visible_relation, relation).then(|| expr.clone())
+        })
+}
+
+pub(super) fn scope_column_output_expr(
+    scope: &BoundScope,
+    index: usize,
+    relation: Option<&str>,
+) -> Option<Expr> {
+    scope
+        .columns
+        .get(index)
+        .and_then(|column| relation_specific_output_expr(column, relation))
+        .or_else(|| scope.output_exprs.get(index).cloned())
+}
+
 fn resolve_system_column_in_scope(
     scope: &BoundScope,
     name: &str,
@@ -810,8 +833,8 @@ fn resolve_relation_row_expr_in_scope(
     let fields = scope
         .columns
         .iter()
-        .zip(scope.output_exprs.iter())
-        .filter_map(|(column, expr)| {
+        .enumerate()
+        .filter_map(|(index, column)| {
             if (column.hidden && !column.qualified_only)
                 || !column
                     .relation_names
@@ -821,7 +844,10 @@ fn resolve_relation_row_expr_in_scope(
                 return None;
             }
             matched = true;
-            Some((column.output_name.clone(), expr.clone()))
+            Some((
+                column.output_name.clone(),
+                scope_column_output_expr(scope, index, Some(name))?,
+            ))
         })
         .collect::<Vec<_>>();
     (matched || relation_exists).then_some(ResolvedRelationRowExpr {
@@ -951,6 +977,29 @@ fn is_physical_pg_type_relation_name(name: &str) -> bool {
 }
 
 fn passthrough_cte_target<'a>(cte: &'a BoundCte, ctes: &'a [BoundCte]) -> Option<&'a BoundCte> {
+    if cte.plan.command_type != crate::include::executor::execdesc::CommandType::Select
+        || cte.plan.depends_on_row_security
+        || cte.plan.distinct
+        || !cte.plan.distinct_on.is_empty()
+        || cte.plan.where_qual.is_some()
+        || !cte.plan.group_by.is_empty()
+        || !cte.plan.group_by_refs.is_empty()
+        || !cte.plan.grouping_sets.is_empty()
+        || !cte.plan.accumulators.is_empty()
+        || !cte.plan.window_clauses.is_empty()
+        || cte.plan.having_qual.is_some()
+        || !cte.plan.sort_clause.is_empty()
+        || cte.plan.limit_count.is_some()
+        || cte.plan.limit_offset.is_some()
+        || cte.plan.locking_clause.is_some()
+        || !cte.plan.locking_targets.is_empty()
+        || !cte.plan.row_marks.is_empty()
+        || cte.plan.has_target_srfs
+        || cte.plan.recursive_union.is_some()
+        || cte.plan.set_operation.is_some()
+    {
+        return None;
+    }
     let [rte] = cte.plan.rtable.as_slice() else {
         return None;
     };
@@ -988,7 +1037,7 @@ pub(super) fn bind_from_item_with_ctes(
     expanded_views: &[u32],
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     match stmt {
-        FromItem::Table { name, only } => {
+        FromItem::Table { name, only, .. } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
                 if cte.self_reference {
                     let output_columns = cte
@@ -5490,6 +5539,7 @@ pub(crate) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
                 hidden: column.dropped,
                 qualified_only: false,
                 relation_names: relation_name.into_iter().map(str::to_string).collect(),
+                relation_output_exprs: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
                 source_relation_oid: None,
@@ -5561,6 +5611,11 @@ pub(crate) fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> Bou
         .into_iter()
         .map(|expr| shift_expr_rtindexes(expr, offset))
         .collect();
+    for column in &mut scope.columns {
+        for (_, expr) in &mut column.relation_output_exprs {
+            *expr = shift_expr_rtindexes(expr.clone(), offset);
+        }
+    }
     for relation in &mut scope.relations {
         if let Some(varno) = relation.system_varno.as_mut() {
             *varno += offset;
@@ -5699,6 +5754,32 @@ fn join_using_relation_names(left: &ScopeColumn, right: &ScopeColumn) -> Vec<Str
     names
 }
 
+fn join_using_relation_output_exprs(
+    left: &ScopeColumn,
+    left_expr: &Expr,
+    right: &ScopeColumn,
+    right_expr: &Expr,
+) -> Vec<(String, Expr)> {
+    let mut out = Vec::new();
+    for name in &left.relation_names {
+        if !out
+            .iter()
+            .any(|(existing, _): &(String, Expr)| existing.eq_ignore_ascii_case(name))
+        {
+            out.push((name.clone(), left_expr.clone()));
+        }
+    }
+    for name in &right.relation_names {
+        if !out
+            .iter()
+            .any(|(existing, _): &(String, Expr)| existing.eq_ignore_ascii_case(name))
+        {
+            out.push((name.clone(), right_expr.clone()));
+        }
+    }
+    out
+}
+
 fn bind_join_using_projection(
     kind: &JoinKind,
     columns: &[String],
@@ -5781,7 +5862,16 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: false,
             qualified_only: false,
-            relation_names: Vec::new(),
+            relation_names: join_using_relation_names(
+                &left_scope.columns[*left_index],
+                &right_scope.columns[*right_index],
+            ),
+            relation_output_exprs: join_using_relation_output_exprs(
+                &left_scope.columns[*left_index],
+                &left_scope.output_exprs[*left_index],
+                &right_scope.columns[*right_index],
+                &right_scope.output_exprs[*right_index],
+            ),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: None,
@@ -5806,7 +5896,8 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: true,
             qualified_only: true,
-            relation_names: left_scope.columns[*left_index].relation_names.clone(),
+            relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: left_scope.columns[*left_index].source_relation_oid,
@@ -5826,7 +5917,8 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: true,
             qualified_only: true,
-            relation_names: right_scope.columns[*right_index].relation_names.clone(),
+            relation_names: Vec::new(),
+            relation_output_exprs: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: right_scope.columns[*right_index].source_relation_oid,
