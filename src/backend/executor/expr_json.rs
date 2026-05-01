@@ -42,6 +42,7 @@ use crate::include::nodes::primnodes::{
 use crate::include::nodes::tsearch::{TsLexeme, TsVector};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
+use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Value as SerdeJsonValue;
 
 pub(crate) fn validate_json_text(text: &str) -> Result<(), ExecError> {
@@ -641,7 +642,7 @@ pub(crate) fn eval_json_builtin_function(
                 )?)))
             }
             BuiltinScalarFunction::SqlJsonConstructor => {
-                eval_sql_json_constructor(values.first().unwrap_or(&Value::Null), result_type)
+                eval_sql_json_constructor(values, result_type)
             }
             BuiltinScalarFunction::SqlJsonScalar => {
                 let value = values.first().cloned().unwrap_or(Value::Null);
@@ -2044,18 +2045,29 @@ fn coerce_sql_json_return_value(
 }
 
 fn eval_sql_json_constructor(
-    value: &Value,
+    values: &[Value],
     result_type: Option<SqlType>,
 ) -> Result<Value, ExecError> {
+    let value = values.first().unwrap_or(&Value::Null);
+    let unique_keys = values
+        .iter()
+        .skip(1)
+        .any(|value| matches!(value, Value::Bool(true)));
     let result = match value {
         Value::Null => Value::Null,
         Value::Json(text) | Value::Text(text) | Value::JsonPath(text) | Value::Xml(text) => {
             validate_json_text(text.as_str())?;
+            if unique_keys {
+                validate_json_unique_keys(text.as_str())?;
+            }
             Value::Json(text.clone())
         }
         Value::TextRef(_, _) => {
             let text = value.as_text().unwrap();
             validate_json_text(text)?;
+            if unique_keys {
+                validate_json_unique_keys(text)?;
+            }
             Value::Json(CompactString::new(text))
         }
         Value::Jsonb(bytes) => Value::Json(CompactString::from_owned(render_jsonb_bytes(bytes)?)),
@@ -2067,6 +2079,9 @@ fn eval_sql_json_constructor(
                 sqlstate: "22021",
             })?;
             validate_json_text(&text)?;
+            if unique_keys {
+                validate_json_unique_keys(&text)?;
+            }
             Value::Json(CompactString::from_owned(text))
         }
         other => {
@@ -2078,6 +2093,116 @@ fn eval_sql_json_constructor(
         }
     };
     coerce_sql_json_return_value(result, result_type)
+}
+
+struct JsonUniqueKeysSeed;
+
+impl<'de> DeserializeSeed<'de> for JsonUniqueKeysSeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(JsonUniqueKeysVisitor)
+    }
+}
+
+struct JsonUniqueKeysVisitor;
+
+impl<'de> Visitor<'de> for JsonUniqueKeysVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _v: bool) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _v: i64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _v: u64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _v: f64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _v: &str) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _v: String) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while seq.next_element_seed(JsonUniqueKeysSeed)?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = std::collections::HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate JSON object key value: \"{key}\""
+                )));
+            }
+            map.next_value_seed(JsonUniqueKeysSeed)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_json_unique_keys(text: &str) -> Result<(), ExecError> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    match JsonUniqueKeysSeed.deserialize(&mut deserializer) {
+        Ok(()) => Ok(()),
+        Err(err)
+            if err
+                .to_string()
+                .starts_with("duplicate JSON object key value") =>
+        {
+            let message = err
+                .to_string()
+                .split(" at line ")
+                .next()
+                .unwrap_or("duplicate JSON object key value")
+                .to_string();
+            Err(ExecError::DetailedError {
+                message,
+                detail: None,
+                hint: None,
+                sqlstate: "22030",
+            })
+        }
+        Err(err) => Err(ExecError::DetailedError {
+            message: err.to_string(),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        }),
+    }
 }
 
 fn eval_sql_json_serialize(
@@ -2196,11 +2321,15 @@ fn eval_sql_json_is_json(values: &[Value]) -> Result<Value, ExecError> {
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
-    let predicate_type = values
+    let predicate = values
         .get(1)
         .and_then(Value::as_text)
         .unwrap_or("value")
         .to_ascii_lowercase();
+    let (predicate_type, unique_keys) = predicate
+        .strip_suffix(":unique")
+        .map(|kind| (kind, true))
+        .unwrap_or((predicate.as_str(), false));
     let parsed = match value {
         Value::Json(text) | Value::Text(text) | Value::JsonPath(text) => {
             parse_json_text(text.as_str())
@@ -2220,7 +2349,23 @@ fn eval_sql_json_is_json(values: &[Value]) -> Result<Value, ExecError> {
     let Ok(json) = parsed else {
         return Ok(Value::Bool(false));
     };
-    let matches_type = match predicate_type.as_str() {
+    if unique_keys {
+        let unique = match value {
+            Value::Json(text) | Value::Text(text) | Value::JsonPath(text) => {
+                validate_json_unique_keys(text.as_str()).is_ok()
+            }
+            Value::TextRef(_, _) => validate_json_unique_keys(value.as_text().unwrap()).is_ok(),
+            Value::Bytea(bytes) => String::from_utf8(bytes.clone())
+                .ok()
+                .is_some_and(|text| validate_json_unique_keys(&text).is_ok()),
+            Value::Jsonb(_) => true,
+            _ => false,
+        };
+        if !unique {
+            return Ok(Value::Bool(false));
+        }
+    }
+    let matches_type = match predicate_type {
         "scalar" => !matches!(json, SerdeJsonValue::Array(_) | SerdeJsonValue::Object(_)),
         "array" => matches!(json, SerdeJsonValue::Array(_)),
         "object" => matches!(json, SerdeJsonValue::Object(_)),

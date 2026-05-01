@@ -3022,6 +3022,7 @@ fn validate_sql_json_constructor_arg_types(
                 });
             };
             let format_encoding = sql_json_format_encoding_arg(args);
+            let unique_keys = sql_json_unique_keys_arg(args);
             let source_type = infer_sql_expr_type_with_ctes(
                 &arg.value,
                 scope,
@@ -3051,6 +3052,23 @@ fn validate_sql_json_constructor_arg_types(
                         sqlstate: "22023",
                     });
                 }
+            }
+            if unique_keys
+                && !matches!(
+                    source_type.kind,
+                    SqlTypeKind::Text
+                        | SqlTypeKind::Varchar
+                        | SqlTypeKind::Char
+                        | SqlTypeKind::Bytea
+                )
+                && !matches!(arg.value, SqlExpr::Const(Value::Null))
+            {
+                return Err(ParseError::DetailedError {
+                    message: "cannot use non-string types with WITH UNIQUE KEYS clause".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                });
             }
             if matches!(arg.value, SqlExpr::Const(Value::Null))
                 || matches!(
@@ -3118,6 +3136,12 @@ fn sql_json_format_encoding_arg(args: &[SqlFunctionArg]) -> Option<String> {
         return None;
     };
     Some(encoding.to_string())
+}
+
+fn sql_json_unique_keys_arg(args: &[SqlFunctionArg]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|arg| matches!(arg.value, SqlExpr::Const(Value::Bool(true))))
 }
 
 fn validate_sql_json_input_encoding(

@@ -753,9 +753,6 @@ impl AccumState {
                         });
                     }
                     let value = values.get(1).unwrap_or(&Value::Null);
-                    if *strict_values && matches!(value, Value::Null) {
-                        return Ok(());
-                    }
                     let key_text = json_object_agg_key(key);
                     if *unique_keys
                         && pairs
@@ -768,6 +765,9 @@ impl AccumState {
                             hint: None,
                             sqlstate: "22030",
                         });
+                    }
+                    if *strict_values && matches!(value, Value::Null) {
+                        return Ok(());
                     }
                     pairs.push((key.to_owned_value(), value.to_owned_value()));
                 }
