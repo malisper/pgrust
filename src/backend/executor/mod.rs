@@ -492,6 +492,7 @@ impl DeferredConstraintTracker {
 
 pub trait LockStatusProvider: Send + Sync {
     fn pg_lock_status_rows(&self, current_client_id: ClientId) -> Vec<Vec<Value>>;
+    fn pg_blocking_pids(&self, blocked_pid: ClientId) -> Vec<ClientId>;
 }
 
 #[derive(Debug, Clone)]

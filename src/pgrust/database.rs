@@ -2063,6 +2063,26 @@ impl Database {
         self.pg_lock_status_rows_for_client(0)
     }
 
+    fn pg_blocking_pids_for_client(&self, blocked_pid: ClientId) -> Vec<ClientId> {
+        let mut blockers = BTreeSet::new();
+        blockers.extend(self.table_locks.blocking_pids(blocked_pid));
+
+        let states = self
+            .cluster
+            .open_databases
+            .read()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for state in states {
+            blockers.extend(state.advisory_locks.blocking_pids(blocked_pid));
+            blockers.extend(state.row_locks.blocking_pids(blocked_pid));
+        }
+
+        blockers.extend(self.txn_waiter.blocking_pids(blocked_pid));
+        blockers.into_iter().collect()
+    }
+
     fn pg_lock_status_rows_for_client(&self, current_client_id: ClientId) -> Vec<Vec<Value>> {
         let mut rows = Vec::new();
 
@@ -2401,6 +2421,10 @@ impl Database {
 impl LockStatusProvider for Database {
     fn pg_lock_status_rows(&self, current_client_id: ClientId) -> Vec<Vec<Value>> {
         self.pg_lock_status_rows_for_client(current_client_id)
+    }
+
+    fn pg_blocking_pids(&self, blocked_pid: ClientId) -> Vec<ClientId> {
+        self.pg_blocking_pids_for_client(blocked_pid)
     }
 }
 

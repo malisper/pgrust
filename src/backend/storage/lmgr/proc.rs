@@ -96,6 +96,17 @@ impl TransactionWaiter {
         rows
     }
 
+    pub fn blocking_pids(&self, blocked_pid: ClientId) -> Vec<ClientId> {
+        let state = self.state.lock();
+        state
+            .waiters
+            .iter()
+            .filter(|(_, waiters)| waiters.iter().any(|waiter| waiter.client_id == blocked_pid))
+            .filter_map(|(xid, _)| state.holders.get(xid).copied())
+            .filter(|holder| *holder != blocked_pid)
+            .collect()
+    }
+
     pub fn wait_for(
         &self,
         txns: &RwLock<TransactionManager>,

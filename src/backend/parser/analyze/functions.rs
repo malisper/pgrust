@@ -2388,6 +2388,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TxidCurrent
             | BuiltinScalarFunction::TxidCurrentIfAssigned
             | BuiltinScalarFunction::TxidCurrentSnapshot => args.is_empty(),
+            BuiltinScalarFunction::PgBlockingPids => args.len() == 1,
+            BuiltinScalarFunction::PgIsolationTestSessionIsBlocked => args.len() == 2,
             BuiltinScalarFunction::CurrentSchemas => args.len() == 1,
             BuiltinScalarFunction::TxidSnapshotXmin | BuiltinScalarFunction::TxidSnapshotXmax => {
                 args.len() == 1
@@ -3201,6 +3203,12 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::CurrentSchemas => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Name)));
         }
+        BuiltinScalarFunction::PgBlockingPids => {
+            return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)));
+        }
+        BuiltinScalarFunction::PgIsolationTestSessionIsBlocked => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
         BuiltinScalarFunction::Extract => {
             return Some(SqlType::new(SqlTypeKind::Numeric));
         }
@@ -3679,6 +3687,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("version", BuiltinScalarFunction::Version),
         ("pgsql_version", BuiltinScalarFunction::Version),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
+        ("pg_blocking_pids", BuiltinScalarFunction::PgBlockingPids),
+        (
+            "pg_isolation_test_session_is_blocked",
+            BuiltinScalarFunction::PgIsolationTestSessionIsBlocked,
+        ),
         ("txid_current", BuiltinScalarFunction::TxidCurrent),
         ("pg_current_xact_id", BuiltinScalarFunction::TxidCurrent),
         (
@@ -5816,6 +5829,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::CurrentDatabase
             | BuiltinScalarFunction::CurrentSchemas
             | BuiltinScalarFunction::PgBackendPid
+            | BuiltinScalarFunction::PgBlockingPids
+            | BuiltinScalarFunction::PgIsolationTestSessionIsBlocked
             | BuiltinScalarFunction::PgPartitionRoot
             | BuiltinScalarFunction::SatisfiesHashPartition
             | BuiltinScalarFunction::PgGetPartKeyDef

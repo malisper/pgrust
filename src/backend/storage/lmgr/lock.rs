@@ -357,6 +357,30 @@ impl TableLockManager {
         rows
     }
 
+    pub fn blocking_pids(&self, blocked_pid: ClientId) -> Vec<ClientId> {
+        let state = self.state.lock();
+        let mut blockers = Vec::new();
+        for (rel, waiters) in &state.waiters {
+            for (wait_index, waiter) in waiters
+                .iter()
+                .enumerate()
+                .filter(|(_, waiter)| waiter.holder == blocked_pid)
+            {
+                if let Some(entries) = state.locks.get(rel) {
+                    blockers.extend(entries.iter().filter_map(|entry| {
+                        (entry.holder != blocked_pid && entry.mode.conflicts_with(waiter.mode))
+                            .then_some(entry.holder)
+                    }));
+                }
+                blockers.extend(waiters.iter().take(wait_index).filter_map(|entry| {
+                    (entry.holder != blocked_pid && entry.mode.conflicts_with(waiter.mode))
+                        .then_some(entry.holder)
+                }));
+            }
+        }
+        blockers
+    }
+
     #[cfg(test)]
     pub(crate) fn has_locks_for_client(&self, client_id: ClientId) -> bool {
         self.state

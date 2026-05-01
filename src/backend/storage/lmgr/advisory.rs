@@ -384,6 +384,37 @@ impl AdvisoryLockManager {
         rows
     }
 
+    pub fn blocking_pids(&self, blocked_pid: ClientId) -> Vec<ClientId> {
+        let state = self.state.lock();
+        let mut blockers = Vec::new();
+        for key_state in state.keys.values() {
+            for (wait_index, waiter) in key_state
+                .waiting
+                .iter()
+                .enumerate()
+                .filter(|(_, waiter)| waiter.owner.client_id == blocked_pid)
+            {
+                blockers.extend(key_state.granted.iter().filter_map(|entry| {
+                    (conflicts_between_owners(entry.owner, waiter.owner)
+                        && entry.mode.conflicts_with(waiter.mode))
+                    .then_some(entry.owner.client_id)
+                }));
+                blockers.extend(
+                    key_state
+                        .waiting
+                        .iter()
+                        .take(wait_index)
+                        .filter_map(|entry| {
+                            (conflicts_between_owners(entry.owner, waiter.owner)
+                                && entry.mode.conflicts_with(waiter.mode))
+                            .then_some(entry.owner.client_id)
+                        }),
+                );
+            }
+        }
+        blockers
+    }
+
     fn unlock_matching(&self, predicate: impl Fn(AdvisoryLockOwner) -> bool) {
         let mut state = self.state.lock();
         let mut changed = false;

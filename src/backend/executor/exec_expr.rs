@@ -11983,6 +11983,8 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgTsTemplateIsVisible
         | BuiltinScalarFunction::PgTsConfigIsVisible
         | BuiltinScalarFunction::PgTableSize
+        | BuiltinScalarFunction::PgBlockingPids
+        | BuiltinScalarFunction::PgIsolationTestSessionIsBlocked
         | BuiltinScalarFunction::GinCleanPendingList
         | BuiltinScalarFunction::BrinSummarizeNewValues
         | BuiltinScalarFunction::BrinSummarizeRange
@@ -13669,6 +13671,119 @@ fn pg_typeof_type_name(ty: SqlType, ctx: &ExecutorContext) -> String {
     sql_type_name(ty)
 }
 
+fn int4_array_from_client_ids(pids: Vec<crate::ClientId>) -> Value {
+    Value::PgArray(
+        ArrayValue::from_1d(
+            pids.into_iter()
+                .map(|pid| Value::Int32(pid as i32))
+                .collect(),
+        )
+        .with_element_type_oid(INT4_TYPE_OID),
+    )
+}
+
+fn client_id_arg(value: &Value, op: &'static str) -> Result<Option<crate::ClientId>, ExecError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Int32(pid) if *pid > 0 => Ok(Some(*pid as crate::ClientId)),
+        Value::Int32(_) => Ok(None),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Int32(0),
+        }),
+    }
+}
+
+fn eval_pg_blocking_pids(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Err(malformed_expr_error("pg_blocking_pids"));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let Some(blocked_pid) = client_id_arg(value, "pg_blocking_pids")? else {
+        return Ok(int4_array_from_client_ids(Vec::new()));
+    };
+    let blockers = ctx
+        .lock_status_provider
+        .as_ref()
+        .map(|provider| provider.pg_blocking_pids(blocked_pid))
+        .unwrap_or_default();
+    Ok(int4_array_from_client_ids(blockers))
+}
+
+fn int4_array_arg(value: &Value, op: &'static str) -> Result<Vec<crate::ClientId>, ExecError> {
+    let elements = match value {
+        Value::PgArray(array) => &array.elements,
+        Value::Array(elements) => elements,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op,
+                left: other.clone(),
+                right: Value::PgArray(ArrayValue::empty().with_element_type_oid(INT4_TYPE_OID)),
+            });
+        }
+    };
+
+    let mut pids = Vec::new();
+    for element in elements {
+        match element {
+            Value::Null => {
+                return Err(ExecError::DetailedError {
+                    message: "array must not contain nulls".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22004",
+                });
+            }
+            Value::Int32(pid) if *pid > 0 => pids.push(*pid as crate::ClientId),
+            Value::Int32(_) => {}
+            other => {
+                return Err(ExecError::TypeMismatch {
+                    op,
+                    left: other.clone(),
+                    right: Value::Int32(0),
+                });
+            }
+        }
+    }
+    Ok(pids)
+}
+
+fn eval_pg_isolation_test_session_is_blocked(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let [blocked_pid_value, interesting_pids_value] = values else {
+        return Err(malformed_expr_error("pg_isolation_test_session_is_blocked"));
+    };
+    if matches!(blocked_pid_value, Value::Null) || matches!(interesting_pids_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let Some(blocked_pid) =
+        client_id_arg(blocked_pid_value, "pg_isolation_test_session_is_blocked")?
+    else {
+        return Ok(Value::Bool(false));
+    };
+    let interesting_pids = int4_array_arg(
+        interesting_pids_value,
+        "pg_isolation_test_session_is_blocked",
+    )?;
+    let blockers = ctx
+        .lock_status_provider
+        .as_ref()
+        .map(|provider| provider.pg_blocking_pids(blocked_pid))
+        .unwrap_or_default();
+    // :HACK: pgrust does not yet model PostgreSQL isolationtester injection
+    // points or safe-snapshot waits, so this checks modeled lock blockers only.
+    Ok(Value::Bool(
+        blockers
+            .iter()
+            .any(|blocker| interesting_pids.contains(blocker)),
+    ))
+}
+
 pub(crate) fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -13841,6 +13956,12 @@ pub(crate) fn eval_builtin_function(
     }
     if matches!(func, BuiltinScalarFunction::PgNotificationQueueUsage) {
         return Ok(eval_pg_notification_queue_usage_function(ctx));
+    }
+    if matches!(func, BuiltinScalarFunction::PgBlockingPids) {
+        return eval_pg_blocking_pids(&values, ctx);
+    }
+    if matches!(func, BuiltinScalarFunction::PgIsolationTestSessionIsBlocked) {
+        return eval_pg_isolation_test_session_is_blocked(&values, ctx);
     }
     if matches!(
         func,
@@ -14166,6 +14287,12 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgNotify => unreachable!("pg_notify handled earlier"),
         BuiltinScalarFunction::PgNotificationQueueUsage => {
             unreachable!("pg_notification_queue_usage handled earlier")
+        }
+        BuiltinScalarFunction::PgBlockingPids => {
+            unreachable!("pg_blocking_pids handled earlier")
+        }
+        BuiltinScalarFunction::PgIsolationTestSessionIsBlocked => {
+            unreachable!("pg_isolation_test_session_is_blocked handled earlier")
         }
         BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
         | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
