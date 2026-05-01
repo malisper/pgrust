@@ -11421,6 +11421,114 @@ fn alter_table_only_partitioned_primary_key_does_not_reconcile_children() {
 }
 
 #[test]
+fn create_unique_index_on_partitioned_table_reuses_child_constraint_index() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table part_u (a int) partition by range (a)")
+        .unwrap();
+    session
+        .execute(&db, "create table part_u1 (a int)")
+        .unwrap();
+    session
+        .execute(&db, "alter table part_u1 add unique (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table part_u attach partition part_u1 for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create unique index part_u_a_idx on part_u(a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index part_u_a_idx attach partition part_u1_a_key",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select inhparent::regclass::text
+               from pg_inherits
+              where inhrelid = 'part_u1_a_key'::regclass",
+        ),
+        vec![vec![Value::Text("part_u_a_idx".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conparentid
+               from pg_constraint
+              where conrelid = 'part_u1'::regclass
+                and conname = 'part_u1_a_key'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn attach_partition_fk_clone_uses_available_parent_name() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table fk_ref(id int primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table fk_parent(\
+                 id int, \
+                 ref_id int, \
+                 constraint dummy_constr foreign key (ref_id) references fk_ref(id)\
+             ) partition by range(id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table fk_child(\
+                 id int, \
+                 ref_id int, \
+                 constraint dummy_constr check (id >= 0)\
+             )",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table fk_parent attach partition fk_child for values from (0) to (10)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype
+               from pg_constraint
+              where conrelid = 'fk_child'::regclass
+                and conname like 'dummy_constr%'
+              order by conname",
+        ),
+        vec![
+            vec![Value::Text("dummy_constr".into()), Value::Text("c".into())],
+            vec![
+                Value::Text("dummy_constr_1".into()),
+                Value::Text("f".into())
+            ],
+        ]
+    );
+}
+
+#[test]
 fn attach_partition_rejects_mismatched_existing_primary_key() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -13211,6 +13319,41 @@ fn alter_table_set_not_null_rejects_existing_no_inherit_constraint() {
             assert_eq!(sqlstate, "0A000");
         }
         other => panic!("expected existing NO INHERIT SET NOT NULL failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn drop_primary_key_preserves_created_not_null_constraint() {
+    let dir = temp_dir("drop_primary_key_preserves_not_null");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table pk_keep_nn (a int primary key)")
+        .unwrap();
+    db.execute(1, "alter table pk_keep_nn drop constraint pk_keep_nn_pkey")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, convalidated, conislocal, coninhcount
+               from pg_constraint c
+               join pg_class r on r.oid = c.conrelid
+              where r.relname = 'pk_keep_nn'
+                and c.contype = 'n'",
+        ),
+        vec![vec![
+            Value::Text("pk_keep_nn_a_not_null".into()),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Int16(0),
+        ]]
+    );
+    match db.execute(1, "insert into pk_keep_nn values (null)") {
+        Err(ExecError::NotNullViolation {
+            relation, column, ..
+        }) if relation == "pk_keep_nn" && column == "a" => {}
+        other => panic!("expected preserved not-null violation, got {other:?}"),
     }
 }
 
@@ -22909,6 +23052,43 @@ fn regclass_cast_resolves_text_expression() {
 }
 
 #[test]
+fn regclass_array_literal_resolves_relation_names() {
+    let base = temp_dir("regclass_array_literal");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "prepare regclass_array_lookup(regclass[]) as
+             select count(*) from pg_class where oid = any($1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table regclass_array_tbl(id int4)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest('{regclass_array_tbl}'::regclass[])::oid = \
+                    'regclass_array_tbl'::regclass::oid",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    match session
+        .execute(&db, "execute regclass_array_lookup('{regclass_array_tbl}')")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected prepared regclass array query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn regclass_cast_reports_missing_relation_for_qualified_name() {
     let base = temp_dir("regclass_missing_relation");
     let db = Database::open(&base, 16).unwrap();
@@ -23798,6 +23978,42 @@ fn alter_table_add_column_reads_old_rows_with_null_or_default() {
             vec![Value::Int32(1), Value::Null, Value::Int32(3)],
             vec![Value::Int32(2), Value::Null, Value::Int32(3)],
         ]
+    );
+
+    db.execute(1, "create table random_defaults (id int4)")
+        .unwrap();
+    db.execute(1, "insert into random_defaults values (1), (2)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table random_defaults add column d float8 default random()",
+    )
+    .unwrap();
+    let random_default_expr = query_rows(
+        &db,
+        1,
+        "select pg_get_expr(adbin, adrelid)
+           from pg_attrdef
+          where adrelid = 'random_defaults'::regclass",
+    );
+    match random_default_expr.as_slice() {
+        [row] if row.len() == 1 => match &row[0] {
+            Value::Text(expr)
+                if expr.eq_ignore_ascii_case("random()") || expr.eq_ignore_ascii_case("random") => {
+            }
+            other => panic!("expected random default expression, got {other:?}"),
+        },
+        other => panic!("expected one random default expression row, got {other:?}"),
+    }
+    db.execute(1, "insert into random_defaults (id) values (3)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d is not null from random_defaults where id = 3"
+        ),
+        vec![vec![Value::Bool(true)]]
     );
 }
 
@@ -28267,6 +28483,127 @@ fn range_exclusion_constraints_enforce_equal_and_overlap_columns() {
 }
 
 #[test]
+fn scalar_gist_exclusion_constraint_honors_predicate() {
+    let base = temp_dir("scalar_gist_exclusion_predicate");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table scalar_excl(\
+             room int4, \
+             active bool, \
+             exclude using gist (room with =) where (active)\
+         )",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indpred
+               from pg_index i
+               join pg_class c on c.oid = i.indexrelid
+              where c.relname = 'scalar_excl_room_excl'",
+        ),
+        vec![vec![Value::Text("(active)".into())]]
+    );
+
+    db.execute(1, "insert into scalar_excl values (1, false)")
+        .unwrap();
+    db.execute(1, "insert into scalar_excl values (1, false)")
+        .unwrap();
+    db.execute(1, "insert into scalar_excl values (1, true)")
+        .unwrap();
+    match db.execute(1, "insert into scalar_excl values (1, true)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "conflicting key value violates exclusion constraint \"scalar_excl_room_excl\""
+            );
+        }
+        other => panic!("expected scalar exclusion violation, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create table circle_excl(\
+             c circle, \
+             exclude using gist (c with &&)\
+         )",
+    )
+    .unwrap();
+    db.execute(1, "insert into circle_excl values ('<(0,0),5>')")
+        .unwrap();
+    match db.execute(1, "insert into circle_excl values ('<(4,0),5>')") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "conflicting key value violates exclusion constraint \"circle_excl_c_excl\""
+            );
+        }
+        other => panic!("expected circle exclusion violation, got {other:?}"),
+    }
+    db.execute(
+        1,
+        "insert into circle_excl values ('<(4,0),5>')
+           on conflict on constraint circle_excl_c_excl do nothing",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from circle_excl"),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn deferrable_exclusion_constraint_checks_at_commit() {
+    let base = temp_dir("deferrable_exclusion_commit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table deferred_excl (
+                f1 int4,
+                constraint deferred_excl_con exclude (f1 with =) initially deferred
+            )",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into deferred_excl values (1)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into deferred_excl values (1)")
+        .unwrap();
+    match session.execute(&db, "commit") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "conflicting key value violates exclusion constraint \"deferred_excl_con\""
+            && sqlstate == "23P01" => {}
+        other => panic!("expected deferred exclusion violation at commit, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "insert into deferred_excl values (1) on conflict on constraint deferred_excl_con do nothing",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
+            if message
+                == "ON CONFLICT does not support deferrable unique constraints/exclusion constraints as arbiters" => {}
+        other => panic!("expected deferrable exclusion ON CONFLICT rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_drop_exclusion_constraint_drops_backing_index() {
     let base = temp_dir("alter_drop_exclusion_constraint");
     let db = Database::open(&base, 16).unwrap();
@@ -28365,6 +28702,26 @@ fn alter_table_add_exclusion_constraint_accepts_expression_key() {
         ),
         vec![vec![Value::Text("EXCLUDE USING gist ((1) WITH =)".into())]]
     );
+
+    db.execute(1, "create table add_excl_expr_conflict(a int4)")
+        .unwrap();
+    db.execute(1, "insert into add_excl_expr_conflict values (1), (2)")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter table add_excl_expr_conflict add constraint add_excl_expr_conflict_excl exclude ((1) with =)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "could not create exclusion constraint \"add_excl_expr_conflict_excl\""
+            );
+        }
+        other => panic!("expected expression exclusion create violation, got {other:?}"),
+    }
 }
 
 #[test]
@@ -36178,6 +36535,85 @@ fn no_inherit_not_null_blocks_primary_key() {
 }
 
 #[test]
+fn partition_child_not_valid_or_no_inherit_not_null_blocks_primary_key() {
+    let base = temp_dir("partition_child_not_null_pk_compat");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pp_nn (a int4) partition by hash (a)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table pp_nn_1 partition of pp_nn for values with (modulus 2, remainder 0)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table pp_nn_1 add constraint nn not null a not valid",
+    )
+    .unwrap();
+    match db.execute(1, "alter table only pp_nn add primary key (a)") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }) => {
+            assert_eq!(message, "cannot create primary key on column \"a\"");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "The constraint \"nn\" on column \"a\" of table \"pp_nn_1\", marked NOT VALID, is incompatible with a primary key."
+                )
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.")
+            );
+            assert_eq!(sqlstate, "55000");
+        }
+        other => panic!("expected child NOT VALID NOT NULL to block primary key, got {other:?}"),
+    }
+
+    db.execute(1, "drop table pp_nn").unwrap();
+    db.execute(1, "create table pp_nn (a int4) partition by hash (a)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table pp_nn_1 partition of pp_nn for values with (modulus 2, remainder 0)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table pp_nn_1 add constraint nn not null a no inherit",
+    )
+    .unwrap();
+    match db.execute(1, "alter table only pp_nn add primary key (a)") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }) => {
+            assert_eq!(message, "cannot create primary key on column \"a\"");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "The constraint \"nn\" on column \"a\" of table \"pp_nn_1\", marked NO INHERIT, is incompatible with a primary key."
+                )
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."
+                )
+            );
+            assert_eq!(sqlstate, "55000");
+        }
+        other => panic!("expected child NO INHERIT NOT NULL to block primary key, got {other:?}"),
+    }
+}
+
+#[test]
 fn not_null_inheritance_metadata_and_alter_constraint_inheritability() {
     let base = temp_dir("not_null_inheritance_metadata");
     let db = Database::open(&base, 16).unwrap();
@@ -38304,6 +38740,56 @@ fn alter_table_add_deferrable_unique_initially_deferred_fails_at_commit() {
 }
 
 #[test]
+fn deferred_unique_recheck_ignores_same_transaction_delete() {
+    let base = temp_dir("deferred_unique_delete_before_commit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table items (
+                code int4 unique deferrable initially deferred,
+                note text
+            )",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (10, 'old')")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into items values (10, 'new')")
+        .unwrap();
+    session
+        .execute(&db, "delete from items where note = 'old'")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select code, note from items order by note"),
+        vec![vec![Value::Int32(10), Value::Text("new".into())]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into items values (10, 'newer')")
+        .unwrap();
+    session
+        .execute(&db, "update items set note = 'newest' where note = 'newer'")
+        .unwrap();
+    session
+        .execute(&db, "delete from items where note = 'new'")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select code, note from items order by note"),
+        vec![vec![Value::Int32(10), Value::Text("newest".into())]]
+    );
+}
+
+#[test]
 fn set_constraints_named_deferred_postpones_deferrable_foreign_key_checks() {
     let base = temp_dir("set_constraints_named_deferred_fk");
     let db = Database::open(&base, 16).unwrap();
@@ -39074,6 +39560,50 @@ fn alter_table_drop_parent_not_null_removes_inherited_child_constraint() {
 }
 
 #[test]
+fn alter_table_only_drop_not_null_preserves_child_constraint() {
+    let base = temp_dir("alter_table_only_drop_not_null");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_only_parent (a int4 not null)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table nn_only_child (b text) inherits (nn_only_parent)",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table only nn_only_parent alter a drop not null")
+        .unwrap();
+    db.execute(1, "insert into nn_only_parent values (null)")
+        .unwrap();
+    match db.execute(
+        1,
+        "insert into nn_only_child (a, b) values (null, 'blocked')",
+    ) {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+            ..
+        }) if relation == "nn_only_child"
+            && column == "a"
+            && constraint == "nn_only_parent_a_not_null" => {}
+        other => panic!("expected preserved child not-null violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conislocal, coninhcount
+               from pg_constraint
+              where conrelid = 'nn_only_child'::regclass and contype = 'n'",
+        ),
+        vec![vec![Value::Bool(true), Value::Int16(0)]]
+    );
+}
+
+#[test]
 fn alter_table_add_and_drop_key_constraints_manage_indexes() {
     let base = temp_dir("alter_table_key_constraints_indexes");
     let db = Database::open(&base, 16).unwrap();
@@ -39159,7 +39689,7 @@ fn alter_table_add_and_drop_key_constraints_manage_indexes() {
              where conrelid = (select oid from pg_class where relname = 'items') \
              order by conname",
         ),
-        Vec::<Vec<Value>>::new()
+        vec![vec![Value::Text("items_id_not_null".into())]]
     );
     assert_eq!(
         query_rows(
@@ -39171,8 +39701,17 @@ fn alter_table_add_and_drop_key_constraints_manage_indexes() {
         ),
         Vec::<Vec<Value>>::new()
     );
-    db.execute(1, "insert into items values (null, 10, 'after drop')")
+    db.execute(1, "insert into items values (1, 10, 'after drop')")
         .unwrap();
+    match db.execute(1, "insert into items values (null, 10, 'missing id')") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+            ..
+        }) if relation == "items" && column == "id" && constraint == "items_id_not_null" => {}
+        other => panic!("expected PK-created NOT NULL to remain, got {other:?}"),
+    }
 }
 
 #[test]
@@ -39364,8 +39903,8 @@ fn alter_table_rename_not_null_constraint_updates_column_enforcement() {
 }
 
 #[test]
-fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
-    let base = temp_dir("alter_table_drop_primary_key_owned_not_null");
+fn alter_table_drop_primary_key_preserves_not_null_constraints() {
+    let base = temp_dir("alter_table_drop_primary_key_preserves_not_null");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(
@@ -39416,11 +39955,21 @@ fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
              where conrelid = (select oid from pg_class where relname = 'items') \
              order by conname",
         ),
-        vec![vec![Value::Text("items_id_not_null".into())]]
+        vec![
+            vec![Value::Text("items_code_not_null".into())],
+            vec![Value::Text("items_id_not_null".into())],
+        ]
     );
 
-    db.execute(1, "insert into items values (1, null, 'nullable code')")
-        .unwrap();
+    match db.execute(1, "insert into items values (1, null, 'missing code')") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+            ..
+        }) if relation == "items" && column == "code" && constraint == "items_code_not_null" => {}
+        other => panic!("expected PK-created NOT NULL to remain, got {other:?}"),
+    }
     match db.execute(1, "insert into items values (null, 2, 'missing id')") {
         Err(ExecError::NotNullViolation {
             relation,

@@ -2,8 +2,8 @@ use super::super::*;
 use crate::backend::commands::rolecmds::PasswordSettings;
 use crate::backend::executor::{
     ExecutorTransactionState, Expr, MaterializedCteTable, MaterializedRow,
-    SharedExecutorTransactionState, TupleSlot, cast_value_with_config, eval_expr,
-    execute_planned_stmt, execute_readonly_statement_with_config,
+    SharedExecutorTransactionState, TupleSlot, cast_value_with_source_type_catalog_and_config,
+    eval_expr, execute_planned_stmt, execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
     BoundCte, BoundModifyingCte, BoundWritableCte, CatalogLookup, CommonTableExpr, CteBody,
@@ -201,7 +201,13 @@ fn install_prepared_external_params(
     let mut slot = TupleSlot::empty(0);
     for binding in bindings {
         let value = eval_expr(&binding.expr, &mut slot, ctx)?;
-        let value = cast_value_with_config(value, binding.ty, &ctx.datetime_config)?;
+        let value = cast_value_with_source_type_catalog_and_config(
+            value,
+            None,
+            binding.ty,
+            ctx.catalog.as_deref(),
+            &ctx.datetime_config,
+        )?;
         ctx.expr_bindings
             .external_params
             .insert(binding.paramid, value);

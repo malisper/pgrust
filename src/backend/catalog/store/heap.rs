@@ -6606,6 +6606,35 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn clear_column_not_null_primary_key_owned_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                entry.desc.columns[column_index].not_null_primary_key_owned = false;
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn validate_not_null_constraint_mvcc(
         &mut self,
         relation_oid: u32,

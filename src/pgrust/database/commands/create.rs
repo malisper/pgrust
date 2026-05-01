@@ -3711,7 +3711,7 @@ impl Database {
                     &index_name,
                     Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     &storage_columns,
-                    None,
+                    action.predicate_sql.as_deref(),
                     !action.exclusion,
                     action.primary,
                     action.nulls_not_distinct,

@@ -1395,7 +1395,7 @@ pub(super) fn validate_alter_table_add_column(
             desc.default_expr = Some(type_default);
         }
         if let Some(sql) = desc.default_expr.as_deref() {
-            desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
+            desc.missing_default_value = derive_literal_default_value(sql, desc.sql_type).ok();
         }
     }
     if let Some(storage) = column.storage {

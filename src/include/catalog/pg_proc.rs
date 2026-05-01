@@ -13898,6 +13898,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("box_contained", BuiltinScalarFunction::GeoContainedBy),
         ("contained", BuiltinScalarFunction::GeoContainedBy),
         ("box_overlap", BuiltinScalarFunction::GeoOverlap),
+        ("circle_overlap", BuiltinScalarFunction::GeoOverlap),
         ("overlap", BuiltinScalarFunction::GeoOverlap),
         ("box_left", BuiltinScalarFunction::GeoLeft),
         ("left", BuiltinScalarFunction::GeoLeft),

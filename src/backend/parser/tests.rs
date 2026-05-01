@@ -4025,6 +4025,35 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
 }
 
 #[test]
+fn parse_create_table_exclusion_constraint_captures_predicate_sql() {
+    let stmt = parse_statement(
+        "create table room_bookings (
+            room int4,
+            active bool,
+            exclude using gist (room with =) where (active)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let exclusion = ct
+        .elements
+        .iter()
+        .find_map(|element| match element {
+            CreateTableElement::Constraint(TableConstraint::Exclusion {
+                using_method,
+                predicate_sql,
+                ..
+            }) => Some((using_method, predicate_sql)),
+            _ => None,
+        })
+        .expect("exclusion constraint");
+    assert_eq!(exclusion.0, "gist");
+    assert_eq!(exclusion.1.as_deref(), Some("(active)"));
+}
+
+#[test]
 fn parse_alter_table_add_column_statement() {
     let stmt = parse_statement("alter table items add column note text default 'hello'").unwrap();
     assert_eq!(
@@ -15110,6 +15139,31 @@ fn lower_create_table_accepts_check_not_enforced() {
     assert_eq!(lowered.check_actions.len(), 1);
     assert_eq!(lowered.check_actions[0].constraint_name, "items_id_check");
     assert!(!lowered.check_actions[0].enforced);
+}
+
+#[test]
+fn lower_create_table_names_column_checks_from_referenced_columns() {
+    let stmt = parse_statement(
+        "create table items (
+            a int4,
+            b int4 check (a > 0),
+            c int4 check (a > b),
+            d int4 check (d > 0)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .expect("lower create table");
+    let names = lowered
+        .check_actions
+        .iter()
+        .map(|action| action.constraint_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["items_a_check", "items_check", "items_d_check"]);
 }
 
 #[test]
