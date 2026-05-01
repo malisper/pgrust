@@ -9968,7 +9968,11 @@ impl Session {
                     dynamic_type_snapshot: db.dynamic_type_snapshot(),
                     catalog_snapshot: db.catalog_store_snapshot(
                         self.client_id,
-                        txn.xid.map(|xid| (xid, txn.next_command_id)),
+                        if txn.catalog_effects.is_empty() {
+                            None
+                        } else {
+                            txn.xid.map(|xid| (xid, txn.next_command_id))
+                        },
                     )?,
                     catalog_effect_len: txn.catalog_effects.len(),
                     prior_catalog_invalidation_len: txn.prior_cmd_catalog_invalidations.len(),

@@ -1017,12 +1017,23 @@ fn bind_scalar_function_call_from_bound_args(
                 expected: "concrete enum argument",
                 actual: format!("{func:?}({} args)", args.len()),
             })?;
+        let result_type = if matches!(func, BuiltinScalarFunction::EnumRange) {
+            SqlType::array_of(enum_type)
+        } else {
+            enum_type
+        };
         let coerced = bound_args
             .iter()
             .zip(arg_types.iter().copied())
             .map(|(arg, actual_type)| coerce_bound_expr(arg.clone(), actual_type, enum_type))
             .collect();
-        return Ok(build_func(func_variadic, coerced));
+        return Ok(Expr::resolved_builtin_func(
+            func,
+            func_oid,
+            Some(result_type),
+            func_variadic,
+            coerced,
+        ));
     }
     match func {
         BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {

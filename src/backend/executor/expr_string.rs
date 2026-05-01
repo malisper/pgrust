@@ -2778,7 +2778,7 @@ pub(super) fn eval_encode_function(values: &[Value]) -> Result<Value, ExecError>
     let format = expect_text_arg("encode", format_value, bytes_value)?.to_ascii_lowercase();
     let rendered = match format.as_str() {
         "hex" => encode_hex_bytes(bytes),
-        "escape" => format_bytea_text(bytes, ByteaOutputFormat::Escape),
+        "escape" => encode_bytea_escape_text(bytes),
         "base64" => wrap_base64_text(&base64::engine::general_purpose::STANDARD.encode(bytes)),
         _ => {
             return Err(ExecError::RaiseException(format!(
@@ -2787,6 +2787,21 @@ pub(super) fn eval_encode_function(values: &[Value]) -> Result<Value, ExecError>
         }
     };
     Ok(Value::Text(CompactString::from_owned(rendered)))
+}
+
+fn encode_bytea_escape_text(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &byte in bytes {
+        match byte {
+            b'\0' | 0x80..=0xff => {
+                use std::fmt::Write as _;
+                let _ = write!(&mut out, "\\{byte:03o}");
+            }
+            b'\\' => out.push_str("\\\\"),
+            _ => out.push(byte as char),
+        }
+    }
+    out
 }
 
 fn wrap_base64_text(text: &str) -> String {

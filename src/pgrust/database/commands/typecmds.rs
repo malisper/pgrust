@@ -2990,6 +2990,9 @@ impl Database {
         entry
             .labels
             .sort_by(|left, right| left.sort_order.total_cmp(&right.sort_order));
+        drop(enum_types);
+        self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+        self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }
