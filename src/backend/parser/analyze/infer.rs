@@ -521,6 +521,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Record(record)) => record.sql_type(),
         SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _))
+        | SqlExpr::Const(Value::DroppedColumn(_))
+        | SqlExpr::Const(Value::WrongTypeColumn { .. })
         | SqlExpr::Const(Value::Null) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Const(Value::Array(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::PgArray(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
@@ -1828,7 +1830,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::CurrentCatalog => SqlType::new(SqlTypeKind::Text),
         SqlExpr::CurrentSchema => SqlType::new(SqlTypeKind::Text),
         SqlExpr::CurrentUser => SqlType::new(SqlTypeKind::Name),
+        SqlExpr::User => SqlType::new(SqlTypeKind::Name),
         SqlExpr::SessionUser => SqlType::new(SqlTypeKind::Name),
+        SqlExpr::SystemUser => SqlType::new(SqlTypeKind::Name),
         SqlExpr::CurrentRole => SqlType::new(SqlTypeKind::Name),
         SqlExpr::CurrentTime { precision } => precision
             .map(|precision| SqlType::with_time_precision(SqlTypeKind::TimeTz, precision))

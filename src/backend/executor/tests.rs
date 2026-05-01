@@ -32,6 +32,7 @@ fn local_var(index: usize) -> Expr {
         varattno: user_attrno(index),
         varlevelsup: 0,
         vartype: crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+        collation_oid: None,
     })
 }
 
@@ -1713,6 +1714,7 @@ fn pg_column_compression_reports_compressed_heap_values() {
             vartype: crate::backend::parser::SqlType::new(
                 crate::backend::parser::SqlTypeKind::Text,
             ),
+            collation_oid: None,
         })],
     );
 
@@ -4638,6 +4640,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(2),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::SubPlan(Box::new(SubPlan {
                     sublink_type: SubLinkType::ExprSubLink,
@@ -4659,6 +4662,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(4),
                     varlevelsup: 0,
                     vartype: text,
+                    collation_oid: None,
                 })],
             ),
             Expr::binary_op(
@@ -4669,6 +4673,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: text,
+                    collation_oid: None,
                 }),
                 Expr::CurrentUser,
             ),
@@ -4714,6 +4719,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(1)),
             ),
@@ -4725,6 +4731,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(3)),
             ),
@@ -4750,12 +4757,14 @@ fn explain_expr_matches_postgres_filter_formatting() {
         varattno: user_attrno(0),
         varlevelsup: 0,
         vartype: int4,
+        collation_oid: None,
     });
     let b = Expr::Var(Var {
         varno: 1,
         varattno: user_attrno(1),
         varlevelsup: 0,
         vartype: text,
+        collation_oid: None,
     });
     let modulo = Expr::binary_op(
         OpExprKind::Mod,
@@ -4811,6 +4820,7 @@ fn explain_expr_matches_postgres_filter_formatting() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Jsonb),
+            collation_oid: None,
         }),
         Expr::Const(Value::JsonPath(r#"($."wait" == null)"#.into())),
     );
@@ -4828,6 +4838,7 @@ fn explain_expr_matches_postgres_filter_formatting() {
             varattno: user_attrno(0),
             varlevelsup: 0,
             vartype: ts,
+            collation_oid: None,
         }),
         Expr::LocalTimestamp { precision: None },
     );
@@ -4906,6 +4917,7 @@ fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
             varattno: user_attrno(1),
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Char),
+            collation_oid: None,
         }),
         Expr::ArrayLiteral {
             elements: vec![Expr::Const(Value::Text("ab".into()))],
@@ -4938,6 +4950,7 @@ fn explain_join_expr_renders_function_args_with_join_vars() {
                 varattno: user_attrno(2),
                 varlevelsup: 0,
                 vartype: text,
+                collation_oid: None,
             }),
             Expr::Const(Value::Int32(3)),
         ],
@@ -4977,6 +4990,7 @@ fn explain_expr_renders_varchar_scalar_array_with_nonconst_element() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: varchar,
+                collation_oid: None,
             })),
             text,
         )),
@@ -5029,6 +5043,7 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: polygon_ty,
+                collation_oid: None,
             }),
             Expr::Const(Value::Polygon(GeoPolygon {
                 bound_box: GeoBox {
@@ -5064,6 +5079,7 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: circle_ty,
+                collation_oid: None,
             }),
             Expr::Const(Value::Circle(GeoCircle {
                 center: GeoPoint { x: 500.0, y: 500.0 },
@@ -5097,6 +5113,7 @@ fn explain_sort_key_renders_box_coordinate_subscripts() {
                 varattno: user_attrno(0),
                 varlevelsup: 0,
                 vartype: SqlType::new(SqlTypeKind::Box),
+                collation_oid: None,
             })],
         )],
     );
@@ -5161,6 +5178,7 @@ fn explain_const_false_and_scan_filter_uses_one_time_filter() {
                     varattno: user_attrno(0),
                     varlevelsup: 0,
                     vartype: int4,
+                    collation_oid: None,
                 }),
                 Expr::Const(Value::Int32(1000)),
             ),
@@ -15588,6 +15606,57 @@ fn join_using_projects_merged_column_once() {
 }
 
 #[test]
+fn join_using_qualified_star_uses_side_specific_columns() {
+    let base = temp_dir("join_using_qualified_star_side_specific");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
+        catalog_with_pets(),
+    )
+    .unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into pets (id, name, owner_id) values (1, 'mocha', 1)",
+        catalog_with_pets(),
+    )
+    .unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select people.*, pets.* from people left join pets using (id) order by people.id",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("alice".into()),
+                Value::Text("a".into()),
+                Value::Int32(1),
+                Value::Text("mocha".into()),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("bob".into()),
+                Value::Text("b".into()),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ],
+        ],
+    );
+}
+
+#[test]
 fn grouped_join_using_counts_rhs_values() {
     let base = temp_dir("grouped_join_using_counts_rhs_values");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -15663,6 +15732,98 @@ fn full_join_using_coalesces_join_column() {
             vec![Value::Int32(2), Value::Text("bob".into()), Value::Null],
             vec![Value::Int32(3), Value::Null, Value::Text("pixel".into())],
         ],
+    );
+}
+
+#[test]
+fn recursive_cte_rematerializes_nested_iteration_ctes() {
+    let base = temp_dir("recursive_cte_iteration_local_ctes");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "WITH RECURSIVE \
+               tab(id_key,link) AS (VALUES (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)), \
+               iter (id_key, row_type, link) AS ( \
+                   SELECT 0, 'base', 17 \
+                 UNION ALL ( \
+                   WITH remaining(id_key, row_type, link, min) AS ( \
+                     SELECT tab.id_key, 'true'::text, iter.link, MIN(tab.id_key) OVER () \
+                     FROM tab INNER JOIN iter USING (link) \
+                     WHERE tab.id_key > iter.id_key \
+                   ), \
+                   first_remaining AS ( \
+                     SELECT id_key, row_type, link \
+                     FROM remaining \
+                     WHERE id_key=min \
+                   ) \
+                   SELECT * FROM first_remaining \
+                 ) \
+               ) \
+             SELECT * FROM iter",
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Text("base".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(4),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(5),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+            vec![
+                Value::Int32(6),
+                Value::Text("true".into()),
+                Value::Int32(17),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn unused_subquery_output_prunes_scalar_cte_subquery() {
+    let base = temp_dir("unused_subquery_output_prunes_scalar_cte_subquery");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "SELECT a FROM ( \
+               WITH t_cte AS (VALUES (1, 10), (1, 20)) \
+               SELECT v.a, (SELECT column2 FROM t_cte WHERE column1 = v.a) AS t_sub \
+               FROM (VALUES (1), (2)) AS v(a) \
+             ) ss",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
     );
 }
 
@@ -17962,6 +18123,93 @@ fn window_rows_range_and_groups_frames_are_respected() {
                         Value::Int32(1),
                         Value::Int32(4),
                     ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_groups_preceding_end_underflow_is_empty() {
+    let base = temp_dir("window_groups_preceding_end_underflow");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'x'),
+            (4, 'dave', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) over (order by note groups between 2 preceding and 1 preceding)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Null],
+                    vec![Value::Int32(2), Value::Null],
+                    vec![Value::Int32(3), Value::Null],
+                    vec![Value::Int32(4), Value::Int64(6)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_aggregate_filter_applies_to_rows_frames() {
+    let base = temp_dir("window_aggregate_filter_applies_to_rows_frames");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'yes'),
+            (2, 'bob', 'no'),
+            (3, 'carol', 'yes')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                sum(id) filter (where note = 'yes')
+                    over (order by id rows between 1 preceding and current row)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(1)],
+                    vec![Value::Int32(2), Value::Int64(1)],
+                    vec![Value::Int32(3), Value::Int64(3)],
                 ]
             );
         }
@@ -24846,24 +25094,67 @@ fn select_cte_can_capture_outer_value_through_scalar_subquery() {
     let base = temp_dir("select_cte_outer_value_scalar_subquery");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
-    assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select (
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select (
                 with cte(foo) as (values (x))
                 select (select foo from cte)
              )
              from (values (0), (123456), (-123456)) as t(x)",
-        )
-        .unwrap(),
-        vec![
-            vec![Value::Int32(0)],
-            vec![Value::Int32(123456)],
-            vec![Value::Int32(-123456)],
-        ],
-    );
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["foo".to_string()]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(0)],
+                    vec![Value::Int32(123456)],
+                    vec![Value::Int32(-123456)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_cte_scalar_values_subquery_uses_values_column_name() {
+    let base = temp_dir("select_cte_outer_value_scalar_values_subquery");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select (
+                with cte(foo) as (values (x))
+                values((select foo from cte))
+             )
+             from (values (0), (123456), (-123456)) as t(x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["column1".to_string()]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(0)],
+                    vec![Value::Int32(123456)],
+                    vec![Value::Int32(-123456)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]

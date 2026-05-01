@@ -12,9 +12,9 @@ use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
     AttrNumber, BoolExpr, BuiltinScalarFunction, CaseExpr, CaseWhen, ColumnDesc, FuncExpr,
     JoinType, JsonRecordFunction, RULE_NEW_VAR, RULE_OLD_VAR, RowsFromItem, RowsFromSource,
-    SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SqlJsonTable, SqlJsonTableBehavior,
-    SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
-    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
+    SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
+    SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan, SqlJsonTableQuotes,
+    SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
     SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, XMAX_ATTR_NO, XMIN_ATTR_NO, expr_sql_type_hint,
     user_attrno,
 };
@@ -83,6 +83,20 @@ pub(crate) struct BoundCte {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct BoundWritableCte {
+    pub(crate) cte: BoundCte,
+    pub(crate) source: BoundModifyingCte,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum BoundModifyingCte {
+    Insert(BoundInsertStatement),
+    Update(BoundUpdateStatement),
+    Delete(BoundDeleteStatement),
+    Merge(BoundMergeStatement),
+}
+
+#[derive(Debug, Clone)]
 pub struct BoundRelation {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
@@ -129,15 +143,28 @@ fn default_scope_output_exprs(varno: usize, desc: &RelationDesc) -> Vec<Expr> {
     desc.columns
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
+        .map(|(index, column)| scope_column_var_expr(varno, index, column))
         .collect()
+}
+
+fn scope_column_var_expr(varno: usize, index: usize, column: &ColumnDesc) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+        collation_oid: (column.collation_oid != 0).then_some(column.collation_oid),
+    })
+}
+
+fn scope_query_column_var_expr(varno: usize, index: usize, column: &QueryColumn) -> Expr {
+    Expr::Var(Var {
+        varno,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: column.sql_type,
+        collation_oid: None,
+    })
 }
 
 pub(super) fn bind_values_rows(
@@ -268,6 +295,62 @@ pub(super) fn bind_values_rows(
         AnalyzedFrom::values(bound_rows, output_columns),
         scope_for_relation(None, &desc),
     ))
+}
+
+fn bind_scalar_expression_from_item_with_ctes(
+    expr: &SqlExpr,
+    display_sql: Option<&str>,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    let call_scope = empty_scope();
+    let bound = bind_expr_with_outer_and_ctes(
+        expr,
+        &call_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let sql_type = expr_sql_type_hint(&bound).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let column_name = scalar_expression_rte_column_name(expr);
+    let output_columns = vec![QueryColumn {
+        name: column_name.clone(),
+        sql_type,
+        wire_type_oid: None,
+    }];
+    let plan = AnalyzedFrom::project_function(
+        vec![bound],
+        output_columns,
+        display_sql.map(str::to_string),
+        Some(column_name.clone()),
+    );
+    let scope = scope_with_output_exprs(
+        scope_for_relation(Some(&column_name), &plan.desc()),
+        &plan.output_exprs,
+    );
+    Ok((plan, scope))
+}
+
+fn scalar_expression_rte_column_name(expr: &SqlExpr) -> String {
+    match expr {
+        SqlExpr::CurrentDate => "current_date",
+        SqlExpr::CurrentCatalog => "current_catalog",
+        SqlExpr::CurrentSchema => "current_schema",
+        SqlExpr::CurrentUser => "current_user",
+        SqlExpr::User => "user",
+        SqlExpr::SessionUser => "session_user",
+        SqlExpr::SystemUser => "system_user",
+        SqlExpr::CurrentRole => "current_role",
+        SqlExpr::CurrentTime { .. } => "current_time",
+        SqlExpr::CurrentTimestamp { .. } => "current_timestamp",
+        SqlExpr::LocalTime { .. } => "localtime",
+        SqlExpr::LocalTimestamp { .. } => "localtimestamp",
+        _ => "?column?",
+    }
+    .to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -759,6 +842,7 @@ fn relation_name_matches(visible_relation: &str, requested_relation: &str) -> bo
 fn from_item_is_lateral(item: &FromItem) -> bool {
     match item {
         FromItem::Lateral(_) => true,
+        FromItem::Expression { .. } => true,
         FromItem::FunctionCall { .. } => true,
         FromItem::RowsFrom { .. } => true,
         FromItem::JsonTable(_) => true,
@@ -890,7 +974,9 @@ fn passthrough_cte_target<'a>(cte: &'a BoundCte, ctes: &'a [BoundCte]) -> Option
             return None;
         }
     }
-    ctes.iter().find(|candidate| candidate.cte_id == cte_id)
+    ctes.iter().find(|candidate| {
+        candidate.cte_id == cte_id && candidate.desc.columns.len() == cte.desc.columns.len()
+    })
 }
 
 pub(super) fn bind_from_item_with_ctes(
@@ -959,6 +1045,14 @@ pub(super) fn bind_from_item_with_ctes(
         FromItem::Values { rows } => {
             bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer, ctes)
         }
+        FromItem::Expression { expr, display_sql } => bind_scalar_expression_from_item_with_ctes(
+            expr,
+            display_sql.as_deref(),
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
         FromItem::FunctionCall {
             name,
             args,
@@ -1141,8 +1235,14 @@ pub(super) fn bind_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )?;
-            let plan =
-                AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info);
+            let plan = AnalyzedFrom::join(
+                left_plan,
+                right_plan,
+                plan_join_type(*kind),
+                matches!(kind, JoinKind::Comma),
+                on,
+                alias_info,
+            );
             let scope = scope_with_output_exprs(scope.unwrap_or(raw_scope), &plan.output_exprs);
             Ok((plan, scope))
         }
@@ -1184,16 +1284,8 @@ pub(super) fn bind_from_item_with_ctes(
                     )
                 })
                 .transpose()?;
-            let sample_qual = table_sample_qual(&sample.method, &args, repeatable.as_ref())?;
-            attach_table_sample(
-                &mut plan,
-                TableSampleClause {
-                    method: sample.method.clone(),
-                    args,
-                    repeatable,
-                },
-                sample_qual,
-            )?;
+            let sample = bind_table_sample_clause(&sample.method, args, repeatable)?;
+            attach_table_sample(&mut plan, sample)?;
             Ok((plan, scope))
         }
         FromItem::Alias {
@@ -1256,7 +1348,14 @@ pub(super) fn bind_from_item_with_ctes(
                         ctes,
                         expanded_views,
                     )?;
-                    (plan, scope, false)
+                    let scalar_expression_source = match source.as_ref() {
+                        FromItem::Expression { .. } => true,
+                        FromItem::Lateral(inner) => {
+                            matches!(inner.as_ref(), FromItem::Expression { .. })
+                        }
+                        _ => false,
+                    };
+                    (plan, scope, scalar_expression_source)
                 };
             if *preserve_source_names
                 && column_aliases.is_empty()
@@ -1287,7 +1386,6 @@ pub(super) fn bind_from_item_with_ctes(
 fn attach_table_sample(
     plan: &mut AnalyzedFrom,
     sample: TableSampleClause,
-    sample_qual: Expr,
 ) -> Result<(), ParseError> {
     let relation_indexes = plan
         .rtable
@@ -1298,9 +1396,7 @@ fn attach_table_sample(
         })
         .collect::<Vec<_>>();
     if relation_indexes.len() != 1 {
-        return Err(ParseError::FeatureNotSupported(
-            "TABLESAMPLE on non-table relation".into(),
-        ));
+        return Err(table_sample_non_table_error());
     }
     let rte = &mut plan.rtable[relation_indexes[0]];
     let RangeTblEntryKind::Relation {
@@ -1312,34 +1408,36 @@ fn attach_table_sample(
         unreachable!();
     };
     if !matches!(*relkind, 'r' | 'm' | 'p') {
-        return Err(ParseError::DetailedError {
-            message: "TABLESAMPLE clause can only be applied to tables and materialized views"
-                .into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42809",
-        });
+        return Err(table_sample_non_table_error());
     }
     *tablesample = Some(sample);
-    // :HACK: Store TABLESAMPLE as a relation security qual so it is evaluated
-    // before normal WHERE predicates, matching the rowsecurity regression path
-    // without introducing a full SampleScan plan node yet.
-    rte.security_quals.insert(0, sample_qual);
     Ok(())
 }
 
-fn table_sample_qual(
+fn table_sample_non_table_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "TABLESAMPLE clause can only be applied to tables and materialized views".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn bind_table_sample_clause(
     method: &str,
-    args: &[Expr],
-    repeatable: Option<&Expr>,
-) -> Result<Expr, ParseError> {
+    args: Vec<Expr>,
+    repeatable: Option<Expr>,
+) -> Result<TableSampleClause, ParseError> {
     let normalized_method = method.to_ascii_lowercase();
     if !matches!(normalized_method.as_str(), "bernoulli" | "system") {
-        return Err(ParseError::FeatureNotSupported(format!(
-            "TABLESAMPLE method {method}"
-        )));
+        return Err(ParseError::DetailedError {
+            message: format!("tablesample method {normalized_method} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        });
     }
-    let [percent_arg] = args else {
+    if args.len() != 1 {
         return Err(ParseError::DetailedError {
             message: format!(
                 "tablesample method {normalized_method} requires 1 argument, not {}",
@@ -1347,46 +1445,25 @@ fn table_sample_qual(
             ),
             detail: None,
             hint: None,
-            sqlstate: "42804",
+            sqlstate: "2202H",
         });
-    };
-    // :HACK: Lower SYSTEM to the same deterministic row-level predicate as
-    // BERNOULLI until pgrust has block-level sample scan support.
-    let percent = table_sample_float_expr(percent_arg.clone());
-    let seed = repeatable
-        .cloned()
-        .map(table_sample_float_expr)
-        .unwrap_or(Expr::Const(Value::Float64(0.0)));
-    Ok(Expr::Func(Box::new(FuncExpr {
-        funcid: 0,
-        funcname: Some("pgrust_tablesample_bernoulli".into()),
-        funcresulttype: Some(SqlType::new(SqlTypeKind::Bool)),
-        funcvariadic: false,
-        implementation: ScalarFunctionImpl::Builtin(
-            BuiltinScalarFunction::PgRustTablesampleBernoulli,
-        ),
-        display_args: None,
-        args: vec![
-            Expr::Var(Var {
-                varno: 1,
-                varattno: SELF_ITEM_POINTER_ATTR_NO,
-                varlevelsup: 0,
-                vartype: SqlType::new(SqlTypeKind::Tid),
-            }),
-            percent,
-            seed,
-        ],
-    })))
-}
-
-fn table_sample_float_expr(expr: Expr) -> Expr {
-    match expr {
-        Expr::Const(Value::Int16(value)) => Expr::Const(Value::Float64(f64::from(value))),
-        Expr::Const(Value::Int32(value)) => Expr::Const(Value::Float64(f64::from(value))),
-        Expr::Const(Value::Int64(value)) => Expr::Const(Value::Float64(value as f64)),
-        Expr::Const(Value::Float64(_)) => expr,
-        other => Expr::Cast(Box::new(other), SqlType::new(SqlTypeKind::Float8)),
     }
+    let percent_arg = args.into_iter().next().expect("one TABLESAMPLE argument");
+    Ok(TableSampleClause {
+        method: normalized_method,
+        args: vec![Expr::Cast(
+            Box::new(percent_arg),
+            SqlType::new(SqlTypeKind::Float4)
+                .with_identity(crate::include::catalog::FLOAT4_TYPE_OID, 0),
+        )],
+        repeatable: repeatable.map(|expr| {
+            Expr::Cast(
+                Box::new(expr),
+                SqlType::new(SqlTypeKind::Float8)
+                    .with_identity(crate::include::catalog::FLOAT8_TYPE_OID, 0),
+            )
+        }),
+    })
 }
 
 fn bind_rows_from_item_with_ctes(
@@ -1423,6 +1500,7 @@ fn bind_rows_from_item_with_ctes(
                         .map(|target| target.expr.clone())
                         .collect(),
                     output_columns: plan.output_columns.clone(),
+                    display_sql: None,
                 },
                 _ => {
                     return Err(ParseError::UnexpectedToken {
@@ -2200,6 +2278,8 @@ fn sql_expr_contains_set_returning_call(
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -3803,7 +3883,12 @@ fn bind_function_from_item_with_ctes(
                             output_columns.len(),
                         ));
                     }
-                    let plan = AnalyzedFrom::result().with_projection(targets);
+                    let plan = AnalyzedFrom::project_function(
+                        targets.iter().map(|target| target.expr.clone()).collect(),
+                        output_columns.clone(),
+                        None,
+                        Some(other.to_string()),
+                    );
                     let desc = RelationDesc {
                         columns: output_columns
                             .iter()
@@ -3816,26 +3901,28 @@ fn bind_function_from_item_with_ctes(
                     );
                     return Ok((plan, scope, false));
                 }
-                let mut plan = AnalyzedFrom::result().with_projection(vec![TargetEntry::new(
-                    other.to_string(),
-                    typed.expr,
-                    typed.sql_type,
-                    1,
-                )]);
+                let mut output_columns = vec![QueryColumn {
+                    name: other.to_string(),
+                    sql_type: typed.sql_type,
+                    wire_type_oid: None,
+                }];
+                let mut output_exprs = vec![typed.expr];
                 let alias_single_function_output = true;
                 if with_ordinality {
-                    let base_expr = plan.output_exprs[0].clone();
                     let ordinality_type = SqlType::new(SqlTypeKind::Int8);
-                    plan = plan.with_projection(vec![
-                        TargetEntry::new(other.to_string(), base_expr, typed.sql_type, 1),
-                        TargetEntry::new(
-                            "ordinality",
-                            Expr::Const(Value::Int64(1)),
-                            ordinality_type,
-                            2,
-                        ),
-                    ]);
+                    output_columns.push(QueryColumn {
+                        name: "ordinality".into(),
+                        sql_type: ordinality_type,
+                        wire_type_oid: None,
+                    });
+                    output_exprs.push(Expr::Const(Value::Int64(1)));
                 }
+                let plan = AnalyzedFrom::project_function(
+                    output_exprs,
+                    output_columns,
+                    None,
+                    Some(other.to_string()),
+                );
                 let desc = plan.desc();
                 let scope = scope_with_output_exprs(
                     scope_for_relation(Some(other), &desc),
@@ -4826,14 +4913,7 @@ fn retarget_analyzed_from_output_columns(
     plan.output_exprs = output_columns
         .iter()
         .enumerate()
-        .map(|(index, column)| {
-            Expr::Var(Var {
-                varno: rtindex,
-                varattno: user_attrno(index),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            })
-        })
+        .map(|(index, column)| scope_query_column_var_expr(rtindex, index, column))
         .collect();
     plan.output_columns = output_columns;
 }
@@ -5508,6 +5588,7 @@ pub(super) fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScop
 
 fn plan_join_type(kind: JoinKind) -> JoinType {
     match kind {
+        JoinKind::Comma => JoinType::Cross,
         JoinKind::Inner => JoinType::Inner,
         JoinKind::Cross => JoinType::Cross,
         JoinKind::Left => JoinType::Left,
@@ -5532,7 +5613,7 @@ fn bind_join_constraint_with_ctes(
 ) -> Result<JoinBinding, ParseError> {
     match constraint {
         JoinConstraint::None => {
-            if !matches!(kind, JoinKind::Cross) {
+            if !matches!(kind, JoinKind::Comma | JoinKind::Cross) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "valid join clause",
                     actual: format!("{kind:?}"),
@@ -5540,18 +5621,21 @@ fn bind_join_constraint_with_ctes(
             }
             Ok((Expr::Const(Value::Bool(true)), None, None))
         }
-        JoinConstraint::On(on) => Ok((
-            bind_expr_with_outer_and_ctes(
-                on,
-                raw_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?,
-            None,
-            None,
-        )),
+        JoinConstraint::On(on) => {
+            reject_window_clause(on, "JOIN conditions")?;
+            Ok((
+                bind_expr_with_outer_and_ctes(
+                    on,
+                    raw_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                None,
+                None,
+            ))
+        }
         JoinConstraint::Using(columns) => {
             bind_join_using_projection(kind, columns, left_scope, right_scope)
         }
@@ -5660,29 +5744,44 @@ fn bind_join_using_projection(
         used_left[*left_index] = true;
         used_right[*right_index] = true;
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
+        let right_ty = right_scope.desc.columns[*right_index].sql_type;
+        let output_ty = resolve_common_scalar_type(left_ty, right_ty).ok_or_else(|| {
+            ParseError::UnexpectedToken {
+                expected: "JOIN/USING columns with a common type",
+                actual: format!("{} and {}", sql_type_name(left_ty), sql_type_name(right_ty)),
+            }
+        })?;
         let left_expr = left_scope.output_exprs[*left_index].clone();
         let right_expr = right_scope.output_exprs[*right_index].clone();
+        let left_expr = coerce_bound_expr(left_expr, left_ty, output_ty);
+        let right_expr = coerce_bound_expr(right_expr, right_ty, output_ty);
         alias_exprs.push(match kind {
             JoinKind::Full => Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
             JoinKind::Right => right_expr,
-            _ => left_expr,
+            JoinKind::Inner | JoinKind::Comma | JoinKind::Cross => {
+                if matches!(&left_expr, Expr::Var(_)) {
+                    left_expr
+                } else if matches!(&right_expr, Expr::Var(_)) {
+                    right_expr
+                } else {
+                    left_expr
+                }
+            }
+            JoinKind::Left => left_expr,
         });
         output_columns.push(QueryColumn {
             name: name.clone(),
-            sql_type: left_ty,
+            sql_type: output_ty,
             wire_type_oid: None,
         });
         joinleftcols.push(*left_index + 1);
         joinrightcols.push(*right_index + 1);
-        desc_columns.push(column_desc(name.clone(), left_ty, true));
+        desc_columns.push(column_desc(name.clone(), output_ty, true));
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
             hidden: false,
             qualified_only: false,
-            relation_names: join_using_relation_names(
-                &left_scope.columns[*left_index],
-                &right_scope.columns[*right_index],
-            ),
+            relation_names: Vec::new(),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: None,
@@ -5691,6 +5790,48 @@ fn bind_join_using_projection(
                 &left_scope.columns[*left_index],
                 &right_scope.columns[*right_index],
             ),
+        });
+    }
+
+    for (name, left_index, right_index) in &using_pairs {
+        let left_ty = left_scope.desc.columns[*left_index].sql_type;
+        alias_exprs.push(left_scope.output_exprs[*left_index].clone());
+        output_columns.push(QueryColumn {
+            name: name.clone(),
+            sql_type: left_ty,
+            wire_type_oid: None,
+        });
+        desc_columns.push(column_desc(name.clone(), left_ty, true));
+        scope_columns.push(ScopeColumn {
+            output_name: name.clone(),
+            hidden: true,
+            qualified_only: true,
+            relation_names: left_scope.columns[*left_index].relation_names.clone(),
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
+            source_relation_oid: left_scope.columns[*left_index].source_relation_oid,
+            source_attno: left_scope.columns[*left_index].source_attno,
+            source_columns: scope_column_sources(&left_scope.columns[*left_index]),
+        });
+
+        let right_ty = right_scope.desc.columns[*right_index].sql_type;
+        alias_exprs.push(right_scope.output_exprs[*right_index].clone());
+        output_columns.push(QueryColumn {
+            name: name.clone(),
+            sql_type: right_ty,
+            wire_type_oid: None,
+        });
+        desc_columns.push(column_desc(name.clone(), right_ty, true));
+        scope_columns.push(ScopeColumn {
+            output_name: name.clone(),
+            hidden: true,
+            qualified_only: true,
+            relation_names: right_scope.columns[*right_index].relation_names.clone(),
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
+            source_relation_oid: right_scope.columns[*right_index].source_relation_oid,
+            source_attno: right_scope.columns[*right_index].source_attno,
+            source_columns: scope_column_sources(&right_scope.columns[*right_index]),
         });
     }
 
@@ -5766,6 +5907,7 @@ fn apply_function_rte_alias(plan: &mut AnalyzedFrom, alias: &str, desc: &Relatio
         })
         .collect::<Vec<_>>();
     rte.alias = Some(alias.to_string());
+    rte.alias_is_user_defined = true;
     rte.alias_preserves_source_names = false;
     rte.eref.aliasname = alias.to_string();
     rte.eref.colnames = output_columns
@@ -5811,6 +5953,7 @@ fn apply_join_using_alias(
         && matches!(rte.kind, RangeTblEntryKind::Join { .. })
     {
         rte.alias = Some(alias.to_string());
+        rte.alias_is_user_defined = true;
         rte.alias_preserves_source_names = true;
         rte.eref.aliasname = alias.to_string();
     }
@@ -5880,6 +6023,7 @@ fn apply_relation_alias(
     if let Some(rte) = plan.rtable.last_mut() {
         let preserve_rte_name = rte.alias_preserves_source_names;
         rte.alias = Some(alias.to_string());
+        rte.alias_is_user_defined = true;
         rte.alias_preserves_source_names = preserve_source_names;
         if !preserve_rte_name {
             rte.eref.aliasname = alias.to_string();

@@ -904,6 +904,8 @@ fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }

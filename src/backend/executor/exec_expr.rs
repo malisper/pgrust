@@ -77,13 +77,15 @@ use super::expr_numeric::{
     eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
 };
 use super::expr_ops::compare_order_values;
+use super::expr_ops::text_collation_semantics;
 use super::expr_ops::{
     add_values, add_values_with_config, bitwise_and_values, bitwise_not_value, bitwise_or_values,
-    bitwise_xor_values, compare_values, compare_values_with_type, concat_values,
-    concat_values_with_cast_context, div_values, eval_and, eval_or, mixed_date_timestamp_ordering,
-    mod_values, mul_values, negate_value, not_equal_values, not_equal_values_with_type,
-    order_record_image_values, order_values, shift_left_values, shift_right_values, sub_values,
-    sub_values_with_config, values_are_distinct,
+    bitwise_xor_values, compare_text_values_with_catalog, compare_values, compare_values_with_type,
+    compare_values_with_type_and_catalog, concat_values, concat_values_with_cast_context,
+    div_values, eval_and, eval_or, mixed_date_timestamp_ordering, mod_values, mul_values,
+    negate_value, not_equal_values, not_equal_values_with_type,
+    not_equal_values_with_type_and_catalog, order_record_image_values, order_values,
+    shift_left_values, shift_right_values, sub_values, sub_values_with_config, values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_partition::eval_satisfies_hash_partition;
@@ -92,12 +94,13 @@ use super::expr_reg;
 use super::expr_string::{
     eval_ascii_function, eval_bit_count_bytes, eval_bit_length_function,
     eval_bpchar_to_text_function, eval_bytea_overlay, eval_bytea_position_function,
-    eval_bytea_substring, eval_chr_function, eval_concat_function, eval_concat_ws_function,
-    eval_convert_from_function, eval_convert_to_function, eval_crc32_function,
-    eval_crc32c_function, eval_decode_function, eval_encode_function, eval_format_function,
-    eval_get_bit_bytes, eval_get_byte, eval_initcap_function, eval_left_function,
-    eval_length_function, eval_like, eval_lower_function, eval_lpad_function, eval_md5_function,
-    eval_octet_length_function, eval_parse_ident_function,
+    eval_bytea_substring, eval_casefold_function_with_collation, eval_chr_function,
+    eval_concat_function, eval_concat_ws_function, eval_convert_from_function,
+    eval_convert_to_function, eval_crc32_function, eval_crc32c_function, eval_decode_function,
+    eval_encode_function, eval_format_function, eval_get_bit_bytes, eval_get_byte,
+    eval_initcap_function, eval_initcap_function_with_collation, eval_left_function,
+    eval_length_function, eval_like, eval_lower_function, eval_lower_function_with_collation,
+    eval_lpad_function, eval_md5_function, eval_octet_length_function, eval_parse_ident_function,
     eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
     eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
     eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
@@ -112,7 +115,7 @@ use super::expr_string::{
     eval_to_hex_function, eval_to_number_function, eval_to_oct_function, eval_translate_function,
     eval_trim_function, eval_unicode_assigned_function, eval_unicode_is_normalized_function,
     eval_unicode_normalize_function, eval_unicode_version_function, eval_unistr_function,
-    eval_upper_function,
+    eval_upper_function, eval_upper_function_with_collation,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{
@@ -129,7 +132,7 @@ use super::pg_regex::{
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
 use super::{
     ExecError, ExecutorContext, TypedFunctionArg, exec_next, execute_readonly_statement,
-    executor_start,
+    executor_start, render_internal_char_text,
 };
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_next_visible,
@@ -242,8 +245,28 @@ fn malformed_expr_error(kind: &str) -> ExecError {
 fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
     match expr {
         Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        Expr::Cast(inner, _) => top_level_explicit_collation(inner),
+        Expr::Var(var) => var.collation_oid,
+        Expr::Func(func) => func.collation_oid,
         _ => None,
     }
+}
+
+fn function_collation_oid(args: &[Expr]) -> Option<u32> {
+    args.iter()
+        .find_map(top_level_explicit_collation)
+        .or_else(|| {
+            args.iter()
+                .any(|arg| {
+                    expr_sql_type_hint(arg).is_some_and(|ty| {
+                        matches!(
+                            ty.element_type().kind,
+                            SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char
+                        )
+                    })
+                })
+                .then_some(crate::include::catalog::DEFAULT_COLLATION_OID)
+        })
 }
 
 fn sql_type_from_builtin_oid(oid: u32) -> Option<SqlType> {
@@ -2710,51 +2733,21 @@ fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
     Value::Tid(tid)
 }
 
-fn eval_tablesample_bernoulli(values: &[Value]) -> Result<Value, ExecError> {
-    let [ctid, Value::Float64(percent), Value::Float64(repeatable)] = values else {
-        return Err(malformed_expr_error("TABLESAMPLE BERNOULLI"));
-    };
-    if matches!(ctid, Value::Null) {
-        return Ok(Value::Bool(false));
-    }
-    if !(0.0..=100.0).contains(percent) || percent.is_nan() {
-        return Err(ExecError::DetailedError {
-            message: "sample percentage must be between 0 and 100".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "2202H",
-        });
-    }
-    let (block, offset) = match ctid {
-        Value::Tid(tid) => (tid.block_number, u32::from(tid.offset_number)),
-        other => {
-            let Some((block, offset)) = other.as_text().and_then(parse_ctid_text) else {
-                return Err(malformed_expr_error("TABLESAMPLE BERNOULLI ctid"));
-            };
-            (block, offset)
-        }
-    };
-    let cutoff = ((u64::from(u32::MAX) + 1) as f64 * *percent / 100.0).round() as u64;
-    let seed = hashfloat8_for_tablesample(*repeatable);
-    Ok(Value::Bool(
-        u64::from(pg_hash_three_u32(block, offset, seed)) < cutoff,
-    ))
-}
-
-fn parse_ctid_text(text: &str) -> Option<(u32, u32)> {
-    let inner = text.strip_prefix('(')?.strip_suffix(')')?;
-    let (block, offset) = inner.split_once(',')?;
-    Some((block.parse().ok()?, offset.parse().ok()?))
-}
-
-fn hashfloat8_for_tablesample(value: f64) -> u32 {
+pub(crate) fn hashfloat8_for_tablesample(value: f64) -> u32 {
     if value == 0.0 {
         return 0;
     }
     pg_hash_bytes(&value.to_le_bytes())
 }
 
-fn pg_hash_three_u32(first: u32, second: u32, third: u32) -> u32 {
+pub(crate) fn pg_hash_two_u32(first: u32, second: u32) -> u32 {
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(&first.to_le_bytes());
+    bytes.extend_from_slice(&second.to_le_bytes());
+    pg_hash_bytes(&bytes)
+}
+
+pub(crate) fn pg_hash_three_u32(first: u32, second: u32, third: u32) -> u32 {
     let mut bytes = Vec::with_capacity(12);
     bytes.extend_from_slice(&first.to_le_bytes());
     bytes.extend_from_slice(&second.to_le_bytes());
@@ -4053,6 +4046,16 @@ pub(crate) fn eval_pg_describe_object(
                         .into_iter()
                         .find(|attr| i32::from(attr.attnum) == objsubid)?;
                     Some(format!("column {} of table {}", attr.attname, row.relname))
+                }),
+                "pg_class" => catalog.class_row_by_oid(objid).map(|row| {
+                    let kind = match row.relkind {
+                        'i' | 'I' => "index",
+                        'm' => "materialized view",
+                        'S' => "sequence",
+                        'v' => "view",
+                        _ => "table",
+                    };
+                    format!("{kind} {}", row.relname)
                 }),
                 _ if objsubid != 0 => None,
                 "pg_namespace" => catalog
@@ -6122,6 +6125,9 @@ fn parenthesized_index_expression(expr_sql: &str) -> String {
     if looks_like_function_call(trimmed) {
         return trimmed.to_string();
     }
+    if trimmed.to_ascii_lowercase().contains("collate") {
+        return trimmed.to_string();
+    }
     let inner = strip_outer_parens_once(trimmed);
     format!("(({inner}))")
 }
@@ -7937,6 +7943,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         )
         .unwrap_or_default()
         .len(),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => 0,
         Value::Null => unreachable!("SQL NULL handled above"),
     };
     Ok(Value::Int32(size.min(i32::MAX as usize) as i32))
@@ -9592,7 +9599,7 @@ fn eval_op_expr(
             ctx.catalog.as_deref(),
             &ctx.datetime_config,
         ),
-        (OpExprKind::Eq, [left, right]) => compare_values_with_type(
+        (OpExprKind::Eq, [left, right]) => compare_values_with_type_and_catalog(
             "=",
             eval_expr(left, slot, ctx)?,
             expr_sql_type_hint(left),
@@ -9600,14 +9607,16 @@ fn eval_op_expr(
             expr_sql_type_hint(right),
             op.collation_oid,
             Some(&ctx.datetime_config),
+            ctx.catalog.as_deref(),
         ),
-        (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
+        (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type_and_catalog(
             eval_expr(left, slot, ctx)?,
             expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
             expr_sql_type_hint(right),
             op.collation_oid,
             Some(&ctx.datetime_config),
+            ctx.catalog.as_deref(),
         ),
         (OpExprKind::Lt, [left, right]) => order_values_with_type(
             "<",
@@ -9648,7 +9657,15 @@ fn eval_op_expr(
         (OpExprKind::RegexMatch, [left, right]) => {
             let text = eval_expr(left, slot, ctx)?;
             let pattern = eval_expr(right, slot, ctx)?;
-            eval_regex_match_operator(&text, &pattern)
+            let collation_oid = op
+                .collation_oid
+                .or_else(|| top_level_explicit_collation(left))
+                .or_else(|| top_level_explicit_collation(right));
+            eval_regex_match_operator(
+                &text,
+                &pattern,
+                text_collation_semantics(collation_oid, ctx.catalog.as_deref())?,
+            )
         }
         (OpExprKind::ArrayOverlap, [left, right]) => {
             eval_array_overlap(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
@@ -9753,6 +9770,44 @@ fn order_values_with_type(
                 _ => unreachable!(),
             }));
         }
+    }
+    let text_ordering = match (&left, &right) {
+        (Value::InternalChar(left_char), right) if right.as_text().is_some() => {
+            let left_text = render_internal_char_text(*left_char);
+            Some(compare_text_values_with_catalog(
+                &left_text,
+                right.as_text().unwrap(),
+                collation_oid,
+                ctx.catalog.as_deref(),
+            )?)
+        }
+        (left, Value::InternalChar(right_char)) if left.as_text().is_some() => {
+            let right_text = render_internal_char_text(*right_char);
+            Some(compare_text_values_with_catalog(
+                left.as_text().unwrap(),
+                &right_text,
+                collation_oid,
+                ctx.catalog.as_deref(),
+            )?)
+        }
+        (left, right) if left.as_text().is_some() && right.as_text().is_some() => {
+            Some(compare_text_values_with_catalog(
+                left.as_text().unwrap(),
+                right.as_text().unwrap(),
+                collation_oid,
+                ctx.catalog.as_deref(),
+            )?)
+        }
+        _ => None,
+    };
+    if let Some(ordering) = text_ordering {
+        return Ok(Value::Bool(match op {
+            "<" => ordering == Ordering::Less,
+            "<=" => ordering != Ordering::Greater,
+            ">" => ordering == Ordering::Greater,
+            ">=" => ordering != Ordering::Less,
+            _ => unreachable!(),
+        }));
     }
     order_values(op, left, right, collation_oid)
 }
@@ -10111,6 +10166,8 @@ fn expr_requires_stack_check(expr: &Expr) -> bool {
             | Expr::CurrentSchema
             | Expr::CurrentUser
             | Expr::SessionUser
+            | Expr::User
+            | Expr::SystemUser
             | Expr::CurrentRole
             | Expr::CurrentTime { .. }
             | Expr::CurrentTimestamp { .. }
@@ -10520,8 +10577,10 @@ pub fn eval_expr(
         )),
         Expr::CurrentCatalog => Ok(Value::Text(ctx.current_database_name.clone().into())),
         Expr::CurrentSchema => Ok(current_schema_value(ctx)),
-        Expr::CurrentUser | Expr::CurrentRole => auth_role_name(ctx, ctx.current_user_oid),
-        Expr::SessionUser => auth_role_name(ctx, ctx.session_user_oid),
+        Expr::CurrentUser | Expr::User | Expr::CurrentRole => {
+            auth_role_name(ctx, ctx.current_user_oid)
+        }
+        Expr::SessionUser | Expr::SystemUser => auth_role_name(ctx, ctx.session_user_oid),
         Expr::CurrentTime { precision } => {
             warn_time_precision_overflow(*precision, "TIME", " WITH TIME ZONE");
             Ok(current_time_value_from_timestamp_with_config(
@@ -10655,7 +10714,11 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             (OpExprKind::RegexMatch, [left, right]) => {
                 let text = eval_plpgsql_expr(left, slot)?;
                 let pattern = eval_plpgsql_expr(right, slot)?;
-                eval_regex_match_operator(&text, &pattern)
+                eval_regex_match_operator(
+                    &text,
+                    &pattern,
+                    super::expr_ops::TextCollationSemantics::Default,
+                )
             }
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql expression without subqueries or SQL statements",
@@ -11701,6 +11764,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Upper => eval_upper_function(&values),
+        BuiltinScalarFunction::Casefold => eval_casefold_function_with_collation(
+            &values,
+            super::expr_ops::TextCollationSemantics::Default,
+        ),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::UnicodeVersion => eval_unicode_version_function(&values),
         BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
@@ -11935,7 +12002,9 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ToOct => eval_to_oct_function(&values),
         BuiltinScalarFunction::ToHex => eval_to_hex_function(&values),
         BuiltinScalarFunction::RegexpMatch => eval_regexp_match(&values),
-        BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
+        BuiltinScalarFunction::RegexpLike => {
+            eval_regexp_like(&values, super::expr_ops::TextCollationSemantics::Default)
+        }
         BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
         BuiltinScalarFunction::RegexpCount => eval_regexp_count(&values),
         BuiltinScalarFunction::RegexpInstr => eval_regexp_instr(&values),
@@ -13604,9 +13673,6 @@ pub(crate) fn eval_builtin_function(
     if matches!(func, BuiltinScalarFunction::PgRustDomainCheckUpperLessThan) {
         return eval_domain_check_upper_less_than(&values);
     }
-    if matches!(func, BuiltinScalarFunction::PgRustTablesampleBernoulli) {
-        return eval_tablesample_bernoulli(&values);
-    }
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;
     }
@@ -14582,11 +14648,24 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::LPad => eval_lpad_function(&values),
         BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
-        BuiltinScalarFunction::Lower => eval_lower_function(&values),
-        BuiltinScalarFunction::Upper => eval_upper_function(&values),
+        BuiltinScalarFunction::Lower => eval_lower_function_with_collation(
+            &values,
+            text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
+        ),
+        BuiltinScalarFunction::Upper => eval_upper_function_with_collation(
+            &values,
+            text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
+        ),
+        BuiltinScalarFunction::Casefold => eval_casefold_function_with_collation(
+            &values,
+            text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
+        ),
         BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
-        BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
+        BuiltinScalarFunction::Initcap => eval_initcap_function_with_collation(
+            &values,
+            text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
+        ),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
         BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
@@ -14736,7 +14815,10 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::ToOct => eval_to_oct_function(&values),
         BuiltinScalarFunction::ToHex => eval_to_hex_function(&values),
         BuiltinScalarFunction::RegexpMatch => eval_regexp_match(&values),
-        BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
+        BuiltinScalarFunction::RegexpLike => eval_regexp_like(
+            &values,
+            text_collation_semantics(function_collation_oid(args), ctx.catalog.as_deref())?,
+        ),
         BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
         BuiltinScalarFunction::RegexpCount => eval_regexp_count(&values),
         BuiltinScalarFunction::RegexpInstr => eval_regexp_instr(&values),

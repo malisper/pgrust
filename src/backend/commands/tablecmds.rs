@@ -7,8 +7,9 @@ use parking_lot::RwLock;
 use crate::backend::access::heap::HeapWalPolicy;
 use crate::backend::access::heap::heapam::{
     HeapError, heap_delete_with_waiter, heap_delete_with_waiter_with_wal_policy, heap_fetch,
-    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid, heap_scan_begin_visible,
-    heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page, heap_update_with_waiter,
+    heap_fetch_visible_with_txns, heap_insert_mvcc_with_cid_and_fillfactor,
+    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+    heap_update_with_waiter,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
@@ -407,7 +408,11 @@ fn finalize_bound_delete(
     mut stmt: BoundDeleteStatement,
     catalog: &dyn CatalogLookup,
 ) -> BoundDeleteStatement {
-    let mut subplans = Vec::new();
+    let mut subplans = stmt
+        .input_plan
+        .as_mut()
+        .map(|plan| std::mem::take(&mut plan.subplans))
+        .unwrap_or_default();
     stmt.targets = stmt
         .targets
         .into_iter()
@@ -540,7 +545,15 @@ pub(crate) fn execute_explain(
     } = stmt;
     let statement = *statement;
     if !analyze && explain_statement_has_writable_ctes(&statement) {
-        return Ok(explain_placeholder_result("Result"));
+        return execute_explain_writable_ctes(
+            statement,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        );
     }
     if let Statement::Update(update) = statement {
         return execute_explain_update(
@@ -977,6 +990,137 @@ fn explain_placeholder_result(label: &str) -> StatementResult {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
         rows: vec![vec![Value::Text(label.into())]],
+    }
+}
+
+fn execute_explain_writable_ctes(
+    statement: Statement,
+    costs: bool,
+    format: ExplainFormat,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    let ctes = statement_top_level_ctes(&statement);
+    let mut lines = Vec::new();
+    for cte in ctes.iter().filter(|cte| cte_body_is_writable(&cte.body)) {
+        if !matches!(
+            cte.body,
+            CteBody::Insert(_) | CteBody::Update(_) | CteBody::Delete(_) | CteBody::Merge(_)
+        ) {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                "WITH clause containing a data-modifying statement must be at the top level".into(),
+            )));
+        }
+        lines.push(format!("CTE {}", cte.name));
+        let producer_lines = explain_writable_cte_producer_lines(
+            &cte.body,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?;
+        for (index, line) in producer_lines.into_iter().enumerate() {
+            if index == 0 {
+                lines.push(format!("  ->  {line}"));
+            } else {
+                lines.push(format!("    {line}"));
+            }
+        }
+    }
+    if let Some(cte) = ctes.iter().find(|cte| cte_body_is_writable(&cte.body)) {
+        lines.push(format!("  ->  CTE Scan on {}", cte.name));
+    }
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn explain_writable_cte_producer_lines(
+    body: &CteBody,
+    costs: bool,
+    format: ExplainFormat,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<Vec<String>, ExecError> {
+    let result = match body {
+        CteBody::Insert(stmt) => execute_explain_insert(
+            (**stmt).clone(),
+            false,
+            costs,
+            format,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?,
+        CteBody::Update(stmt) => execute_explain_update(
+            (**stmt).clone(),
+            false,
+            costs,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        )?,
+        CteBody::Delete(stmt) => execute_explain_delete(
+            (**stmt).clone(),
+            false,
+            costs,
+            verbose,
+            catalog,
+            planner_config,
+        )?,
+        CteBody::Merge(stmt) => {
+            let bound = crate::backend::parser::plan_merge(stmt, catalog)?;
+            let mut lines = Vec::new();
+            let state = executor_start(bound.input_plan.plan_tree);
+            push_explain_line(
+                &format!("Merge on {}", bound.explain_target_name),
+                state.plan_info(),
+                costs,
+                &mut lines,
+            );
+            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, true, &mut lines);
+            return Ok(lines);
+        }
+        _ => return Ok(vec!["Result".into()]),
+    };
+    Ok(statement_result_text_lines(result))
+}
+
+fn statement_result_text_lines(result: StatementResult) -> Vec<String> {
+    match result {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .filter_map(|row| match row.into_iter().next() {
+                Some(Value::Text(text)) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect(),
+        StatementResult::AffectedRows(_) => Vec::new(),
+    }
+}
+
+fn statement_top_level_ctes(statement: &Statement) -> Vec<CommonTableExpr> {
+    match statement {
+        Statement::Select(stmt) => stmt.with.clone(),
+        Statement::Insert(stmt) => stmt.with.clone(),
+        Statement::Update(stmt) => stmt.with.clone(),
+        Statement::Delete(stmt) => stmt.with.clone(),
+        Statement::Merge(stmt) => stmt.with.clone(),
+        Statement::Values(stmt) => stmt.with.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -1961,6 +2105,7 @@ fn push_partitioned_view_merge_explain_lines(
             varattno: user_attrno(child_column_index),
             varlevelsup: 0,
             vartype: child_relation.desc.columns[child_column_index].sql_type,
+            collation_oid: None,
         });
         let prune_filter = Expr::op_auto(
             crate::include::nodes::primnodes::OpExprKind::Eq,
@@ -3063,6 +3208,7 @@ fn first_lateral_derived_table_alias_in_from_item(item: &FromItem) -> Option<&st
         FromItem::DerivedTable(select) => first_lateral_derived_table_alias_in_select(select),
         FromItem::Table { .. }
         | FromItem::Values { .. }
+        | FromItem::Expression { .. }
         | FromItem::RowsFrom { .. }
         | FromItem::FunctionCall { .. }
         | FromItem::JsonTable(_)
@@ -5398,6 +5544,7 @@ pub(crate) fn cleanup_toast_attempt(
 pub(crate) fn write_insert_heap_row(
     relation_name: &str,
     rls_relation_name: &str,
+    relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
@@ -5452,7 +5599,34 @@ pub(crate) fn write_insert_heap_row(
         ctx,
     )?;
     let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
-    heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple).map_err(Into::into)
+    let fillfactor = heap_fillfactor_for_relation(relation_oid, ctx);
+    heap_insert_mvcc_with_cid_and_fillfactor(
+        &*ctx.pool,
+        ctx.client_id,
+        rel,
+        xid,
+        cid,
+        &tuple,
+        fillfactor,
+    )
+    .map_err(Into::into)
+}
+
+fn heap_fillfactor_for_relation(relation_oid: u32, ctx: &ExecutorContext) -> u16 {
+    ctx.catalog
+        .as_deref()
+        .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
+        .and_then(|row| row.reloptions)
+        .and_then(|options| {
+            options.into_iter().find_map(|option| {
+                let (name, value) = option.split_once('=')?;
+                name.eq_ignore_ascii_case("fillfactor")
+                    .then(|| value.parse::<u16>().ok())
+                    .flatten()
+            })
+        })
+        .filter(|fillfactor| (10..=100).contains(fillfactor))
+        .unwrap_or(100)
 }
 
 pub(crate) fn rollback_inserted_row(
@@ -5730,6 +5904,7 @@ fn move_updated_row_to_partition(
     let inserted_tid = write_insert_heap_row(
         &destination.relation_info.relation_name,
         &destination.relation_info.relation_name,
+        destination.relation_info.relation.relation_oid,
         destination.relation_info.relation.rel,
         destination.relation_info.relation.toast,
         destination.relation_info.toast_index.as_ref(),
@@ -6391,26 +6566,63 @@ pub(crate) fn enforce_exclusion_constraints_for_write(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in &constraints.exclusions {
-        if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+        if exclusion_constraint_is_deferred(constraint, ctx) {
+            if let Some(tracker) = ctx.deferred_foreign_keys.as_ref() {
+                tracker.record(constraint.constraint_oid);
+            }
             continue;
         }
+        if !constraint.enforced || !exclusion_row_matches_predicate(constraint, values, None, ctx)?
+        {
+            continue;
+        }
+        let Some(proposed_key) = exclusion_constraint_key_values(constraint, values, None, ctx)?
+        else {
+            continue;
+        };
         let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
         for (tid, existing) in rows {
             if excluded_tid.is_some_and(|excluded| excluded == tid) {
                 continue;
             }
-            if exclusion_rows_conflict(constraint, values, &existing)? {
+            if !exclusion_row_matches_predicate(constraint, &existing, Some(tid), ctx)? {
+                continue;
+            }
+            let Some(existing_key) =
+                exclusion_constraint_key_values(constraint, &existing, Some(tid), ctx)?
+            else {
+                continue;
+            };
+            if exclusion_rows_conflict(constraint, &proposed_key, &existing_key)? {
                 return Err(exclusion_violation(
                     desc,
                     relation_name,
                     constraint,
-                    values,
-                    &existing,
+                    &proposed_key,
+                    &existing_key,
                 ));
             }
         }
     }
     Ok(())
+}
+
+fn exclusion_constraint_is_deferred(
+    constraint: &BoundExclusionConstraint,
+    ctx: &ExecutorContext,
+) -> bool {
+    constraint.deferrable
+        && ctx
+            .deferred_foreign_keys
+            .as_ref()
+            .map(|tracker| {
+                tracker.effective_timing(
+                    constraint.constraint_oid,
+                    constraint.deferrable,
+                    constraint.initially_deferred,
+                ) == ConstraintTiming::Deferred
+            })
+            .unwrap_or(false)
 }
 
 pub(crate) fn exclusion_arbiter_conflicts_with_existing_row(
@@ -6422,15 +6634,26 @@ pub(crate) fn exclusion_arbiter_conflicts_with_existing_row(
     excluded_tid: Option<ItemPointerData>,
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
-    if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+    if !constraint.enforced || !exclusion_row_matches_predicate(constraint, values, None, ctx)? {
         return Ok(false);
     }
+    let Some(proposed_key) = exclusion_constraint_key_values(constraint, values, None, ctx)? else {
+        return Ok(false);
+    };
     let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
     for (tid, existing) in rows {
         if excluded_tid.is_some_and(|excluded| excluded == tid) {
             continue;
         }
-        if exclusion_rows_conflict(constraint, values, &existing)? {
+        if !exclusion_row_matches_predicate(constraint, &existing, Some(tid), ctx)? {
+            continue;
+        }
+        let Some(existing_key) =
+            exclusion_constraint_key_values(constraint, &existing, Some(tid), ctx)?
+        else {
+            continue;
+        };
+        if exclusion_rows_conflict(constraint, &proposed_key, &existing_key)? {
             return Ok(true);
         }
     }
@@ -6443,22 +6666,33 @@ pub(crate) fn enforce_exclusion_constraints_against_values(
     constraints: &BoundRelationConstraints,
     values: &[Value],
     existing_rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for constraint in &constraints.exclusions {
-        if !constraint.enforced || exclusion_constraint_skips_conflict_check(constraint, values) {
+        if !constraint.enforced || !exclusion_row_matches_predicate(constraint, values, None, ctx)?
+        {
             continue;
         }
+        let Some(proposed_key) = exclusion_constraint_key_values(constraint, values, None, ctx)?
+        else {
+            continue;
+        };
         for existing in existing_rows {
-            if exclusion_constraint_skips_conflict_check(constraint, existing) {
+            if !exclusion_row_matches_predicate(constraint, existing, None, ctx)? {
                 continue;
             }
-            if exclusion_rows_conflict(constraint, values, existing)? {
+            let Some(existing_key) =
+                exclusion_constraint_key_values(constraint, existing, None, ctx)?
+            else {
+                continue;
+            };
+            if exclusion_rows_conflict(constraint, &proposed_key, &existing_key)? {
                 return Err(exclusion_violation(
                     desc,
                     relation_name,
                     constraint,
-                    values,
-                    existing,
+                    &proposed_key,
+                    &existing_key,
                 ));
             }
         }
@@ -6506,19 +6740,71 @@ pub(crate) fn validate_exclusion_constraint_existing_rows(
     desc: &RelationDesc,
     constraint: &BoundExclusionConstraint,
     rows: &[(ItemPointerData, Vec<Value>)],
-    _ctx: &mut ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    for (left_pos, (_, left_values)) in rows.iter().enumerate() {
-        if exclusion_constraint_skips_conflict_check(constraint, left_values) {
+    validate_exclusion_constraint_existing_rows_inner(
+        relation_name,
+        desc,
+        constraint,
+        rows,
+        ctx,
+        true,
+    )
+}
+
+pub(crate) fn validate_deferred_exclusion_constraint_existing_rows(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundExclusionConstraint,
+    rows: &[(ItemPointerData, Vec<Value>)],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    validate_exclusion_constraint_existing_rows_inner(
+        relation_name,
+        desc,
+        constraint,
+        rows,
+        ctx,
+        false,
+    )
+}
+
+fn validate_exclusion_constraint_existing_rows_inner(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundExclusionConstraint,
+    rows: &[(ItemPointerData, Vec<Value>)],
+    ctx: &mut ExecutorContext,
+    create_error: bool,
+) -> Result<(), ExecError> {
+    for (left_pos, (left_tid, left_values)) in rows.iter().enumerate() {
+        if !exclusion_row_matches_predicate(constraint, left_values, Some(*left_tid), ctx)? {
             continue;
         }
-        for (_, right_values) in rows.iter().skip(left_pos + 1) {
-            if exclusion_constraint_skips_conflict_check(constraint, right_values) {
+        let Some(left_key) =
+            exclusion_constraint_key_values(constraint, left_values, Some(*left_tid), ctx)?
+        else {
+            continue;
+        };
+        for (right_tid, right_values) in rows.iter().skip(left_pos + 1) {
+            if !exclusion_row_matches_predicate(constraint, right_values, Some(*right_tid), ctx)? {
                 continue;
             }
-            if exclusion_rows_conflict(constraint, left_values, right_values)? {
-                let left_key = exclusion_constraint_key_values(constraint, left_values);
-                let right_key = exclusion_constraint_key_values(constraint, right_values);
+            let Some(right_key) =
+                exclusion_constraint_key_values(constraint, right_values, Some(*right_tid), ctx)?
+            else {
+                continue;
+            };
+            if exclusion_rows_conflict(constraint, &left_key, &right_key)? {
+                if !create_error {
+                    return Err(exclusion_violation(
+                        desc,
+                        relation_name,
+                        constraint,
+                        &left_key,
+                        &right_key,
+                    ));
+                }
                 return Err(ExecError::DetailedError {
                     message: format!(
                         "could not create exclusion constraint \"{}\"",
@@ -6537,32 +6823,48 @@ pub(crate) fn validate_exclusion_constraint_existing_rows(
             }
         }
     }
-    let _ = relation_name;
     Ok(())
 }
 
-fn exclusion_constraint_skips_conflict_check(
+fn exclusion_constraint_has_null_key(
+    constraint: &BoundExclusionConstraint,
+    key_values: &[Value],
+) -> bool {
+    key_values
+        .iter()
+        .take(constraint.operator_proc_oids.len())
+        .any(|value| matches!(value, Value::Null))
+}
+
+fn exclusion_row_matches_predicate(
     constraint: &BoundExclusionConstraint,
     values: &[Value],
-) -> bool {
-    constraint
-        .column_indexes
-        .iter()
-        .any(|index| matches!(values.get(*index), Some(Value::Null) | None))
+    heap_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(predicate) = constraint.predicate.as_ref() else {
+        return Ok(true);
+    };
+    let mut slot = TupleSlot::virtual_row_with_metadata(
+        values.to_vec(),
+        heap_tid,
+        Some(constraint.relation_oid),
+    );
+    match eval_expr(predicate, &mut slot, ctx)? {
+        Value::Bool(value) => Ok(value),
+        Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
 }
 
 fn exclusion_rows_conflict(
     constraint: &BoundExclusionConstraint,
-    proposed: &[Value],
-    existing: &[Value],
+    proposed_key: &[Value],
+    existing_key: &[Value],
 ) -> Result<bool, ExecError> {
-    for (column_index, proc_oid) in constraint
-        .column_indexes
-        .iter()
-        .zip(constraint.operator_proc_oids.iter())
-    {
-        let left = proposed.get(*column_index).unwrap_or(&Value::Null);
-        let right = existing.get(*column_index).unwrap_or(&Value::Null);
+    for (key_index, proc_oid) in constraint.operator_proc_oids.iter().enumerate() {
+        let left = proposed_key.get(key_index).unwrap_or(&Value::Null);
+        let right = existing_key.get(key_index).unwrap_or(&Value::Null);
         if matches!(left, Value::Null) || matches!(right, Value::Null) {
             return Ok(false);
         }
@@ -6642,8 +6944,8 @@ fn exclusion_violation(
     desc: &RelationDesc,
     _relation_name: &str,
     constraint: &BoundExclusionConstraint,
-    proposed: &[Value],
-    existing: &[Value],
+    proposed_key: &[Value],
+    existing_key: &[Value],
 ) -> ExecError {
     ExecError::DetailedError {
         message: format!(
@@ -6651,13 +6953,11 @@ fn exclusion_violation(
             constraint.constraint_name
         ),
         detail: {
-            let proposed_key = exclusion_constraint_key_values(constraint, proposed);
-            let existing_key = exclusion_constraint_key_values(constraint, existing);
             Some(
                 crate::backend::executor::value_io::format_exclusion_key_detail(
                     &exclusion_constraint_columns(desc, constraint),
-                    &proposed_key,
-                    &existing_key,
+                    proposed_key,
+                    existing_key,
                 ),
             )
         },
@@ -6669,12 +6969,32 @@ fn exclusion_violation(
 fn exclusion_constraint_key_values(
     constraint: &BoundExclusionConstraint,
     values: &[Value],
-) -> Vec<Value> {
-    constraint
-        .column_indexes
+    heap_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    let mut slot = TupleSlot::virtual_row_with_metadata(
+        values.to_vec(),
+        heap_tid,
+        Some(constraint.relation_oid),
+    );
+    let mut key_values = Vec::with_capacity(constraint.key_columns.len());
+    for (column, expr) in constraint
+        .key_columns
         .iter()
-        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
-        .collect()
+        .zip(constraint.key_exprs.iter())
+    {
+        let value = match (column, expr) {
+            (Some(index), _) => values.get(*index).cloned().unwrap_or(Value::Null),
+            (None, Some(expr)) => eval_expr(expr, &mut slot, ctx)?,
+            (None, None) => Value::Null,
+        };
+        key_values.push(value);
+    }
+    if exclusion_constraint_has_null_key(constraint, &key_values) {
+        Ok(None)
+    } else {
+        Ok(Some(key_values))
+    }
 }
 
 fn exclusion_constraint_columns(
@@ -6682,9 +7002,18 @@ fn exclusion_constraint_columns(
     constraint: &BoundExclusionConstraint,
 ) -> Vec<crate::backend::executor::ColumnDesc> {
     constraint
-        .column_indexes
+        .key_columns
         .iter()
-        .filter_map(|index| desc.columns.get(*index).cloned())
+        .enumerate()
+        .filter_map(|(key_index, column)| {
+            let mut desc_column = column
+                .and_then(|index| desc.columns.get(index).cloned())
+                .or_else(|| desc.columns.iter().find(|column| !column.dropped).cloned())?;
+            if let Some(name) = constraint.column_names.get(key_index) {
+                desc_column.name = name.clone();
+            }
+            Some(desc_column)
+        })
         .collect()
 }
 
@@ -7457,7 +7786,7 @@ pub(crate) fn validate_pending_no_action_checks(
 
 fn validate_pending_updated_exclusion_checks(
     pending: &[PendingUpdatedExclusionCheck],
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for (index, check) in pending.iter().enumerate() {
         let previous_values = pending[..index]
@@ -7482,6 +7811,7 @@ fn validate_pending_updated_exclusion_checks(
             &check.constraints,
             &check.values,
             &previous_values,
+            ctx,
         )?;
     }
     Ok(())
@@ -8138,6 +8468,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
                                     varattno: user_attrno(index),
                                     varlevelsup: 0,
                                     vartype: column.sql_type,
+                                    collation_oid: None,
                                 })
                             })
                             .collect(),
@@ -9813,6 +10144,7 @@ fn partition_parent_layout_exprs(
                         varattno: user_attrno(child_index),
                         varlevelsup: 0,
                         vartype: child_column.sql_type,
+                        collation_oid: None,
                     })
                 })
                 .unwrap_or(Expr::Const(Value::Null))
@@ -11056,10 +11388,12 @@ fn execute_merge_insert_action(
             &stmt.relation_constraints,
             &row_values,
             &[],
+            ctx,
         )?;
         let heap_tid = write_insert_heap_row(
             &stmt.relation_name,
             &stmt.relation_name,
+            stmt.relation_oid,
             stmt.rel,
             stmt.toast,
             stmt.toast_index.as_ref(),
@@ -13944,10 +14278,12 @@ pub(crate) fn execute_insert_rows(
                 relation_constraints,
                 &values,
                 &inserted_rows,
+                ctx,
             )?;
             let heap_tid = write_insert_heap_row(
                 relation_name,
                 rls_relation_name,
+                relation_oid,
                 rel,
                 toast,
                 toast_index,
@@ -14219,6 +14555,7 @@ pub fn execute_prepared_insert_row(
     let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
         &prepared.relation_name,
+        prepared.relation_oid,
         prepared.rel,
         prepared.toast,
         prepared.toast_index.as_ref(),

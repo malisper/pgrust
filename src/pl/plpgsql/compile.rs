@@ -249,6 +249,7 @@ pub(crate) enum FunctionReturnContract {
         columns: Vec<QueryColumn>,
         setof: bool,
         uses_output_vars: bool,
+        composite_typrelid: Option<u32>,
     },
     AnonymousRecord {
         setof: bool,
@@ -1267,6 +1268,7 @@ fn function_return_contract(
                     .collect(),
                 setof: false,
                 uses_output_vars: true,
+                composite_typrelid: None,
             })
         };
     }
@@ -1288,6 +1290,7 @@ fn function_return_contract(
                             .collect(),
                         setof: true,
                         uses_output_vars: true,
+                        composite_typrelid: None,
                     }
                 }
             }
@@ -1309,6 +1312,7 @@ fn function_return_contract(
                         .collect(),
                     setof: true,
                     uses_output_vars: false,
+                    composite_typrelid: Some(result_type.typrelid),
                 }
             }
             _ => FunctionReturnContract::Scalar {
@@ -1330,6 +1334,7 @@ fn function_return_contract(
                 .collect(),
             setof: false,
             uses_output_vars: true,
+            composite_typrelid: None,
         }),
         SqlTypeKind::Record => Ok(FunctionReturnContract::AnonymousRecord { setof: false }),
         SqlTypeKind::Composite => {
@@ -1350,6 +1355,7 @@ fn function_return_contract(
                     .collect(),
                 setof: false,
                 uses_output_vars: false,
+                composite_typrelid: Some(result_type.typrelid),
             })
         }
         _ => Ok(FunctionReturnContract::Scalar {
@@ -3187,6 +3193,7 @@ pub(crate) fn runtime_sql_bound_scope(scope: &RuntimeSqlScope) -> BoundScope {
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         },
     )
@@ -4497,6 +4504,7 @@ fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Ex
             varattno: user_attrno(var.slot),
             varlevelsup: 0,
             vartype: var.ty,
+            collation_oid: None,
         })),
         field: field.to_string(),
         field_type: SqlType::new(SqlTypeKind::Text),
@@ -5535,11 +5543,13 @@ fn normalize_plpgsql_cte_body(body: CteBody, env: &CompileEnv) -> CteBody {
         CteBody::RecursiveUnion {
             all,
             left_nested,
+            anchor_with_is_subquery,
             anchor,
             recursive,
         } => CteBody::RecursiveUnion {
             all,
             left_nested,
+            anchor_with_is_subquery,
             anchor: Box::new(normalize_plpgsql_cte_body(*anchor, env)),
             recursive: Box::new(normalize_plpgsql_select(*recursive, env)),
         },

@@ -2450,7 +2450,6 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
             BuiltinScalarFunction::PgRustDomainCheckUpperLessThan => args.len() == 3,
-            BuiltinScalarFunction::PgRustTablesampleBernoulli => args.len() == 3,
             BuiltinScalarFunction::PgRustTestOpclassOptionsFunc => args.len() == 1,
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
@@ -2663,6 +2662,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::BitLength
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Upper
+            | BuiltinScalarFunction::Casefold
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Scale
             | BuiltinScalarFunction::MinScale
@@ -4925,6 +4925,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("enum_range_bounds", BuiltinScalarFunction::EnumRange),
         ("lower", BuiltinScalarFunction::Lower),
         ("upper", BuiltinScalarFunction::Upper),
+        ("casefold", BuiltinScalarFunction::Casefold),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
@@ -5938,6 +5939,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ArrayUpper
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Upper
+            | BuiltinScalarFunction::Casefold
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Ascii
             | BuiltinScalarFunction::Chr

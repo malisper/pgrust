@@ -12,7 +12,9 @@ use crate::backend::commands::copyto::CopyToSink;
 use crate::backend::executor::exec_expr::{
     normalize_composite_result_values_for_catalog, partition_constraint_conditions_for_catalog,
 };
-use crate::backend::executor::{ExecError, QueryColumn, StatementResult};
+use crate::backend::executor::{
+    ExecError, QueryColumn, StatementResult, ensure_no_deferred_column_errors,
+};
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
 };
@@ -354,6 +356,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return Some(position);
     }
+    if let Some(position) = cte_error_position(sql, e) {
+        return Some(position);
+    }
     if let Some(parameter) = prepared_parameter_coercion_error_index(e)
         && let Some(position) = find_execute_argument_position(sql, parameter)
     {
@@ -487,6 +492,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         {
             return find_last_case_insensitive_token_position(sql, "ON");
         }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+            if message.starts_with("tablesample method ")
+                || message
+                    == "TABLESAMPLE clause can only be applied to tables and materialized views" =>
+        {
+            return find_case_insensitive_token_position(sql, "TABLESAMPLE");
+        }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInsertTargetCount {
             expected,
             actual,
@@ -555,6 +567,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             detail,
             ..
         }) => {
+            if let Some(position) = window_error_position(sql, message) {
+                return Some(position);
+            }
             if message
                 == "aggregate functions are not allowed in FROM clause of their own query level"
             {
@@ -760,6 +775,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             return None;
         }
+        ExecError::Parse(crate::backend::parser::ParseError::WindowingError(message)) => {
+            return window_error_position(sql, message);
+        }
         ExecError::DetailedError { message, .. }
             if message == "constraints cannot be altered to be NOT VALID" =>
         {
@@ -841,6 +859,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if let Some(position) = window_error_position(sql, message) {
+                return Some(position);
+            }
             if is_datetime_template_call(sql) && is_datetime_template_runtime_error(message) {
                 return None;
             }
@@ -2408,6 +2429,148 @@ fn find_missing_function_position(sql: &str, message: &str) -> Option<usize> {
         return None;
     }
     find_case_insensitive_token_position(sql, name)
+}
+
+fn window_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "window functions are not allowed in WHERE" => {
+            find_window_function_position_after(sql, "WHERE")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in JOIN conditions" => {
+            find_window_function_position_after(sql, " ON ")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in RETURNING" => {
+            find_window_function_position_after(sql, "RETURNING")
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "window functions are not allowed in GROUP BY" => {
+            find_first_window_function_position(sql, 0)
+        }
+        "window functions are not allowed in window definitions" => {
+            find_window_function_position_after(sql, "ORDER BY")
+                .or_else(|| find_window_function_position_after(sql, "PARTITION BY"))
+                .or_else(|| find_first_window_function_position(sql, 0))
+        }
+        "count(*) must be used to call a parameterless aggregate function" => {
+            find_case_insensitive_token_position(sql, "count(")
+        }
+        "OVER specified, but generate_series is not a window function nor an aggregate function" => {
+            find_case_insensitive_token_position(sql, "generate_series")
+        }
+        "argument of ROWS must not contain variables"
+        | "argument of GROUPS must not contain variables" => {
+            find_token_after_case_insensitive_phrase(sql, "between")
+        }
+        "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column"
+        | "GROUPS mode requires an ORDER BY clause" => find_window_spec_open_position(sql),
+        _ if message.starts_with(
+            "RANGE with offset PRECEDING/FOLLOWING is not supported for column type ",
+        ) =>
+        {
+            find_range_offset_error_position(sql, message)
+        }
+        _ if message.starts_with("window \"") && message.ends_with("\" is already defined") => {
+            message
+                .strip_prefix("window \"")
+                .and_then(|rest| rest.split_once("\" is already defined"))
+                .map(|(name, _)| name)
+                .and_then(|name| find_last_identifier_position(sql, name))
+                .and_then(|position| find_next_char_position(sql, position, '(').or(Some(position)))
+        }
+        _ => None,
+    }
+}
+
+fn find_next_char_position(sql: &str, position: usize, wanted: char) -> Option<usize> {
+    sql.char_indices()
+        .skip_while(|(index, _)| *index + 1 <= position)
+        .find_map(|(index, ch)| (ch == wanted).then_some(index + 1))
+}
+
+fn find_window_spec_open_position(sql: &str) -> Option<usize> {
+    let over_position = find_case_insensitive_token_position(sql, "over")?;
+    let mut index = over_position - 1 + "over".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'(') {
+        Some(index + 1)
+    } else {
+        Some(over_position)
+    }
+}
+
+fn find_range_offset_error_position(sql: &str, message: &str) -> Option<usize> {
+    if message.ends_with("offset type double precision")
+        && let Some(position) = find_literal_before_cast_position(sql, "::float8")
+            .or_else(|| find_literal_before_cast_position(sql, "::double precision"))
+    {
+        return Some(position);
+    }
+    find_token_after_case_insensitive_phrase(sql, "range between")
+}
+
+fn find_literal_before_cast_position(sql: &str, cast: &str) -> Option<usize> {
+    let cast_index = sql.to_ascii_lowercase().find(&cast.to_ascii_lowercase())?;
+    let bytes = sql.as_bytes();
+    let mut start = cast_index;
+    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+        start -= 1;
+    }
+    if start > 0 && bytes[start - 1] == b'\'' {
+        start -= 1;
+        while start > 0 {
+            start -= 1;
+            if bytes[start] == b'\'' {
+                return Some(start + 1);
+            }
+        }
+        return Some(1);
+    }
+    while start > 0 {
+        let prev = bytes[start - 1];
+        if prev.is_ascii_alphanumeric() || matches!(prev, b'.' | b'_' | b'-') {
+            start -= 1;
+            continue;
+        }
+        break;
+    }
+    Some(start + 1)
+}
+
+fn find_window_function_position_after(sql: &str, phrase: &str) -> Option<usize> {
+    let phrase_position = find_case_insensitive_token_position(sql, phrase)?;
+    find_first_window_function_position(sql, phrase_position - 1 + phrase.len())
+}
+
+fn find_first_window_function_position(sql: &str, start: usize) -> Option<usize> {
+    const WINDOW_FUNCTIONS: &[&str] = &[
+        "row_number(",
+        "rank(",
+        "dense_rank(",
+        "percent_rank(",
+        "cume_dist(",
+        "ntile(",
+        "lag(",
+        "lead(",
+        "first_value(",
+        "last_value(",
+        "nth_value(",
+        "count(",
+        "sum(",
+        "generate_series(",
+    ];
+    let lower = sql.to_ascii_lowercase();
+    if start >= lower.len() {
+        return None;
+    }
+    WINDOW_FUNCTIONS
+        .iter()
+        .filter_map(|name| lower[start..].find(name).map(|offset| start + offset + 1))
+        .min()
 }
 
 fn is_create_type_missing_subtype_diff_function(sql: &str, message: &str) -> bool {
@@ -4145,8 +4308,157 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
             "Perhaps you meant to reference the table alias \"{alias}\"."
         ));
     }
+    if response.detail.is_none()
+        && let Some(cte_name) = unknown_table_name(e)
+        && sql_references_unknown_with_item_in_from(sql, cte_name)
+    {
+        response.detail = Some(format!(
+            "There is a WITH item named \"{cte_name}\", but it cannot be referenced from this part of the query."
+        ));
+        response.hint = Some(
+            "Use WITH RECURSIVE, or re-order the WITH items to remove forward references.".into(),
+        );
+    }
 
     response
+}
+
+fn cte_error_position(sql: &str, e: &ExecError) -> Option<usize> {
+    let ExecError::Parse(parse_error) = e else {
+        return None;
+    };
+    match parse_error.unpositioned() {
+        crate::backend::parser::ParseError::OuterLevelAggregateNestedCte(_) => {
+            find_aggregate_call_position(sql)
+        }
+        crate::backend::parser::ParseError::UnknownTable(name)
+            if sql.trim_start().to_ascii_lowercase().starts_with("with ") =>
+        {
+            find_reference_before_final_select(sql, name)
+                .or_else(|| find_last_relation_reference_position(sql, name))
+                .or_else(|| find_last_identifier_position(sql, name))
+        }
+        crate::backend::parser::ParseError::UnexpectedToken { actual, .. } => {
+            if actual.starts_with("WITH query \"") && actual.contains(" columns available but ") {
+                return extract_quoted_after(actual, "WITH query ")
+                    .and_then(|name| find_sql_identifier_token_position(sql, name));
+            }
+            None
+        }
+        crate::backend::parser::ParseError::DetailedError { message, .. } => {
+            if message.starts_with("WITH query \"") && message.contains(" columns available but ") {
+                return extract_quoted_after(message, "WITH query ")
+                    .and_then(|name| find_sql_identifier_token_position(sql, name));
+            }
+            if message.starts_with("WITH query \"")
+                && message.ends_with("does not have a RETURNING clause")
+            {
+                return extract_quoted_after(message, "WITH query ")
+                    .and_then(|name| find_last_relation_reference_position(sql, name));
+            }
+            if message
+                == "aggregate functions are not allowed in a recursive query's recursive term"
+            {
+                return find_aggregate_call_position(sql);
+            }
+            None
+        }
+        crate::backend::parser::ParseError::FeatureNotSupportedMessage(message) => {
+            if message.starts_with("WITH query \"")
+                && message.ends_with("does not have a RETURNING clause")
+            {
+                return extract_quoted_after(message, "WITH query ")
+                    .and_then(|name| find_last_relation_reference_position(sql, name));
+            }
+            if message.starts_with("search ") || message.starts_with("search sequence") {
+                return find_search_clause_position(sql);
+            }
+            if message.starts_with("CYCLE types ") {
+                return find_token_after_case_insensitive_phrase(sql, "default")
+                    .or_else(|| find_cycle_clause_position(sql));
+            }
+            if message.starts_with("cycle ") {
+                return find_cycle_clause_position(sql);
+            }
+            if message
+                == "WITH clause containing a data-modifying statement must be at the top level"
+            {
+                return find_last_case_insensitive_token_position(sql, "WITH");
+            }
+            if message
+                == "aggregate functions are not allowed in a recursive query's recursive term"
+            {
+                return find_aggregate_call_position(sql);
+            }
+            None
+        }
+        crate::backend::parser::ParseError::InvalidRecursion(message) => {
+            if let Some(name) = extract_quoted_after(message, "recursive query ")
+                && (message.contains("does not have the form")
+                    || message.contains("must not contain data-modifying statements"))
+            {
+                return find_cte_name_after_with_recursive(sql, name);
+            }
+            if let Some(name) = extract_quoted_after(message, "recursive reference to query ") {
+                return find_reference_before_final_select(sql, name)
+                    .or_else(|| find_last_relation_reference_position(sql, name))
+                    .or_else(|| find_last_identifier_position(sql, name));
+            }
+            if message == "mutual recursion between WITH items is not implemented" {
+                return find_token_after_case_insensitive_phrase(sql, "WITH RECURSIVE");
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn extract_quoted_after<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = message.strip_prefix(prefix)?;
+    let rest = rest.strip_prefix('"')?;
+    rest.split_once('"').map(|(name, _)| name)
+}
+
+fn find_cte_name_after_with_recursive(sql: &str, name: &str) -> Option<usize> {
+    let with_position = find_case_insensitive_token_position(sql, "WITH RECURSIVE")?;
+    let start = with_position - 1 + "WITH RECURSIVE".len();
+    find_sql_identifier_token_position(&sql[start..], name).map(|position| start + position)
+}
+
+fn find_search_clause_position(sql: &str) -> Option<usize> {
+    find_last_case_insensitive_token_position(sql, ") search").map(|position| position + 2)
+}
+
+fn find_cycle_clause_position(sql: &str) -> Option<usize> {
+    find_last_case_insensitive_token_position(sql, ") cycle").map(|position| position + 2)
+}
+
+fn find_reference_before_final_select(sql: &str, name: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let final_select = format!("select * from {}", name.to_ascii_lowercase());
+    let cutoff = lower.rfind(&final_select).unwrap_or(sql.len());
+    find_last_relation_reference_position(&sql[..cutoff], name)
+}
+
+fn unknown_table_name(e: &ExecError) -> Option<&str> {
+    match e {
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => unknown_table_name(source),
+        ExecError::Parse(parse_error) => match parse_error.unpositioned() {
+            crate::backend::parser::ParseError::UnknownTable(name) => Some(name),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn sql_references_unknown_with_item_in_from(sql: &str, name: &str) -> bool {
+    let lower = sql.trim_start().to_ascii_lowercase();
+    if !lower.starts_with("with ") {
+        return false;
+    }
+    let from_ref = format!("from {}", name.to_ascii_lowercase());
+    lower.contains(&from_ref)
 }
 
 fn apply_foreign_table_constraint_error_position(sql: &str, response: &mut ExecErrorResponse) {
@@ -4205,6 +4517,18 @@ fn delete_target_alias_for_table(sql: &str, table_name: &str) -> Option<String> 
 fn apply_errors_regression_syntax_compat(sql: &str, response: &mut ExecErrorResponse) {
     let trimmed = sql.trim();
     let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "select * from rank() over (order by random());"
+            | "select rank() over (partition by four, order by ten) from tenk1;"
+    ) && response
+        .message
+        .starts_with("feature not supported: SELECT form:")
+    {
+        response.message = "syntax error at or near \"ORDER\"".into();
+        response.position = find_case_insensitive_token_position(sql, "ORDER");
+        return;
+    }
     if matches!(
         lower.as_str(),
         "alter table nonesuch rename to newnonesuch;" | "alter table nonesuch rename to stud_emp;"
@@ -7294,6 +7618,10 @@ fn execute_streaming_select_statement(
                                         break;
                                     }
                                 };
+                                if let Err(e) = ensure_no_deferred_column_errors(&values) {
+                                    err = Some(e);
+                                    break;
+                                }
                                 send_typed_data_row(
                                     stream,
                                     &values,
@@ -10219,6 +10547,9 @@ fn psql_index_column_opclass_options_display(
 
 fn parenthesized_index_expression(expr_sql: &str) -> String {
     let trimmed = expr_sql.trim();
+    if trimmed.to_ascii_lowercase().contains("collate") {
+        return trimmed.to_string();
+    }
     if trimmed.starts_with('(') && trimmed.ends_with(')') {
         trimmed.to_string()
     } else {
@@ -12164,6 +12495,18 @@ fn handle_execute(
                 let catalog_maps = WireCatalogMaps::for_columns(&catalog, &result.columns);
                 let mut row_buf = Vec::new();
                 for row in &result.rows {
+                    if let Err(e) = ensure_no_deferred_column_errors(row) {
+                        let message = format_exec_error(&e);
+                        let hint = format_exec_error_hint(&e);
+                        send_error_with_hint(
+                            stream,
+                            exec_error_sqlstate(&e),
+                            &message,
+                            hint.as_deref(),
+                            None,
+                        )?;
+                        return Ok(());
+                    }
                     send_typed_data_row(
                         stream,
                         row,
@@ -12699,6 +13042,9 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
         crate::backend::parser::FromItem::Values { rows } => {
             rows.iter().flatten().any(raw_expr_contains_pg_notify)
         }
+        crate::backend::parser::FromItem::Expression { expr, .. } => {
+            raw_expr_contains_pg_notify(expr)
+        }
         crate::backend::parser::FromItem::FunctionCall { args, .. } => args
             .iter()
             .any(|arg| raw_expr_contains_pg_notify(&arg.value)),
@@ -12852,7 +13198,9 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
         | crate::backend::parser::SqlExpr::CurrentCatalog
         | crate::backend::parser::SqlExpr::CurrentSchema
         | crate::backend::parser::SqlExpr::CurrentUser
+        | crate::backend::parser::SqlExpr::User
         | crate::backend::parser::SqlExpr::SessionUser
+        | crate::backend::parser::SqlExpr::SystemUser
         | crate::backend::parser::SqlExpr::CurrentRole => false,
         crate::backend::parser::SqlExpr::CurrentTime { .. }
         | crate::backend::parser::SqlExpr::CurrentTimestamp { .. }

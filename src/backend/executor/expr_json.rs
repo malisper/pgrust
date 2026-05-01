@@ -2665,6 +2665,7 @@ fn json_object_text_value(value: &Value, op: &'static str) -> Result<Option<Stri
             left: value.clone(),
             right: Value::Null,
         }),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => Ok(None),
     }
 }
 
@@ -4627,6 +4628,7 @@ fn value_to_json_serde_with_config(
                 .map(|value| value_to_json_serde_with_config(value, datetime_config))
                 .collect(),
         ),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => SerdeJsonValue::Null,
     }
 }
 
@@ -4752,6 +4754,7 @@ fn render_json_value_text_with_config(
         Value::PgArray(array) => {
             render_json_array_values(&array.to_nested_values(), false, datetime_config, catalog)
         }
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".into(),
     }
 }
 

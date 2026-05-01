@@ -1,9 +1,10 @@
 use super::ExecError;
 use super::RegexError;
-use super::expr_ops::ensure_builtin_collation_supported;
+use super::expr_ops::{TextCollationSemantics, ensure_builtin_collation_supported};
 use super::node_types::Value;
 use crate::pgrust::compact_string::CompactString;
 use regex::{Regex, RegexBuilder};
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 const INVALID_REGULAR_EXPRESSION: &str = "2201B";
 const INVALID_PARAMETER_VALUE: &str = "22023";
@@ -166,7 +167,11 @@ pub(crate) fn pg_regex_is_match(compiled: &CompiledPgRegex, text: &str) -> Resul
     compiled.is_match(text)
 }
 
-pub(super) fn eval_regex_match_operator(left: &Value, right: &Value) -> Result<Value, ExecError> {
+pub(super) fn eval_regex_match_operator(
+    left: &Value,
+    right: &Value,
+    collation: TextCollationSemantics,
+) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
@@ -180,7 +185,11 @@ pub(super) fn eval_regex_match_operator(left: &Value, right: &Value) -> Result<V
         left: left.clone(),
         right: right.clone(),
     })?;
-    let compiled = compile_pg_regex(pattern, &PgRegexFlags::default(), PgRegexPurpose::Boolean)?;
+    let flags = PgRegexFlags::default();
+    if let Some(matched) = eval_collation_regex_class(text, pattern, &flags, collation) {
+        return Ok(Value::Bool(matched));
+    }
+    let compiled = compile_pg_regex(pattern, &flags, PgRegexPurpose::Boolean)?;
     Ok(Value::Bool(compiled.is_match(text)?))
 }
 
@@ -285,7 +294,10 @@ pub(super) fn eval_similar(
     Ok(Value::Bool(if negated { !matched } else { matched }))
 }
 
-pub(super) fn eval_regexp_like(values: &[Value]) -> Result<Value, ExecError> {
+pub(super) fn eval_regexp_like(
+    values: &[Value],
+    collation: TextCollationSemantics,
+) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);
     };
@@ -302,8 +314,80 @@ pub(super) fn eval_regexp_like(values: &[Value]) -> Result<Value, ExecError> {
     let pattern = expect_text_arg("regexp_like", pattern_value, text_value)?;
     let flags = parse_pg_regex_flags(optional_regex_text_arg("regexp_like", values.get(2), "")?)?;
     reject_global_option("regexp_like()", &flags, None)?;
+    if let Some(matched) = eval_collation_regex_class(text, pattern, &flags, collation) {
+        return Ok(Value::Bool(matched));
+    }
     let compiled = compile_pg_regex(pattern, &flags, PgRegexPurpose::Boolean)?;
     Ok(Value::Bool(compiled.is_match(text)?))
+}
+
+fn eval_collation_regex_class(
+    text: &str,
+    pattern: &str,
+    flags: &PgRegexFlags,
+    collation: TextCollationSemantics,
+) -> Option<bool> {
+    let matcher: fn(char, TextCollationSemantics) -> bool = match pattern {
+        r"\d" | "[[:digit:]]" => regex_digit_char,
+        "[[:alpha:]]" => regex_alpha_char,
+        "[[:alnum:]]" => regex_alnum_char,
+        "[[:upper:]]" => regex_upper_char,
+        "[[:punct:]]" => regex_punct_char,
+        _ => return None,
+    };
+    let matched = text.chars().any(|ch| {
+        if matcher(ch, collation) {
+            return true;
+        }
+        flags.case_insensitive && ch.to_lowercase().any(|lower| matcher(lower, collation))
+    });
+    Some(matched)
+}
+
+fn regex_digit_char(ch: char, collation: TextCollationSemantics) -> bool {
+    match collation {
+        TextCollationSemantics::PgUnicodeFast => {
+            get_general_category(ch) == GeneralCategory::DecimalNumber
+        }
+        _ => ch.is_ascii_digit(),
+    }
+}
+
+fn regex_alpha_char(ch: char, collation: TextCollationSemantics) -> bool {
+    match collation {
+        TextCollationSemantics::PgUnicodeFast => ch.is_alphabetic(),
+        _ => ch.is_ascii_alphabetic(),
+    }
+}
+
+fn regex_alnum_char(ch: char, collation: TextCollationSemantics) -> bool {
+    match collation {
+        TextCollationSemantics::PgUnicodeFast => ch.is_alphanumeric(),
+        _ => ch.is_ascii_alphanumeric(),
+    }
+}
+
+fn regex_upper_char(ch: char, collation: TextCollationSemantics) -> bool {
+    match collation {
+        TextCollationSemantics::PgUnicodeFast => ch.is_uppercase(),
+        _ => ch.is_ascii_uppercase(),
+    }
+}
+
+fn regex_punct_char(ch: char, collation: TextCollationSemantics) -> bool {
+    match collation {
+        TextCollationSemantics::PgUnicodeFast => matches!(
+            get_general_category(ch),
+            GeneralCategory::ConnectorPunctuation
+                | GeneralCategory::DashPunctuation
+                | GeneralCategory::OpenPunctuation
+                | GeneralCategory::ClosePunctuation
+                | GeneralCategory::InitialPunctuation
+                | GeneralCategory::FinalPunctuation
+                | GeneralCategory::OtherPunctuation
+        ),
+        _ => ch.is_ascii_punctuation(),
+    }
 }
 
 pub(crate) fn eval_jsonpath_like_regex(
@@ -2497,5 +2581,45 @@ mod tests {
             ),
             Err(ExecError::DetailedError { sqlstate, .. }) if sqlstate == "0A000"
         ));
+    }
+
+    #[test]
+    fn regex_classes_respect_builtin_utf8_collation_semantics() {
+        assert_eq!(
+            eval_regex_match_operator(
+                &Value::Text("\u{00C1}".into()),
+                &Value::Text("[[:alpha:]]".into()),
+                TextCollationSemantics::Ascii,
+            )
+            .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_regex_match_operator(
+                &Value::Text("\u{0D67}".into()),
+                &Value::Text(r"\d".into()),
+                TextCollationSemantics::PgCUtf8,
+            )
+            .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_regex_match_operator(
+                &Value::Text("\u{0D67}".into()),
+                &Value::Text(r"\d".into()),
+                TextCollationSemantics::PgUnicodeFast,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_regex_match_operator(
+                &Value::Text("=".into()),
+                &Value::Text("[[:punct:]]".into()),
+                TextCollationSemantics::PgUnicodeFast,
+            )
+            .unwrap(),
+            Value::Bool(false)
+        );
     }
 }

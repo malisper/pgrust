@@ -146,7 +146,10 @@ pub(crate) use rules::{
 };
 pub use scope::BoundRelation;
 use scope::*;
-pub(crate) use scope::{BoundCte, BoundScope, scope_for_relation, shift_scope_rtindexes};
+pub(crate) use scope::{
+    BoundCte, BoundModifyingCte, BoundScope, BoundWritableCte, scope_for_relation,
+    shift_scope_rtindexes,
+};
 use sqlfunc_inline::*;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -3969,6 +3972,7 @@ fn named_relation_scope(
                     varattno: user_attrno(index),
                     varlevelsup: 0,
                     vartype: column.sql_type,
+                    collation_oid: None,
                 })
             })
             .collect(),
@@ -4029,6 +4033,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             varattno: user_attrno(column.slot),
             varlevelsup: 0,
             vartype: column.sql_type,
+            collation_oid: None,
         }));
     }
 
@@ -4058,6 +4063,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             }));
         }
     }
@@ -4296,6 +4302,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
         CteBody::RecursiveUnion {
             all,
             left_nested: _,
+            anchor_with_is_subquery: _,
             anchor,
             recursive,
         } => Ok(SelectStatement {
@@ -4388,10 +4395,20 @@ fn bind_ctes(
             CteBody::RecursiveUnion {
                 all,
                 left_nested,
+                anchor_with_is_subquery,
                 anchor,
                 recursive,
             } if with_recursive && self_references_cte => {
-                validate_recursive_cte_non_recursive_term(anchor, &cte.name)?;
+                let top_level_with_names = recursive_union_top_level_with_names(
+                    anchor,
+                    recursive,
+                    *anchor_with_is_subquery,
+                );
+                validate_recursive_cte_non_recursive_term(
+                    anchor,
+                    &cte.name,
+                    &top_level_with_names,
+                )?;
                 let (base_anchor_query, base_anchor_desc) = analyze_non_recursive_cte_body(
                     anchor,
                     catalog,
@@ -4482,6 +4499,15 @@ fn bind_ctes(
                     worktable_id,
                 });
                 let recursive_outer_scopes = cte_body_outer_scopes(outer_scopes);
+                validate_recursive_term_target_operator_errors(
+                    &recursive_stmt,
+                    catalog,
+                    &recursive_outer_scopes,
+                    grouped_outer.clone(),
+                    current_visible_aggregate_scope().as_ref(),
+                    &recursive_visible,
+                    expanded_views,
+                )?;
                 let (mut recursive_query, _) = analyze_select_query_with_outer(
                     &recursive_stmt,
                     catalog,
@@ -5111,6 +5137,7 @@ fn direct_recursive_cte_ref_qualifier(item: &FromItem, cte_name: &str) -> Option
         FromItem::Join { left, right, .. } => direct_recursive_cte_ref_qualifier(left, cte_name)
             .or_else(|| direct_recursive_cte_ref_qualifier(right, cte_name)),
         FromItem::Values { .. }
+        | FromItem::Expression { .. }
         | FromItem::Table { .. }
         | FromItem::FunctionCall { .. }
         | FromItem::RowsFrom { .. }
@@ -5261,6 +5288,45 @@ pub(crate) fn cte_body_references_table(body: &CteBody, table_name: &str) -> boo
     }
 }
 
+fn recursive_union_top_level_with_names(
+    anchor: &CteBody,
+    recursive: &SelectStatement,
+    anchor_with_is_subquery: bool,
+) -> Vec<String> {
+    let anchor_names = cte_body_top_level_with_names(anchor);
+    let mut names = if anchor_with_is_subquery {
+        anchor_names.clone()
+    } else {
+        Vec::new()
+    };
+    for anchor_name in anchor_names.into_iter().filter(|anchor_name| {
+        recursive
+            .with
+            .iter()
+            .any(|cte| cte.name.eq_ignore_ascii_case(anchor_name))
+    }) {
+        if !names
+            .iter()
+            .any(|candidate: &String| candidate.eq_ignore_ascii_case(&anchor_name))
+        {
+            names.push(anchor_name);
+        }
+    }
+    names
+}
+
+fn cte_body_top_level_with_names(body: &CteBody) -> Vec<String> {
+    match body {
+        CteBody::Select(select) => select.with.iter().map(|cte| cte.name.clone()).collect(),
+        CteBody::Values(values) => values.with.iter().map(|cte| cte.name.clone()).collect(),
+        CteBody::Insert(insert) => insert.with.iter().map(|cte| cte.name.clone()).collect(),
+        CteBody::Update(update) => update.with.iter().map(|cte| cte.name.clone()).collect(),
+        CteBody::Delete(delete) => delete.with.iter().map(|cte| cte.name.clone()).collect(),
+        CteBody::Merge(merge) => merge.with.iter().map(|cte| cte.name.clone()).collect(),
+        CteBody::RecursiveUnion { anchor, .. } => cte_body_top_level_with_names(anchor),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecursiveReferenceContext {
     Ok,
@@ -5302,6 +5368,7 @@ fn recursive_reference_error(
 struct RecursiveReferenceChecker<'a> {
     cte_name: &'a str,
     self_refcount: usize,
+    top_level_with_names: Vec<String>,
 }
 
 impl<'a> RecursiveReferenceChecker<'a> {
@@ -5309,7 +5376,19 @@ impl<'a> RecursiveReferenceChecker<'a> {
         Self {
             cte_name,
             self_refcount: 0,
+            top_level_with_names: Vec::new(),
         }
+    }
+
+    fn with_top_level_with_names(mut self, names: &[String]) -> Self {
+        self.top_level_with_names = names.to_vec();
+        self
+    }
+
+    fn is_top_level_recursive_union_with(&self, name: &str) -> bool {
+        self.top_level_with_names
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name))
     }
 
     fn validate_recursive_term(&mut self, stmt: &SelectStatement) -> Result<(), ParseError> {
@@ -5421,13 +5500,8 @@ impl<'a> RecursiveReferenceChecker<'a> {
             CteBody::RecursiveUnion {
                 anchor, recursive, ..
             } => {
-                let nested_context = if context == RecursiveReferenceContext::Ok {
-                    RecursiveReferenceContext::Ok
-                } else {
-                    RecursiveReferenceContext::Subquery
-                };
-                self.visit_cte_body(anchor, nested_context)?;
-                self.visit_select(recursive, nested_context)
+                self.visit_cte_body(anchor, context)?;
+                self.visit_select(recursive, context)
             }
         }
     }
@@ -5441,12 +5515,14 @@ impl<'a> RecursiveReferenceChecker<'a> {
             return Ok(());
         }
 
-        let cte_context = if context == RecursiveReferenceContext::Ok {
-            RecursiveReferenceContext::Ok
-        } else {
-            RecursiveReferenceContext::Subquery
-        };
         for cte in &stmt.with {
+            let cte_context = if context == RecursiveReferenceContext::NonRecursiveTerm
+                && self.is_top_level_recursive_union_with(&cte.name)
+            {
+                RecursiveReferenceContext::Subquery
+            } else {
+                context
+            };
             self.visit_cte_body(&cte.body, cte_context)?;
         }
         if let Some(from) = &stmt.from {
@@ -5540,6 +5616,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            FromItem::Expression { expr, .. } => self.visit_expr(expr, context),
             FromItem::FunctionCall { args, .. } => {
                 for arg in args {
                     self.visit_expr(&arg.value, context)?;
@@ -5688,6 +5765,8 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::CurrentSchema
             | SqlExpr::CurrentUser
             | SqlExpr::SessionUser
+            | SqlExpr::User
+            | SqlExpr::SystemUser
             | SqlExpr::CurrentRole
             | SqlExpr::CurrentTime { .. }
             | SqlExpr::CurrentTimestamp { .. }
@@ -5901,8 +5980,82 @@ fn validate_recursive_cte_recursive_term(
 fn validate_recursive_cte_non_recursive_term(
     body: &CteBody,
     cte_name: &str,
+    top_level_with_names: &[String],
 ) -> Result<(), ParseError> {
-    RecursiveReferenceChecker::new(cte_name).validate_non_recursive_term(body)
+    RecursiveReferenceChecker::new(cte_name)
+        .with_top_level_with_names(top_level_with_names)
+        .validate_non_recursive_term(body)
+}
+
+fn validate_recursive_term_target_operator_errors(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+    visible_agg_scope: Option<&VisibleAggregateScope>,
+    outer_ctes: &[BoundCte],
+    expanded_views: &[u32],
+) -> Result<(), ParseError> {
+    if stmt.set_operation.is_some() {
+        return Ok(());
+    }
+    with_visible_aggregate_scope(visible_agg_scope.cloned(), || {
+        let local_ctes = match bind_ctes(
+            stmt.with_recursive,
+            &stmt.with,
+            catalog,
+            outer_scopes,
+            grouped_outer.clone(),
+            outer_ctes,
+            expanded_views,
+        ) {
+            Ok(ctes) => ctes,
+            Err(err) if parse_error_is_undefined_operator(&err) => return Err(err),
+            Err(_) => return Ok(()),
+        };
+        let mut visible_ctes = local_ctes;
+        visible_ctes.extend_from_slice(outer_ctes);
+        let scope = match &stmt.from {
+            Some(from) => match bind_from_item_with_ctes(
+                from,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+                expanded_views,
+            ) {
+                Ok((_, scope)) => scope,
+                Err(err) if parse_error_is_undefined_operator(&err) => return Err(err),
+                Err(_) => return Ok(()),
+            },
+            None => empty_scope(),
+        };
+        for target in &stmt.targets {
+            match bind_typed_expr_with_outer_and_ctes(
+                &target.expr,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+            ) {
+                Ok(_) => {}
+                Err(err) if parse_error_is_undefined_operator(&err) => return Err(err),
+                Err(_) => {}
+            }
+        }
+        Ok(())
+    })
+}
+
+fn parse_error_is_undefined_operator(err: &ParseError) -> bool {
+    match err {
+        ParseError::UndefinedOperator { .. } => true,
+        ParseError::Positioned { source, .. } | ParseError::WithContext { source, .. } => {
+            parse_error_is_undefined_operator(source)
+        }
+        _ => false,
+    }
 }
 
 fn validate_recursive_cte_recursive_term_decorations(
@@ -5971,6 +6124,8 @@ fn sql_expr_contains_aggregate_call(expr: &SqlExpr) -> bool {
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -6302,9 +6457,10 @@ fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
         }
         FromItem::JsonTable(table) => json_table_expr_references_table(table, table_name),
         FromItem::XmlTable(table) => xml_table_expr_references_table(table, table_name),
-        FromItem::Values { .. } | FromItem::FunctionCall { .. } | FromItem::RowsFrom { .. } => {
-            false
-        }
+        FromItem::Values { .. }
+        | FromItem::Expression { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. } => false,
     }
 }
 
@@ -6402,6 +6558,8 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -6956,6 +7114,13 @@ pub(crate) fn bound_cte_from_query_rows(
         self_reference: false,
         worktable_id: 0,
     }
+}
+
+pub(crate) fn bound_cte_from_query_columns(
+    name: String,
+    output_columns: Vec<QueryColumn>,
+) -> BoundCte {
+    bound_cte_from_query_rows(name, output_columns, &[])
 }
 
 pub fn build_values_plan(
@@ -8251,6 +8416,7 @@ fn bind_set_operation_query_with_outer(
                 varattno: user_attrno(index),
                 varlevelsup: 0,
                 vartype: column.sql_type,
+                collation_oid: None,
             })
         })
         .collect::<Vec<_>>();

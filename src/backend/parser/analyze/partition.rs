@@ -418,6 +418,7 @@ pub(crate) fn lower_relation_partition_spec_uncached(
             varattno: user_attrno(column_index),
             varlevelsup: 0,
             vartype: column.sql_type,
+            collation_oid: None,
         }));
         key_types.push(column.sql_type);
         key_sqls.push(column.name.clone());
@@ -1124,6 +1125,8 @@ fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
@@ -1390,6 +1393,8 @@ fn partition_expr_is_mutable(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
         | Expr::CaseTest(_)
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema => false,
@@ -1492,6 +1497,8 @@ fn expr_contains_var(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

@@ -9,6 +9,7 @@ use super::comments::{
 };
 use super::parsenodes::*;
 use crate::backend::executor::Value;
+use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::misc::stack_depth::{
     StackDepthGuard, check_parse_stack_depth, effective_default_max_stack_depth_kb,
 };
@@ -360,6 +361,12 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
             .with_position(sql_position_from_byte_offset(sql, leading + position)),
         );
     }
+    if (lowered.starts_with("select ") || lowered.starts_with("with "))
+        && let Some(position) = derived_table_tablesample_syntax_error_position(trimmed)
+    {
+        let token = syntax_error_token_at(trimmed, position);
+        return Some(syntax_error_at(sql, leading + position, &token));
+    }
 
     if lowered.starts_with("select ")
         && keyword_boundary(trimmed, "group by grouping sets").is_some()
@@ -371,6 +378,70 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     }
 
     None
+}
+
+fn derived_table_tablesample_syntax_error_position(input: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(relative) = find_keyword_any_depth(input, "tablesample", start) {
+        let position = relative;
+        let depth = nesting_depth_at(input, position);
+        if let Some(item_start) = find_from_item_start_before(input, position, depth) {
+            let item = input[item_start..position].trim_start();
+            if parenthesized_from_item_starts_with_query(item) {
+                return Some(position);
+            }
+        }
+        start = position + "tablesample".len();
+    }
+    None
+}
+
+fn find_from_item_start_before(input: &str, position: usize, target_depth: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    let mut item_start = None;
+    while index < bytes.len() && index < position {
+        match bytes[index] {
+            b'\'' => {
+                index = parse_delimited_token_end(bytes, index, b'\'');
+                continue;
+            }
+            b'"' => {
+                index = parse_delimited_token_end(bytes, index, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, index) {
+                    index = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == target_depth => item_start = Some(index + 1),
+            _ if depth == target_depth && keyword_at_boundary(input, index, "from") => {
+                item_start = Some(index + "from".len());
+            }
+            _ if depth == target_depth && keyword_at_boundary(input, index, "join") => {
+                item_start = Some(index + "join".len());
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    item_start
+}
+
+fn parenthesized_from_item_starts_with_query(item: &str) -> bool {
+    if !item.starts_with('(') {
+        return false;
+    }
+    let Ok((inner, _rest)) = take_parenthesized_segment(item) else {
+        return false;
+    };
+    let inner = inner.trim_start();
+    keyword_at_start(inner, "select") || keyword_at_start(inner, "with")
 }
 
 fn json_table_exists_on_empty_behavior_position(input: &str) -> Option<usize> {
@@ -1153,6 +1224,7 @@ fn try_parse_alter_table_cluster_on_statement(sql: &str) -> Result<Option<Statem
         index_name: schema_name
             .map(|schema| format!("{schema}.{index_name}"))
             .unwrap_or(index_name),
+        mark_only: true,
     })))
 }
 
@@ -17698,6 +17770,22 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
     let collation_name = schema_name
         .map(|schema| format!("{schema}.{base_name}"))
         .unwrap_or(base_name);
+    let rest = rest.trim_start();
+    if rest.starts_with('(') {
+        let (options_sql, trailing) = take_parenthesized_segment(rest)?;
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: trailing.trim().into(),
+            });
+        }
+        return Ok(CreateCollationStatement {
+            collation_name,
+            kind: CreateCollationKind::Options {
+                options: parse_collation_option_assignments(&options_sql)?,
+            },
+        });
+    }
     let Some(rest) = consume_keyword_if_present(rest, "from") else {
         return Err(ParseError::UnexpectedToken {
             expected: "FROM",
@@ -17716,8 +17804,49 @@ fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatemen
         .unwrap_or(source_base);
     Ok(CreateCollationStatement {
         collation_name,
-        source_collation,
+        kind: CreateCollationKind::From { source_collation },
     })
+}
+
+fn parse_collation_option_assignments(input: &str) -> Result<Vec<RelOption>, ParseError> {
+    split_comma_separated_sql(input)?
+        .into_iter()
+        .map(|part| {
+            let (name_sql, value_sql) =
+                part.split_once('=')
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "collation option assignment",
+                        actual: part.trim().into(),
+                    })?;
+            let (name, tail) = parse_sql_identifier(name_sql)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "collation option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            let value_sql = value_sql.trim();
+            let value = if let Some(literal_len) = scan_string_literal_token_len(value_sql) {
+                if !value_sql[literal_len..].trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "end of collation option",
+                        actual: value_sql[literal_len..].trim().into(),
+                    });
+                }
+                decode_string_literal(&value_sql[..literal_len])?
+            } else {
+                let (value, tail) = parse_sql_identifier(value_sql)?;
+                if !tail.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "collation option value",
+                        actual: tail.trim().into(),
+                    });
+                }
+                value
+            };
+            Ok(RelOption { name, value })
+        })
+        .collect()
 }
 
 fn build_drop_conversion_statement(sql: &str) -> Result<DropConversionStatement, ParseError> {
@@ -18740,6 +18869,7 @@ fn build_cluster(pair: Pair<'_, Rule>) -> Result<ClusterStatement, ParseError> {
     Ok(ClusterStatement {
         table_name: table_name.clone(),
         index_name: index_name.clone(),
+        mark_only: false,
     })
 }
 
@@ -20436,6 +20566,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             Ok(CteBody::RecursiveUnion {
                 all,
                 left_nested: false,
+                anchor_with_is_subquery: true,
                 anchor: Box::new(anchor),
                 recursive: Box::new(recursive.ok_or(ParseError::UnexpectedEof)?),
             })
@@ -20452,6 +20583,7 @@ fn select_statement_as_cte_body(stmt: SelectStatement) -> CteBody {
         return CteBody::RecursiveUnion {
             all,
             left_nested,
+            anchor_with_is_subquery: false,
             anchor: Box::new(select_term_as_cte_body(anchor)),
             recursive: Box::new(recursive),
         };
@@ -20851,6 +20983,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                             | Rule::rows_from_item
                             | Rule::json_table_from_item
                             | Rule::xml_table_from_item
+                            | Rule::scalar_expr_from_item
                             | Rule::srf_from_item
                             | Rule::derived_from_item
                             | Rule::parenthesized_from_item
@@ -20901,7 +21034,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 item = FromItem::Join {
                     left: Box::new(item),
                     right: Box::new(next?),
-                    kind: JoinKind::Cross,
+                    kind: JoinKind::Comma,
                     constraint: JoinConstraint::None,
                 };
             }
@@ -20921,13 +21054,19 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             }
             Ok(item)
         }
-        Rule::aliased_from_item => {
+        Rule::aliased_from_item | Rule::sampled_from_item | Rule::unsampled_from_item => {
             let mut source = None;
             let mut alias = None;
             let mut column_aliases = AliasColumnSpec::None;
             let mut sample = None;
             for part in pair.into_inner() {
                 match part.as_rule() {
+                    Rule::sampled_from_item | Rule::unsampled_from_item => {
+                        source = Some(build_from_item(part)?)
+                    }
+                    Rule::sampleable_from_primary | Rule::unsampleable_from_primary => {
+                        source = Some(build_from_item(part)?)
+                    }
                     Rule::only_table_from_item
                     | Rule::table_from_item
                     | Rule::lateral_from_item
@@ -20935,6 +21074,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::rows_from_item
                     | Rule::json_table_from_item
                     | Rule::xml_table_from_item
+                    | Rule::scalar_expr_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
                     | Rule::derived_from_item
@@ -20973,6 +21113,10 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             }
             Ok(item)
         }
+        Rule::sampleable_from_primary | Rule::unsampleable_from_primary => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_from_item(inner)
+        }
         Rule::only_table_from_item => Ok(FromItem::Table {
             name: build_identifier(
                 pair.into_inner()
@@ -20996,6 +21140,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 .map(build_values_row)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        Rule::scalar_expr_from_item => build_scalar_expr_from_item(pair),
         Rule::rows_from_item => build_rows_from_item(pair),
         Rule::json_table_from_item => build_json_table_from_item(pair),
         Rule::xml_table_from_item => build_xml_table_from_item(pair),
@@ -21035,6 +21180,77 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             actual: raw,
         }),
     }
+}
+
+fn build_scalar_expr_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    if inner.as_rule() == Rule::collation_for_expr {
+        let arg = inner
+            .clone()
+            .into_inner()
+            .find(|part| part.as_rule() == Rule::expr)
+            .ok_or(ParseError::UnexpectedEof)?;
+        let display_sql = format!("COLLATION FOR ({})", arg.as_str().trim());
+        return Ok(FromItem::Expression {
+            // :HACK: PostgreSQL lowers COLLATION FOR to pg_collation_for(any).
+            // pgrust does not model expression collation yet, so keep the
+            // SQL-visible deparse spelling and use the default-collation result
+            // shape for the scalar RTE.
+            expr: SqlExpr::Const(Value::Text("default".into())),
+            display_sql: Some(display_sql),
+        });
+    }
+    let display_sql = scalar_expr_from_item_display(&inner);
+    Ok(FromItem::Expression {
+        expr: build_expr(inner)?,
+        display_sql,
+    })
+}
+
+fn scalar_expr_from_item_display(pair: &Pair<'_, Rule>) -> Option<String> {
+    match pair.as_rule() {
+        Rule::kw_current_date => Some("CURRENT_DATE".into()),
+        Rule::kw_current_catalog => Some("CURRENT_CATALOG".into()),
+        Rule::kw_current_schema => Some("CURRENT_SCHEMA".into()),
+        Rule::kw_current_user => Some("CURRENT_USER".into()),
+        Rule::kw_user_value => Some("USER".into()),
+        Rule::kw_session_user => Some("SESSION_USER".into()),
+        Rule::kw_system_user => Some("SYSTEM_USER".into()),
+        Rule::kw_current_role => Some("CURRENT_ROLE".into()),
+        Rule::kw_current_time => Some(uppercase_keyword_call("CURRENT_TIME", pair.as_str())),
+        Rule::kw_current_timestamp => {
+            Some(uppercase_keyword_call("CURRENT_TIMESTAMP", pair.as_str()))
+        }
+        Rule::kw_localtime => Some(uppercase_keyword_call("LOCALTIME", pair.as_str())),
+        Rule::kw_localtimestamp => Some(uppercase_keyword_call("LOCALTIMESTAMP", pair.as_str())),
+        Rule::cast_expr => Some(uppercase_cast_display(pair.as_str())),
+        _ => None,
+    }
+}
+
+fn uppercase_keyword_call(keyword: &str, raw: &str) -> String {
+    raw.find('(')
+        .map(|index| format!("{keyword}{}", &raw[index..]))
+        .unwrap_or_else(|| keyword.to_string())
+}
+
+fn uppercase_cast_display(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if raw[index..].to_ascii_lowercase().starts_with("cast") {
+            out.push_str("CAST");
+            index += 4;
+        } else if raw[index..].to_ascii_lowercase().starts_with(" as ") {
+            out.push_str(" AS ");
+            index += 4;
+        } else {
+            out.push(bytes[index] as char);
+            index += 1;
+        }
+    }
+    out
 }
 
 fn build_table_sample_clause(pair: Pair<'_, Rule>) -> Result<RawTableSampleClause, ParseError> {
@@ -21683,7 +21899,7 @@ fn build_join_clause(
     }
 
     match kind {
-        JoinKind::Cross => {
+        JoinKind::Comma | JoinKind::Cross => {
             if !matches!(constraint, JoinConstraint::None) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "CROSS JOIN without ON or USING",
@@ -21747,7 +21963,28 @@ fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
 fn default_alias_for_column_definition_source(item: &FromItem) -> Option<String> {
     match item {
         FromItem::FunctionCall { name, .. } => Some(name.clone()),
+        FromItem::Expression { expr, .. } => {
+            scalar_expr_default_column_name(expr).map(str::to_string)
+        }
         FromItem::Lateral(inner) => default_alias_for_column_definition_source(inner),
+        _ => None,
+    }
+}
+
+fn scalar_expr_default_column_name(expr: &SqlExpr) -> Option<&'static str> {
+    match expr {
+        SqlExpr::CurrentDate => Some("current_date"),
+        SqlExpr::CurrentCatalog => Some("current_catalog"),
+        SqlExpr::CurrentSchema => Some("current_schema"),
+        SqlExpr::CurrentUser => Some("current_user"),
+        SqlExpr::User => Some("user"),
+        SqlExpr::SessionUser => Some("session_user"),
+        SqlExpr::SystemUser => Some("system_user"),
+        SqlExpr::CurrentRole => Some("current_role"),
+        SqlExpr::CurrentTime { .. } => Some("current_time"),
+        SqlExpr::CurrentTimestamp { .. } => Some("current_timestamp"),
+        SqlExpr::LocalTime { .. } => Some("localtime"),
+        SqlExpr::LocalTimestamp { .. } => Some("localtimestamp"),
         _ => None,
     }
 }
@@ -23170,12 +23407,14 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::exclusion_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
-            let (using_method, elements, include_columns) = build_exclusion_constraint_body(body)?;
+            let (using_method, elements, include_columns, predicate_sql) =
+                build_exclusion_constraint_body(body)?;
             Ok(TableConstraint::Exclusion {
                 attributes,
                 using_method,
                 elements,
                 include_columns,
+                predicate_sql,
             })
         }
         Rule::check_table_constraint => {
@@ -23247,10 +23486,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
 
 fn build_exclusion_constraint_body(
     pair: Pair<'_, Rule>,
-) -> Result<(String, Vec<ExclusionElement>, Vec<String>), ParseError> {
+) -> Result<(String, Vec<ExclusionElement>, Vec<String>, Option<String>), ParseError> {
     let mut using_method = None;
     let mut elements = Vec::new();
     let mut include_columns = Vec::new();
+    let mut predicate_sql = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier if using_method.is_none() => {
@@ -23301,6 +23541,13 @@ fn build_exclusion_constraint_body(
                         .flat_map(|inner| inner.into_inner().map(build_identifier)),
                 );
             }
+            Rule::create_index_where_clause => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                predicate_sql = Some(expr.as_str().trim().to_string());
+            }
             _ => {}
         }
     }
@@ -23311,6 +23558,7 @@ fn build_exclusion_constraint_body(
         using_method.unwrap_or_else(|| "gist".into()),
         elements,
         include_columns,
+        predicate_sql,
     ))
 }
 
@@ -25150,6 +25398,8 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         let expr_pair = item_inner.next().ok_or(ParseError::UnexpectedEof)?;
         let expr_is_extract = top_level_extract_expr(expr_pair.clone());
         let expr_is_power_operator = top_level_power_operator_expr(expr_pair.clone());
+        let expr_is_case_insensitive_regex_operator =
+            top_level_case_insensitive_regex_operator_expr(expr_pair.clone());
         let expr = build_expr(expr_pair)?;
         let output_name = if let Some(alias_pair) = item_inner.next() {
             let alias = alias_pair
@@ -25160,6 +25410,8 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         } else if expr_is_extract {
             "extract".into()
         } else if expr_is_power_operator {
+            "?column?".into()
+        } else if expr_is_case_insensitive_regex_operator {
             "?column?".into()
         } else {
             select_item_name(&expr, index)
@@ -25330,6 +25582,42 @@ fn top_level_power_operator_expr(pair: Pair<'_, Rule>) -> bool {
     }
 }
 
+fn top_level_case_insensitive_regex_operator_expr(pair: Pair<'_, Rule>) -> bool {
+    match pair.as_rule() {
+        Rule::cmp_expr => {
+            let input = pair.as_str();
+            find_top_level_operator(input, b'~', Some(b'*')).is_some()
+                || find_top_level_operator(input, b'!', Some(b'~'))
+                    .is_some_and(|index| input.as_bytes().get(index + 2) == Some(&b'*'))
+        }
+        Rule::expr
+        | Rule::or_expr
+        | Rule::and_expr
+        | Rule::not_expr
+        | Rule::json_access_expr
+        | Rule::concat_expr
+        | Rule::add_expr
+        | Rule::bit_expr
+        | Rule::shift_expr
+        | Rule::mul_expr
+        | Rule::unary_expr
+        | Rule::positive_expr
+        | Rule::negated_expr
+        | Rule::postfix_expr
+        | Rule::primary_expr => {
+            let mut inner = pair.into_inner();
+            let Some(first) = inner.next() else {
+                return false;
+            };
+            if inner.next().is_some() {
+                return false;
+            }
+            top_level_case_insensitive_regex_operator_expr(first)
+        }
+        _ => false,
+    }
+}
+
 fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     let _ = index;
     match expr {
@@ -25360,7 +25648,9 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::CurrentCatalog => "current_catalog".to_string(),
         SqlExpr::CurrentSchema => "current_schema".to_string(),
         SqlExpr::CurrentUser => "current_user".to_string(),
+        SqlExpr::User => "user".to_string(),
         SqlExpr::SessionUser => "session_user".to_string(),
+        SqlExpr::SystemUser => "system_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
         SqlExpr::JsonQueryFunction(func) => match func.kind {
@@ -28005,14 +28295,32 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
         }
     }
     let raw = pair.as_str();
-    if pair.as_rule() == Rule::unicode_quoted_identifier {
-        return decode_unicode_quoted_identifier(raw).unwrap_or_else(|_| raw.to_string());
-    }
-    if raw.starts_with('"') && raw.ends_with('"') {
+    let identifier = if pair.as_rule() == Rule::unicode_quoted_identifier {
+        decode_unicode_quoted_identifier(raw).unwrap_or_else(|_| raw.to_string())
+    } else if raw.starts_with('"') && raw.ends_with('"') {
         raw[1..raw.len() - 1].replace("\"\"", "\"")
     } else {
         raw.to_ascii_lowercase()
+    };
+    truncate_identifier_with_notice(identifier)
+}
+
+fn truncate_identifier_with_notice(identifier: String) -> String {
+    const MAX_IDENTIFIER_BYTES: usize = 63;
+    if identifier.len() <= MAX_IDENTIFIER_BYTES {
+        return identifier;
     }
+    let mut end = MAX_IDENTIFIER_BYTES;
+    while !identifier.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = identifier[..end].to_string();
+    push_notice(format!(
+        "identifier \"{}\" will be truncated to \"{}\"",
+        identifier.replace('"', "\"\""),
+        truncated.replace('"', "\"\"")
+    ));
+    truncated
 }
 
 pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
@@ -28325,6 +28633,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             op,
                             is_all,
                             subquery: Box::new(build_select(rhs)?),
+                        },
+                        Rule::values_stmt => SqlExpr::QuantifiedSubquery {
+                            left: Box::new(left),
+                            op,
+                            is_all,
+                            subquery: Box::new(wrap_values_as_select(build_values_statement(rhs)?)),
                         },
                         Rule::expr => SqlExpr::QuantifiedArray {
                             left: Box::new(left),
@@ -28702,8 +29016,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
         Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
-        Rule::kw_current_user | Rule::kw_user_value => Ok(SqlExpr::CurrentUser),
+        Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_user_value => Ok(SqlExpr::User),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
+        Rule::kw_system_user => Ok(SqlExpr::SystemUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
             precision: pair

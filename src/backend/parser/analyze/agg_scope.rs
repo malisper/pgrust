@@ -693,7 +693,50 @@ fn analyze_select_usage_with_outer(
         )?);
     }
 
+    if let Some(cte_name) = outer_level_aggregate_references_local_cte(&info, &local_ctes) {
+        return Err(ParseError::OuterLevelAggregateNestedCte(cte_name));
+    }
+
     Ok(info)
+}
+
+fn outer_level_aggregate_references_local_cte(
+    info: &AggregateExprInfo,
+    local_ctes: &[BoundCte],
+) -> Option<String> {
+    info.agg_refs
+        .iter()
+        .filter(|usage| matches!(usage.ownership, AggregateOwnership::OuterLevel(_)))
+        .find_map(|usage| aggregate_references_local_cte(&usage.agg, local_ctes))
+}
+
+fn aggregate_references_local_cte(
+    agg: &CollectedAggregate,
+    local_ctes: &[BoundCte],
+) -> Option<String> {
+    for cte in local_ctes {
+        let references_cte = agg
+            .direct_args
+            .iter()
+            .any(|arg| sql_expr_references_table(&arg.value, &cte.name))
+            || agg
+                .args
+                .args()
+                .iter()
+                .any(|arg| sql_expr_references_table(&arg.value, &cte.name))
+            || agg
+                .order_by
+                .iter()
+                .any(|item| sql_expr_references_table(&item.expr, &cte.name))
+            || agg
+                .filter
+                .as_ref()
+                .is_some_and(|expr| sql_expr_references_table(expr, &cte.name));
+        if references_cte {
+            return Some(cte.name.clone());
+        }
+    }
+    None
 }
 
 pub(super) fn reject_from_subselect_outer_aggregates(
@@ -864,6 +907,8 @@ fn analyze_expr_internal(
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }

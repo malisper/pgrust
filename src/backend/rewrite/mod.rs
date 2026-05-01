@@ -504,6 +504,8 @@ fn collect_expr_relation_privileges(
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -774,6 +776,8 @@ fn apply_policy_expr_permission_context(expr: &mut Expr, effective_user_oid: u32
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -813,7 +817,7 @@ fn rewrite_rte(
                         ),
                         detail: None,
                         hint: None,
-                        sqlstate: "42501",
+                        sqlstate: "55000",
                     });
                 }
             }
@@ -860,12 +864,14 @@ fn rewrite_rte(
         },
         RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars: joinaliasvars
                 .into_iter()
@@ -1149,6 +1155,7 @@ fn rewrite_set_returning_call(
                             RowsFromSource::Project {
                                 output_exprs,
                                 output_columns,
+                                display_sql,
                             } => RowsFromSource::Project {
                                 output_exprs: output_exprs
                                     .into_iter()
@@ -1162,6 +1169,7 @@ fn rewrite_set_returning_call(
                                     })
                                     .collect::<Result<Vec<_>, ParseError>>()?,
                                 output_columns,
+                                display_sql,
                             },
                         },
                         column_definitions: item.column_definitions,
@@ -1476,6 +1484,8 @@ fn rewrite_semantic_expr(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

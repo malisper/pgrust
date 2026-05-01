@@ -12,7 +12,7 @@ use crate::include::catalog::builtin_type_row_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RecursiveUnionQuery, SetOperationQuery,
-    SqlType, SqlTypeKind,
+    SqlType, SqlTypeKind, TableSampleClause,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen,
@@ -148,12 +148,14 @@ fn simplify_rte(rte: RangeTblEntry) -> Result<RangeTblEntry, ParseError> {
         kind: match rte.kind {
             RangeTblEntryKind::Join {
                 jointype,
+                from_list,
                 joinmergedcols,
                 joinaliasvars,
                 joinleftcols,
                 joinrightcols,
             } => RangeTblEntryKind::Join {
                 jointype,
+                from_list,
                 joinmergedcols,
                 joinaliasvars: joinaliasvars
                     .into_iter()
@@ -186,9 +188,39 @@ fn simplify_rte(rte: RangeTblEntry) -> Result<RangeTblEntry, ParseError> {
             RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
                 query: Box::new(simplify_query(*query)?),
             },
+            RangeTblEntryKind::Relation {
+                rel,
+                relation_oid,
+                relkind,
+                relispopulated,
+                toast,
+                tablesample,
+            } => RangeTblEntryKind::Relation {
+                rel,
+                relation_oid,
+                relkind,
+                relispopulated,
+                toast,
+                tablesample: tablesample.map(simplify_table_sample).transpose()?,
+            },
             other => other,
         },
         ..rte
+    })
+}
+
+fn simplify_table_sample(sample: TableSampleClause) -> Result<TableSampleClause, ParseError> {
+    Ok(TableSampleClause {
+        method: sample.method,
+        args: sample
+            .args
+            .into_iter()
+            .map(|expr| simplify_expr(expr, None))
+            .collect::<Result<Vec<_>, _>>()?,
+        repeatable: sample
+            .repeatable
+            .map(|expr| simplify_expr(expr, None))
+            .transpose()?,
     })
 }
 
@@ -273,12 +305,14 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
                             RowsFromSource::Project {
                                 output_exprs,
                                 output_columns,
+                                display_sql,
                             } => RowsFromSource::Project {
                                 output_exprs: output_exprs
                                     .into_iter()
                                     .map(|expr| simplify_expr(expr, None))
                                     .collect::<Result<Vec<_>, ParseError>>()?,
                                 output_columns,
+                                display_sql,
                             },
                         },
                         column_definitions: item.column_definitions,
@@ -687,6 +721,8 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1525,6 +1561,7 @@ mod tests {
             varattno: 1,
             varlevelsup: 0,
             vartype: SqlType::new(SqlTypeKind::Int4),
+            collation_oid: None,
         })
     }
 
@@ -1558,6 +1595,7 @@ mod tests {
                     varattno: 1,
                     varlevelsup: 0,
                     vartype: SqlType::new(SqlTypeKind::Timestamp),
+                    collation_oid: None,
                 })),
                 SqlType::new(SqlTypeKind::TimestampTz),
             )),

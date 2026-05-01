@@ -22,11 +22,13 @@ use crate::backend::executor::{
 use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::{
     AlterRuleRenameStatement, AlterTableRuleStateStatement, AlterTableTriggerMode,
-    BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement,
+    BoundAssignmentTarget, CatalogLookup, CommentOnRuleStatement, CreateRuleStatement, CteBody,
     DropRuleStatement, FromItem, ParseError, RuleDoKind, RuleEvent, SelectItem, SelectStatement,
-    Statement, bind_rule_action_statement, bind_rule_qual, rewrite_bound_delete_auto_view_target,
+    Statement, bind_rule_action_statement, bind_rule_qual, cte_body_references_table,
+    delete_statement_references_table, insert_statement_references_table,
+    merge_statement_references_table, rewrite_bound_delete_auto_view_target,
     rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
-    validate_rule_definition,
+    select_statement_references_table, update_statement_references_table, validate_rule_definition,
 };
 use crate::backend::rewrite::split_stored_rule_action_sql;
 use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
@@ -720,6 +722,7 @@ struct PreparedRule {
     qual: Option<crate::backend::executor::Expr>,
     qual_subplans: Vec<Plan>,
     actions: Vec<crate::backend::parser::BoundRuleAction>,
+    actions_reference_old_new: bool,
 }
 
 #[derive(Default)]
@@ -1468,6 +1471,26 @@ pub(crate) fn execute_bound_delete_with_rules(
                 catalog,
                 ctx.session_replication_role,
             )?;
+            if let Some(outcome) = execute_statement_level_instead_rules(
+                &rules,
+                target.desc.columns.len(),
+                catalog,
+                ctx,
+                xid,
+                0,
+                waiter,
+                !stmt.returning.is_empty(),
+            )? {
+                affected_rows += append_statement_level_instead_result(
+                    RuleEvent::Delete,
+                    &target.relation_name,
+                    &stmt.returning,
+                    outcome,
+                    ctx,
+                    &mut returned_rows,
+                )?;
+                continue;
+            }
             if target.relkind == 'v' {
                 if !view_has_user_rules {
                     return Err(missing_view_instead_trigger_error(
@@ -1694,11 +1717,64 @@ fn append_rule_query_output(
             *column_names = std::mem::take(&mut outcome.query_column_names);
         }
     }
-    for row in outcome.query_rows.drain(..) {
-        if !rows.contains(&row) {
-            rows.push(row);
-        }
+    rows.append(&mut outcome.query_rows);
+}
+
+fn execute_statement_level_instead_rules(
+    rules: &[PreparedRule],
+    row_width: usize,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<crate::backend::access::transam::xact::TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+    capture_returning: bool,
+) -> Result<Option<RuleMatchOutcome>, ExecError> {
+    if rules.is_empty()
+        || !rules
+            .iter()
+            .all(|rule| rule.is_instead && rule.qual.is_none() && !rule.actions_reference_old_new)
+    {
+        return Ok(None);
     }
+    let null_tuple = vec![Value::Null; row_width];
+    execute_matching_rules(
+        rules,
+        &null_tuple,
+        &null_tuple,
+        catalog,
+        ctx,
+        xid,
+        cid,
+        waiter,
+        capture_returning,
+    )
+    .map(Some)
+}
+
+fn append_statement_level_instead_result(
+    event: RuleEvent,
+    relation_name: &str,
+    returning: &[TargetEntry],
+    outcome: RuleMatchOutcome,
+    ctx: &mut ExecutorContext,
+    returned_rows: &mut Vec<Vec<Value>>,
+) -> Result<usize, ExecError> {
+    if !returning.is_empty() {
+        if !outcome.returning_seen {
+            return Err(missing_rule_returning_error(event, relation_name));
+        }
+        returned_rows.extend(project_statement_returning_rows(
+            returning,
+            &outcome.returning_rows,
+            ctx,
+        )?);
+    }
+    Ok(usize::from(outcome.matched_actions))
 }
 
 fn execute_view_insert_with_triggers(
@@ -2492,12 +2568,14 @@ fn substitute_rule_rte(
                 .map(|sample| substitute_rule_table_sample(sample, old_values, new_values)),
         },
         RangeTblEntryKind::Join {
+            from_list,
             jointype,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => RangeTblEntryKind::Join {
+            from_list,
             jointype,
             joinmergedcols,
             joinaliasvars: joinaliasvars
@@ -3155,11 +3233,16 @@ fn substitute_rule_plan(plan: Plan, old_values: &[Value], new_values: &[Value]) 
             plan_info,
             input,
             clause,
+            run_condition,
+            top_qual,
             output_columns,
         } => Plan::WindowAgg {
             plan_info,
             input: Box::new(substitute_rule_plan(*input, old_values, new_values)),
             clause: substitute_rule_window_clause(clause, old_values, new_values),
+            run_condition: run_condition
+                .map(|expr| substitute_rule_expr(expr, old_values, new_values)),
+            top_qual: top_qual.map(|expr| substitute_rule_expr(expr, old_values, new_values)),
             output_columns,
         },
         Plan::FunctionScan {
@@ -3686,8 +3769,10 @@ fn load_prepared_rules(
                 Some(bind_rule_qual(&parsed, relation_desc, event, catalog)?)
             };
             let mut actions = Vec::new();
+            let mut actions_reference_old_new = false;
             for sql in split_stored_rule_action_sql(&row.ev_action) {
                 let statement = crate::backend::parser::parse_statement(sql)?;
+                actions_reference_old_new |= statement_references_rule_tuple(&statement);
                 actions.push(bind_rule_action_statement(
                     &statement,
                     relation_desc,
@@ -3700,10 +3785,29 @@ fn load_prepared_rules(
                 qual,
                 qual_subplans: Vec::new(),
                 actions,
+                actions_reference_old_new,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()
         .map_err(ExecError::Parse)
+}
+
+fn statement_references_rule_tuple(statement: &Statement) -> bool {
+    statement_references_table(statement, "old") || statement_references_table(statement, "new")
+}
+
+fn statement_references_table(statement: &Statement, table_name: &str) -> bool {
+    match statement {
+        Statement::Select(stmt) => select_statement_references_table(stmt, table_name),
+        Statement::Values(stmt) => {
+            cte_body_references_table(&CteBody::Values(stmt.clone()), table_name)
+        }
+        Statement::Insert(stmt) => insert_statement_references_table(stmt, table_name),
+        Statement::Update(stmt) => update_statement_references_table(stmt, table_name),
+        Statement::Delete(stmt) => delete_statement_references_table(stmt, table_name),
+        Statement::Merge(stmt) => merge_statement_references_table(stmt, table_name),
+        _ => false,
+    }
 }
 
 fn materialize_view_update_events(

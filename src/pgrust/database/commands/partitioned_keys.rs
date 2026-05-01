@@ -749,12 +749,20 @@ impl<'a> PartitionedKeyInstaller<'a> {
         if !spec.primary {
             return Ok(());
         }
+        let catalog = self.db.lazy_catalog_lookup(
+            self.client_id,
+            Some((self.xid, self.visible_cid())),
+            self.configured_search_path,
+        );
         for child in self.direct_partition_children(relation.relation_oid)? {
             let child_name = self.relation_name(child.relation_oid)?;
+            let child_constraints = catalog.constraint_rows_for_relation(child.relation_oid);
             for column_name in &spec.columns {
-                let Some(column) = child.desc.columns.iter().find(|column| {
-                    !column.dropped && column.name.eq_ignore_ascii_case(column_name)
-                }) else {
+                let Some((column_index, column)) =
+                    child.desc.columns.iter().enumerate().find(|(_, column)| {
+                        !column.dropped && column.name.eq_ignore_ascii_case(column_name)
+                    })
+                else {
                     continue;
                 };
                 if column.storage.nullable {
@@ -767,6 +775,15 @@ impl<'a> PartitionedKeyInstaller<'a> {
                         hint: None,
                         sqlstate: "42P16",
                     });
+                }
+                if let Some(row) = child_constraints.iter().find(|row| {
+                    row.contype == CONSTRAINT_NOTNULL
+                        && row
+                            .conkey
+                            .as_ref()
+                            .is_some_and(|key| key.as_slice() == [(column_index + 1) as i16])
+                }) {
+                    verify_not_null_pk_compatible(row, &column.name, &child_name)?;
                 }
             }
         }
@@ -967,6 +984,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     without_overlaps: spec.without_overlaps.clone(),
                     access_method: None,
                     exclusion_operators: Vec::new(),
+                    predicate_sql: None,
                     tablespace: None,
                     deferrable: spec.deferrable,
                     initially_deferred: spec.initially_deferred,
