@@ -8,7 +8,9 @@ use super::exec_expr::{
 use super::expr_casts::cast_value_with_source_type_catalog_and_config;
 use super::expr_math::eval_abs_function;
 use super::expr_ops::{add_values, compare_order_values, div_values, sub_values};
-use super::expr_string::{eval_parse_ident_function, eval_quote_nullable_function};
+use super::expr_string::{
+    eval_parse_ident_function, eval_pg_rust_test_enc_conversion, eval_quote_nullable_function,
+};
 use super::sqlfunc::{
     execute_user_defined_sql_scalar_function_values,
     execute_user_defined_sql_scalar_function_values_with_arg_type_oids,
@@ -665,6 +667,9 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             execute_builtin_hash_value_call(kind, true, arg_values)
         }
         BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(arg_values),
+        BuiltinScalarFunction::PgRustTestEncConversion => {
+            eval_pg_rust_test_enc_conversion(arg_values)
+        }
         BuiltinScalarFunction::TsVectorIn => match arg_values {
             [Value::Null] | [Value::Null, _, _] => Ok(Value::Null),
             [_] | [_, _, _] => {

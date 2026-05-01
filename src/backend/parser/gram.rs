@@ -29208,6 +29208,16 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::primary_expr => {
             build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
+        Rule::collation_for_expr => {
+            let arg = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::expr)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(simple_func_call(
+                "pg_collation_for",
+                vec![SqlFunctionArg::positional(build_expr(arg)?)],
+            ))
+        }
         Rule::json_constructor_expr => {
             build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }

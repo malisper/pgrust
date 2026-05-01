@@ -11,7 +11,7 @@ use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
 use crate::include::catalog::{
-    ANYOID, PG_LANGUAGE_INTERNAL_OID, RECORD_TYPE_OID, UNKNOWN_TYPE_OID,
+    ANYOID, DEFAULT_COLLATION_OID, PG_LANGUAGE_INTERNAL_OID, RECORD_TYPE_OID, UNKNOWN_TYPE_OID,
     builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
@@ -21,7 +21,8 @@ use crate::include::nodes::primnodes::{
     CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, FuncExpr,
     OpExprKind, Param, ParamKind, ScalarFunctionImpl, SqlJsonQueryFunction,
     SqlJsonQueryFunctionKind, SqlJsonTableBehavior, SqlJsonTablePassingArg, SqlJsonTableQuotes,
-    SqlJsonTableWrapper, WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
+    SqlJsonTableWrapper, WindowFuncKind, expr_collation_oid_hint, expr_contains_set_returning,
+    expr_sql_type_hint,
 };
 
 mod func;
@@ -102,6 +103,55 @@ fn explicit_collation_name(expr: &SqlExpr) -> Option<&str> {
         | SqlExpr::Not(expr) => explicit_collation_name(expr),
         _ => None,
     }
+}
+
+fn collation_display_name_for_oid(catalog: &dyn CatalogLookup, oid: u32) -> String {
+    catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.oid == oid)
+        .map(|row| format!("\"{}\"", row.collname))
+        .unwrap_or_else(|| format!("\"{oid}\""))
+}
+
+fn bind_pg_collation_for_arg(
+    raw_arg: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if let Some(display_name) = explicit_collation_display_name(raw_arg, catalog) {
+        return Ok(Expr::Const(Value::Text(display_name.into())));
+    }
+    if is_unknown_literal_expr(raw_arg) {
+        return Ok(Expr::Const(Value::Text("".into())));
+    }
+
+    let bound = bind_typed_expr_with_outer_and_ctes(
+        raw_arg,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    if !is_collatable_type(bound.sql_type) {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "collations are not supported by type {}",
+                sql_type_name(bound.sql_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    let oid = expr_collation_oid_hint(&bound.expr).unwrap_or(DEFAULT_COLLATION_OID);
+    Ok(Expr::Const(Value::Text(
+        collation_display_name_for_oid(catalog, oid).into(),
+    )))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5866,11 +5916,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 && args_list.len() == 1
                 && args_list[0].name.is_none()
             {
-                return Ok(Expr::Const(Value::Text(
-                    explicit_collation_display_name(&args_list[0].value, catalog)
-                        .unwrap_or_default()
-                        .into(),
-                )));
+                return bind_pg_collation_for_arg(
+                    &args_list[0].value,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
             }
             if !*func_variadic
                 && !name.eq_ignore_ascii_case("pg_lsn")
