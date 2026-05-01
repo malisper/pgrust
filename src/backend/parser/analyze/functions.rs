@@ -1538,6 +1538,9 @@ fn match_proc_arg_type(
     if catalog_implicit_cast_exists(catalog, actual_type, declared_oid) {
         return Some((3, declared_type));
     }
+    if is_unknown_sql_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {
+        return Some((3, declared_type));
+    }
     None
 }
 
