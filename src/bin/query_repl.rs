@@ -529,6 +529,7 @@ fn run_statement(
         | Statement::AlterIndexSet(_)
         | Statement::AlterTableReset(_)
         | Statement::AlterTableSetPersistence(_)
+        | Statement::AlterTableSetWithoutCluster(_)
         | Statement::AlterTableSetTablespace(_)
         | Statement::AlterMaterializedViewSetAccessMethod(_)
         | Statement::CreateStatistics(_)

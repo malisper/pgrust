@@ -80,6 +80,31 @@ use std::rc::Rc;
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 const EMPTY_GROUPING_REFS: [usize; 0] = [];
 
+thread_local! {
+    static EXPLAIN_DATETIME_CONFIG: RefCell<Vec<DateTimeConfig>> = RefCell::new(Vec::new());
+}
+
+pub(crate) struct ExplainDateTimeConfigGuard;
+
+pub(crate) fn push_explain_datetime_config(config: &DateTimeConfig) -> ExplainDateTimeConfigGuard {
+    EXPLAIN_DATETIME_CONFIG.with(|stack| stack.borrow_mut().push(config.clone()));
+    ExplainDateTimeConfigGuard
+}
+
+impl Drop for ExplainDateTimeConfigGuard {
+    fn drop(&mut self) {
+        EXPLAIN_DATETIME_CONFIG.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+fn current_explain_datetime_config() -> DateTimeConfig {
+    EXPLAIN_DATETIME_CONFIG
+        .with(|stack| stack.borrow().last().cloned())
+        .unwrap_or_default()
+}
+
 fn set_active_grouping_refs(ctx: &mut ExecutorContext, refs: &[usize]) {
     ctx.active_grouping_refs.clear();
     ctx.active_grouping_refs.extend_from_slice(refs);
@@ -274,7 +299,10 @@ fn normalize_jsonb_group_key(value: JsonbValue) -> JsonbValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{pg_sql_sort_by, render_explain_const, render_explain_datetime_cast_literal};
+    use super::{
+        pg_sql_sort_by, postgres_explain_datetime_config, push_explain_datetime_config,
+        render_explain_const, render_explain_datetime_cast_literal,
+    };
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::time::datetime::days_from_ymd;
     use crate::include::nodes::datetime::DateADT;
@@ -348,6 +376,8 @@ mod tests {
             "'01-01-1997'::date"
         );
 
+        let config = postgres_explain_datetime_config();
+        let _guard = push_explain_datetime_config(&config);
         let expr = Expr::Const(Value::Text("1997-01-01".into()));
         assert_eq!(
             render_explain_datetime_cast_literal(&expr, SqlType::new(SqlTypeKind::Date)),
@@ -6907,26 +6937,34 @@ fn render_explain_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<Stri
         return None;
     };
     let text = value.as_text()?;
-    let config = postgres_utc_datetime_config();
     match ty.kind {
-        SqlTypeKind::Date => parse_date_text(text, &config).ok().map(|date| {
-            format!(
-                "'{}'::date",
-                format_date_text(date, &postgres_explain_datetime_config()).replace('\'', "''")
-            )
-        }),
-        SqlTypeKind::Timestamp => parse_timestamp_text(text, &config).ok().map(|timestamp| {
-            format!(
-                "'{}'::timestamp without time zone",
-                format_timestamp_text(timestamp, &config).replace('\'', "''")
-            )
-        }),
-        SqlTypeKind::TimestampTz => parse_timestamptz_text(text, &config).ok().map(|timestamp| {
-            format!(
-                "'{}'::timestamp with time zone",
-                format_timestamptz_text(timestamp, &config).replace('\'', "''")
-            )
-        }),
+        SqlTypeKind::Date => {
+            let config = current_explain_datetime_config();
+            parse_date_text(text, &config).ok().map(|date| {
+                format!(
+                    "'{}'::date",
+                    format_date_text(date, &config).replace('\'', "''")
+                )
+            })
+        }
+        SqlTypeKind::Timestamp => {
+            let config = postgres_utc_datetime_config();
+            parse_timestamp_text(text, &config).ok().map(|timestamp| {
+                format!(
+                    "'{}'::timestamp without time zone",
+                    format_timestamp_text(timestamp, &config).replace('\'', "''")
+                )
+            })
+        }
+        SqlTypeKind::TimestampTz => {
+            let config = postgres_utc_datetime_config();
+            parse_timestamptz_text(text, &config).ok().map(|timestamp| {
+                format!(
+                    "'{}'::timestamp with time zone",
+                    format_timestamptz_text(timestamp, &config).replace('\'', "''")
+                )
+            })
+        }
         _ => None,
     }
 }
@@ -7009,7 +7047,10 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
             format!("'{}'", rendered.replace('\'', "''"))
         }
         Value::Date(date) => {
-            format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
+            format!(
+                "'{}'",
+                format_date_text(*date, &current_explain_datetime_config())
+            )
         }
         Value::Inet(value) => format!("'{}'", value.render_inet()),
         Value::Cidr(value) => format!("'{}'", value.render_cidr()),

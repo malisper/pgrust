@@ -38,20 +38,20 @@ use crate::backend::executor::{
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, BoundCte, BoundModifyingCte, BoundWritableCte, CallStatement,
-    CatalogLookup, CommonTableExpr, CopyFormat as ParserCopyFormat, CopyFromStatement,
-    CopyOptions as ParserCopyOptions, CopySource, CopyToDestination, CopyToSource, CopyToStatement,
-    CreateFunctionStatement, CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause,
-    DeallocateStatement, DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem,
-    GroupByItem, InsertSource, InsertStatement, MergeAction, MergeInsertSource, MergeStatement,
-    OrderByItem, ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
-    PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
-    RuleEvent, SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType,
-    SqlTypeKind, Statement, TransactionOptions, UpdateStatement, ValuesStatement,
-    analyze_select_query_with_outer, bind_delete, bind_delete_with_outer_scopes_and_ctes,
-    bind_insert, bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes,
-    bind_scalar_expr_in_named_slot_scope, bind_update, bind_update_with_outer_scopes_and_ctes,
-    bound_cte_from_query_columns, cte_body_references_table, delete_statement_references_table,
+    BoundCte, BoundModifyingCte, BoundWritableCte, CallStatement, CatalogLookup, CommonTableExpr,
+    CopyFormat as ParserCopyFormat, CopyFromStatement, CopyOptions as ParserCopyOptions,
+    CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
+    CreateTableAsQuery, CreateTableAsStatement, CteBody, CteCycleClause, DeallocateStatement,
+    DetachPartitionMode, DiscardTarget, ExecuteStatement, FromItem, GroupByItem, InsertSource,
+    InsertStatement, MergeAction, MergeInsertSource, MergeStatement, OrderByItem, ParseError,
+    ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert, PreparedStatementQuery,
+    RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RuleEvent, SelectItem,
+    SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, SqlType, SqlTypeKind, Statement,
+    TransactionOptions, UpdateStatement, ValuesStatement, analyze_select_query_with_outer,
+    bind_delete, bind_delete_with_outer_scopes_and_ctes, bind_insert, bind_insert_prepared,
+    bind_insert_with_outer_scopes_and_ctes, bind_scalar_expr_in_named_slot_scope, bind_update,
+    bind_update_with_outer_scopes_and_ctes, bound_cte_from_query_columns,
+    cte_body_references_table, delete_statement_references_table,
     insert_statement_references_table, merge_statement_references_table, pg_plan_query_with_config,
     pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
     plan_merge, plan_merge_with_outer_ctes, raw_type_name_is_unknown, resolve_raw_type_name,
@@ -3091,9 +3091,11 @@ impl Session {
         stmt: &crate::backend::parser::AlterTableSetStatement,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.catalog_lookup(db);
-        if let Some(relation) = catalog.lookup_any_relation(&stmt.table_name)
+        let relation = catalog.lookup_any_relation(&stmt.table_name);
+        if let Some(relation) = relation.as_ref()
             && relation.relkind == 'v'
         {
+            let relation = relation.clone();
             drop(catalog);
             if let Some((xid, cid)) = self.catalog_txn_ctx() {
                 self.lock_table_if_needed(
@@ -3119,7 +3121,7 @@ impl Session {
                 search_path.as_deref(),
             );
         }
-        if let Some(relation) = catalog.lookup_any_relation(&stmt.table_name)
+        if let Some(relation) = relation.as_ref()
             && relation.relkind == 'p'
         {
             return Err(ExecError::DetailedError {
@@ -3129,35 +3131,19 @@ impl Session {
                 sqlstate: "0A000",
             });
         }
-        for option in &stmt.options {
-            if option.name.eq_ignore_ascii_case("toast_tuple_target") {
-                let target = option.value.parse::<usize>().map_err(|_| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "integer toast_tuple_target",
-                        actual: option.value.clone(),
-                    })
-                })?;
-                let relation = catalog
-                    .lookup_any_relation(&stmt.table_name)
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
-                    })?;
-                if let Some(toast) = relation.toast {
-                    crate::backend::access::table::toast_helper::set_toast_tuple_target_for_toast_relation(
-                        toast.relation_oid,
-                        target,
-                    );
-                }
-            }
-        }
-        let relation_to_lock = catalog
-            .lookup_any_relation(&stmt.table_name)
-            .map(|relation| relation.rel);
-        drop(catalog);
         if let Some((xid, cid)) = self.catalog_txn_ctx() {
-            if let Some(rel) = relation_to_lock {
-                self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
+            let relation = relation.ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
+            })?;
+            let mut requests = vec![(
+                crate::pgrust::database::relation_lock_tag(&relation),
+                TableLockMode::ShareUpdateExclusive,
+            )];
+            if let Some(toast) = relation.toast.as_ref() {
+                requests.push((toast.rel, TableLockMode::ShareUpdateExclusive));
             }
+            drop(catalog);
+            self.lock_table_requests_if_needed(db, &requests)?;
             let search_path = self.configured_search_path();
             let txn = self.active_txn.as_mut().unwrap();
             return db.execute_alter_table_set_stmt_in_transaction_with_search_path(
@@ -3169,6 +3155,7 @@ impl Session {
                 &mut txn.catalog_effects,
             );
         }
+        drop(catalog);
         let search_path = self.configured_search_path();
         db.execute_alter_table_set_stmt_with_search_path(
             self.client_id,
@@ -5362,6 +5349,7 @@ impl Session {
             | Statement::AlterIndexSetTablespace(_)
             | Statement::AlterMoveAllTablespace(_)
             | Statement::AlterTableSetPersistence(_)
+            | Statement::AlterTableSetWithoutCluster(_)
             | Statement::AlterTableSet(_)
             | Statement::AlterTableReset(_)
             | Statement::AlterTableReplicaIdentity(_)
@@ -8342,6 +8330,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableSetWithoutCluster(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_set_without_cluster_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterIndexRename(ref rename_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -8688,35 +8694,22 @@ impl Session {
                 }
             }
             Statement::AlterTableAddColumns(ref alter_stmt) => {
-                let mut result = Ok(StatementResult::AffectedRows(0));
-                for column in &alter_stmt.columns {
-                    let single_stmt = AlterTableAddColumnStatement {
-                        if_exists: alter_stmt.if_exists,
-                        missing_ok: false,
-                        only: alter_stmt.only,
-                        table_name: alter_stmt.table_name.clone(),
-                        column: column.clone(),
-                        fdw_options: None,
-                    };
-                    result = if self.active_txn.is_some() {
-                        self.execute_in_transaction(
-                            db,
-                            Statement::AlterTableAddColumn(single_stmt),
-                            statement_lock_scope_id,
-                        )
-                    } else {
-                        let search_path = self.configured_search_path();
-                        db.execute_alter_table_add_column_stmt_with_search_path(
-                            self.client_id,
-                            &single_stmt,
-                            search_path.as_deref(),
-                        )
-                    };
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
-                        break;
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
                     }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_add_columns_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
                 }
-                result
             }
             Statement::AlterTableDropColumn(ref drop_stmt) => {
                 if self.active_txn.is_some() {
@@ -9380,11 +9373,23 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_alter_table_reset_stmt_with_search_path(
-                        self.client_id,
-                        alter_stmt,
-                        search_path.as_deref(),
-                    )
+                    let is_view = self
+                        .catalog_lookup(db)
+                        .lookup_any_relation(&alter_stmt.table_name)
+                        .is_some_and(|relation| relation.relkind == 'v');
+                    if is_view {
+                        db.execute_alter_view_reset_options_stmt_with_search_path(
+                            self.client_id,
+                            alter_stmt,
+                            search_path.as_deref(),
+                        )
+                    } else {
+                        db.execute_alter_table_reset_stmt_with_search_path(
+                            self.client_id,
+                            alter_stmt,
+                            search_path.as_deref(),
+                        )
+                    }
                 }
             }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
@@ -15418,11 +15423,43 @@ impl Session {
                     )
                 }
                 Statement::AlterTableSetPersistence(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    if let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) {
+                        self.lock_table_if_needed(
+                            db,
+                            relation.rel,
+                            TableLockMode::AccessExclusive,
+                        )?;
+                    }
                     let search_path = self.configured_search_path();
-                    db.execute_alter_table_set_persistence_stmt_with_search_path(
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_set_persistence_stmt_in_transaction_with_search_path(
                         client_id,
                         alter_stmt,
+                        xid,
+                        cid,
                         search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterTableSetWithoutCluster(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    if let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) {
+                        self.lock_table_if_needed(
+                            db,
+                            crate::pgrust::database::relation_lock_tag(&relation),
+                            TableLockMode::ShareUpdateExclusive,
+                        )?;
+                    }
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_set_without_cluster_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
                     )
                 }
                 Statement::AlterIndexRename(ref rename_stmt) => {
@@ -15502,7 +15539,7 @@ impl Session {
                     self.lock_table_if_needed(
                         db,
                         crate::pgrust::database::relation_lock_tag(&relation),
-                        TableLockMode::AccessExclusive,
+                        TableLockMode::ShareUpdateExclusive,
                     )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
@@ -15812,25 +15849,31 @@ impl Session {
                     )
                 }
                 Statement::AlterTableAddColumns(ref alter_stmt) => {
-                    let mut result = Ok(StatementResult::AffectedRows(0));
-                    for column in &alter_stmt.columns {
-                        result = self.execute_in_transaction(
-                            db,
-                            Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
-                                if_exists: alter_stmt.if_exists,
-                                missing_ok: false,
-                                only: alter_stmt.only,
-                                table_name: alter_stmt.table_name.clone(),
-                                column: column.clone(),
-                                fdw_options: None,
-                            }),
-                            _statement_lock_scope_id,
-                        );
-                        if result.is_err() {
-                            break;
-                        }
-                    }
-                    result
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let relation = catalog
+                        .lookup_any_relation(&alter_stmt.table_name)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(
+                                alter_stmt.table_name.clone(),
+                            ))
+                        })?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_table_add_columns_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
+                        &mut txn.sequence_effects,
+                    )
                 }
                 Statement::AlterTableDropColumn(ref drop_stmt) => {
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -16536,21 +16579,40 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(
-                        db,
-                        crate::pgrust::database::relation_lock_tag(&relation),
-                        TableLockMode::AccessExclusive,
-                    )?;
+                    let mode = if relation.relkind == 'v' {
+                        TableLockMode::AccessExclusive
+                    } else {
+                        TableLockMode::ShareUpdateExclusive
+                    };
+                    let mut requests =
+                        vec![(crate::pgrust::database::relation_lock_tag(&relation), mode)];
+                    if relation.relkind != 'v'
+                        && let Some(toast) = relation.toast.as_ref()
+                    {
+                        requests.push((toast.rel, TableLockMode::ShareUpdateExclusive));
+                    }
+                    self.lock_table_requests_if_needed(db, &requests)?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
-                    db.execute_alter_table_reset_stmt_in_transaction_with_search_path(
-                        client_id,
-                        alter_stmt,
-                        xid,
-                        cid,
-                        search_path.as_deref(),
-                        &mut txn.catalog_effects,
-                    )
+                    if relation.relkind == 'v' {
+                        db.execute_alter_view_reset_options_stmt_in_transaction_with_search_path(
+                            client_id,
+                            alter_stmt,
+                            xid,
+                            cid,
+                            search_path.as_deref(),
+                            &mut txn.catalog_effects,
+                        )
+                    } else {
+                        db.execute_alter_table_reset_stmt_in_transaction_with_search_path(
+                            client_id,
+                            alter_stmt,
+                            xid,
+                            cid,
+                            search_path.as_deref(),
+                            &mut txn.catalog_effects,
+                        )
+                    }
                 }
                 Statement::AlterTableSet(ref alter_stmt) => {
                     self.apply_alter_table_set(db, alter_stmt)
@@ -18152,11 +18214,23 @@ impl Session {
                 Statement::Cluster(ref cluster_stmt) => {
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
                     if let Some(relation) = catalog.lookup_any_relation(&cluster_stmt.table_name) {
-                        self.lock_table_if_needed(
-                            db,
-                            relation.rel,
-                            TableLockMode::AccessExclusive,
-                        )?;
+                        let mode = if cluster_stmt.mark_only {
+                            TableLockMode::ShareUpdateExclusive
+                        } else {
+                            TableLockMode::AccessExclusive
+                        };
+                        let mut requests =
+                            vec![(crate::pgrust::database::relation_lock_tag(&relation), mode)];
+                        if cluster_stmt.mark_only
+                            && let Some(index) =
+                                catalog.lookup_any_relation(&cluster_stmt.index_name)
+                        {
+                            requests.push((
+                                crate::pgrust::database::relation_lock_tag(&index),
+                                TableLockMode::ShareUpdateExclusive,
+                            ));
+                        }
+                        self.lock_table_requests_if_needed(db, &requests)?;
                     }
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
