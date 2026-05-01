@@ -311,11 +311,12 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 110] = [
         opclass_oids: &NAME_OIDVECTOR_OID_OPCLASS_3,
     },
     CatalogIndexDescriptor {
-        relation_oid: 76190,
+        relation_oid: 15000,
         // :HACK: pgrust's executor still handles the opr_sanity pg_proc
         // self-join expensively. This pgrust-only catalog index matches the
         // prolang constant plus prosrc join key until planner/runtime joins
-        // catch up.
+        // catch up. Keep this below FirstNormalObjectId so bootstrap indexes
+        // do not advance user-object OID allocation.
         relation_name: "pg_proc_prolang_prosrc_index",
         heap_kind: BootstrapCatalogKind::PgProc,
         unique: false,
