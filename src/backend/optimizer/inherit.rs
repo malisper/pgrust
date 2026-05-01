@@ -104,6 +104,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             };
             let child_rte = RangeTblEntry {
                 alias: Some(child_alias.clone()),
+                alias_is_user_defined: false,
                 alias_preserves_source_names: false,
                 eref: RangeTblEref {
                     aliasname: child_alias,

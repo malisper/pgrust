@@ -2156,12 +2156,14 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
     match &query.rtable[2].kind {
         RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => {
             assert_eq!(*jointype, JoinType::Inner);
+            assert!(!from_list);
             assert_eq!(*joinmergedcols, 1);
             assert_eq!(joinleftcols, &vec![1, 2, 3]);
             assert_eq!(joinrightcols, &vec![1, 2]);
@@ -4022,6 +4024,35 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
             tablespace: None,
         })
     );
+}
+
+#[test]
+fn parse_create_table_exclusion_constraint_captures_predicate_sql() {
+    let stmt = parse_statement(
+        "create table room_bookings (
+            room int4,
+            active bool,
+            exclude using gist (room with =) where (active)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let exclusion = ct
+        .elements
+        .iter()
+        .find_map(|element| match element {
+            CreateTableElement::Constraint(TableConstraint::Exclusion {
+                using_method,
+                predicate_sql,
+                ..
+            }) => Some((using_method, predicate_sql)),
+            _ => None,
+        })
+        .expect("exclusion constraint");
+    assert_eq!(exclusion.0, "gist");
+    assert_eq!(exclusion.1.as_deref(), Some("(active)"));
 }
 
 #[test]
@@ -8661,7 +8692,7 @@ fn parse_cross_join_select() {
                 name: "pets".into(),
                 only: false,
             }),
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         })
     );
@@ -9618,7 +9649,7 @@ fn parse_cross_join_with_aliases() {
                 column_aliases: AliasColumnSpec::None,
                 preserve_source_names: false,
             }),
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         })
     );
@@ -15113,6 +15144,31 @@ fn lower_create_table_accepts_check_not_enforced() {
 }
 
 #[test]
+fn lower_create_table_names_column_checks_from_referenced_columns() {
+    let stmt = parse_statement(
+        "create table items (
+            a int4,
+            b int4 check (a > 0),
+            c int4 check (a > b),
+            d int4 check (d > 0)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .expect("lower create table");
+    let names = lowered
+        .check_actions
+        .iter()
+        .map(|action| action.constraint_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["items_a_check", "items_check", "items_d_check"]);
+}
+
+#[test]
 fn lower_create_table_preserves_key_constraint_deferrability() {
     let stmt = parse_statement(
         "create table items (
@@ -19323,7 +19379,7 @@ fn parse_cross_join_with_derived_table() {
             kind,
             constraint,
         }) => {
-            assert_eq!(kind, JoinKind::Cross);
+            assert_eq!(kind, JoinKind::Comma);
             assert!(matches!(constraint, JoinConstraint::None));
             assert!(matches!(*left, FromItem::Alias { .. }));
             assert!(matches!(*right, FromItem::Alias { .. }));
@@ -19339,7 +19395,7 @@ fn parse_join_precedence_binds_tighter_than_comma() {
         Some(FromItem::Join {
             left,
             right,
-            kind: JoinKind::Cross,
+            kind: JoinKind::Comma,
             constraint: JoinConstraint::None,
         }) => {
             assert!(matches!(*left, FromItem::Table { name, .. } if name == "a"));

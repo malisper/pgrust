@@ -148,12 +148,14 @@ fn simplify_rte(rte: RangeTblEntry) -> Result<RangeTblEntry, ParseError> {
         kind: match rte.kind {
             RangeTblEntryKind::Join {
                 jointype,
+                from_list,
                 joinmergedcols,
                 joinaliasvars,
                 joinleftcols,
                 joinrightcols,
             } => RangeTblEntryKind::Join {
                 jointype,
+                from_list,
                 joinmergedcols,
                 joinaliasvars: joinaliasvars
                     .into_iter()
@@ -303,12 +305,14 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
                             RowsFromSource::Project {
                                 output_exprs,
                                 output_columns,
+                                display_sql,
                             } => RowsFromSource::Project {
                                 output_exprs: output_exprs
                                     .into_iter()
                                     .map(|expr| simplify_expr(expr, None))
                                     .collect::<Result<Vec<_>, ParseError>>()?,
                                 output_columns,
+                                display_sql,
                             },
                         },
                         column_definitions: item.column_definitions,
@@ -717,6 +721,8 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

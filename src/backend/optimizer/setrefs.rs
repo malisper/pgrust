@@ -1341,6 +1341,8 @@ fn expr_references_join_alias_var(root: &PlannerInfo, expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -2506,6 +2508,8 @@ fn expr_max_varlevelsup(expr: &Expr) -> usize {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -2968,12 +2972,14 @@ fn lower_set_returning_call(
                         RowsFromSource::Project {
                             output_exprs,
                             output_columns,
+                            display_sql,
                         } => RowsFromSource::Project {
                             output_exprs: output_exprs
                                 .into_iter()
                                 .map(|expr| lower_expr(ctx, expr, mode))
                                 .collect(),
                             output_columns,
+                            display_sql,
                         },
                     },
                     column_definitions: item.column_definitions,
@@ -3243,12 +3249,14 @@ fn fix_set_returning_call_upper_exprs(
                         RowsFromSource::Project {
                             output_exprs,
                             output_columns,
+                            display_sql,
                         } => RowsFromSource::Project {
                             output_exprs: output_exprs
                                 .into_iter()
                                 .map(|expr| fix_upper_expr_for_input(root, expr, path, input_tlist))
                                 .collect(),
                             output_columns,
+                            display_sql,
                         },
                     },
                     column_definitions: item.column_definitions,
@@ -4060,6 +4068,8 @@ fn expr_uses_only_index_keys(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -4838,6 +4848,8 @@ fn validate_executable_expr(
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -5444,6 +5456,8 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -8371,7 +8385,8 @@ fn set_subquery_scan_references(
             && path_contains_function_scan(input.as_ref()))
         || (subroot.as_ref().parse.where_qual.is_some()
             && path_contains_window_agg(input.as_ref()));
-    if filter.is_none() && !force_display {
+    let preserve_row_subquery = should_preserve_row_subquery_scan(input.as_ref(), &output_columns);
+    if filter.is_none() && !force_display && !preserve_row_subquery {
         let input_columns = input.columns();
         if input_columns == output_columns {
             return recurse_with_root(ctx, Some(subroot.as_ref()), *input);
@@ -8428,7 +8443,11 @@ fn set_subquery_scan_references(
         }
     }
     let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
-    if input.columns() == output_columns && filter.is_none() && !force_display {
+    if input.columns() == output_columns
+        && filter.is_none()
+        && !force_display
+        && !preserve_row_subquery
+    {
         input
     } else {
         let scan_name = subquery_scan_name(ctx, rtindex, &input, &output_columns);
@@ -8439,6 +8458,52 @@ fn set_subquery_scan_references(
             filter,
             output_columns,
         }
+    }
+}
+
+fn should_preserve_row_subquery_scan(input: &Path, output_columns: &[QueryColumn]) -> bool {
+    let [column] = output_columns else {
+        return false;
+    };
+    if !matches!(
+        column.sql_type.kind,
+        crate::backend::parser::SqlTypeKind::Record
+            | crate::backend::parser::SqlTypeKind::Composite
+    ) {
+        return false;
+    }
+    path_is_row_projection_over_values_limit(input)
+}
+
+fn path_is_row_projection_over_values_limit(path: &Path) -> bool {
+    let Path::Projection { input, targets, .. } = path else {
+        return false;
+    };
+    projection_targets_single_row_expr(targets)
+        && matches!(input.as_ref(), Path::Limit { .. } | Path::Values { .. })
+}
+
+fn projection_targets_single_row_expr(targets: &[TargetEntry]) -> bool {
+    let mut visible_targets = targets.iter().filter(|target| !target.resjunk);
+    let Some(target) = visible_targets.next() else {
+        return false;
+    };
+    visible_targets.next().is_none() && target_expr_is_row_projection(&target.expr)
+}
+
+fn target_expr_is_row_projection(expr: &Expr) -> bool {
+    match expr {
+        Expr::Row { .. } => true,
+        Expr::Cast(inner, ty)
+            if matches!(
+                ty.kind,
+                crate::backend::parser::SqlTypeKind::Record
+                    | crate::backend::parser::SqlTypeKind::Composite
+            ) =>
+        {
+            target_expr_is_row_projection(inner)
+        }
+        _ => false,
     }
 }
 

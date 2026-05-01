@@ -563,12 +563,14 @@ fn prepare_set_returning_call_for_locking(
                             RowsFromSource::Project {
                                 output_exprs,
                                 output_columns,
+                                display_sql,
                             } => RowsFromSource::Project {
                                 output_exprs: output_exprs
                                     .into_iter()
                                     .map(prepare_expr_for_locking)
                                     .collect::<Result<Vec<_>, ParseError>>()?,
                                 output_columns,
+                                display_sql,
                             },
                         },
                         column_definitions: item.column_definitions,
@@ -1491,6 +1493,8 @@ fn expr_contains_local_var_for_unique_lookup(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1770,6 +1774,8 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -2143,6 +2149,8 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -2487,6 +2495,8 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -2690,6 +2700,8 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -2851,6 +2863,8 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -3035,6 +3049,8 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

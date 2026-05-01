@@ -319,6 +319,8 @@ fn ensure_index_expression_immutable(
         Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1719,8 +1721,7 @@ impl Database {
         ) {
             Ok(options) => Ok(options),
             Err(ExecError::Parse(ParseError::MissingDefaultOpclass { access_method, .. }))
-                if access_method.eq_ignore_ascii_case("gist")
-                    && columns.iter().any(|column| column.expr_sql.is_some()) =>
+                if access_method.eq_ignore_ascii_case("gist") =>
             {
                 let access_method =
                     crate::backend::utils::cache::lsyscache::access_method_row_by_name(
@@ -1732,16 +1733,67 @@ impl Database {
                             actual: "unsupported index access method".into(),
                         })
                     })?;
+                let indclass = columns
+                    .iter()
+                    .map(|column| {
+                        let sql_type = if column.expr_sql.is_some() {
+                            column.expr_type.ok_or_else(|| {
+                                ExecError::Parse(ParseError::UnexpectedToken {
+                                    expected: "inferred expression index type",
+                                    actual: "missing expression index type".into(),
+                                })
+                            })?
+                        } else {
+                            relation
+                                .desc
+                                .columns
+                                .iter()
+                                .find(|desc| {
+                                    !desc.dropped && desc.name.eq_ignore_ascii_case(&column.name)
+                                })
+                                .ok_or_else(|| {
+                                    ExecError::Parse(ParseError::UnknownColumn(column.name.clone()))
+                                })?
+                                .sql_type
+                        };
+                        let type_oid = index_type_oid_for_sql_type(self, client_id, sql_type)
+                            .ok_or_else(|| {
+                                ExecError::Parse(ParseError::UnsupportedType(
+                                    column
+                                        .expr_sql
+                                        .clone()
+                                        .unwrap_or_else(|| column.name.clone()),
+                                ))
+                            })?;
+                        crate::include::catalog::default_btree_opclass_oid(type_oid).ok_or_else(
+                            || {
+                                ExecError::Parse(ParseError::MissingDefaultOpclass {
+                                    access_method: "gist".into(),
+                                    type_name: index_type_name_for_oid(
+                                        self, client_id, txn_ctx, type_oid,
+                                    ),
+                                })
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .or_else(|err| {
+                        if columns.iter().any(|column| column.expr_sql.is_some()) {
+                            Ok(vec![RANGE_GIST_OPCLASS_OID; columns.len()])
+                        } else {
+                            Err(err)
+                        }
+                    })?;
                 // :HACK: pgrust does not ship PostgreSQL's btree_gist opclasses
-                // yet. The inherit regression uses an empty-table expression
-                // exclusion constraint only for catalog semantics, so use a
-                // GiST opclass placeholder while leaving enforcement deferred.
+                // yet. Use scalar btree opclasses as catalog placeholders for
+                // heap-scan enforced equality exclusions; expression exclusions
+                // still fall back to a generic GiST placeholder.
                 Ok((
                     access_method.oid,
                     access_method.amhandler,
                     CatalogIndexBuildOptions {
                         am_oid: access_method.oid,
-                        indclass: vec![RANGE_GIST_OPCLASS_OID; columns.len()],
+                        indclass,
                         indclass_options: vec![Vec::new(); columns.len()],
                         indcollation: vec![0; columns.len()],
                         indoption: vec![0; columns.len()],

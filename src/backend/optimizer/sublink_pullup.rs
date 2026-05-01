@@ -529,6 +529,7 @@ fn make_pulled_up_join(
     let joinleftcols = (1..=left_desc.columns.len()).collect::<Vec<_>>();
     query.rtable.push(RangeTblEntry {
         alias: None,
+        alias_is_user_defined: false,
         alias_preserves_source_names: false,
         eref: RangeTblEref {
             aliasname: "join".into(),
@@ -544,6 +545,7 @@ fn make_pulled_up_join(
         permission: None,
         kind: RangeTblEntryKind::Join {
             jointype: kind,
+            from_list: false,
             joinmergedcols: 0,
             joinaliasvars: left_alias_vars,
             joinleftcols,
@@ -612,12 +614,14 @@ fn adjust_rte_for_pullup(
     let kind = match rte.kind {
         RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars,
             joinleftcols,
             joinrightcols,
         } => RangeTblEntryKind::Join {
             jointype,
+            from_list,
             joinmergedcols,
             joinaliasvars: joinaliasvars
                 .into_iter()
@@ -849,6 +853,8 @@ fn adjust_expr_for_pullup(expr: Expr, offset: usize, levels_to_parent: usize) ->
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1068,6 +1074,8 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -1187,6 +1195,8 @@ fn expr_contains_outer_var(expr: &Expr) -> bool {
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

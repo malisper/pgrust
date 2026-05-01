@@ -369,6 +369,8 @@ fn expr_contains_outer_ref_to_rte(expr: &Expr, rtindex: usize, target_level: usi
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -563,6 +565,8 @@ fn collect_expr_used_attrs(expr: &Expr, rtindex: usize, width: usize, used: &mut
         | Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -749,6 +753,8 @@ fn expr_contains_prune_volatile(expr: &Expr, catalog: &dyn CatalogLookup) -> boo
         | Expr::CaseTest(_)
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema => false,

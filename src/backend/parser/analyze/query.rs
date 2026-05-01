@@ -6,9 +6,10 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, FuncExpr, GroupingFuncExpr, GroupingKeyExpr, OpExpr, OrderByEntry,
-    RelationPrivilegeMask, RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr,
-    SubLink, SubPlan, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
-    WindowSpec, attrno_index, is_special_varno, is_system_attr, user_attrno,
+    RelationPrivilegeMask, RelationPrivilegeRequirement, RowsFromItem, RowsFromSource,
+    ScalarArrayOpExpr, SetReturningExpr, SubLink, SubPlan, WindowClause, WindowFrame,
+    WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, attrno_index, is_special_varno,
+    is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -113,6 +114,7 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: Some(relation_name.clone()),
+                alias_is_user_defined: false,
                 alias_preserves_source_names: false,
                 eref: rte_eref(relation_name, &output_columns),
                 desc,
@@ -144,6 +146,7 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_is_user_defined: false,
                 alias_preserves_source_names: false,
                 eref: rte_eref("*VALUES*", &output_columns),
                 desc,
@@ -178,6 +181,7 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_is_user_defined: false,
                 alias_preserves_source_names: false,
                 eref: rte_eref(relation_name, &output_columns),
                 desc,
@@ -192,6 +196,33 @@ impl AnalyzedFrom {
         }
     }
 
+    pub(super) fn project_function(
+        output_exprs: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+        display_sql: Option<String>,
+        alias: Option<String>,
+    ) -> Self {
+        let mut plan = Self::function(SetReturningCall::RowsFrom {
+            items: vec![RowsFromItem {
+                source: RowsFromSource::Project {
+                    output_exprs,
+                    output_columns: output_columns.clone(),
+                    display_sql,
+                },
+                column_definitions: false,
+            }],
+            output_columns: output_columns.clone(),
+            with_ordinality: false,
+        });
+        if let Some(alias) = alias
+            && let Some(rte) = plan.rtable.last_mut()
+        {
+            rte.alias = Some(alias.clone());
+            rte.eref.aliasname = alias;
+        }
+        plan
+    }
+
     pub(super) fn worktable(worktable_id: usize, output_columns: Vec<QueryColumn>) -> Self {
         let desc = RelationDesc {
             columns: output_columns
@@ -202,6 +233,7 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_is_user_defined: false,
                 alias_preserves_source_names: false,
                 eref: rte_eref(format!("worktable {worktable_id}"), &output_columns),
                 desc,
@@ -227,6 +259,7 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_is_user_defined: false,
                 alias_preserves_source_names: false,
                 eref: rte_eref(cte_name, &output_columns),
                 desc,
@@ -255,6 +288,7 @@ impl AnalyzedFrom {
         Self {
             rtable: vec![RangeTblEntry {
                 alias: None,
+                alias_is_user_defined: false,
                 alias_preserves_source_names: false,
                 eref: rte_eref("subquery", &output_columns),
                 desc,
@@ -275,6 +309,7 @@ impl AnalyzedFrom {
         left: Self,
         right: Self,
         kind: JoinType,
+        from_list: bool,
         on: Expr,
         alias_info: Option<JoinAliasInfo>,
     ) -> Self {
@@ -323,6 +358,7 @@ impl AnalyzedFrom {
         };
         rtable.push(RangeTblEntry {
             alias: None,
+            alias_is_user_defined: false,
             alias_preserves_source_names: false,
             eref: rte_eref("join", &output_columns),
             desc,
@@ -331,6 +367,7 @@ impl AnalyzedFrom {
             permission: None,
             kind: RangeTblEntryKind::Join {
                 jointype: kind,
+                from_list,
                 joinmergedcols,
                 joinaliasvars,
                 joinleftcols,
@@ -467,12 +504,14 @@ fn shift_rte_rtindexes(
         kind: match entry.kind {
             RangeTblEntryKind::Join {
                 jointype,
+                from_list,
                 joinmergedcols,
                 joinaliasvars,
                 joinleftcols,
                 joinrightcols,
             } => RangeTblEntryKind::Join {
                 jointype,
+                from_list,
                 joinmergedcols,
                 joinaliasvars: joinaliasvars
                     .into_iter()
@@ -604,12 +643,14 @@ fn shift_rte_outer_rtindexes(
         kind: match entry.kind {
             RangeTblEntryKind::Join {
                 jointype,
+                from_list,
                 joinmergedcols,
                 joinaliasvars,
                 joinleftcols,
                 joinrightcols,
             } => RangeTblEntryKind::Join {
                 jointype,
+                from_list,
                 joinmergedcols,
                 joinaliasvars: joinaliasvars
                     .into_iter()
@@ -917,6 +958,8 @@ fn shift_outer_expr_rtindexes(expr: Expr, offset: usize, varlevelsup: usize) -> 
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -1160,6 +1203,8 @@ pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -1639,6 +1684,8 @@ fn rewrite_local_vars_for_output_exprs_impl(
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -1755,12 +1802,14 @@ fn rewrite_query_local_vars_for_output_exprs(
                     }),
                 },
                 RangeTblEntryKind::Join {
+                    from_list,
                     jointype,
                     joinmergedcols,
                     joinaliasvars,
                     joinleftcols,
                     joinrightcols,
                 } => RangeTblEntryKind::Join {
+                    from_list,
                     jointype,
                     joinmergedcols,
                     joinaliasvars: joinaliasvars.into_iter().map(rewrite_expr).collect(),
@@ -2123,7 +2172,9 @@ fn raise_expr_varlevels(expr: Expr, delta: usize) -> Expr {
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
         | Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
