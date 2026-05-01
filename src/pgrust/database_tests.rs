@@ -22380,11 +22380,13 @@ fn insert_on_conflict_works_for_auto_updatable_views() {
 }
 
 #[test]
-fn nested_views_with_user_rules_are_not_auto_updatable() {
-    let base = temp_dir("auto_view_nested_rule_reject");
+fn nested_views_with_unconditional_user_rules_route_through_rule() {
+    let base = temp_dir("auto_view_nested_rule_update");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into base_items values (1, 'alpha')")
         .unwrap();
     db.execute(
         1,
@@ -22402,12 +22404,14 @@ fn nested_views_with_user_rules_are_not_auto_updatable() {
     )
     .unwrap();
 
-    assert_view_dml_error(
+    assert_eq!(
         db.execute(1, "update outer_view set name = 'beta' where id = 1")
-            .unwrap_err(),
-        "cannot update view \"outer_view\"",
-        "nested view \"inner_view\"",
-        "ON UPDATE DO INSTEAD rule",
+            .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items order by id"),
+        vec![vec![Value::Int32(1), Value::Text("beta".into())]]
     );
 }
 
