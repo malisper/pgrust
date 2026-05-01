@@ -28735,6 +28735,74 @@ fn explain_geometry_sort_keys_render_sql_function_names() {
             .any(|line| line.contains("Sort Key: ((poly_center(f1))[0])")),
         "expected SQL poly_center subscript sort key, got {center_x_lines:?}"
     );
+
+    db.execute(
+        1,
+        "insert into poly_sort values \
+         ('((2,0),(2,4),(0,0))'::polygon), \
+         ('((10,10),(12,10),(11,12))'::polygon)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index poly_sort_gist on poly_sort using gist (f1)",
+    )
+    .unwrap();
+    db.execute(1, "create table circle_sort (f1 circle)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into circle_sort values \
+         ('<(1,2),3>'::circle), \
+         ('<(100,1),115>'::circle)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index circle_sort_gist on circle_sort using gist (f1)",
+    )
+    .unwrap();
+    db.execute(1, "set enable_seqscan to off").unwrap();
+
+    let indexed_area_lines = explain_lines(
+        &db,
+        1,
+        "select * from circle_sort \
+         where f1 && circle(point(1,-2), 1) \
+         order by area(f1)",
+    );
+    assert!(
+        indexed_area_lines
+            .iter()
+            .any(|line| line.contains("Index Scan using circle_sort_gist")),
+        "expected forced circle GiST scan, got {indexed_area_lines:?}"
+    );
+    assert!(
+        indexed_area_lines
+            .iter()
+            .any(|line| line.contains("Sort Key: (area(f1))")),
+        "expected SQL area sort key over index scan, got {indexed_area_lines:?}"
+    );
+
+    let indexed_center_x_lines = explain_lines(
+        &db,
+        1,
+        "select * from poly_sort \
+         where f1 @> '((1,1),(2,2),(2,1))'::polygon \
+         order by (poly_center(f1))[0]",
+    );
+    assert!(
+        indexed_center_x_lines
+            .iter()
+            .any(|line| line.contains("Index Scan using poly_sort_gist")),
+        "expected forced polygon GiST scan, got {indexed_center_x_lines:?}"
+    );
+    assert!(
+        indexed_center_x_lines
+            .iter()
+            .any(|line| line.contains("Sort Key: ((poly_center(f1))[0])")),
+        "expected SQL poly_center subscript sort key over index scan, got {indexed_center_x_lines:?}"
+    );
 }
 
 #[test]
