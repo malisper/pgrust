@@ -1585,6 +1585,7 @@ fn render_key_value(value: &Value, ctx: &ExecutorContext) -> String {
         Value::Record(v) => format!("{v:?}"),
         Value::Range(v) => render_range_value_with_config(v, &ctx.datetime_config),
         Value::Multirange(v) => render_multirange_with_config(v, &ctx.datetime_config),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".into(),
     }
 }
 

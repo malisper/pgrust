@@ -199,6 +199,12 @@ pub(super) fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostS
         if preferred_reassociated_lateral_values_hash_join(current, candidate) {
             return false;
         }
+        if preferred_field_select_hash_join(candidate, current) {
+            return true;
+        }
+        if preferred_field_select_hash_join(current, candidate) {
+            return false;
+        }
         if non_nested_join_nearly_as_cheap(candidate, current) {
             return true;
         }
@@ -503,6 +509,46 @@ fn path_is_values_relation(path: &Path) -> bool {
         | Path::CteScan {
             cte_plan: input, ..
         } => path_is_values_relation(input),
+        _ => false,
+    }
+}
+
+pub(super) fn preferred_field_select_hash_join(preferred: &Path, other: &Path) -> bool {
+    let Path::HashJoin {
+        kind: JoinType::Inner,
+        hash_clauses,
+        ..
+    } = preferred
+    else {
+        return false;
+    };
+    matches!(
+        other,
+        Path::MergeJoin {
+            kind: JoinType::Inner,
+            ..
+        }
+    ) && hash_clauses
+        .iter()
+        .any(|clause| expr_contains_field_select(&clause.clause))
+}
+
+fn expr_contains_field_select(expr: &Expr) -> bool {
+    match expr {
+        Expr::FieldSelect { .. } => true,
+        Expr::Op(op) => op.args.iter().any(expr_contains_field_select),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_field_select),
+        Expr::Cast(inner, _) => expr_contains_field_select(inner),
+        Expr::Collate { expr, .. } => expr_contains_field_select(expr),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, field)| expr_contains_field_select(field)),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_field_select(left) || expr_contains_field_select(right)
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_field_select(inner),
         _ => false,
     }
 }

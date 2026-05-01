@@ -80,6 +80,8 @@ fn expr_is_leakproof(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
         | Expr::CaseTest(_)
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema
@@ -945,6 +947,8 @@ fn collect_expr_relids_at_level(expr: &Expr, levelsup: usize, relids: &mut Vec<u
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -1012,6 +1016,7 @@ mod tests {
     fn base_rte() -> RangeTblEntry {
         RangeTblEntry {
             alias: None,
+            alias_is_user_defined: false,
             alias_preserves_source_names: false,
             eref: RangeTblEref {
                 aliasname: "result".into(),

@@ -96,6 +96,8 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
         | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
+        | Expr::User
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -909,6 +911,9 @@ fn collect_direct_relation_oids_from_from_item(
                 }
             }
         }
+        FromItem::Expression { expr, .. } => {
+            collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+        }
         FromItem::FunctionCall { args, .. } => {
             for arg in args {
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
@@ -1096,6 +1101,8 @@ fn collect_direct_relation_oids_from_sql_expr(
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }

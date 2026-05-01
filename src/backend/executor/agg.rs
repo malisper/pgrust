@@ -2053,6 +2053,7 @@ fn json_object_agg_key(key: &Value) -> String {
         Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
         Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
         Value::Array(_) | Value::PgArray(_) | Value::Record(_) => value_to_json_text(key),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".to_string(),
     }
 }
 
@@ -2142,6 +2143,7 @@ fn value_to_json_text(value: &Value) -> String {
                 .collect::<Vec<_>>(),
         ),
         Value::PgArray(array) => render_json_array(&array.to_nested_values()),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".into(),
     }
 }
 

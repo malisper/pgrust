@@ -55368,6 +55368,70 @@ fn session_user_and_current_role_are_sql_visible() {
 }
 
 #[test]
+fn scalar_expression_from_items_use_relation_alias_for_single_column() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(
+        1,
+        "create view scalar_rte_view as
+         select * from current_date d, localtimestamp(3) t, cast(1 + 2 as int4) i",
+    )
+    .unwrap();
+
+    let rows = query_rows(&db, 1, "select pg_get_viewdef('scalar_rte_view', true)");
+    let Value::Text(viewdef) = &rows[0][0] else {
+        panic!("expected view definition text");
+    };
+    assert!(viewdef.contains("CURRENT_DATE d(d)"));
+    assert!(viewdef.contains("LOCALTIMESTAMP(3) t(t)"));
+    assert!(viewdef.contains(" i(i)"));
+}
+
+#[test]
+fn whole_row_composite_in_values_compares_as_single_value() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(1, "create table whole_row_values (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "insert into whole_row_values values (1, 2), (3, 4)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a from whole_row_values w where w in (values(w)) order by a",
+        ),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn restrict_nonsystem_relation_kind_blocks_view_select() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table restricted_view_base (a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view restricted_view as select a from restricted_view_base",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set restrict_nonsystem_relation_kind to 'view'")
+        .unwrap();
+
+    let err = session
+        .execute(&db, "select a from restricted_view where a > 0")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { ref message, .. }
+            if message == "access to non-system view \"restricted_view\" is restricted"
+    ));
+}
+
+#[test]
 fn create_function_row_returns_work_for_table_and_record() {
     let dir = temp_dir("create_function_row_returns");
     let db = Database::open(&dir, 64).unwrap();

@@ -9,6 +9,7 @@ use super::comments::{
 };
 use super::parsenodes::*;
 use crate::backend::executor::Value;
+use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::misc::stack_depth::{
     StackDepthGuard, check_parse_stack_depth, effective_default_max_stack_depth_kb,
 };
@@ -20982,6 +20983,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                             | Rule::rows_from_item
                             | Rule::json_table_from_item
                             | Rule::xml_table_from_item
+                            | Rule::scalar_expr_from_item
                             | Rule::srf_from_item
                             | Rule::derived_from_item
                             | Rule::parenthesized_from_item
@@ -21032,7 +21034,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 item = FromItem::Join {
                     left: Box::new(item),
                     right: Box::new(next?),
-                    kind: JoinKind::Cross,
+                    kind: JoinKind::Comma,
                     constraint: JoinConstraint::None,
                 };
             }
@@ -21072,6 +21074,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::rows_from_item
                     | Rule::json_table_from_item
                     | Rule::xml_table_from_item
+                    | Rule::scalar_expr_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
                     | Rule::derived_from_item
@@ -21137,6 +21140,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 .map(build_values_row)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        Rule::scalar_expr_from_item => build_scalar_expr_from_item(pair),
         Rule::rows_from_item => build_rows_from_item(pair),
         Rule::json_table_from_item => build_json_table_from_item(pair),
         Rule::xml_table_from_item => build_xml_table_from_item(pair),
@@ -21176,6 +21180,77 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             actual: raw,
         }),
     }
+}
+
+fn build_scalar_expr_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    if inner.as_rule() == Rule::collation_for_expr {
+        let arg = inner
+            .clone()
+            .into_inner()
+            .find(|part| part.as_rule() == Rule::expr)
+            .ok_or(ParseError::UnexpectedEof)?;
+        let display_sql = format!("COLLATION FOR ({})", arg.as_str().trim());
+        return Ok(FromItem::Expression {
+            // :HACK: PostgreSQL lowers COLLATION FOR to pg_collation_for(any).
+            // pgrust does not model expression collation yet, so keep the
+            // SQL-visible deparse spelling and use the default-collation result
+            // shape for the scalar RTE.
+            expr: SqlExpr::Const(Value::Text("default".into())),
+            display_sql: Some(display_sql),
+        });
+    }
+    let display_sql = scalar_expr_from_item_display(&inner);
+    Ok(FromItem::Expression {
+        expr: build_expr(inner)?,
+        display_sql,
+    })
+}
+
+fn scalar_expr_from_item_display(pair: &Pair<'_, Rule>) -> Option<String> {
+    match pair.as_rule() {
+        Rule::kw_current_date => Some("CURRENT_DATE".into()),
+        Rule::kw_current_catalog => Some("CURRENT_CATALOG".into()),
+        Rule::kw_current_schema => Some("CURRENT_SCHEMA".into()),
+        Rule::kw_current_user => Some("CURRENT_USER".into()),
+        Rule::kw_user_value => Some("USER".into()),
+        Rule::kw_session_user => Some("SESSION_USER".into()),
+        Rule::kw_system_user => Some("SYSTEM_USER".into()),
+        Rule::kw_current_role => Some("CURRENT_ROLE".into()),
+        Rule::kw_current_time => Some(uppercase_keyword_call("CURRENT_TIME", pair.as_str())),
+        Rule::kw_current_timestamp => {
+            Some(uppercase_keyword_call("CURRENT_TIMESTAMP", pair.as_str()))
+        }
+        Rule::kw_localtime => Some(uppercase_keyword_call("LOCALTIME", pair.as_str())),
+        Rule::kw_localtimestamp => Some(uppercase_keyword_call("LOCALTIMESTAMP", pair.as_str())),
+        Rule::cast_expr => Some(uppercase_cast_display(pair.as_str())),
+        _ => None,
+    }
+}
+
+fn uppercase_keyword_call(keyword: &str, raw: &str) -> String {
+    raw.find('(')
+        .map(|index| format!("{keyword}{}", &raw[index..]))
+        .unwrap_or_else(|| keyword.to_string())
+}
+
+fn uppercase_cast_display(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if raw[index..].to_ascii_lowercase().starts_with("cast") {
+            out.push_str("CAST");
+            index += 4;
+        } else if raw[index..].to_ascii_lowercase().starts_with(" as ") {
+            out.push_str(" AS ");
+            index += 4;
+        } else {
+            out.push(bytes[index] as char);
+            index += 1;
+        }
+    }
+    out
 }
 
 fn build_table_sample_clause(pair: Pair<'_, Rule>) -> Result<RawTableSampleClause, ParseError> {
@@ -21824,7 +21899,7 @@ fn build_join_clause(
     }
 
     match kind {
-        JoinKind::Cross => {
+        JoinKind::Comma | JoinKind::Cross => {
             if !matches!(constraint, JoinConstraint::None) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "CROSS JOIN without ON or USING",
@@ -21888,7 +21963,28 @@ fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
 fn default_alias_for_column_definition_source(item: &FromItem) -> Option<String> {
     match item {
         FromItem::FunctionCall { name, .. } => Some(name.clone()),
+        FromItem::Expression { expr, .. } => {
+            scalar_expr_default_column_name(expr).map(str::to_string)
+        }
         FromItem::Lateral(inner) => default_alias_for_column_definition_source(inner),
+        _ => None,
+    }
+}
+
+fn scalar_expr_default_column_name(expr: &SqlExpr) -> Option<&'static str> {
+    match expr {
+        SqlExpr::CurrentDate => Some("current_date"),
+        SqlExpr::CurrentCatalog => Some("current_catalog"),
+        SqlExpr::CurrentSchema => Some("current_schema"),
+        SqlExpr::CurrentUser => Some("current_user"),
+        SqlExpr::User => Some("user"),
+        SqlExpr::SessionUser => Some("session_user"),
+        SqlExpr::SystemUser => Some("system_user"),
+        SqlExpr::CurrentRole => Some("current_role"),
+        SqlExpr::CurrentTime { .. } => Some("current_time"),
+        SqlExpr::CurrentTimestamp { .. } => Some("current_timestamp"),
+        SqlExpr::LocalTime { .. } => Some("localtime"),
+        SqlExpr::LocalTimestamp { .. } => Some("localtimestamp"),
         _ => None,
     }
 }
@@ -25552,7 +25648,9 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::CurrentCatalog => "current_catalog".to_string(),
         SqlExpr::CurrentSchema => "current_schema".to_string(),
         SqlExpr::CurrentUser => "current_user".to_string(),
+        SqlExpr::User => "user".to_string(),
         SqlExpr::SessionUser => "session_user".to_string(),
+        SqlExpr::SystemUser => "system_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
         SqlExpr::JsonQueryFunction(func) => match func.kind {
@@ -28197,14 +28295,32 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
         }
     }
     let raw = pair.as_str();
-    if pair.as_rule() == Rule::unicode_quoted_identifier {
-        return decode_unicode_quoted_identifier(raw).unwrap_or_else(|_| raw.to_string());
-    }
-    if raw.starts_with('"') && raw.ends_with('"') {
+    let identifier = if pair.as_rule() == Rule::unicode_quoted_identifier {
+        decode_unicode_quoted_identifier(raw).unwrap_or_else(|_| raw.to_string())
+    } else if raw.starts_with('"') && raw.ends_with('"') {
         raw[1..raw.len() - 1].replace("\"\"", "\"")
     } else {
         raw.to_ascii_lowercase()
+    };
+    truncate_identifier_with_notice(identifier)
+}
+
+fn truncate_identifier_with_notice(identifier: String) -> String {
+    const MAX_IDENTIFIER_BYTES: usize = 63;
+    if identifier.len() <= MAX_IDENTIFIER_BYTES {
+        return identifier;
     }
+    let mut end = MAX_IDENTIFIER_BYTES;
+    while !identifier.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = identifier[..end].to_string();
+    push_notice(format!(
+        "identifier \"{}\" will be truncated to \"{}\"",
+        identifier.replace('"', "\"\""),
+        truncated.replace('"', "\"\"")
+    ));
+    truncated
 }
 
 pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
@@ -28517,6 +28633,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             op,
                             is_all,
                             subquery: Box::new(build_select(rhs)?),
+                        },
+                        Rule::values_stmt => SqlExpr::QuantifiedSubquery {
+                            left: Box::new(left),
+                            op,
+                            is_all,
+                            subquery: Box::new(wrap_values_as_select(build_values_statement(rhs)?)),
                         },
                         Rule::expr => SqlExpr::QuantifiedArray {
                             left: Box::new(left),
@@ -28894,8 +29016,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
         Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
-        Rule::kw_current_user | Rule::kw_user_value => Ok(SqlExpr::CurrentUser),
+        Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_user_value => Ok(SqlExpr::User),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
+        Rule::kw_system_user => Ok(SqlExpr::SystemUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
             precision: pair

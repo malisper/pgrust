@@ -3208,6 +3208,7 @@ fn first_lateral_derived_table_alias_in_from_item(item: &FromItem) -> Option<&st
         FromItem::DerivedTable(select) => first_lateral_derived_table_alias_in_select(select),
         FromItem::Table { .. }
         | FromItem::Values { .. }
+        | FromItem::Expression { .. }
         | FromItem::RowsFrom { .. }
         | FromItem::FunctionCall { .. }
         | FromItem::JsonTable(_)

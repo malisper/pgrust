@@ -402,6 +402,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::Array(values) => format_array_text_with_config(values, datetime_config),
         Value::PgArray(array) => format_array_value_text_with_config(array, datetime_config),
         Value::Record(record) => format_record_text_with_config(record, datetime_config),
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => "null".to_string(),
     }
 }
 
@@ -1113,6 +1114,9 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
         Value::Record(v) => {
             out.push(INTERNAL_VALUE_TAG_RECORD);
             encode_internal_text(&encode_internal_record(&v)?, &mut out);
+        }
+        Value::DroppedColumn(_) | Value::WrongTypeColumn { .. } => {
+            out.push(INTERNAL_VALUE_TAG_NULL);
         }
     }
     Ok(out)
@@ -2053,6 +2057,16 @@ pub(crate) fn coerce_assignment_value_with_catalog_and_config(
         Value::Array(items) => Ok(Value::Array(items.clone())),
         Value::PgArray(array) => Ok(Value::PgArray(array.clone())),
         Value::Record(record) => Ok(Value::Record(record.clone())),
+        Value::DroppedColumn(attnum) => Ok(Value::DroppedColumn(*attnum)),
+        Value::WrongTypeColumn {
+            attnum,
+            table_type,
+            query_type,
+        } => Ok(Value::WrongTypeColumn {
+            attnum: *attnum,
+            table_type: *table_type,
+            query_type: *query_type,
+        }),
     }
 }
 

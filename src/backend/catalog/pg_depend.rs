@@ -657,6 +657,8 @@ pub(crate) fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<S
         | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
+        | SqlExpr::User
+        | SqlExpr::SystemUser
         | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
