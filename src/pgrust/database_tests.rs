@@ -26377,7 +26377,14 @@ fn alter_table_alter_column_type_using_same_type_rewrites_rows() {
         1,
         "alter table rewrite_same_type alter column test type integer using 0",
     ) {
-        Err(ExecError::UniqueViolation { .. }) => {}
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message == "could not create unique index \"rewrite_same_type_test_key\""
+            && detail == "Key (test)=(0) is duplicated."
+            && sqlstate == "23505" => {}
         other => panic!("expected ALTER TYPE rewrite to hit unique violation, got {other:?}"),
     }
     assert_eq!(
