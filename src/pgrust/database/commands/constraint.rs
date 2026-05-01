@@ -1832,6 +1832,18 @@ impl Database {
             }
         }
         if row.contype != CONSTRAINT_FOREIGN {
+            if alter_stmt.enforced.is_some() {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot alter enforceability of constraint \"{}\" of relation \"{}\"",
+                        alter_stmt.constraint_name,
+                        relation_basename(&alter_stmt.table_name)
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42809",
+                });
+            }
             return Err(ExecError::DetailedError {
                 message: format!(
                     "constraint \"{}\" of relation \"{}\" is not a foreign key constraint",

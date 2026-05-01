@@ -6346,7 +6346,7 @@ impl CatalogStore {
             BootstrapCatalogKind::PgConstraint,
             BootstrapCatalogKind::PgDepend,
         ];
-        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
         let mut effect = CatalogMutationEffect::default();
@@ -6450,7 +6450,7 @@ impl CatalogStore {
             BootstrapCatalogKind::PgConstraint,
             BootstrapCatalogKind::PgDepend,
         ];
-        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
         let mut effect = CatalogMutationEffect::default();
@@ -7115,15 +7115,26 @@ impl CatalogStore {
     ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
         let removed = relation_constraint_row_mvcc(self, ctx, relation_oid, constraint_name, None)?;
         let removed_depends = constraint_depend_rows_mvcc(self, ctx, removed.oid)?;
-        let kinds = vec![
+        let removed_descriptions = description_rows_for_object_mvcc(
+            self,
+            ctx,
+            removed.oid,
+            PG_CONSTRAINT_RELATION_OID,
+            0,
+        )?;
+        let mut kinds = vec![
             BootstrapCatalogKind::PgConstraint,
             BootstrapCatalogKind::PgDepend,
         ];
+        if !removed_descriptions.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgDescription);
+        }
         delete_catalog_rows_subset_mvcc(
             ctx,
             &PhysicalCatalogRows {
                 constraints: vec![removed.clone()],
                 depends: removed_depends,
+                descriptions: removed_descriptions,
                 ..PhysicalCatalogRows::default()
             },
             self.scope_db_oid(),
@@ -13147,7 +13158,7 @@ fn drop_relation_entries_visible(
     ),
     CatalogError,
 > {
-    let oids = drop_relation_oids_by_oid_visible(relcache, &catcache.depend_rows(), relation_oid)?;
+    let oids = drop_relation_oids_by_oid_visible(relcache, catcache, relation_oid)?;
     let dropped = oids
         .iter()
         .copied()
@@ -13335,7 +13346,7 @@ fn publication_rows_for_relation_mvcc(
 
 fn drop_relation_oids_by_oid_visible(
     relcache: &RelCache,
-    depend_rows: &[PgDependRow],
+    catcache: &CatCache,
     relation_oid: u32,
 ) -> Result<Vec<u32>, CatalogError> {
     let entry = relcache
@@ -13346,7 +13357,7 @@ fn drop_relation_oids_by_oid_visible(
     }
     let mut seen = BTreeSet::new();
     let mut order = Vec::new();
-    collect_relation_drop_oids_visible(relcache, depend_rows, relation_oid, &mut seen, &mut order);
+    collect_relation_drop_oids_visible(relcache, catcache, relation_oid, &mut seen, &mut order);
     Ok(order)
 }
 
@@ -13368,7 +13379,7 @@ fn drop_relation_oids_by_oid_mvcc(
 
 fn collect_relation_drop_oids_visible(
     relcache: &RelCache,
-    depend_rows: &[PgDependRow],
+    catcache: &CatCache,
     relation_oid: u32,
     seen: &mut BTreeSet<u32>,
     order: &mut Vec<u32>,
@@ -13377,7 +13388,7 @@ fn collect_relation_drop_oids_visible(
         return;
     }
 
-    for row in depend_rows {
+    for row in catcache.depend_rows() {
         if row.refclassid != crate::include::catalog::PG_CLASS_RELATION_OID
             || row.refobjid != relation_oid
             || row.classid != crate::include::catalog::PG_CLASS_RELATION_OID
@@ -13391,8 +13402,19 @@ fn collect_relation_drop_oids_visible(
             }
             collect_relation_drop_oids_visible(
                 relcache,
-                depend_rows,
+                catcache,
                 dependent.relation_oid,
+                seen,
+                order,
+            );
+        }
+    }
+    for constraint in catcache.constraint_rows_for_relation(relation_oid) {
+        if constraint.conindid != 0 && relcache.get_by_oid(constraint.conindid).is_some() {
+            collect_relation_drop_oids_visible(
+                relcache,
+                catcache,
+                constraint.conindid,
                 seen,
                 order,
             );
@@ -13423,6 +13445,13 @@ fn collect_relation_drop_oids_mvcc(
                 continue;
             }
             collect_relation_drop_oids_mvcc(store, ctx, dependent.oid, seen, order)?;
+        }
+    }
+    for constraint in relation_constraints_mvcc(store, ctx, relation_oid)? {
+        if constraint.conindid != 0
+            && class_row_by_oid_mvcc(store, ctx, constraint.conindid)?.is_some()
+        {
+            collect_relation_drop_oids_mvcc(store, ctx, constraint.conindid, seen, order)?;
         }
     }
 

@@ -15352,7 +15352,8 @@ fn lower_create_table_rejects_invalid_key_constraints() {
     };
     assert!(matches!(
         lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
-        Err(ParseError::UnexpectedToken { expected, .. }) if expected == "at most one PRIMARY KEY"
+        Err(ParseError::DetailedError { message, .. })
+            if message == "multiple primary keys for table \"items\" are not allowed"
     ));
 
     let stmt = parse_statement("create table items (id int4, note text, unique (id, id))").unwrap();

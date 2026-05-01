@@ -1024,10 +1024,7 @@ pub fn normalize_create_table_constraints(
         .count()
         > 1
     {
-        return Err(ParseError::UnexpectedToken {
-            expected: "at most one PRIMARY KEY",
-            actual: "multiple PRIMARY KEY constraints".into(),
-        });
+        return Err(multiple_primary_keys_error(&stmt.table_name));
     }
 
     for primary in index_constraints
@@ -1820,10 +1817,7 @@ pub fn normalize_alter_table_add_constraint(
                 .iter()
                 .any(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
             {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "at most one PRIMARY KEY",
-                    actual: "multiple PRIMARY KEY constraints".into(),
-                });
+                return Err(multiple_primary_keys_error(table_name));
             }
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
@@ -1987,10 +1981,7 @@ pub fn normalize_alter_table_add_constraint(
                 .iter()
                 .any(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
             {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "at most one PRIMARY KEY",
-                    actual: "multiple PRIMARY KEY constraints".into(),
-                });
+                return Err(multiple_primary_keys_error(table_name));
             }
             let (columns, include_columns, nulls_not_distinct) = index_columns_for_existing_index(
                 table_name,
@@ -3824,6 +3815,15 @@ fn relation_column_lookup(desc: &RelationDesc) -> BTreeMap<String, usize> {
         .filter(|(_, column)| !column.dropped)
         .map(|(index, column)| (column.name.to_ascii_lowercase(), index))
         .collect()
+}
+
+fn multiple_primary_keys_error(table_name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("multiple primary keys for table \"{table_name}\" are not allowed"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    }
 }
 
 fn relation_display_name(

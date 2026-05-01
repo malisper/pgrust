@@ -5,7 +5,7 @@ use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
     reinitialize_index_relation, row_matches_index_predicate,
 };
-use crate::backend::executor::value_io::tuple_from_values;
+use crate::backend::executor::value_io::{format_unique_key_detail, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
 use crate::backend::parser::{RawTypeName, SequenceOptionsPatchSpec};
 use crate::backend::utils::cache::catcache::sql_type_oid;
@@ -160,6 +160,23 @@ fn key_contains_null(key_values: &[Value]) -> bool {
     key_values.iter().any(|value| matches!(value, Value::Null))
 }
 
+fn unique_index_rewrite_violation(
+    index: &crate::backend::parser::BoundIndexRelation,
+    key_values: &[Value],
+) -> ExecError {
+    let key_columns = &index.desc.columns[..index.desc.columns.len().min(key_values.len())];
+    let detail = format_unique_key_detail(key_columns, key_values)
+        .strip_suffix(" already exists.")
+        .map(|prefix| format!("{prefix} is duplicated."))
+        .unwrap_or_else(|| format_unique_key_detail(key_columns, key_values));
+    ExecError::DetailedError {
+        message: format!("could not create unique index \"{}\"", index.name),
+        detail: Some(detail),
+        hint: None,
+        sqlstate: "23505",
+    }
+}
+
 fn validate_unique_indexes_for_rewritten_rows(
     new_desc: &RelationDesc,
     indexes: &[crate::backend::parser::BoundIndexRelation],
@@ -189,13 +206,7 @@ fn validate_unique_indexes_for_rewritten_rows(
                 continue;
             }
             if seen_keys.iter().any(|seen| seen == &key_values) {
-                return Err(ExecError::UniqueViolation {
-                    constraint: index
-                        .constraint_name
-                        .clone()
-                        .unwrap_or_else(|| index.name.clone()),
-                    detail: None,
-                });
+                return Err(unique_index_rewrite_violation(index, &key_values));
             }
             seen_keys.push(key_values);
         }
