@@ -3,7 +3,7 @@ use super::exec_expr::append_array_value;
 use super::exec_expr::{
     ensure_builtin_side_effects_allowed, eval_pg_column_is_updatable, eval_pg_describe_object,
     eval_pg_get_object_address, eval_pg_identify_object, eval_pg_identify_object_as_address,
-    eval_pg_relation_is_updatable,
+    eval_pg_relation_is_updatable, eval_pg_settings_get_flags,
 };
 use super::expr_casts::cast_value_with_source_type_catalog_and_config;
 use super::expr_math::eval_abs_function;
@@ -667,6 +667,7 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             execute_builtin_hash_value_call(kind, true, arg_values)
         }
         BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(arg_values),
+        BuiltinScalarFunction::PgSettingsGetFlags => eval_pg_settings_get_flags(arg_values),
         BuiltinScalarFunction::PgRustTestEncConversion => {
             eval_pg_rust_test_enc_conversion(arg_values)
         }

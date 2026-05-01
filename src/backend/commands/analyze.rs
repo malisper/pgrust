@@ -499,6 +499,14 @@ fn sample_expression_indexes(
             .filter_map(|(idx, column)| (column.attstattarget != 0).then_some(idx))
             .collect::<Vec<_>>();
         if selected_columns.is_empty() {
+            out.push(AnalyzeRelationStats {
+                relation_oid: index.relation_oid,
+                relpages: nblocks as i32,
+                reltuples: sample_rows.len() as f64,
+                clear_relhassubclass: false,
+                statistics: Vec::new(),
+                statistics_ext_data: Vec::new(),
+            });
             continue;
         }
         let reltuples = sample_rows.len() as f64;

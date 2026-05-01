@@ -168,8 +168,9 @@ use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
 };
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
-use crate::backend::utils::misc::guc::normalize_guc_name;
-use crate::backend::utils::misc::guc::plpgsql_guc_default_value;
+use crate::backend::utils::misc::guc::{
+    normalize_guc_name, pg_settings_flags, plpgsql_guc_default_value,
+};
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::toast_compression::ToastCompressionId;
@@ -3158,7 +3159,7 @@ fn parse_bool_config_value(value: &str) -> Option<bool> {
     }
 }
 
-fn eval_pg_settings_get_flags(values: &[Value]) -> Result<Value, ExecError> {
+pub(crate) fn eval_pg_settings_get_flags(values: &[Value]) -> Result<Value, ExecError> {
     let name = match values {
         [Value::Text(name)] => normalize_guc_name(name),
         [Value::Null] => return Ok(Value::Null),
@@ -3176,9 +3177,8 @@ fn eval_pg_settings_get_flags(values: &[Value]) -> Result<Value, ExecError> {
             }));
         }
     };
-    let flags: &[&str] = match name.as_str() {
-        "default_statistics_target" => &[],
-        _ => return Ok(Value::Null),
+    let Some(flags) = pg_settings_flags(&name) else {
+        return Ok(Value::Null);
     };
     Ok(Value::PgArray(
         ArrayValue::from_1d(
