@@ -96,6 +96,7 @@ pub enum TriggerOperation {
     Insert,
     Update,
     Delete,
+    Truncate,
 }
 
 #[derive(Debug, Clone)]
@@ -8246,6 +8247,7 @@ fn seed_trigger_state(
             TriggerOperation::Insert => "INSERT",
             TriggerOperation::Update => "UPDATE",
             TriggerOperation::Delete => "DELETE",
+            TriggerOperation::Truncate => "TRUNCATE",
         }
         .into(),
     );

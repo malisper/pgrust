@@ -1373,14 +1373,28 @@ fn validate_table_trigger_stmt(
     stmt: &CreateTriggerStatement,
     relation_name: &str,
 ) -> Result<(), ExecError> {
+    if stmt.level == TriggerLevel::Row
+        && stmt
+            .events
+            .iter()
+            .any(|event| event.event == TriggerEvent::Truncate)
+    {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "TRUNCATE FOR EACH ROW triggers are not supported".into(),
+        )));
+    }
     if stmt
         .events
         .iter()
         .any(|event| event.event == TriggerEvent::Truncate)
+        && stmt.timing == TriggerTiming::Instead
     {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "TRUNCATE triggers are not supported".into(),
-        )));
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is a table", relation_name),
+            detail: Some("Tables cannot have INSTEAD OF triggers.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
     }
     if stmt.is_constraint {
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(

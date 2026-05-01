@@ -25,6 +25,7 @@ use crate::backend::commands::rolecmds::{
 use crate::backend::commands::tablecmds::{
     check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
     check_relation_column_privileges, execute_merge, execute_prepared_insert_row,
+    resolve_truncate_relations,
 };
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
@@ -108,9 +109,8 @@ use crate::pgrust::database::{
     default_sequence_name_base, delete_foreign_key_lock_requests, execute_set_constraints,
     insert_foreign_key_lock_requests, merge_pending_notifications, merge_table_lock_requests,
     prepared_insert_foreign_key_lock_requests, queue_pending_notification,
-    reject_relation_with_referencing_foreign_keys_except, relation_foreign_key_lock_requests,
-    update_foreign_key_lock_requests, validate_deferred_constraints,
-    validate_immediate_constraints,
+    relation_foreign_key_lock_requests, update_foreign_key_lock_requests,
+    validate_deferred_constraints, validate_immediate_constraints,
 };
 use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
@@ -18433,52 +18433,7 @@ impl Session {
                 }
                 Statement::TruncateTable(ref truncate_stmt) => {
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    let relations = {
-                        let mut relations = Vec::new();
-                        for name in &truncate_stmt.table_names {
-                            let Some(relation) = catalog.lookup_any_relation(name) else {
-                                continue;
-                            };
-                            if !relations.iter().any(
-                                |existing: &crate::backend::parser::BoundRelation| {
-                                    existing.relation_oid == relation.relation_oid
-                                },
-                            ) {
-                                relations.push(relation.clone());
-                            }
-                            if relation.relkind == 'p' {
-                                for oid in catalog.find_all_inheritors(relation.relation_oid) {
-                                    if oid == relation.relation_oid {
-                                        continue;
-                                    }
-                                    let Some(child) = catalog.relation_by_oid(oid) else {
-                                        continue;
-                                    };
-                                    if relations.iter().any(
-                                        |existing: &crate::backend::parser::BoundRelation| {
-                                            existing.relation_oid == child.relation_oid
-                                        },
-                                    ) {
-                                        continue;
-                                    }
-                                    relations.push(child);
-                                }
-                            }
-                        }
-                        relations
-                    };
-                    let target_relation_oids = relations
-                        .iter()
-                        .map(|relation| relation.relation_oid)
-                        .collect::<Vec<_>>();
-                    for relation in &relations {
-                        reject_relation_with_referencing_foreign_keys_except(
-                            &catalog,
-                            relation.relation_oid,
-                            &target_relation_oids,
-                            "TRUNCATE on table without referencing foreign keys",
-                        )?;
-                    }
+                    let relations = resolve_truncate_relations(truncate_stmt, &catalog, false)?;
                     for relation in relations {
                         self.lock_table_if_needed(
                             db,
@@ -18487,15 +18442,37 @@ impl Session {
                         )?;
                     }
                     let search_path = self.configured_search_path();
-                    let txn = self.active_txn.as_mut().unwrap();
-                    db.execute_truncate_table_in_transaction_with_search_path(
-                        client_id,
-                        truncate_stmt,
-                        xid,
+                    let snapshot = self.snapshot_for_command(db, xid, cid)?;
+                    let deferred_foreign_keys = self
+                        .active_txn
+                        .as_ref()
+                        .map(|txn| txn.deferred_foreign_keys.clone());
+                    let mut ctx = self.executor_context_for_catalog(
+                        db,
+                        snapshot,
                         cid,
-                        search_path.as_deref(),
-                        &mut txn.catalog_effects,
-                    )
+                        &catalog,
+                        deferred_foreign_keys,
+                        _statement_lock_scope_id,
+                    );
+                    let result = {
+                        let txn = self.active_txn.as_mut().unwrap();
+                        db.execute_truncate_table_in_transaction_with_search_path(
+                            client_id,
+                            truncate_stmt,
+                            xid,
+                            cid,
+                            search_path.as_deref(),
+                            &mut ctx,
+                            &mut txn.catalog_effects,
+                            &mut txn.sequence_effects,
+                        )
+                    };
+                    if let Some(xid) = ctx.transaction_xid() {
+                        self.note_context_xid(xid);
+                    }
+                    self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                    result
                 }
                 Statement::Begin(_)
                 | Statement::Commit(_)

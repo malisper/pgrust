@@ -338,6 +338,7 @@ impl RuntimeTriggers {
                     self.fire_after_row(Some(old_row), None, Some(capture), true, ctx)?;
                 }
             }
+            TriggerOperation::Truncate => {}
         }
         Ok(())
     }
@@ -423,6 +424,7 @@ impl RuntimeTriggers {
             TriggerOperation::Delete => {
                 values.extend(clone_or_null_row(old_row, self.relation_desc.columns.len()));
             }
+            TriggerOperation::Truncate => {}
         }
         values
     }
@@ -671,6 +673,7 @@ fn compile_when_expr(
                 relation_scopes.push(("old", relation_desc));
             }
             TriggerOperation::Delete => relation_scopes.push(("old", relation_desc)),
+            TriggerOperation::Truncate => {}
         }
     }
     let local_columns = trigger_when_local_columns(event);
@@ -770,6 +773,7 @@ fn trigger_when_local_columns(event: TriggerOperation) -> Vec<(String, SqlType)>
                 SqlType::new(SqlTypeKind::Tid),
             ),
         ],
+        TriggerOperation::Truncate => Vec::new(),
     }
 }
 
@@ -779,6 +783,7 @@ fn trigger_when_local_values(relation_oid: u32, event: TriggerOperation) -> Vec<
         TriggerOperation::Insert => vec![tableoid, Value::Null],
         TriggerOperation::Update => vec![tableoid.clone(), Value::Null, tableoid, Value::Null],
         TriggerOperation::Delete => vec![tableoid, Value::Null],
+        TriggerOperation::Truncate => Vec::new(),
     }
 }
 
@@ -1010,6 +1015,7 @@ fn trigger_matches_event(
         TriggerOperation::Insert => (row.tgtype & TRIGGER_TYPE_INSERT) != 0,
         TriggerOperation::Update => (row.tgtype & TRIGGER_TYPE_UPDATE) != 0,
         TriggerOperation::Delete => (row.tgtype & TRIGGER_TYPE_DELETE) != 0,
+        TriggerOperation::Truncate => (row.tgtype & TRIGGER_TYPE_TRUNCATE) != 0,
     };
     if !matches_event {
         return false;
