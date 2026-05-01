@@ -8172,6 +8172,23 @@ fn mixed_date_timestamp_comparisons_execute_with_common_types() {
 }
 
 #[test]
+fn timestamp_shorthand_unknown_now_comparison_uses_timestamp_type() {
+    let base = temp_dir("timestamp_shorthand_unknown_now_comparison");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select timestamp without time zone 'tomorrow' > 'now'",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true)]],
+    );
+}
+
+#[test]
 fn mixed_date_timestamp_comparisons_do_not_cast_out_of_range_dates() {
     let base = temp_dir("mixed_date_timestamp_out_of_range_comparisons");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -14191,6 +14208,54 @@ fn numeric_math_misc_helpers_cover_log_factorial_and_pg_lsn() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn numeric_power_decimal_literals_use_numeric_overload() {
+    let base = temp_dir("numeric_power_decimal_literals");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 0.0 ^ 0.0, 10.0 ^ -2147483648 = 0, scale(10.0 ^ -2147483648)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Numeric("1.0000000000000000".into()),
+            Value::Bool(true),
+            Value::Int32(1000),
+        ]],
+    );
+}
+
+#[test]
+fn binary_log_uses_numeric_overload() {
+    let base = temp_dir("binary_log_numeric_overload");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select log(2.0, 2.0), log(2::numeric, 4.2::numeric)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Numeric("1.0000000000000000".into()),
+            Value::Numeric("2.0703893278913979".into()),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select log(1.0, 12.34)",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ExecError::DivisionByZero(_)), "{err:?}");
 }
 
 #[test]

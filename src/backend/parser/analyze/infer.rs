@@ -14,15 +14,6 @@ use crate::include::catalog::{UNKNOWN_TYPE_OID, range_type_ref_for_sql_type};
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
-fn explicit_numeric_power_arg(arg: &SqlExpr, catalog: &dyn CatalogLookup) -> bool {
-    matches!(
-        arg,
-        SqlExpr::Cast(_, raw_type)
-            if resolve_raw_type_name(raw_type, catalog)
-                .is_ok_and(|ty| matches!(ty.kind, SqlTypeKind::Numeric))
-    )
-}
-
 fn array_subscript_element_type(array_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
     if let Some(domain_element) = domain_over_array_element_type(array_type, catalog) {
         return domain_element;
@@ -1664,81 +1655,38 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         }
                     }),
                 Some(BuiltinScalarFunction::Power) => {
-                    let left = args.args().first().map(|arg| {
-                        infer_sql_expr_type_with_ctes(
-                            &arg.value,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )
-                    });
-                    let right = args.args().get(1).map(|arg| {
-                        infer_sql_expr_type_with_ctes(
-                            &arg.value,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )
-                    });
-                    match (left, right) {
-                        (Some(left), Some(right))
-                            if matches!(
-                                left.element_type().kind,
-                                SqlTypeKind::Float4 | SqlTypeKind::Float8
-                            ) || matches!(
-                                right.element_type().kind,
-                                SqlTypeKind::Float4 | SqlTypeKind::Float8
-                            ) =>
-                        {
-                            SqlType::new(SqlTypeKind::Float8)
-                        }
-                        (Some(left), Some(right))
-                            if is_numeric_family(left) && is_numeric_family(right) =>
-                        {
-                            if args
-                                .args()
-                                .first()
-                                .is_some_and(|arg| explicit_numeric_power_arg(&arg.value, catalog))
-                                || args.args().get(1).is_some_and(|arg| {
-                                    explicit_numeric_power_arg(&arg.value, catalog)
-                                })
-                            {
-                                SqlType::new(SqlTypeKind::Numeric)
-                            } else {
-                                SqlType::new(SqlTypeKind::Float8)
-                            }
+                    match (args.args().first(), args.args().get(1)) {
+                        (Some(left), Some(right)) => {
+                            let left_type = infer_sql_expr_type_with_ctes(
+                                &left.value,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            );
+                            let right_type = infer_sql_expr_type_with_ctes(
+                                &right.value,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            );
+                            power_operator_result_type(
+                                &left.value,
+                                left_type,
+                                &right.value,
+                                right_type,
+                                catalog,
+                            )
                         }
                         _ => SqlType::new(SqlTypeKind::Float8),
                     }
                 }
                 Some(BuiltinScalarFunction::Log | BuiltinScalarFunction::Log10) => {
                     if args.args().len() == 2 {
-                        function_arg_values(args).next().map_or(
-                            SqlType::new(SqlTypeKind::Float8),
-                            |arg| {
-                                let ty = infer_sql_expr_type_with_ctes(
-                                    arg,
-                                    scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer,
-                                    ctes,
-                                );
-                                match ty.element_type().kind {
-                                    SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
-                                        SqlType::new(SqlTypeKind::Float8)
-                                    }
-                                    _ if is_numeric_family(ty) => {
-                                        SqlType::new(SqlTypeKind::Numeric)
-                                    }
-                                    _ => SqlType::new(SqlTypeKind::Float8),
-                                }
-                            },
-                        )
+                        SqlType::new(SqlTypeKind::Numeric)
                     } else {
                         function_arg_values(args).next().map_or(
                             SqlType::new(SqlTypeKind::Float8),

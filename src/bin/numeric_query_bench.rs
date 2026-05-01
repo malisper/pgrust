@@ -25,7 +25,7 @@ Options:
   --dir DIR               Data dir (default: /tmp/pgrust_numeric_query_bench)
   --rows N                generate_series upper bound (default: 100000)
   --iterations N          Number of measured query executions (default: 20)
-  --variant NAME          target, count, sum-int, sum-series-numeric, series-rows, or all (default: all)
+  --variant NAME          target, count, sum-int, sum-series-numeric, series-rows, variance-huge, or all (default: all)
   --preserve-existing     Keep existing data dir contents
 "
     );
@@ -89,8 +89,24 @@ fn query_for_variant(variant: &str, rows: usize) -> Result<String, String> {
             format!("select sum(i::numeric) from generate_series(1, {rows}) as g(i)")
         }
         "series-rows" => format!("select * from generate_series(1, {rows})"),
+        "variance-huge" => "select variance(a) from num_variance".to_string(),
         other => return Err(format!("unknown variant: {other}")),
     })
+}
+
+fn prepare_variant(db: &Database, variant: &str) -> Result<(), String> {
+    if variant != "variance-huge" {
+        return Ok(());
+    }
+
+    for query in [
+        "drop table if exists num_variance",
+        "create table num_variance (a numeric)",
+        "insert into num_variance select 9e131071 + x from generate_series(1, 5) x",
+    ] {
+        run_query(db, query)?;
+    }
+    Ok(())
 }
 
 fn run_query(db: &Database, query: &str) -> Result<usize, String> {
@@ -135,6 +151,7 @@ fn main() -> Result<(), String> {
     println!("iterations: {}", args.iterations);
 
     for variant in variants {
+        prepare_variant(&db, variant)?;
         let query = query_for_variant(variant, args.rows)?;
         run_query(&db, &query)?;
         let (elapsed, result_rows) = timed_run(&db, &query, args.iterations)?;

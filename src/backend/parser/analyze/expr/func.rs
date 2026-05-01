@@ -39,15 +39,6 @@ fn signed_integer_literal_type(expr: &SqlExpr) -> Option<SqlTypeKind> {
     }
 }
 
-fn explicit_numeric_power_arg(arg: &SqlExpr, catalog: &dyn CatalogLookup) -> bool {
-    matches!(
-        arg,
-        SqlExpr::Cast(_, raw_type)
-            if resolve_raw_type_name(raw_type, catalog)
-                .is_ok_and(|ty| matches!(ty.kind, SqlTypeKind::Numeric))
-    )
-}
-
 fn random_bound_target_type(args: &[SqlExpr], arg_types: &[SqlType]) -> SqlType {
     if args.len() == 2
         && let (Some(left), Some(right)) = (
@@ -3226,21 +3217,7 @@ fn bind_scalar_function_call_from_bound_args(
                     ),
                 });
             }
-            let target = if matches!(
-                left_type.element_type().kind,
-                SqlTypeKind::Float4 | SqlTypeKind::Float8
-            ) || matches!(
-                right_type.element_type().kind,
-                SqlTypeKind::Float4 | SqlTypeKind::Float8
-            ) {
-                SqlType::new(SqlTypeKind::Float8)
-            } else if explicit_numeric_power_arg(&args[0], catalog)
-                || explicit_numeric_power_arg(&args[1], catalog)
-            {
-                SqlType::new(SqlTypeKind::Numeric)
-            } else {
-                SqlType::new(SqlTypeKind::Float8)
-            };
+            let target = SqlType::new(SqlTypeKind::Numeric);
             Ok(build_func(
                 func_variadic,
                 vec![

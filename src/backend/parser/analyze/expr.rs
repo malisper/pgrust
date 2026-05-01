@@ -1463,9 +1463,7 @@ fn power_operator_arg_uses_numeric_operator(
     arg_type: SqlType,
     catalog: &dyn CatalogLookup,
 ) -> bool {
-    explicit_numeric_power_arg(arg, catalog)
-        || (matches!(arg_type.kind, SqlTypeKind::Numeric)
-            && !power_operator_arg_is_uncast_literal(arg))
+    explicit_numeric_power_arg(arg, catalog) || matches!(arg_type.kind, SqlTypeKind::Numeric)
 }
 
 fn explicit_numeric_power_arg(arg: &SqlExpr, catalog: &dyn CatalogLookup) -> bool {
@@ -1475,16 +1473,6 @@ fn explicit_numeric_power_arg(arg: &SqlExpr, catalog: &dyn CatalogLookup) -> boo
             if resolve_raw_type_name(raw_type, catalog)
                 .is_ok_and(|ty| matches!(ty.kind, SqlTypeKind::Numeric))
     )
-}
-
-fn power_operator_arg_is_uncast_literal(arg: &SqlExpr) -> bool {
-    match arg {
-        SqlExpr::IntegerLiteral(_) | SqlExpr::NumericLiteral(_) => true,
-        SqlExpr::UnaryPlus(inner) | SqlExpr::Negate(inner) => {
-            power_operator_arg_is_uncast_literal(inner)
-        }
-        _ => false,
-    }
 }
 
 fn bind_overlaps_expr(

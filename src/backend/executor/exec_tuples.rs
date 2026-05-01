@@ -2,13 +2,12 @@
 //! per-tuple type dispatch, alignment computation, and branch overhead.
 
 use super::ExecError;
-use super::exec_expr::parse_numeric_text;
 use super::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
 use super::expr_mac::{parse_macaddr_bytes, parse_macaddr8_bytes};
 use super::expr_network::{parse_cidr_bytes, parse_inet_bytes};
 use super::expr_range::decode_range_bytes;
-use super::value_io::missing_column_value;
 use super::value_io::{decode_anyarray_bytes, decode_array_bytes};
+use super::value_io::{decode_numeric_storage_bytes, missing_column_value};
 use crate::backend::executor::{decode_tsquery_bytes, decode_tsvector_bytes};
 use crate::include::access::htup::HEAP_NATTS_MASK;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
@@ -506,17 +505,10 @@ impl CompiledTupleDecoder {
                         off = new_off;
                         match ty {
                             ScalarType::Numeric => {
-                                values.push(Value::Numeric(
-                                    parse_numeric_text(unsafe {
-                                        std::str::from_utf8_unchecked(bytes_slice)
-                                    })
-                                    .ok_or_else(|| {
-                                        ExecError::InvalidStorageValue {
-                                            column: "<tuple>".into(),
-                                            details: "invalid numeric text".into(),
-                                        }
-                                    })?,
-                                ));
+                                values.push(Value::Numeric(decode_numeric_storage_bytes(
+                                    "<tuple>",
+                                    bytes_slice,
+                                )?));
                             }
                             ScalarType::Json => {
                                 values.push(Value::Json(
@@ -620,17 +612,9 @@ impl CompiledTupleDecoder {
                         off = end + 1;
                         match ty {
                             ScalarType::Numeric => {
-                                values.push(Value::Numeric(
-                                    parse_numeric_text(unsafe {
-                                        std::str::from_utf8_unchecked(bytes)
-                                    })
-                                    .ok_or_else(|| {
-                                        ExecError::InvalidStorageValue {
-                                            column: "<tuple>".into(),
-                                            details: "invalid numeric text".into(),
-                                        }
-                                    })?,
-                                ));
+                                values.push(Value::Numeric(decode_numeric_storage_bytes(
+                                    "<tuple>", bytes,
+                                )?));
                             }
                             ScalarType::Json => {
                                 values.push(Value::Json(

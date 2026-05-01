@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, sync::Mutex};
 
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -43,6 +43,9 @@ use crate::include::nodes::datetime::{
 };
 use crate::include::nodes::datum::{IntervalValue, RecordValue};
 use crate::pgrust::compact_string::CompactString;
+
+static POW10_CACHE: LazyLock<Mutex<HashMap<u32, BigInt>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn compare_order_by_keys(
     items: &[OrderByEntry],
@@ -1330,6 +1333,9 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
             } else {
                 Err(ExecError::DivisionByZero("/"))
             };
+        }
+        if let Some(result) = exact_scale_zero_power_of_ten_division(&left_num, &right_num) {
+            return Ok(Value::Numeric(result));
         }
         let out_scale = select_div_scale_numeric(&left_num, &right_num);
         return exact_numeric_binary(&left, &right, |lv, rv| lv.div(rv, out_scale), "/");
@@ -2754,6 +2760,90 @@ fn select_div_scale_numeric(left: &NumericValue, right: &NumericValue) -> u32 {
     rscale.clamp(0, 1000) as u32
 }
 
+fn exact_scale_zero_power_of_ten_division(
+    left: &NumericValue,
+    right: &NumericValue,
+) -> Option<NumericValue> {
+    let (
+        NumericValue::Finite {
+            coeff: lcoeff,
+            scale: 0,
+            dscale: ldscale,
+        },
+        NumericValue::Finite {
+            coeff: rcoeff,
+            scale: 0,
+            dscale: rdscale,
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    let divisor_exp = power_of_ten_exponent(rcoeff)?;
+    let mut divisor = pow10_bigint(divisor_exp);
+    if rcoeff.is_negative() {
+        divisor = -divisor;
+    }
+    let (quotient, remainder) = lcoeff.div_rem(&divisor);
+    if !remainder.is_zero() {
+        return None;
+    }
+
+    let (weight1, first1) =
+        numeric_weight_and_first_for_coeff_with_trailing_zeros(&quotient, divisor_exp);
+    let (weight2, first2) = numeric_weight_and_first_for_coeff_with_trailing_zeros(
+        &BigInt::from(if rcoeff.is_negative() { -1 } else { 1 }),
+        divisor_exp,
+    );
+    let mut qweight = weight1 - weight2;
+    if first1 <= first2 {
+        qweight -= 1;
+    }
+    let mut rscale = 16 - qweight * 4;
+    rscale = rscale.max(*ldscale as i32);
+    rscale = rscale.max(*rdscale as i32);
+    let rscale = rscale.clamp(0, 1000) as u32;
+    Some(
+        NumericValue::finite(quotient * pow10_bigint(rscale), rscale)
+            .with_dscale(rscale)
+            .normalize(),
+    )
+}
+
+fn numeric_weight_and_first_for_coeff_with_trailing_zeros(
+    coeff: &BigInt,
+    trailing_zeros: u32,
+) -> (i32, i32) {
+    if coeff.is_zero() {
+        return (0, 0);
+    }
+    let digits = coeff.abs().to_str_radix(10);
+    numeric_weight_and_first_for_digits_with_trailing_zeros(&digits, trailing_zeros)
+}
+
+fn numeric_weight_and_first_for_digits_with_trailing_zeros(
+    digits: &str,
+    trailing_zeros: u32,
+) -> (i32, i32) {
+    let decimal_pos = digits.len() as i32 + trailing_zeros as i32;
+    let weight = (decimal_pos - 1).div_euclid(4);
+    let first_group_exp = weight * 4;
+    let end = (decimal_pos - first_group_exp) as usize;
+    let first_digit = if end <= digits.len() {
+        digits[..end]
+            .parse::<i32>()
+            .expect("numeric first digit group is decimal")
+    } else {
+        let mut first = String::with_capacity(end);
+        first.push_str(digits);
+        first.extend(std::iter::repeat_n('0', end - digits.len()));
+        first
+            .parse::<i32>()
+            .expect("numeric first digit group is decimal")
+    };
+    (weight, first_digit)
+}
+
 fn checked_div_i16(left: i16, right: i16) -> Result<i16, ExecError> {
     left.checked_div(right).ok_or(ExecError::Int2OutOfRange)
 }
@@ -2849,6 +2939,19 @@ fn align_coeff(coeff: BigInt, from_scale: u32, to_scale: u32) -> BigInt {
 }
 
 fn pow10_bigint(exp: u32) -> BigInt {
+    if exp >= 1024 {
+        let mut cache = POW10_CACHE.lock().expect("pow10 cache lock poisoned");
+        if let Some(value) = cache.get(&exp) {
+            return value.clone();
+        }
+        let value = pow10_bigint_uncached(exp);
+        cache.insert(exp, value.clone());
+        return value;
+    }
+    pow10_bigint_uncached(exp)
+}
+
+fn pow10_bigint_uncached(exp: u32) -> BigInt {
     let mut digits = String::with_capacity(exp as usize + 1);
     digits.push('1');
     digits.extend(std::iter::repeat_n('0', exp as usize));
@@ -3196,6 +3299,19 @@ mod tests {
         assert_eq!(
             numerator.div(&denominator, 0),
             Some(NumericValue::from_i64(6))
+        );
+
+        assert_eq!(
+            super::div_values(Value::Numeric(numerator), Value::Numeric(denominator)).unwrap(),
+            Value::Numeric(NumericValue::from("6.0000000000000000"))
+        );
+        assert_eq!(
+            super::div_values(
+                Value::Numeric(NumericValue::from_i64(1)),
+                Value::Numeric(NumericValue::from_i64(1)),
+            )
+            .unwrap(),
+            Value::Numeric(NumericValue::from("1.00000000000000000000"))
         );
     }
 
