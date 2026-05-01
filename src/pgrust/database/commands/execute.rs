@@ -1240,6 +1240,7 @@ impl Database {
         let namespace_name = namespace.map(|row| row.nspname);
         let mut object_addresses = self.object_addresses.write();
         if is_grant
+            && namespace_oid.is_none()
             && grantee_name
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(&role.rolname))
