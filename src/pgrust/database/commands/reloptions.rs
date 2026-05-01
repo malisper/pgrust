@@ -96,6 +96,13 @@ fn normalize_bool_option(name: &str, value: &str) -> Result<String, ExecError> {
     }
 }
 
+fn normalize_vacuum_index_cleanup_option(name: &str, value: &str) -> Result<String, ExecError> {
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok("auto".into());
+    }
+    normalize_bool_option(name, value)
+}
+
 fn normalize_int_option(name: &str, value: &str, min: i64, max: i64) -> Result<String, ExecError> {
     if let Ok(parsed) = value.parse::<i64>() {
         if (min..=max).contains(&parsed) {
@@ -144,6 +151,10 @@ fn normalize_table_option(option: &RelOption) -> Result<(TableReloptionTarget, S
         | (TableReloptionTarget::Heap, "vacuum_truncate")
         | (TableReloptionTarget::Toast, "vacuum_truncate") => {
             normalize_bool_option(&name, &option.value)?
+        }
+        (TableReloptionTarget::Heap, "vacuum_index_cleanup")
+        | (TableReloptionTarget::Toast, "vacuum_index_cleanup") => {
+            normalize_vacuum_index_cleanup_option(&name, &option.value)?
         }
         (TableReloptionTarget::Heap, "autovacuum_analyze_scale_factor") => {
             normalize_real_option(&name, &option.value, 0.0, 100.0)?

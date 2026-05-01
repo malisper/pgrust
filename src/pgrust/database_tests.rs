@@ -8403,6 +8403,52 @@ fn vacuum_counts_toast_and_honors_process_options() {
     );
 }
 
+#[test]
+fn vacuum_process_counts_helper_view_is_creatable() {
+    let dir = temp_dir("vacuum_process_counts_helper_view");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table vac_option_tab (a int4, t text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into vac_option_tab select a, 't' || a from generate_series(1, 10) as a",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table vac_option_tab alter column t set storage external",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view vac_option_tab_counts as
+             select case when c.relname is null then 'main' else 'toast' end as rel,
+                    s.vacuum_count
+             from pg_stat_all_tables s
+             left join pg_class c on s.relid = c.reltoastrelid
+             where c.relname = 'vac_option_tab' or s.relname = 'vac_option_tab'
+             order by rel",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "vacuum (process_toast true) vac_option_tab")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select * from vac_option_tab_counts"),
+        vec![
+            vec![Value::Text("main".into()), Value::Int64(1)],
+            vec![Value::Text("toast".into()), Value::Int64(1)],
+        ]
+    );
+}
+
 fn vacuum_process_counts(session: &mut Session, db: &Database) -> Vec<Vec<Value>> {
     session_query_rows(
         session,
@@ -15977,6 +16023,72 @@ fn table_reloptions_create_set_reset_and_errors() {
             && sqlstate == "22023" => {}
         other => panic!("expected duplicate reloption error, got {other:?}"),
     }
+}
+
+#[test]
+fn vacuum_index_cleanup_reloptions_accept_heap_and_toast_values() {
+    let dir = temp_dir("vacuum_index_cleanup_reloptions");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table vacuum_index_cleanup_reloptions(t text) with \
+         (vacuum_index_cleanup = auto, toast.vacuum_index_cleanup = yes)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'vacuum_index_cleanup_reloptions'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["vacuum_index_cleanup=auto"],
+            TEXT_TYPE_OID
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tc.reloptions from pg_class c join pg_class tc on tc.oid = c.reltoastrelid \
+             where c.relname = 'vacuum_index_cleanup_reloptions'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["vacuum_index_cleanup=true"],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table vacuum_index_cleanup_reloptions set \
+         (vacuum_index_cleanup = off, toast.vacuum_index_cleanup = false)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'vacuum_index_cleanup_reloptions'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["vacuum_index_cleanup=false"],
+            TEXT_TYPE_OID
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tc.reloptions from pg_class c join pg_class tc on tc.oid = c.reltoastrelid \
+             where c.relname = 'vacuum_index_cleanup_reloptions'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["vacuum_index_cleanup=false"],
+            TEXT_TYPE_OID
+        )]]
+    );
 }
 
 #[test]
