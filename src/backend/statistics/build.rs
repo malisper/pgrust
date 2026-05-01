@@ -38,7 +38,7 @@ pub fn build_extended_statistics_payloads(
             .then(|| build_dependencies_payload(target_ids, &keyed_rows))
             .transpose()?,
         stxdmcv: wants_mcv
-            .then(|| build_mcv_payload(&keyed_rows, statistics_target))
+            .then(|| build_mcv_payload(&keyed_rows, total_rows, statistics_target))
             .transpose()?,
     })
 }
@@ -109,6 +109,7 @@ fn build_dependencies_payload(
 
 fn build_mcv_payload(
     rows: &[Vec<Option<String>>],
+    total_rows: f64,
     statistics_target: i16,
 ) -> Result<Vec<u8>, String> {
     let sample_total = rows.len();
@@ -139,22 +140,30 @@ fn build_mcv_payload(
             .then_with(|| left.1.1.cmp(&right.1.1))
             .then_with(|| left.0.cmp(&right.0))
     });
-    let has_repeated_group = ranked.iter().any(|(_, (count, _))| *count > 1);
     let target = if statistics_target <= 0 {
         100
     } else {
         statistics_target as usize
     };
+    let min_count = mcv_min_count(sample_total, total_rows);
+    if ranked.len() > target && ranked.first().is_some_and(|(_, (count, _))| *count == 1) {
+        // :HACK: PostgreSQL can TOAST large pg_statistic_ext_data values.
+        // pgrust catalog tuples are still single-page, and high-cardinality
+        // all-singleton MCV lists provide almost no correction beyond the
+        // per-expression stats. Prefer an empty MCV payload until the catalog
+        // can store toasted or compact binary MCV payloads.
+        return encode_pg_mcv_list_payload(&PgMcvListPayload { items });
+    }
     for (values, (count, _)) in ranked.into_iter() {
+        if (count as f64) < min_count {
+            break;
+        }
         let base_frequency = values.iter().enumerate().fold(1.0, |acc, (index, value)| {
             let marginal = marginal_counts[index].get(value).copied().unwrap_or(0) as f64;
             acc * (marginal / sample_total as f64)
         });
         let frequency = rounded_stat_frequency(count as f64 / sample_total as f64);
         let base_frequency = rounded_stat_frequency(base_frequency);
-        if count == 1 && (has_repeated_group || sample_total > target) {
-            continue;
-        }
         items.push(PgMcvItem {
             values,
             frequency,
@@ -173,6 +182,25 @@ fn build_mcv_payload(
             return Ok(encoded);
         }
         items.pop();
+    }
+}
+
+fn mcv_min_count(sample_rows: usize, total_rows: f64) -> f64 {
+    if sample_rows == 0 {
+        return 0.0;
+    }
+    let n = sample_rows as f64;
+    let total_rows = total_rows.max(n);
+    let numerator = n * (total_rows - n);
+    let denominator = total_rows - n + 0.04 * n * (total_rows - 1.0);
+    if denominator == 0.0 {
+        return 0.0;
+    }
+    let min_count = numerator / denominator;
+    if min_count.is_finite() && min_count > 0.0 {
+        min_count
+    } else {
+        0.0
     }
 }
 
@@ -321,13 +349,55 @@ mod tests {
             &payload.stxdmcv.unwrap(),
         )
         .unwrap();
-        assert_eq!(decoded.items.len(), 1);
+        assert_eq!(decoded.items.len(), 3);
         assert_eq!(
             decoded.items[0].values,
             vec![Some("1".into()), Some("x".into())]
         );
         assert_eq!(decoded.items[0].frequency, 0.5);
         assert_eq!(decoded.items[0].base_frequency, 0.5625);
+    }
+
+    #[test]
+    fn mcv_keeps_singletons_when_sample_covers_table() {
+        let rows = vec![
+            vec![Value::Int32(1), Value::Text("x".into())],
+            vec![Value::Int32(2), Value::Text("y".into())],
+            vec![Value::Int32(3), Value::Text("z".into())],
+        ];
+        let payload = build_extended_statistics_payloads(&[1, 2], &rows, 3.0, b"m", 100).unwrap();
+        let decoded = crate::backend::statistics::types::decode_pg_mcv_list_payload(
+            &payload.stxdmcv.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded.items.len(), 3);
+    }
+
+    #[test]
+    fn mcv_drops_sparse_singletons_from_large_sample() {
+        let rows = (0..30)
+            .map(|value| vec![Value::Int32(value), Value::Text(format!("v{value}").into())])
+            .collect::<Vec<_>>();
+        let payload =
+            build_extended_statistics_payloads(&[1, 2], &rows, 10_000.0, b"m", 100).unwrap();
+        let decoded = crate::backend::statistics::types::decode_pg_mcv_list_payload(
+            &payload.stxdmcv.unwrap(),
+        )
+        .unwrap();
+        assert!(decoded.items.is_empty());
+    }
+
+    #[test]
+    fn mcv_drops_oversized_all_singleton_lists() {
+        let rows = (0..150)
+            .map(|value| vec![Value::Int32(value), Value::Text(format!("v{value}").into())])
+            .collect::<Vec<_>>();
+        let payload = build_extended_statistics_payloads(&[1, 2], &rows, 150.0, b"m", 100).unwrap();
+        let decoded = crate::backend::statistics::types::decode_pg_mcv_list_payload(
+            &payload.stxdmcv.unwrap(),
+        )
+        .unwrap();
+        assert!(decoded.items.is_empty());
     }
 
     #[test]
