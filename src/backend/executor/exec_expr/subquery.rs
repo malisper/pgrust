@@ -4,7 +4,7 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayValue, RecordValue};
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, OpExprKind, ParamKind, Var, user_attrno,
+    BoolExprType, Expr, OpExprKind, ParamKind, Var, expr_sql_type_hint, user_attrno,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -371,6 +371,7 @@ fn build_scalar_lookup_cache(
     input: &Plan,
     key_expr: &Expr,
     value_expr: &Expr,
+    bpchar_key: bool,
     ctx: &mut ExecutorContext,
 ) -> Result<ScalarLookupCache, ExecError> {
     let mut state = executor_start(input.clone());
@@ -389,7 +390,7 @@ fn build_scalar_lookup_cache(
             if matches!(key, Value::Null) {
                 continue;
             }
-            let key = key.to_owned_value();
+            let key = scalar_lookup_cache_key(key, bpchar_key);
             let value = eval_expr(value_expr, &mut row.slot, ctx)?.to_owned_value();
             if values.insert(key.clone(), value).is_some() {
                 duplicates.insert(key);
@@ -400,6 +401,21 @@ fn build_scalar_lookup_cache(
     ctx.expr_bindings.outer_tuple = saved_outer_tuple;
     ctx.expr_bindings.outer_system_bindings = saved_outer_system_bindings;
     result
+}
+
+fn scalar_lookup_uses_bpchar_key(key_expr: &Expr, param_expr: &Expr) -> bool {
+    [key_expr, param_expr]
+        .into_iter()
+        .filter_map(expr_sql_type_hint)
+        .any(|ty| !ty.is_array && matches!(ty.kind, SqlTypeKind::Char))
+}
+
+fn scalar_lookup_cache_key(value: Value, bpchar_key: bool) -> Value {
+    let value = value.to_owned_value();
+    if bpchar_key && let Some(text) = value.as_text() {
+        return Value::Text(text.trim_end_matches(' ').into());
+    }
+    value
 }
 
 fn eval_scalar_lookup_fast_path(
@@ -413,6 +429,7 @@ fn eval_scalar_lookup_fast_path(
     if !expr_is_exists_membership_safe(&key_expr)
         || !expr_is_exists_membership_safe(&param_expr)
         || !expr_is_exists_membership_safe(&value_expr)
+        || expr_has_exec_param(&value_expr)
         || !plan_is_exists_membership_safe(input)
     {
         return Ok(None);
@@ -422,13 +439,14 @@ fn eval_scalar_lookup_fast_path(
     if matches!(param_value, Value::Null) {
         return Ok(Some(Value::Null));
     }
-    let param_value = param_value.to_owned_value();
+    let bpchar_key = scalar_lookup_uses_bpchar_key(&key_expr, &param_expr);
+    let param_value = scalar_lookup_cache_key(param_value, bpchar_key);
     let cache = if let Some(cache) =
         SCALAR_LOOKUP_CACHE.with(|cache| cache.borrow().get(&subplan.plan_id).cloned())
     {
         cache
     } else {
-        let built = build_scalar_lookup_cache(input, &key_expr, &value_expr, ctx)?;
+        let built = build_scalar_lookup_cache(input, &key_expr, &value_expr, bpchar_key, ctx)?;
         SCALAR_LOOKUP_CACHE.with(|cache| {
             cache.borrow_mut().insert(subplan.plan_id, built.clone());
         });

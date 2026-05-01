@@ -7,6 +7,7 @@ Key decisions:
 - Preserved named composite/record and array element identity through aggregate state/final values and view storage.
 - Fixed aggregate semantic-level tracking for nested sublinks and direct args, including lower-level var errors.
 - Added runtime fast paths for the two timeout shapes: correlated scalar lookup subplans and uncorrelated `= ANY` subplans in aggregate `FILTER`.
+- CI follow-up: scalar lookup cache keys now preserve `char(n)` equality semantics by trimming bpchar trailing spaces, and the cache skips target expressions that depend on Exec params.
 - Flattened multidimensional `PgArray` values for `unnest(anyarray)`, matching PostgreSQL storage-order unnesting.
 - Simulated custom aggregate combinefunc behavior for plain aggregates with custom combine functions so the regression’s NULL-returning combiner matches PostgreSQL’s forced parallel result.
 
@@ -20,6 +21,7 @@ Files touched:
 - `src/pgrust/database_tests.rs`
 - `src/pl/plpgsql/*`
 - `src/backend/rewrite/views.rs`
+- CI follow-up: `src/backend/executor/exec_expr/subquery.rs`, `src/backend/optimizer/tests.rs`
 
 Tests run:
 - `cargo fmt`
@@ -31,6 +33,12 @@ Tests run:
   - `create_aggregate` PASS.
   - `aggregates` FAIL, 499/583 matched, 84 mismatches, 1364 diff lines.
   - No timeouts.
+- `scripts/cargo_isolated.sh test --lib --quiet planner_keeps_nested_sublink_max_as_aggregate`
+  - 1 passed.
+- `scripts/cargo_isolated.sh test --lib --quiet plpgsql_assignment_query_expr_from_clause_uses_sql_scope`
+  - 1 passed.
+- `scripts/cargo_isolated.sh test --lib --quiet aggregate_regress`
+  - 7 passed after CI follow-up.
 
 Remaining:
 - Remaining `aggregates.diff` mismatches in `amsterdam-v5-impl10` are in the excluded buckets:
