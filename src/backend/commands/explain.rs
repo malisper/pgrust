@@ -4043,6 +4043,19 @@ fn resolve_window_sort_display_alias(
 }
 
 fn sort_item_needs_extra_expression_parens(expr: &Expr, rendered: &str) -> bool {
+    let is_geo_distance = matches!(
+        expr,
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoDistance)
+            )
+    );
+    if is_geo_distance || rendered.contains(" <-> ") {
+        // :HACK: PostgreSQL's ruleutils keeps an extra paren layer around
+        // ORDER BY distance operators. This is EXPLAIN text only.
+        return !(rendered.starts_with("((") && rendered.ends_with("))"));
+    }
     let already_wrapped = rendered.starts_with('(') && rendered.ends_with(')');
     (rendered.starts_with('(') && !already_wrapped)
         || (!already_wrapped && matches!(expr, Expr::GroupingFunc(_)))
@@ -7326,6 +7339,12 @@ fn explain_plan_children_with_context(
         }
         Plan::SubqueryScan { input, filter, .. } => {
             let mut child_ctx = ctx.clone();
+            if !verbose {
+                // :HACK: PostgreSQL deparses non-verbose sort keys below a
+                // subquery scan against the base scan output, not only the
+                // subquery alias list. Keep this scoped to EXPLAIN rendering.
+                child_ctx.force_qualified_sort_keys = true;
+            }
             if plan_contains_window_agg(input) {
                 child_ctx.qualify_window_base_names = true;
             }
