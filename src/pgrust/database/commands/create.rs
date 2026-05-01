@@ -7264,6 +7264,37 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    fn validate_create_table_as_column_names(
+        create_stmt: &CreateTableAsStatement,
+        query_column_count: usize,
+    ) -> Result<(), ExecError> {
+        if create_stmt.column_names.len() > query_column_count {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: "too many column names were specified".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            }));
+        }
+        Ok(())
+    }
+
+    fn default_acl_for_new_table(&self, owner_oid: u32, namespace_oid: u32) -> Option<Vec<String>> {
+        let mut acl_items = None;
+        for row in &self.object_addresses.read().default_acls {
+            if row.role_oid == owner_oid
+                && row.objtype == 'r'
+                && row
+                    .namespace_oid
+                    .is_none_or(|default_namespace_oid| default_namespace_oid == namespace_oid)
+                && !row.acl_items.is_empty()
+            {
+                acl_items = Some(row.acl_items.clone());
+            }
+        }
+        acl_items
+    }
+
     pub(crate) fn execute_create_table_as_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -7420,6 +7451,7 @@ impl Database {
             (columns, column_names, rows)
         };
 
+        Self::validate_create_table_as_column_names(create_stmt, columns.len())?;
         let desc = crate::backend::executor::RelationDesc {
             columns: columns
                 .iter()
@@ -7499,6 +7531,7 @@ impl Database {
                     waiter: None,
                     interrupts: Arc::clone(&interrupts),
                 };
+                let owner_oid = self.auth_state(client_id).current_user_oid();
                 let (mut created, effect) = catalog_guard
                     .create_table_mvcc_with_options(
                         table_name.clone(),
@@ -7508,7 +7541,7 @@ impl Database {
                         relpersistence,
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
-                        self.auth_state(client_id).current_user_oid(),
+                        owner_oid,
                         None,
                         &write_ctx,
                     )
@@ -7516,12 +7549,32 @@ impl Database {
                 drop(catalog_guard);
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                let mut metadata_cid = table_cid.saturating_add(1);
+                if let Some(relacl) = self.default_acl_for_new_table(owner_oid, namespace_oid) {
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: metadata_cid,
+                        client_id,
+                        waiter: None,
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    metadata_cid = metadata_cid.saturating_add(1);
+                    let effect = self
+                        .catalog
+                        .write()
+                        .alter_relation_acl_mvcc(created.entry.relation_oid, Some(relacl), &ctx)
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                }
                 if relation_tablespace_oid != created.entry.rel.spc_oid {
                     let ctx = CatalogWriteContext {
                         pool: self.pool.clone(),
                         txns: self.txns.clone(),
                         xid,
-                        cid: table_cid.saturating_add(1),
+                        cid: metadata_cid,
                         client_id,
                         waiter: None,
                         interrupts: Arc::clone(&interrupts),

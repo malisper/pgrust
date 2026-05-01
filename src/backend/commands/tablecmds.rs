@@ -10931,14 +10931,15 @@ fn relation_acl_allows_as(
                 sqlstate: "XX000",
             })?;
     let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
-    if auth.current_user_oid() == class_row.relowner {
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
+    let has_owner_privileges = auth.current_user_oid() == class_row.relowner
+        || auth.has_effective_membership(class_row.relowner, &auth_catalog);
+    if has_owner_privileges && class_row.relacl.is_none() {
         return Ok(true);
     }
-    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
-    if auth.has_effective_membership(class_row.relowner, &auth_catalog)
-        || auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .is_some_and(|role| role.rolsuper)
+    if auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|role| role.rolsuper)
     {
         return Ok(true);
     }
@@ -11005,14 +11006,15 @@ fn relation_or_all_column_acls_allow_as(
                 sqlstate: "XX000",
             })?;
     let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
-    if auth.current_user_oid() == class_row.relowner {
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
+    let has_owner_privileges = auth.current_user_oid() == class_row.relowner
+        || auth.has_effective_membership(class_row.relowner, &auth_catalog);
+    if has_owner_privileges && class_row.relacl.is_none() {
         return Ok(true);
     }
-    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
-    if auth.has_effective_membership(class_row.relowner, &auth_catalog)
-        || auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .is_some_and(|role| role.rolsuper)
+    if auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|role| role.rolsuper)
     {
         return Ok(true);
     }

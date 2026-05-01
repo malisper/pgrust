@@ -1144,7 +1144,9 @@ impl Database {
         sql: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<(), ExecError> {
-        // :HACK: Track only object-address identity rows, not default privilege enforcement.
+        // :HACK: This stores object-address identity plus the table ACL items
+        // needed by new-relation creation. Full default privileges belong in
+        // pg_default_acl-backed catalog state.
         if let Some(spec) = parse_large_object_default_privileges_sql(sql)? {
             let xid = self.txns.write().begin();
             let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -1193,7 +1195,7 @@ impl Database {
         let is_grant = tokens
             .iter()
             .any(|token| token.eq_ignore_ascii_case("grant"));
-        let grantee_name = oa_token_after(&tokens, &["to"]);
+        let grantee_name = oa_token_after(&tokens, &[if is_grant { "to" } else { "from" }]);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let role = if let Some(role_name) = role_name {
             catalog
@@ -1247,12 +1249,25 @@ impl Database {
         {
             object_addresses.remove_default_acl(role.oid, namespace_oid, objtype);
         } else {
+            let privilege_chars =
+                crate::backend::catalog::object_address::default_acl_privilege_chars_from_tokens(
+                    &tokens, objtype,
+                );
+            let acl_items =
+                crate::backend::catalog::object_address::default_acl_items_for_object_address(
+                    &role.rolname,
+                    objtype,
+                    is_grant,
+                    grantee_name.as_deref(),
+                    &privilege_chars,
+                );
             object_addresses.upsert_default_acl(
                 role.oid,
                 role.rolname,
                 namespace_oid,
                 namespace_name,
                 objtype,
+                acl_items,
             );
         }
         Ok(())

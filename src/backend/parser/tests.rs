@@ -11949,6 +11949,43 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: CreateTableAsQuery::Select(SelectStatement { from: Some(FromItem::Table { name, .. }), .. }), .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
     );
     assert!(
+        matches!(parse_statement("explain analyze select * into table easi from int8_tbl").unwrap(), Statement::Explain(explain) if matches!(explain.statement.as_ref(), Statement::CreateTableAs(CreateTableAsStatement { table_name, .. }) if table_name == "easi"))
+    );
+    assert!(matches!(
+        parse_statement("declare foo cursor for select 1 into int4_tbl"),
+        Err(ParseError::Positioned { source, .. })
+            if matches!(*source, ParseError::DetailedError { ref message, sqlstate: "42601", .. } if message == "SELECT ... INTO is not allowed here")
+    ));
+    assert!(matches!(
+        parse_statement("insert into int4_tbl select 1"),
+        Ok(Statement::Insert(_))
+    ));
+    assert!(matches!(
+        parse_statement(
+            "with recursive t(id) as ( \
+                select 1 union all select id + 1 from t where id < 3 \
+             ), ins as ( \
+                insert into dst select id from t returning id \
+             ) \
+             select id from ins"
+        ),
+        Ok(Statement::Select(_))
+    ));
+    assert!(matches!(
+        parse_statement(
+            "with simpletup as (select 2 k, 'Green' v), \
+             upsert_cte as ( \
+               insert into withz values (2, 'Blue') on conflict (k) do \
+               update set (k, v) = (select k, v from simpletup where simpletup.k = withz.k) \
+               returning k, v \
+             ) \
+             insert into withz values (2, 'Red') on conflict (k) do \
+             update set (k, v) = (select k, v from upsert_cte where upsert_cte.k = withz.k) \
+             returning k, v"
+        ),
+        Ok(Statement::Insert(_))
+    ));
+    assert!(
         matches!(parse_statement("prepare q as select * from cmdata").unwrap(), Statement::Prepare(PrepareStatement { name, .. }) if name == "q")
     );
     assert!(
