@@ -60,7 +60,30 @@ pub fn normalize_function_guc_assignment(
             });
         }
     }
-    Ok((normalized, value.to_string()))
+    Ok((normalized, unquote_function_guc_value(value)))
+}
+
+pub fn pg_settings_flags(name: &str) -> Option<&'static [&'static str]> {
+    const EMPTY: &[&str] = &[];
+    const EXPLAIN: &[&str] = &["EXPLAIN"];
+
+    let normalized = normalize_guc_name(name);
+    match normalized.as_str() {
+        "default_statistics_target" => Some(EMPTY),
+        setting if setting.starts_with("enable_") => Some(EXPLAIN),
+        _ => None,
+    }
+}
+
+fn unquote_function_guc_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        return trimmed[1..trimmed.len() - 1].replace("''", "'");
+    }
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        return trimmed[1..trimmed.len() - 1].replace("\"\"", "\"");
+    }
+    trimmed.to_string()
 }
 
 fn postgres_gucs() -> &'static HashSet<String> {
@@ -85,6 +108,17 @@ mod tests {
         assert!(is_postgres_guc("allow_in_place_tablespaces"));
         assert!(is_postgres_guc("synchronous_commit"));
         assert!(!is_postgres_guc("not_a_real_guc"));
+    }
+
+    #[test]
+    fn normalizes_quoted_function_guc_values() {
+        let (_, value) =
+            normalize_function_guc_assignment("work_mem", "'1MB'", false, true).unwrap();
+        assert_eq!(value, "1MB");
+
+        let (_, value) =
+            normalize_function_guc_assignment("work_mem", "'it''s'", false, true).unwrap();
+        assert_eq!(value, "it's");
     }
 
     #[test]

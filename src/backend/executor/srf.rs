@@ -1362,6 +1362,7 @@ fn eval_pg_show_all_settings(
     output_columns: &[crate::include::nodes::primnodes::QueryColumn],
 ) -> Vec<TupleSlot> {
     const ENABLE_SETTINGS: &[(&str, &str)] = &[
+        ("default_statistics_target", "100"),
         ("enable_async_append", "on"),
         ("enable_bitmapscan", "on"),
         ("enable_distinct_reordering", "on"),
@@ -1398,12 +1399,31 @@ fn eval_pg_show_all_settings(
                         "setting" => Value::Text((*setting).into()),
                         "unit" => Value::Null,
                         "category" => {
-                            Value::Text("Query Tuning / Planner Method Configuration".into())
+                            let category = if *name == "default_statistics_target" {
+                                "Query Tuning / Other Planner Options"
+                            } else {
+                                "Query Tuning / Planner Method Configuration"
+                            };
+                            Value::Text(category.into())
                         }
-                        "short_desc" => Value::Text("Enables a planner method.".into()),
+                        "short_desc" => {
+                            let description = if *name == "default_statistics_target" {
+                                "Sets the default statistics target."
+                            } else {
+                                "Enables a planner method."
+                            };
+                            Value::Text(description.into())
+                        }
                         "extra_desc" => Value::Null,
                         "context" => Value::Text("user".into()),
-                        "vartype" => Value::Text("bool".into()),
+                        "vartype" => {
+                            let vartype = if *name == "default_statistics_target" {
+                                "integer"
+                            } else {
+                                "bool"
+                            };
+                            Value::Text(vartype.into())
+                        }
                         "source" => Value::Text("default".into()),
                         "min_val" => Value::Null,
                         "max_val" => Value::Null,
