@@ -21954,6 +21954,29 @@ fn bytea_hash_and_encoding_functions_work() {
 }
 
 #[test]
+fn bytea_escape_encoding_keeps_low_control_bytes_raw() {
+    let base = temp_dir("strings_bytea_escape_encoding");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select encode('\\x1234567890abcdef00', 'escape'), \
+                    encode(E'Th\\\\000omas'::bytea, 'escape'), \
+                    encode(E'\\\\001\\\\002\\\\003'::bytea, 'escape')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("\x124Vx\\220\\253\\315\\357\\000".into()),
+            Value::Text("Th\\000omas".into()),
+            Value::Text("\x01\x02\x03".into()),
+        ]],
+    );
+}
+
+#[test]
 fn bytea_concat_operator_concatenates_buffers() {
     let base = temp_dir("bytea_concat_operator");
     let txns = TransactionManager::new_durable(&base).unwrap();

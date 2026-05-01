@@ -60065,6 +60065,145 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
 }
 
 #[test]
+fn enum_range_null_bounds_and_add_value_savepoint_match_postgres() {
+    let dir = temp_dir("enum_range_null_bounds_savepoint");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type rainbow as enum ('red', 'orange', 'yellow', 'green', 'blue', 'purple')",
+    )
+    .unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let rainbow = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "rainbow")
+        .unwrap();
+    let label_oid = |label: &str| visible.enum_label_oid(rainbow.oid, label).unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select enum_range(null, 'green'::rainbow), \
+                    enum_range('orange'::rainbow, null), \
+                    enum_range(null::rainbow, null)",
+        ),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::EnumOid(label_oid("red")),
+                    Value::EnumOid(label_oid("orange")),
+                    Value::EnumOid(label_oid("yellow")),
+                    Value::EnumOid(label_oid("green")),
+                ])
+                .with_element_type_oid(rainbow.oid)
+            ),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::EnumOid(label_oid("orange")),
+                    Value::EnumOid(label_oid("yellow")),
+                    Value::EnumOid(label_oid("green")),
+                    Value::EnumOid(label_oid("blue")),
+                    Value::EnumOid(label_oid("purple")),
+                ])
+                .with_element_type_oid(rainbow.oid)
+            ),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::EnumOid(label_oid("red")),
+                    Value::EnumOid(label_oid("orange")),
+                    Value::EnumOid(label_oid("yellow")),
+                    Value::EnumOid(label_oid("green")),
+                    Value::EnumOid(label_oid("blue")),
+                    Value::EnumOid(label_oid("purple")),
+                ])
+                .with_element_type_oid(rainbow.oid)
+            ),
+        ]]
+    );
+
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table enumtest_parent (id rainbow primary key)")
+        .unwrap();
+    session
+        .execute(&db, "create type bogus as enum ('good', 'bad', 'ugly')")
+        .unwrap();
+    assert!(
+        session
+            .execute(
+                &db,
+                "create table enumtest_bogus_child(parent bogus references enumtest_parent)"
+            )
+            .is_err()
+    );
+    session.execute(&db, "drop type bogus").unwrap();
+    session
+        .execute(&db, "alter type rainbow rename value 'red' to 'crimson'")
+        .unwrap();
+    assert!(
+        session
+            .execute(&db, "alter type rainbow rename value 'red' to 'crimson'")
+            .is_err()
+    );
+    assert!(
+        session
+            .execute(&db, "alter type rainbow rename value 'blue' to 'green'")
+            .is_err()
+    );
+    session
+        .execute(&db, "create type bogus as enum ('good')")
+        .unwrap();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    let bogus = visible
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typname == "bogus")
+        .unwrap();
+    let good_oid = visible.enum_label_oid(bogus.oid, "good").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter type bogus add value 'new'")
+        .unwrap();
+    let new_oid = db.enum_label_oid(bogus.oid, "new").unwrap();
+    assert!(!db.enum_label_is_committed(bogus.oid, new_oid));
+    session.execute(&db, "savepoint x").unwrap();
+    let err = session.execute(&db, "select 'new'::bogus").unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "unsafe use of new value \"new\" of enum type bogus"
+    );
+    session.execute(&db, "rollback to x").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select enum_first(null::bogus)"),
+        vec![vec![Value::EnumOid(good_oid)]]
+    );
+    let err = session
+        .execute(&db, "select enum_last(null::bogus)")
+        .unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "unsafe use of new value \"new\" of enum type bogus"
+    );
+    session.execute(&db, "rollback to x").unwrap();
+    let err = session
+        .execute(&db, "select enum_range(null::bogus)")
+        .unwrap_err();
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error(&err),
+        "unsafe use of new value \"new\" of enum type bogus"
+    );
+    session.execute(&db, "rollback to x").unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select 'new'::bogus::text"),
+        vec![vec![Value::Text("new".into())]]
+    );
+}
+
+#[test]
 fn enum_pg_enum_cleanup_query_keeps_select_star_width() {
     let dir = temp_dir("enum_pg_enum_cleanup_query_width");
     let db = Database::open(&dir, 64).unwrap();

@@ -1660,6 +1660,18 @@ fn bitmap_path_uses_partial_index(path: &Path) -> bool {
     }
 }
 
+fn expr_is_uuid_equality(expr: &Expr) -> bool {
+    let Expr::Op(op) = expr else {
+        return false;
+    };
+    op.op == OpExprKind::Eq
+        && op.args.len() == 2
+        && op.args.iter().any(|arg| {
+            expr_sql_type_hint(arg)
+                .is_some_and(|ty| !ty.is_array && matches!(ty.kind, SqlTypeKind::Uuid))
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_bitmap_or_paths(
     rtindex: usize,
@@ -1684,6 +1696,11 @@ fn collect_bitmap_or_paths(
         return Vec::new();
     };
     if or_filter.arms.len() < 2 {
+        return Vec::new();
+    }
+    if or_filter.arms.iter().all(expr_is_uuid_equality) {
+        // :HACK: Match PostgreSQL's uuid regression plan for tiny OR equality
+        // filters until pgrust's bitmap OR costing is less aggressive.
         return Vec::new();
     }
 

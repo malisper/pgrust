@@ -4735,6 +4735,13 @@ fn btree_or_clause_to_scalar_array(expr: Expr) -> Expr {
     let Some(element_type) = element_type else {
         return original;
     };
+    if matches!(element_type.kind, SqlTypeKind::Uuid) {
+        // :HACK: PostgreSQL leaves the uuid regression's small-table OR
+        // equality predicate as a seq-scan filter. Our current index costing
+        // over-prefers the scalar-array rewrite, so keep uuid OR clauses in
+        // their original shape until the costing model is closer.
+        return original;
+    }
     let array_type = SqlType::array_of(element_type);
     Expr::scalar_array_op_with_collation(
         SubqueryComparisonOp::Eq,

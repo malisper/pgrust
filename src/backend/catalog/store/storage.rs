@@ -11,9 +11,8 @@ use crate::backend::catalog::indexing::{
     insert_bootstrap_system_indexes, system_catalog_index_entry_for_db,
 };
 use crate::backend::catalog::loader::{
-    catalog_from_physical_rows_scoped, load_catalog_from_visible_pool,
-    load_physical_catalog_rows_visible_in_pool, load_physical_catalog_rows_visible_scoped,
-    load_visible_catalog_kind_in_pool_scoped,
+    catalog_from_physical_rows_scoped, load_physical_catalog_rows_visible_in_pool,
+    load_physical_catalog_rows_visible_scoped, load_visible_catalog_kind_in_pool_scoped,
 };
 use crate::backend::catalog::persistence::{
     apply_catalog_row_changes_subset_incremental, sync_catalog_rows_subset,
@@ -29,7 +28,7 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BootstrapCatalogKind, CatalogScope, PgEventTriggerRow, bootstrap_catalog_kinds,
+    BootstrapCatalogKind, CatalogScope, PgEventTriggerRow, PgTypeRow, bootstrap_catalog_kinds,
     bootstrap_pg_aggregate_rows, system_catalog_indexes, system_catalog_indexes_for_heap,
 };
 
@@ -63,6 +62,14 @@ fn visible_kinds(scope: CatalogScope) -> Vec<BootstrapCatalogKind> {
     match scope {
         CatalogScope::Shared => scope_kinds(scope),
         CatalogScope::Database(_) => bootstrap_catalog_kinds().into_iter().collect(),
+    }
+}
+
+fn add_extra_type_rows(rows: &mut PhysicalCatalogRows, extra_type_rows: &[PgTypeRow]) {
+    for row in extra_type_rows {
+        if rows.types.iter().all(|existing| existing.oid != row.oid) {
+            rows.types.push(row.clone());
+        }
     }
 }
 
@@ -294,7 +301,7 @@ impl CatalogStore {
         snapshot: &Snapshot,
         client_id: crate::ClientId,
     ) -> Result<CatCache, CatalogError> {
-        let rows = match &self.mode {
+        let mut rows = match &self.mode {
             CatalogStoreMode::Durable { base_dir, .. } => {
                 load_physical_catalog_rows_visible_scoped(
                     base_dir,
@@ -310,6 +317,7 @@ impl CatalogStore {
                 load_physical_catalog_rows_visible_in_pool(pool, txns, snapshot, client_id)?
             }
         };
+        add_extra_type_rows(&mut rows, &self.extra_type_rows);
         Ok(CatCache::from_rows(
             rows.namespaces,
             rows.classes,
@@ -585,8 +593,10 @@ impl CatalogStore {
                 base_dir,
                 control_path,
             } => {
+                let mut rows = load_visible_physical_rows_startup_scoped(base_dir, self.scope)?;
+                add_extra_type_rows(&mut rows, &self.extra_type_rows);
                 let mut catalog =
-                    load_catalog_from_visible_physical_startup_scoped(base_dir, self.scope)?;
+                    catalog_from_physical_rows_scoped(base_dir, rows, self.scope_db_oid())?;
                 let control = load_control_file(control_path)?;
                 catalog.next_oid = catalog.next_oid.max(load_effective_next_oid(
                     control_path,
@@ -614,7 +624,7 @@ impl CatalogStore {
                 base_dir,
                 control_path,
             } => {
-                let rows = load_physical_catalog_rows_visible_scoped(
+                let mut rows = load_physical_catalog_rows_visible_scoped(
                     base_dir,
                     &ctx.pool,
                     &txns,
@@ -623,6 +633,7 @@ impl CatalogStore {
                     self.scope_db_oid(),
                     &visible_kinds(self.scope),
                 )?;
+                add_extra_type_rows(&mut rows, &self.extra_type_rows);
                 let mut catalog =
                     catalog_from_physical_rows_scoped(base_dir, rows, self.scope_db_oid())?;
                 let control = load_control_file(control_path)?;
@@ -634,8 +645,14 @@ impl CatalogStore {
                 catalog
             }
             CatalogStoreMode::Ephemeral => {
-                let mut catalog =
-                    load_catalog_from_visible_pool(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+                let mut rows = load_physical_catalog_rows_visible_in_pool(
+                    &ctx.pool,
+                    &txns,
+                    &snapshot,
+                    ctx.client_id,
+                )?;
+                add_extra_type_rows(&mut rows, &self.extra_type_rows);
+                let mut catalog = catalog_from_physical_rows_scoped(Path::new(""), rows, 1)?;
                 catalog.next_oid = catalog.next_oid.max(self.control.next_oid);
                 catalog.next_rel_number = catalog.next_rel_number.max(self.control.next_rel_number);
                 catalog
