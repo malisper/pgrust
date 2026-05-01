@@ -12158,10 +12158,13 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("refresh materialized view concurrently mv_items with no data").unwrap(), Statement::RefreshMaterializedView(RefreshMaterializedViewStatement { relation_name, concurrently: true, skip_data: true }) if relation_name == "mv_items")
     );
     assert!(
-        matches!(parse_statement("truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
+        matches!(parse_statement("truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names, restart_identity: false, cascade: false, .. }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
-        matches!(parse_statement("truncate pgbench_history").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_history"])
+        matches!(parse_statement("truncate pgbench_history").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names, restart_identity: false, cascade: false, .. }) if table_names == vec!["pgbench_history"])
+    );
+    assert!(
+        matches!(parse_statement("truncate only pgbench_history restart identity cascade").unwrap(), Statement::TruncateTable(TruncateTableStatement { targets, restart_identity: true, cascade: true, .. }) if targets.len() == 1 && targets[0].relation_name == "pgbench_history" && !targets[0].include_descendants)
     );
     assert!(
         matches!(parse_statement("vacuum pgbench_branches").unwrap(), Statement::Vacuum(VacuumStatement { analyze: false, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "pgbench_branches".into(), columns: vec![], only: false }])

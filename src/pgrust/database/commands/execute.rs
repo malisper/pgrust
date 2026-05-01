@@ -1419,83 +1419,97 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        ctx: &mut ExecutorContext,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        use crate::backend::commands::tablecmds::{
+            check_truncate_relation_privileges, fire_after_truncate_triggers,
+            fire_before_truncate_triggers, owned_sequence_oids_for_truncate,
+            resolve_truncate_relations,
+        };
+
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let targets = resolve_truncate_relations(stmt, &catalog, true)?;
+        check_truncate_relation_privileges(&targets, ctx)?;
+        let triggers = fire_before_truncate_triggers(&targets, &catalog, ctx)?;
+
         let mut rewrite_oids = Vec::new();
         let mut truncated_relation_oids = Vec::new();
+        for target in targets.iter().filter(|target| target.relkind == 'r') {
+            if !truncated_relation_oids.contains(&target.relation_oid) {
+                truncated_relation_oids.push(target.relation_oid);
+            }
 
-        for table_name in &stmt.table_names {
-            let entry = match catalog.lookup_any_relation(table_name) {
-                Some(entry) if entry.relkind == 'r' || entry.relkind == 'p' => entry,
-                Some(_) => {
-                    return Err(ExecError::Parse(ParseError::WrongObjectType {
-                        name: table_name.clone(),
-                        expected: "table",
-                    }));
+            if !rewrite_oids.contains(&target.relation_oid) {
+                rewrite_oids.push(target.relation_oid);
+            }
+            for index in catalog.index_relations_for_heap(target.relation_oid) {
+                if !rewrite_oids.contains(&index.relation_oid) {
+                    rewrite_oids.push(index.relation_oid);
                 }
-                None => {
-                    return Err(ExecError::Parse(ParseError::UnknownTable(
-                        table_name.clone(),
-                    )));
+            }
+            if let Some(toast) = target.toast {
+                if !rewrite_oids.contains(&toast.relation_oid) {
+                    rewrite_oids.push(toast.relation_oid);
                 }
-            };
-            let truncate_targets = if entry.relkind == 'p' {
-                partitioned_truncate_targets(&catalog, entry.relation_oid)
-            } else if catalog.has_subclass(entry.relation_oid) {
-                inherited_truncate_targets(&catalog, entry.relation_oid)
-            } else {
-                vec![entry]
-            };
-
-            for target in truncate_targets {
-                if !truncated_relation_oids.contains(&target.relation_oid) {
-                    truncated_relation_oids.push(target.relation_oid);
-                }
-
-                if !rewrite_oids.contains(&target.relation_oid) {
-                    rewrite_oids.push(target.relation_oid);
-                }
-                for index in catalog.index_relations_for_heap(target.relation_oid) {
+                for index in catalog.index_relations_for_heap(toast.relation_oid) {
                     if !rewrite_oids.contains(&index.relation_oid) {
                         rewrite_oids.push(index.relation_oid);
                     }
                 }
-                if let Some(toast) = target.toast {
-                    if !rewrite_oids.contains(&toast.relation_oid) {
-                        rewrite_oids.push(toast.relation_oid);
-                    }
-                    for index in catalog.index_relations_for_heap(toast.relation_oid) {
-                        if !rewrite_oids.contains(&index.relation_oid) {
-                            rewrite_oids.push(index.relation_oid);
-                        }
-                    }
-                }
             }
         }
 
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: Some(self.txn_waiter.clone()),
-            interrupts: self.interrupt_state(client_id),
-        };
-        let effect = self
-            .catalog
-            .write()
-            .rewrite_relation_storage_mvcc(&rewrite_oids, &ctx)?;
-        self.apply_catalog_mutation_effect_immediate(&effect)?;
-        {
-            let stats_state = self.session_stats_state(client_id);
-            let mut stats_state = stats_state.write();
-            for relation_oid in truncated_relation_oids {
-                stats_state.note_relation_truncate(relation_oid);
+        if !rewrite_oids.is_empty() {
+            let write_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .rewrite_relation_storage_mvcc(&rewrite_oids, &write_ctx)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            {
+                let stats_state = self.session_stats_state(client_id);
+                let mut stats_state = stats_state.write();
+                for relation_oid in truncated_relation_oids {
+                    stats_state.note_relation_truncate(relation_oid);
+                }
+            }
+            catalog_effects.push(effect);
+            ctx.next_command_id = ctx.next_command_id.max(cid.saturating_add(1));
+            ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
+        }
+        if stmt.restart_identity {
+            for sequence_oid in owned_sequence_oids_for_truncate(&targets, &catalog) {
+                let Some(mut data) = self.sequences.sequence_data(sequence_oid) else {
+                    continue;
+                };
+                data.state.last_value = data.options.start;
+                data.state.log_cnt = 0;
+                data.state.is_called = false;
+                let persistent = catalog
+                    .relation_by_oid(sequence_oid)
+                    .is_some_and(|relation| relation.relpersistence != 't');
+                sequence_effects.push(self.sequences.apply_upsert(sequence_oid, data, persistent));
             }
         }
-        catalog_effects.push(effect);
+        let refreshed_catalog = self.lazy_catalog_lookup(
+            client_id,
+            Some((xid, cid.saturating_add(1))),
+            configured_search_path,
+        );
+        ctx.catalog = Some(crate::backend::executor::executor_catalog(
+            refreshed_catalog.clone(),
+        ));
+        fire_after_truncate_triggers(&triggers, ctx)?;
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -1859,7 +1873,7 @@ impl Database {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
             check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
-            execute_truncate_table,
+            resolve_truncate_relations,
         };
         let interrupts = self.interrupt_state(client_id);
         let session_replication_role = self.session_replication_role(client_id);
@@ -4405,45 +4419,12 @@ impl Database {
                     configured_search_path,
                 ),
             Statement::TruncateTable(ref truncate_stmt) => {
-                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let mut relations = Vec::new();
-                for name in &truncate_stmt.table_names {
-                    let Some(entry) = catalog.lookup_any_relation(name) else {
-                        continue;
-                    };
-                    if !relations
-                        .iter()
-                        .any(|existing: &crate::backend::parser::BoundRelation| {
-                            existing.relation_oid == entry.relation_oid
-                        })
-                    {
-                        relations.push(entry.clone());
-                    }
-                    if entry.relkind == 'p' {
-                        for target in partitioned_truncate_targets(&catalog, entry.relation_oid) {
-                            if relations.iter().any(
-                                |existing: &crate::backend::parser::BoundRelation| {
-                                    existing.relation_oid == target.relation_oid
-                                },
-                            ) {
-                                continue;
-                            }
-                            relations.push(target);
-                        }
-                    }
-                }
-                let target_relation_oids = relations
-                    .iter()
-                    .map(|relation| relation.relation_oid)
-                    .collect::<Vec<_>>();
-                for relation in &relations {
-                    reject_relation_with_referencing_foreign_keys_except(
-                        &catalog,
-                        relation.relation_oid,
-                        &target_relation_oids,
-                        "TRUNCATE on table without referencing foreign keys",
-                    )?;
-                }
+                let xid = self.txns.write().begin();
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
+                let catalog =
+                    self.lazy_catalog_lookup(client_id, Some((xid, 0)), configured_search_path);
+                let relations = resolve_truncate_relations(truncate_stmt, &catalog, false)?;
                 let rels = relations
                     .iter()
                     .map(|relation| relation.rel)
@@ -4456,7 +4437,9 @@ impl Database {
                     interrupts.as_ref(),
                 )?;
 
-                let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
+                let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
+                let deferred_foreign_keys =
+                    crate::backend::executor::DeferredForeignKeyTracker::default();
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     data_dir: Some(self.cluster.base_dir.clone()),
@@ -4513,19 +4496,39 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
-                    deferred_foreign_keys: None,
+                    deferred_foreign_keys: Some(deferred_foreign_keys),
                     trigger_depth: 0,
                 };
-                let result = execute_truncate_table(
-                    truncate_stmt.clone(),
-                    &catalog,
+                let mut catalog_effects = Vec::new();
+                let mut sequence_effects = Vec::new();
+                let result = self.execute_truncate_table_in_transaction_with_search_path(
+                    client_id,
+                    truncate_stmt,
+                    xid,
+                    0,
+                    configured_search_path,
                     &mut ctx,
-                    INVALID_TRANSACTION_ID,
+                    &mut catalog_effects,
+                    &mut sequence_effects,
                 );
-                drop(ctx);
+                let pending_async_notifications =
+                    std::mem::take(&mut ctx.pending_async_notifications);
+                catalog_effects.append(&mut std::mem::take(&mut ctx.catalog_effects));
+                catalog_effects.extend(std::mem::take(&mut ctx.pending_catalog_effects));
+                let temp_effects = std::mem::take(&mut ctx.temp_effects);
+                let result = self.finish_txn_with_async_notifications(
+                    client_id,
+                    xid,
+                    result,
+                    &catalog_effects,
+                    &temp_effects,
+                    &sequence_effects,
+                    pending_async_notifications,
+                );
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
                 }
+                guard.disarm();
                 result
             }
             Statement::Vacuum(ref vacuum_stmt) => self.execute_vacuum_stmt_with_search_path(

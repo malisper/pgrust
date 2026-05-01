@@ -39945,11 +39945,15 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
     ] {
         match db.execute(1, sql) {
             Err(ExecError::DetailedError {
+                message,
                 detail: Some(detail),
                 ..
             }) if detail.contains("foreign key constraint")
                 || detail.contains("depends on table")
-                || detail.contains("depends on") => {}
+                || detail.contains("depends on")
+                || (message
+                    == "cannot truncate a table referenced in a foreign key constraint"
+                    && detail.contains("references")) => {}
             Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
                 if actual.contains("foreign key constraint")
                     || actual.contains("referenced by foreign key")
@@ -40310,6 +40314,12 @@ fn truncate_all_foreign_key_relations_together() {
     db.execute(1, "insert into children values (1, 1)").unwrap();
 
     match db.execute(1, "truncate parents") {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            ..
+        }) if message == "cannot truncate a table referenced in a foreign key constraint"
+            && detail == "Table \"children\" references \"parents\"." => {}
         Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
             if actual.contains("foreign key constraint") => {}
         other => panic!("expected single-table truncate to be blocked, got {other:?}"),

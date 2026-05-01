@@ -4286,8 +4286,17 @@ pub enum LockTableMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateTableTarget {
+    pub relation_name: String,
+    pub include_descendants: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TruncateTableStatement {
+    pub targets: Vec<TruncateTableTarget>,
     pub table_names: Vec<String>,
+    pub restart_identity: bool,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

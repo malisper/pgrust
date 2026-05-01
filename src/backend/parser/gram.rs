@@ -25389,12 +25389,62 @@ fn build_lock_table_mode(mode_sql: &str) -> Result<LockTableMode, ParseError> {
 }
 
 fn build_truncate_table(pair: Pair<'_, Rule>) -> Result<TruncateTableStatement, ParseError> {
-    let table_names = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::ident_list)
-        .map(|part| part.into_inner().map(build_identifier).collect::<Vec<_>>())
-        .ok_or(ParseError::UnexpectedEof)?;
-    Ok(TruncateTableStatement { table_names })
+    let mut targets = Vec::new();
+    let mut restart_identity = false;
+    let mut cascade = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::truncate_table_target_list => {
+                targets.extend(
+                    part.into_inner()
+                        .filter(|item| item.as_rule() == Rule::truncate_table_target)
+                        .map(build_truncate_table_target)
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            Rule::truncate_identity_option => {
+                restart_identity = part
+                    .as_str()
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("restart");
+            }
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
+            _ => {}
+        }
+    }
+    if targets.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    let table_names = targets
+        .iter()
+        .map(|target| target.relation_name.clone())
+        .collect();
+    Ok(TruncateTableStatement {
+        targets,
+        table_names,
+        restart_identity,
+        cascade,
+    })
+}
+
+fn build_truncate_table_target(pair: Pair<'_, Rule>) -> Result<TruncateTableTarget, ParseError> {
+    let mut relation_name = None;
+    let mut include_descendants = true;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::truncate_table_only => include_descendants = false,
+            Rule::truncate_table_recurse => include_descendants = true,
+            Rule::qualified_identifier => {
+                relation_name = Some(build_qualified_identifier_string(part));
+            }
+            _ => {}
+        }
+    }
+    Ok(TruncateTableTarget {
+        relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
+        include_descendants,
+    })
 }
 
 fn build_refresh_materialized_view(

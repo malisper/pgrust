@@ -96,19 +96,20 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID,
     BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CIDR_TYPE_OID,
-    DATE_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID,
-    HASH_AM_OID, INET_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID,
-    INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
-    OID_TYPE_OID, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
-    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID,
-    PG_FOREIGN_TABLE_RELATION_OID, PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID,
-    PG_LANGUAGE_RELATION_OID, PG_LSN_TYPE_OID, PG_MAINTAIN_OID, PG_NAMESPACE_RELATION_OID,
-    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_PARTITIONED_TABLE_RELATION_OID,
-    PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
-    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID,
-    PG_REWRITE_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
+    CONSTRAINT_FOREIGN, DATE_TYPE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, FLOAT4_TYPE_OID,
+    FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID, INET_TYPE_OID,
+    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID,
+    MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, PG_AM_RELATION_OID,
+    PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID, PG_AUTH_MEMBERS_RELATION_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
+    PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_FOREIGN_SERVER_RELATION_OID, PG_FOREIGN_TABLE_RELATION_OID, PG_INDEX_RELATION_OID,
+    PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_LSN_TYPE_OID, PG_MAINTAIN_OID,
+    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
+    PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
     PG_USER_MAPPING_RELATION_OID, PG_WRITE_ALL_DATA_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
     PgOpclassRow, PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID,
     TEXT_BRIN_MINMAX_OPCLASS_OID, TEXT_TYPE_OID, TID_TYPE_OID, TIMESTAMP_TYPE_OID,
@@ -9791,76 +9792,334 @@ pub fn execute_truncate_table(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
-    let mut seen_targets = BTreeSet::new();
-    for table_name in stmt.table_names {
-        let entry = match catalog.lookup_any_relation(&table_name) {
-            Some(entry) if entry.relkind == 'r' || entry.relkind == 'p' => entry,
-            Some(_) => {
-                return Err(ExecError::Parse(ParseError::WrongObjectType {
-                    name: table_name.clone(),
-                    expected: "table",
-                }));
-            }
-            None => {
-                return Err(ExecError::Parse(ParseError::UnknownTable(
-                    table_name.clone(),
-                )));
-            }
-        };
-        let truncate_targets = if entry.relkind == 'p' {
-            partitioned_truncate_targets(catalog, entry.relation_oid)
-        } else if catalog.has_subclass(entry.relation_oid) {
-            inherited_truncate_targets(catalog, entry.relation_oid)
-        } else {
-            vec![entry]
-        };
-        for target in truncate_targets {
-            if !seen_targets.insert(target.relation_oid) {
-                continue;
-            }
-            check_relation_privilege(ctx, target.relation_oid, 'D')?;
-            let indexes = catalog.index_relations_for_heap(target.relation_oid);
-            let _ = ctx.pool.invalidate_relation(target.rel);
-            ctx.pool
-                .with_storage_mut(|s| {
-                    s.smgr.truncate(target.rel, ForkNumber::Main, 0)?;
-                    if s.smgr.exists(target.rel, ForkNumber::VisibilityMap) {
-                        s.smgr.truncate(target.rel, ForkNumber::VisibilityMap, 0)?;
-                    }
-                    Ok(())
-                })
-                .map_err(HeapError::Storage)?;
-            for index in indexes
-                .iter()
-                .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
-            {
-                reinitialize_index_relation(index, ctx, xid)?;
-            }
-            ctx.session_stats
-                .write()
-                .note_relation_truncate(target.relation_oid);
+    let targets = resolve_truncate_relations(&stmt, catalog, true)?;
+    check_truncate_relation_privileges(&targets, ctx)?;
+    let triggers = fire_before_truncate_triggers(&targets, catalog, ctx)?;
+    for target in targets.iter().filter(|target| target.relkind == 'r') {
+        let indexes = catalog.index_relations_for_heap(target.relation_oid);
+        let _ = ctx.pool.invalidate_relation(target.rel);
+        ctx.pool
+            .with_storage_mut(|s| {
+                s.smgr.truncate(target.rel, ForkNumber::Main, 0)?;
+                if s.smgr.exists(target.rel, ForkNumber::VisibilityMap) {
+                    s.smgr.truncate(target.rel, ForkNumber::VisibilityMap, 0)?;
+                }
+                Ok(())
+            })
+            .map_err(HeapError::Storage)?;
+        for index in indexes
+            .iter()
+            .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
+        {
+            reinitialize_index_relation(index, ctx, xid)?;
         }
+        ctx.session_stats
+            .write()
+            .note_relation_truncate(target.relation_oid);
     }
+    if stmt.restart_identity {
+        restart_owned_sequences_for_truncate(&targets, catalog, ctx);
+    }
+    fire_after_truncate_triggers(&triggers, ctx)?;
     Ok(StatementResult::AffectedRows(0))
 }
 
-fn inherited_truncate_targets(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<BoundRelation> {
-    catalog
-        .find_all_inheritors(root_oid)
-        .into_iter()
-        .filter_map(|oid| catalog.relation_by_oid(oid))
-        .filter(|entry| entry.relkind == 'r')
-        .collect()
+pub(crate) fn check_truncate_relation_privileges(
+    targets: &[BoundRelation],
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    for target in targets {
+        check_relation_privilege(ctx, target.relation_oid, 'D')?;
+    }
+    Ok(())
 }
 
-fn partitioned_truncate_targets(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<BoundRelation> {
-    catalog
-        .find_all_inheritors(root_oid)
+pub(crate) fn resolve_truncate_relations(
+    stmt: &TruncateTableStatement,
+    catalog: &dyn CatalogLookup,
+    emit_cascade_notices: bool,
+) -> Result<Vec<BoundRelation>, ExecError> {
+    let mut targets = Vec::new();
+    for target in &stmt.targets {
+        let entry = lookup_truncate_relation(catalog, &target.relation_name)?;
+        push_truncate_relation(catalog, entry, target.include_descendants, &mut targets)?;
+    }
+    if stmt.cascade {
+        expand_truncate_cascade(catalog, &mut targets, emit_cascade_notices)?;
+    } else {
+        check_truncate_restrict_foreign_keys(catalog, &targets)?;
+    }
+    Ok(targets)
+}
+
+pub(crate) fn fire_before_truncate_triggers(
+    targets: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<RuntimeTriggers>, ExecError> {
+    let mut triggers = Vec::new();
+    for target in targets {
+        let relation_name = relation_name_for_oid(catalog, target.relation_oid);
+        let runtime = RuntimeTriggers::load(
+            catalog,
+            target.relation_oid,
+            &relation_name,
+            &target.desc,
+            TriggerOperation::Truncate,
+            &[],
+            ctx.session_replication_role,
+        )?;
+        runtime.before_statement(ctx)?;
+        triggers.push(runtime);
+    }
+    Ok(triggers)
+}
+
+pub(crate) fn fire_after_truncate_triggers(
+    triggers: &[RuntimeTriggers],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for runtime in triggers {
+        runtime.after_statement(None, ctx)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn owned_sequence_oids_for_truncate(
+    targets: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+) -> Vec<u32> {
+    let mut sequence_oids = Vec::new();
+    for target in targets {
+        for depend in
+            catalog.depend_rows_referencing(PG_CLASS_RELATION_OID, target.relation_oid, None)
+        {
+            if depend.classid == PG_CLASS_RELATION_OID
+                && depend.objsubid == 0
+                && depend.refobjsubid > 0
+                && matches!(depend.deptype, DEPENDENCY_AUTO | DEPENDENCY_INTERNAL)
+                && catalog
+                    .class_row_by_oid(depend.objid)
+                    .is_some_and(|row| row.relkind == 'S')
+                && !sequence_oids.contains(&depend.objid)
+            {
+                sequence_oids.push(depend.objid);
+            }
+        }
+    }
+    sequence_oids
+}
+
+fn restart_owned_sequences_for_truncate(
+    targets: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) {
+    let Some(sequences) = &ctx.sequences else {
+        return;
+    };
+    for sequence_oid in owned_sequence_oids_for_truncate(targets, catalog) {
+        let Some(mut data) = sequences.sequence_data(sequence_oid) else {
+            continue;
+        };
+        data.state.last_value = data.options.start;
+        data.state.log_cnt = 0;
+        data.state.is_called = false;
+        let persistent = catalog
+            .relation_by_oid(sequence_oid)
+            .is_some_and(|relation| relation.relpersistence != 't');
+        let _ = sequences.apply_upsert(sequence_oid, data, persistent);
+    }
+}
+
+fn lookup_truncate_relation(
+    catalog: &dyn CatalogLookup,
+    relation_name: &str,
+) -> Result<BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(relation_name) {
+        Some(entry) if entry.relkind == 'r' || entry.relkind == 'p' => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: relation_name.to_string(),
+            expected: "table",
+        })),
+        None => Err(ExecError::Parse(ParseError::UnknownTable(
+            relation_name.to_string(),
+        ))),
+    }
+}
+
+fn push_truncate_relation(
+    catalog: &dyn CatalogLookup,
+    entry: BoundRelation,
+    include_descendants: bool,
+    targets: &mut Vec<BoundRelation>,
+) -> Result<(), ExecError> {
+    if !include_descendants && entry.relkind == 'p' {
+        return Err(cannot_truncate_only_partitioned_table_error());
+    }
+    if include_descendants {
+        let inheritors = catalog.find_all_inheritors(entry.relation_oid);
+        if inheritors.is_empty() {
+            push_unique_truncate_relation(targets, entry);
+        } else {
+            for oid in inheritors {
+                if let Some(relation) = catalog.relation_by_oid(oid)
+                    && (relation.relkind == 'r' || relation.relkind == 'p')
+                {
+                    push_unique_truncate_relation(targets, relation);
+                }
+            }
+        }
+    } else {
+        push_unique_truncate_relation(targets, entry);
+    }
+    Ok(())
+}
+
+fn push_unique_truncate_relation(targets: &mut Vec<BoundRelation>, relation: BoundRelation) {
+    if !targets
+        .iter()
+        .any(|target| target.relation_oid == relation.relation_oid)
+    {
+        targets.push(relation);
+    }
+}
+
+fn expand_truncate_cascade(
+    catalog: &dyn CatalogLookup,
+    targets: &mut Vec<BoundRelation>,
+    emit_notices: bool,
+) -> Result<(), ExecError> {
+    loop {
+        let covered = target_relation_oids(targets);
+        let mut additions = truncate_foreign_key_rows(catalog, &covered)
+            .into_iter()
+            .filter(|row| {
+                relation_covered_by_truncate(catalog, row.confrelid, &covered)
+                    && !relation_covered_by_truncate(catalog, row.conrelid, &covered)
+            })
+            .filter_map(|row| catalog.relation_by_oid(row.conrelid))
+            .collect::<Vec<_>>();
+        additions.sort_by_key(|relation| relation.relation_oid);
+        additions.dedup_by_key(|relation| relation.relation_oid);
+        if additions.is_empty() {
+            break;
+        }
+        for relation in additions {
+            let start = targets.len();
+            let include_descendants = relation.relkind == 'p';
+            push_truncate_relation(catalog, relation, include_descendants, targets)?;
+            if emit_notices {
+                for added in &targets[start..] {
+                    crate::backend::utils::misc::notices::push_notice(format!(
+                        "truncate cascades to table \"{}\"",
+                        relation_name_for_oid(catalog, added.relation_oid)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_truncate_restrict_foreign_keys(
+    catalog: &dyn CatalogLookup,
+    targets: &[BoundRelation],
+) -> Result<(), ExecError> {
+    let covered = target_relation_oids(targets);
+    let rows = truncate_foreign_key_rows(catalog, &covered);
+    for target in targets {
+        let mut references = rows
+            .iter()
+            .filter(|row| {
+                relation_covered_by_truncate(catalog, row.confrelid, &[target.relation_oid])
+                    && !relation_covered_by_truncate(catalog, row.conrelid, &covered)
+            })
+            .map(|row| {
+                (
+                    row.conrelid,
+                    relation_name_for_oid(catalog, row.conrelid),
+                    relation_name_for_oid(catalog, row.confrelid),
+                )
+            })
+            .collect::<Vec<_>>();
+        references.sort();
+        references.dedup();
+        if let Some((_, child, referenced)) = references.into_iter().next() {
+            return Err(ExecError::DetailedError {
+                message: "cannot truncate a table referenced in a foreign key constraint".into(),
+                detail: Some(format!("Table \"{child}\" references \"{referenced}\".")),
+                hint: Some(format!(
+                    "Truncate table \"{child}\" at the same time, or use TRUNCATE ... CASCADE."
+                )),
+                sqlstate: "0A000",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn truncate_foreign_key_rows(
+    catalog: &dyn CatalogLookup,
+    covered: &[u32],
+) -> Vec<crate::include::catalog::PgConstraintRow> {
+    let mut rows = catalog
+        .constraint_rows()
         .into_iter()
-        .filter(|oid| *oid != root_oid)
-        .filter_map(|oid| catalog.relation_by_oid(oid))
-        .filter(|entry| entry.relkind == 'r')
-        .collect()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN)
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    for relation_oid in covered {
+        for row in catalog.foreign_key_constraint_rows_referencing_relation(*relation_oid) {
+            rows.entry(row.oid).or_insert(row);
+        }
+    }
+    rows.into_values().collect()
+}
+
+fn relation_covered_by_truncate(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    covered: &[u32],
+) -> bool {
+    if covered.contains(&relation_oid) {
+        return true;
+    }
+    let mut seen = BTreeSet::new();
+    let mut pending = catalog.inheritance_parents(relation_oid);
+    while let Some(parent) = pending.pop() {
+        if !seen.insert(parent.inhparent) {
+            continue;
+        }
+        if covered.contains(&parent.inhparent) {
+            return true;
+        }
+        pending.extend(catalog.inheritance_parents(parent.inhparent));
+    }
+    false
+}
+
+fn target_relation_oids(targets: &[BoundRelation]) -> Vec<u32> {
+    targets.iter().map(|target| target.relation_oid).collect()
+}
+
+fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_oid.to_string())
+}
+
+fn cannot_truncate_only_partitioned_table_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot truncate only a partitioned table".into(),
+        detail: None,
+        hint: Some(
+            "Do not specify the ONLY keyword, or use TRUNCATE ONLY on the partitions directly."
+                .into(),
+        ),
+        sqlstate: "42809",
+    }
 }
 
 pub fn execute_insert(

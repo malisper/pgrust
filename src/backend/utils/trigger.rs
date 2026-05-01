@@ -6,6 +6,7 @@ const TRIGGER_TYPE_BEFORE: i16 = 1 << 1;
 const TRIGGER_TYPE_INSERT: i16 = 1 << 2;
 const TRIGGER_TYPE_DELETE: i16 = 1 << 3;
 const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
+const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 5;
 const TRIGGER_TYPE_INSTEAD: i16 = 1 << 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,9 @@ fn trigger_event_manipulations(tgtype: i16) -> Vec<&'static str> {
     if (tgtype & TRIGGER_TYPE_DELETE) != 0 {
         events.push("DELETE");
     }
+    if (tgtype & TRIGGER_TYPE_TRUNCATE) != 0 {
+        events.push("TRUNCATE");
+    }
     events
 }
 
@@ -137,6 +141,9 @@ fn trigger_event_list(
     }
     if (row.tgtype & TRIGGER_TYPE_DELETE) != 0 {
         events.push("DELETE".to_string());
+    }
+    if (row.tgtype & TRIGGER_TYPE_TRUNCATE) != 0 {
+        events.push("TRUNCATE".to_string());
     }
     events.join(" OR ")
 }

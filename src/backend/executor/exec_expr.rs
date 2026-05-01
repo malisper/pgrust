@@ -8652,7 +8652,7 @@ fn resolve_sequence_call_target(
             let name = value.as_text().expect("text value");
             catalog
                 .lookup_any_relation(name)
-                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(name.to_string())))?
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(name.to_string())))?
         }
         other => {
             return Err(ExecError::TypeMismatch {
