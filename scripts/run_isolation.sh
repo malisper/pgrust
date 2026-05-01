@@ -178,7 +178,9 @@ if [[ "$SKIP_BUILD" == false ]]; then
     }
 fi
 
-SERVER_BIN="$PGRUST_DIR/target/release/pgrust_server"
+CARGO_TARGET_DIR="$(cd "$PGRUST_DIR" && cargo metadata --no-deps --format-version=1 \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+SERVER_BIN="$CARGO_TARGET_DIR/release/pgrust_server"
 if [[ "$SKIP_SERVER" == false && ! -x "$SERVER_BIN" ]]; then
     echo "ERROR: $SERVER_BIN not found. Run without --skip-build." >&2
     exit 1

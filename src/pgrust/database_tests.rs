@@ -1911,6 +1911,30 @@ fn sql_function_set_config_updates_current_statement_guc() {
 }
 
 #[test]
+fn application_name_default_and_set_config_match_isolationtester() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select current_setting('application_name')"
+        ),
+        vec![vec![Value::Text(String::new().into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select set_config('application_name', \
+             current_setting('application_name') || '/' || 's1', false)"
+        ),
+        vec![vec![Value::Text("/s1".into())]]
+    );
+}
+
+#[test]
 fn set_config_row_security_returns_postgres_bool_text() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -7430,6 +7454,21 @@ fn pg_isolation_test_session_is_blocked_rejects_null_pid_array_entries() {
             ..
         } if message == "array must not contain nulls"
     ));
+}
+
+#[test]
+fn pg_isolation_test_session_is_blocked_accepts_text_array_literal() {
+    let dir = temp_dir("pg_isolation_blocked_text_array_literal");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_isolation_test_session_is_blocked(pg_backend_pid(), '{1,2}')"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
 }
 
 #[test]

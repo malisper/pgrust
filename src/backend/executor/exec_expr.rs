@@ -3019,6 +3019,15 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
                 .into(),
         ));
     }
+    if name == "application_name" {
+        return Ok(Value::Text(
+            ctx.gucs
+                .get("application_name")
+                .cloned()
+                .unwrap_or_default()
+                .into(),
+        ));
+    }
     if name == "datestyle" {
         return Ok(Value::Text(
             crate::backend::utils::misc::guc_datetime::format_datestyle(&ctx.datetime_config)
@@ -3074,6 +3083,7 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
         "max_prepared_transactions" => return Ok(Value::Text("64".into())),
         "lo_compat_privileges" => return Ok(Value::Text("off".into())),
         "search_path" => return Ok(Value::Text(default_search_path_guc_value().into())),
+        "application_name" => return Ok(Value::Text(String::new().into())),
         "server_encoding" => return Ok(Value::Text("UTF8".into())),
         "synchronous_commit" => return Ok(Value::Text("on".into())),
         "wal_sync_method" => return Ok(Value::Text("fsync".into())),
@@ -13717,6 +13727,15 @@ fn int4_array_arg(value: &Value, op: &'static str) -> Result<Vec<crate::ClientId
     let elements = match value {
         Value::PgArray(array) => &array.elements,
         Value::Array(elements) => elements,
+        value if value.as_text().is_some() => {
+            let text = value.as_text().expect("guarded above");
+            let parsed = parse_text_array_literal_with_op(
+                text,
+                SqlType::new(SqlTypeKind::Int4).with_identity(INT4_TYPE_OID, 0),
+                op,
+            )?;
+            return int4_array_arg(&parsed, op);
+        }
         other => {
             return Err(ExecError::TypeMismatch {
                 op,
