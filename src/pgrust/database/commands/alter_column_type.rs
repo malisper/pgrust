@@ -2,7 +2,8 @@ use super::super::*;
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{
-    collect_matching_rows_heap, insert_index_entry_for_row, reinitialize_index_relation,
+    collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
+    reinitialize_index_relation, row_matches_index_predicate,
 };
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
@@ -30,6 +31,11 @@ struct AlterColumnTypeTarget {
     column_index: usize,
     indexes: Vec<crate::backend::parser::BoundIndexRelation>,
     fires_table_rewrite: bool,
+}
+
+struct RewrittenAlterColumnTypeRow {
+    old_tid: ItemPointerData,
+    values: Vec<Value>,
 }
 
 fn reject_unsupported_alter_column_type_indexes(
@@ -126,16 +132,13 @@ fn rewrite_bound_indexes_for_alter_column_type(
         .collect()
 }
 
-fn rewrite_heap_rows_for_alter_column_type(
-    _db: &Database,
+fn plan_rewritten_rows_for_alter_column_type(
     relation: &crate::backend::parser::BoundRelation,
     new_desc: &RelationDesc,
     column_index: usize,
     rewrite_expr: &crate::backend::executor::Expr,
     ctx: &mut ExecutorContext,
-    xid: TransactionId,
-    cid: CommandId,
-) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+) -> Result<Vec<RewrittenAlterColumnTypeRow>, ExecError> {
     let target_rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?;
     let mut rewritten_rows = Vec::with_capacity(target_rows.len());
@@ -144,7 +147,74 @@ fn rewrite_heap_rows_for_alter_column_type(
         let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
         let mut values = original_values;
         values[column_index] = eval_expr(rewrite_expr, &mut eval_slot, ctx)?;
-        let replacement = tuple_from_values(new_desc, &values)?;
+        tuple_from_values(new_desc, &values)?;
+        rewritten_rows.push(RewrittenAlterColumnTypeRow {
+            old_tid: tid,
+            values,
+        });
+    }
+    Ok(rewritten_rows)
+}
+
+fn key_contains_null(key_values: &[Value]) -> bool {
+    key_values.iter().any(|value| matches!(value, Value::Null))
+}
+
+fn validate_unique_indexes_for_rewritten_rows(
+    new_desc: &RelationDesc,
+    indexes: &[crate::backend::parser::BoundIndexRelation],
+    rewritten_rows: &[RewrittenAlterColumnTypeRow],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for index in indexes.iter().filter(|index| {
+        index.index_meta.indisvalid
+            && index.index_meta.indisready
+            && index.index_meta.indisunique
+            && index.index_meta.indimmediate
+            && !index.index_meta.indisexclusion
+    }) {
+        let mut seen_keys: Vec<Vec<Value>> = Vec::new();
+        for row in rewritten_rows {
+            if !row_matches_index_predicate(
+                index,
+                &row.values,
+                Some(row.old_tid),
+                index.index_meta.indrelid,
+                ctx,
+            )? {
+                continue;
+            }
+            let key_values = index_key_values_for_row(index, new_desc, &row.values, ctx)?;
+            if !index.index_meta.indnullsnotdistinct && key_contains_null(&key_values) {
+                continue;
+            }
+            if seen_keys.iter().any(|seen| seen == &key_values) {
+                return Err(ExecError::UniqueViolation {
+                    constraint: index
+                        .constraint_name
+                        .clone()
+                        .unwrap_or_else(|| index.name.clone()),
+                    detail: None,
+                });
+            }
+            seen_keys.push(key_values);
+        }
+    }
+    Ok(())
+}
+
+fn apply_rewritten_rows_for_alter_column_type(
+    relation: &crate::backend::parser::BoundRelation,
+    new_desc: &RelationDesc,
+    rewritten_rows: &[RewrittenAlterColumnTypeRow],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    let mut applied_rows = Vec::with_capacity(rewritten_rows.len());
+    for row in rewritten_rows {
+        ctx.check_for_interrupts()?;
+        let replacement = tuple_from_values(new_desc, &row.values)?;
         let new_tid = heap_update_with_waiter(
             &*ctx.pool,
             ctx.client_id,
@@ -152,13 +222,13 @@ fn rewrite_heap_rows_for_alter_column_type(
             &ctx.txns,
             xid,
             cid,
-            tid,
+            row.old_tid,
             &replacement,
             None,
         )?;
-        rewritten_rows.push((new_tid, values));
+        applied_rows.push((new_tid, row.values.clone()));
     }
-    Ok(rewritten_rows)
+    Ok(applied_rows)
 }
 
 fn rebuild_relation_indexes_for_alter_column_type(
@@ -223,6 +293,92 @@ fn relation_name_for_error(catalog: &dyn CatalogLookup, relation_oid: u32) -> St
         .class_row_by_oid(relation_oid)
         .map(|row| row.relname)
         .unwrap_or_else(|| relation_oid.to_string())
+}
+
+fn sql_type_contains_relation_rowtype(
+    catalog: &dyn CatalogLookup,
+    sql_type: crate::backend::parser::SqlType,
+    relation_oid: u32,
+) -> bool {
+    sql_type_contains_relation_rowtype_inner(
+        catalog,
+        sql_type,
+        relation_oid,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+    )
+}
+
+fn sql_type_contains_relation_rowtype_inner(
+    catalog: &dyn CatalogLookup,
+    sql_type: crate::backend::parser::SqlType,
+    relation_oid: u32,
+    seen_types: &mut BTreeSet<u32>,
+    seen_relations: &mut BTreeSet<u32>,
+) -> bool {
+    if sql_type.typrelid == relation_oid {
+        return true;
+    }
+    let mut pending = Vec::new();
+    if sql_type.type_oid != 0 {
+        pending.push(sql_type.type_oid);
+    }
+    if let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type) {
+        pending.push(type_oid);
+    }
+    while let Some(type_oid) = pending.pop() {
+        if type_oid == 0 || !seen_types.insert(type_oid) {
+            continue;
+        }
+        let Some(row) = catalog.type_by_oid(type_oid) else {
+            continue;
+        };
+        if row.typrelid == relation_oid || row.sql_type.typrelid == relation_oid {
+            return true;
+        }
+        if row.typrelid != 0
+            && seen_relations.insert(row.typrelid)
+            && let Some(relation) = catalog.lookup_relation_by_oid(row.typrelid)
+            && relation.desc.columns.iter().any(|column| {
+                !column.dropped
+                    && sql_type_contains_relation_rowtype_inner(
+                        catalog,
+                        column.sql_type,
+                        relation_oid,
+                        seen_types,
+                        seen_relations,
+                    )
+            })
+        {
+            return true;
+        }
+        if row.typbasetype != 0 {
+            pending.push(row.typbasetype);
+        }
+        if row.typelem != 0 {
+            pending.push(row.typelem);
+        }
+    }
+    false
+}
+
+fn reject_recursive_composite_column_type(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    new_type: crate::backend::parser::SqlType,
+) -> Result<(), ExecError> {
+    if !sql_type_contains_relation_rowtype(catalog, new_type, relation_oid) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "composite type {} cannot be made a member of itself",
+            relation_name_for_error(catalog, relation_oid)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    })
 }
 
 fn reject_row_type_dependents_for_column_type_change(
@@ -342,8 +498,12 @@ fn reject_inherited_type_change_conflicts(
 fn alter_column_type_fires_table_rewrite(
     from: crate::backend::parser::SqlType,
     to: crate::backend::parser::SqlType,
+    has_using_expr: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
 ) -> bool {
+    if has_using_expr {
+        return true;
+    }
     if from == to {
         return false;
     }
@@ -479,9 +639,17 @@ fn collect_alter_column_type_targets(
                 column_index,
             )?;
         }
+        let requested_type = crate::backend::parser::resolve_raw_type_name(&alter_stmt.ty, catalog)
+            .map_err(ExecError::Parse)?;
+        reject_recursive_composite_column_type(
+            catalog,
+            target_relation.relation_oid,
+            requested_type,
+        )?;
         reject_row_type_dependents_for_column_type_change(catalog, &target_relation)?;
         let plan = validate_alter_table_alter_column_type(
             catalog,
+            target_relation.relation_oid,
             &target_relation.desc,
             &alter_stmt.column_name,
             &alter_stmt.ty,
@@ -522,6 +690,7 @@ fn collect_alter_column_type_targets(
             fires_table_rewrite: alter_column_type_fires_table_rewrite(
                 target_relation.desc.columns[plan.column_index].sql_type,
                 new_desc.columns[plan.column_index].sql_type,
+                alter_stmt.using_expr.is_some(),
                 datetime_config,
             ),
             relation: target_relation,
@@ -660,6 +829,7 @@ impl Database {
             stats: std::sync::Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
+            write_xid_override: None,
             transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),
@@ -719,12 +889,23 @@ impl Database {
             } else {
                 continue;
             }
-            let rewritten_rows = rewrite_heap_rows_for_alter_column_type(
-                self,
+            let rewritten_rows = plan_rewritten_rows_for_alter_column_type(
                 &target.relation,
                 &target.new_desc,
                 target.column_index,
                 &target.rewrite_expr,
+                &mut ctx,
+            )?;
+            validate_unique_indexes_for_rewritten_rows(
+                &target.new_desc,
+                &target.indexes,
+                &rewritten_rows,
+                &mut ctx,
+            )?;
+            let rewritten_rows = apply_rewritten_rows_for_alter_column_type(
+                &target.relation,
+                &target.new_desc,
+                &rewritten_rows,
                 &mut ctx,
                 xid,
                 cid,

@@ -10,10 +10,11 @@ use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, Value, pg_sql_sort_by,
 };
 use crate::backend::parser::{BoundIndexRelation, BoundRelation, CatalogLookup, ParseError};
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::amapi::{IndexBuildContext, IndexBuildExprContext};
 use crate::include::access::htup::AttributeCompression;
 use crate::include::catalog::BTREE_AM_OID;
-use crate::include::nodes::parsenodes::ClusterStatement;
+use crate::include::nodes::parsenodes::{AlterTableSetWithoutClusterStatement, ClusterStatement};
 use std::cmp::Ordering;
 
 struct ClusteredRow {
@@ -108,6 +109,61 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    pub(crate) fn execute_alter_table_set_without_cluster_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTableSetWithoutClusterStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self
+            .execute_alter_table_set_without_cluster_stmt_in_transaction_with_search_path(
+                client_id,
+                stmt,
+                xid,
+                0,
+                configured_search_path,
+                &mut catalog_effects,
+            );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_table_set_without_cluster_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTableSetWithoutClusterStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let Some(relation) = catalog.lookup_any_relation(&stmt.table_name) else {
+            if stmt.if_exists {
+                push_notice(format!(
+                    r#"relation "{}" does not exist, skipping"#,
+                    stmt.table_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                stmt.table_name.clone(),
+            )));
+        };
+        if !matches!(relation.relkind, 'r' | 'm') {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: stmt.table_name.clone(),
+                expected: "table or materialized view",
+            }));
+        }
+        self.clear_clustered_index(client_id, xid, cid, relation.relation_oid, catalog_effects)?;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     fn cluster_executor_context(
         &self,
         client_id: ClientId,
@@ -143,6 +199,7 @@ impl Database {
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot: self.txns.read().snapshot_for_command(xid, cid)?,
+            write_xid_override: None,
             transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),
@@ -204,6 +261,32 @@ impl Database {
             self.catalog
                 .write()
                 .set_index_clustered_mvcc(relation_oid, index_oid, &ctx)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(())
+    }
+
+    fn clear_clustered_index(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        relation_oid: u32,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .clear_index_clustered_mvcc(relation_oid, &ctx)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         Ok(())

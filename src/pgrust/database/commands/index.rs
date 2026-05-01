@@ -2145,64 +2145,6 @@ impl Database {
             .as_ref()
             .and_then(|meta| meta.indpred.as_deref())
             .is_some_and(|predicate| !predicate.trim().is_empty());
-        if has_expression_keys
-            && access_method_oid != BTREE_AM_OID
-            && access_method_oid != GIST_AM_OID
-            && access_method_oid != SPGIST_AM_OID
-        {
-            if let Err(err) = self.build_expression_index_rows_in_transaction(
-                client_id,
-                relation,
-                &index_entry,
-                index_name,
-                visible_catalog,
-                xid,
-                cid,
-                access_method_oid,
-                access_method_handler,
-                maintenance_work_mem_kb,
-            ) {
-                if !leave_invalid_on_failure {
-                    self.cleanup_failed_index_build(
-                        client_id,
-                        xid,
-                        cid,
-                        &index_entry,
-                        catalog_effects,
-                        Arc::clone(&interrupts),
-                    );
-                }
-                return Err(err);
-            }
-            let mut catalog_guard = self.catalog.write();
-            let readiness_ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: cid.saturating_add(1),
-                client_id,
-                waiter: None,
-                interrupts,
-            };
-            let ready_effect = catalog_guard
-                .set_index_entry_ready_valid_mvcc(&index_entry, true, true, &readiness_ctx)
-                .map_err(|err| match err {
-                    CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
-                    _ => ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "index catalog readiness update",
-                        actual: "index readiness update failed".into(),
-                    }),
-                })?;
-            drop(catalog_guard);
-            if defer_cache_invalidation {
-                self.apply_catalog_mutation_effect_storage_only(&ready_effect)?;
-            } else {
-                self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
-            }
-            catalog_effects.push(ready_effect);
-            return Ok(index_entry);
-        }
-
         let snapshot = self
             .txns
             .read()
@@ -2520,6 +2462,7 @@ impl Database {
                 stats: std::sync::Arc::clone(&self.stats),
                 session_stats: self.session_stats_state(client_id),
                 snapshot: self.txns.read().snapshot_for_command(xid, cid)?,
+                write_xid_override: None,
                 transaction_state: None,
                 client_id,
                 current_database_name: self.current_database_name(),
@@ -3162,6 +3105,7 @@ impl Database {
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
+            write_xid_override: None,
             transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),

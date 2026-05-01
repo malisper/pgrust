@@ -667,6 +667,9 @@ direct_test_dependencies() {
         brin)
             echo "create_index"
             ;;
+        alter_table)
+            echo "create_index"
+            ;;
         create_index_spgist|index_including|index_including_gist)
             echo "create_index"
             ;;

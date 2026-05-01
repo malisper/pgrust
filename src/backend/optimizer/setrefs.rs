@@ -850,12 +850,7 @@ fn build_join_tlist(
                         )
                     }
                 }
-                (None, None) => (
-                    logical_index,
-                    expr_sql_type(semantic_expr),
-                    expr_collation_oid(semantic_expr),
-                    vec![semantic_expr.clone()],
-                ),
+                (None, None) => continue,
             };
 
         if let Some(output_expr) = output_target.exprs.get(physical_index) {
@@ -2211,6 +2206,38 @@ fn fix_input_tlist_expr(
         .map(|entry| special_slot_var_for_expr(OUTER_VAR, entry, expr))
 }
 
+fn fix_semantic_position_var_for_input(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+    input_tlist: &IndexedTlist,
+) -> Option<Expr> {
+    let (Some(root), Expr::Var(var)) = (root, expr) else {
+        return None;
+    };
+    if var.varlevelsup > 0 || is_executor_special_varno(var.varno) || is_system_attr(var.varattno) {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    if root
+        .parse
+        .rtable
+        .get(var.varno.saturating_sub(1))
+        .is_some_and(|rte| index < rte.desc.columns.len())
+    {
+        return None;
+    }
+    let semantic_target = input.semantic_output_target();
+    let semantic_expr = semantic_target.exprs.get(index)?;
+    let entry = input_tlist.entries.get(index)?;
+    // :HACK: Recursive CTE join paths can carry a Var whose varno still points
+    // at a child RTE while varattno addresses the joined path's logical output
+    // position. Treat only out-of-range child Vars as positional path refs, and
+    // use the indexed tlist to recover the physical slot.
+    (expr_sql_type(semantic_expr) == var.vartype && entry.sql_type == var.vartype)
+        .then(|| special_slot_var(OUTER_VAR, entry.index, entry.sql_type, entry.collation_oid))
+}
+
 fn fix_join_rte_var_for_input(
     root: Option<&PlannerInfo>,
     expr: &Expr,
@@ -2297,6 +2324,9 @@ fn fix_upper_expr_for_input(
         return rewritten;
     }
     if let Some(rewritten) = fix_executor_join_var_for_input(&expr, input) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_semantic_position_var_for_input(root, &expr, input, input_tlist) {
         return rewritten;
     }
     if let Some(rewritten) = fix_join_rte_var_for_input(root, &expr, input) {
@@ -3682,6 +3712,7 @@ fn lower_sublink(
         testexpr: sublink
             .testexpr
             .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
+        comparison: sublink.comparison,
         first_col_type,
         target_width,
         plan_id,
@@ -3712,6 +3743,26 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             if is_system_attr(var.varattno) {
                 Expr::Var(var)
             } else if let Some(root) = ctx.root {
+                let expr = Expr::Var(var.clone());
+                if let LowerMode::Input {
+                    path: Some(input),
+                    tlist,
+                } = mode
+                {
+                    if let Some(rewritten) =
+                        fix_semantic_position_var_for_input(ctx.root, &expr, input, tlist)
+                    {
+                        return rewritten;
+                    }
+                    if let Some(rewritten) = fix_join_rte_var_for_input(ctx.root, &expr, input) {
+                        return rewritten;
+                    }
+                    if let Some(rewritten) =
+                        fix_semantic_output_expr_for_input(ctx.root, &expr, input)
+                    {
+                        return rewritten;
+                    }
+                }
                 let flattened = flatten_join_alias_vars(root, Expr::Var(var.clone()));
                 if flattened != Expr::Var(var.clone()) {
                     lower_expr(ctx, flattened, mode)
@@ -3810,6 +3861,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             testexpr: subplan
                 .testexpr
                 .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
+            comparison: subplan.comparison,
             first_col_type: subplan.first_col_type,
             target_width: subplan.target_width,
             plan_id: subplan.plan_id,
@@ -6296,6 +6348,7 @@ fn lower_partition_prune_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr 
             testexpr: subplan
                 .testexpr
                 .map(|expr| Box::new(lower_partition_prune_expr(ctx, *expr))),
+            comparison: subplan.comparison,
             first_col_type: subplan.first_col_type,
             target_width: subplan.target_width,
             plan_id: subplan.plan_id,

@@ -15,6 +15,8 @@ use crate::backend::parser::{
     PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp,
     deserialize_partition_bound, is_binary_coercible_type, partition_value_to_value,
 };
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::date::parse_date_text;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::catalog::{BTREE_AM_OID, HASH_AM_OID};
 use crate::include::nodes::datum::Value;
@@ -714,11 +716,11 @@ fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
 }
 
 fn exprs_have_contradictory_equalities(left: &Expr, right: &Expr) -> bool {
-    expr_list_has_contradictory_equalities(
-        flatten_and_conjuncts(left)
-            .into_iter()
-            .chain(flatten_and_conjuncts(right)),
-    )
+    let clauses = flatten_and_conjuncts(left)
+        .into_iter()
+        .chain(flatten_and_conjuncts(right))
+        .collect::<Vec<_>>();
+    expr_list_has_contradictory_equalities(clauses.iter().cloned())
 }
 
 fn expr_list_has_contradictory_equalities(clauses: impl IntoIterator<Item = Expr>) -> bool {
@@ -901,19 +903,38 @@ fn comparison_to_nonnull_const(expr: &Expr) -> Option<ConstComparison> {
     let collation_oid = op
         .collation_oid
         .or_else(|| op.args.iter().find_map(top_level_explicit_collation));
-    match (&op.args[0], &op.args[1]) {
-        (other, Expr::Const(value)) if !matches!(value, Value::Null) => Some(ConstComparison {
-            expr: other.clone(),
+    match (
+        nonnull_comparison_const_value(&op.args[0]),
+        nonnull_comparison_const_value(&op.args[1]),
+    ) {
+        (None, Some(value)) => Some(ConstComparison {
+            expr: strip_binary_coercible_casts(&op.args[0]),
             value: value.clone(),
             collation_oid,
             kind: const_comparison_kind(op.op)?,
         }),
-        (Expr::Const(value), other) if !matches!(value, Value::Null) => Some(ConstComparison {
-            expr: other.clone(),
+        (Some(value), None) => Some(ConstComparison {
+            expr: strip_binary_coercible_casts(&op.args[1]),
             value: value.clone(),
             collation_oid,
             kind: commuted_const_comparison_kind(op.op)?,
         }),
+        _ => None,
+    }
+}
+
+fn nonnull_comparison_const_value(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Const(value) if !matches!(value, Value::Null) => Some(value.clone()),
+        Expr::Cast(inner, ty) if matches!(ty.kind, SqlTypeKind::Date) => {
+            let text = match inner.as_ref() {
+                Expr::Const(value) => value.as_text()?,
+                _ => return None,
+            };
+            parse_date_text(text, &DateTimeConfig::default())
+                .ok()
+                .map(Value::Date)
+        }
         _ => None,
     }
 }
@@ -1513,6 +1534,10 @@ fn hash_index_gettuple_supported(index: &BoundIndexRelation) -> bool {
                 SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Oid
             )
         })
+}
+
+fn access_method_supports_full_index_scan(index: &BoundIndexRelation) -> bool {
+    index.index_meta.am_oid != HASH_AM_OID && access_method_supports_index_scan_for_index(index)
 }
 
 fn access_method_supports_bitmap_scan(am_oid: u32) -> bool {
@@ -2375,7 +2400,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.is_none()
             && full_index_only_scan
-            && access_method_supports_index_scan_for_index(index)
+            && access_method_supports_full_index_scan(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2425,7 +2450,7 @@ fn collect_relation_access_paths(
             && query_order_items.is_none()
             && filter.as_ref().is_some_and(expr_contains_subplan)
             && target_index_only
-            && access_method_supports_index_scan_for_index(index)
+            && access_method_supports_full_index_scan(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2451,7 +2476,7 @@ fn collect_relation_access_paths(
             && filter.is_some()
             && !has_index_spec
             && predicate_implies_index_predicate(filter.as_ref(), index.index_predicate.as_ref())
-            && access_method_supports_index_scan_for_index(index)
+            && access_method_supports_full_index_scan(index)
         {
             paths.push(
                 estimate_index_candidate(
@@ -2839,7 +2864,7 @@ fn prepare_query_path_input(
     catalog: &dyn CatalogLookup,
 ) -> crate::include::nodes::parsenodes::Query {
     let query = super::super::root::prepare_query_for_planning(query, catalog);
-    pull_up_sublinks(query)
+    pull_up_sublinks(query, catalog)
 }
 
 fn plan_set_operation_child_path(
@@ -5390,7 +5415,7 @@ fn relation_may_satisfy_check_constraints(
     constraints
         .checks
         .iter()
-        .filter(|check| check.enforced)
+        .filter(|check| check.enforced && check.validated)
         .all(|check| !exprs_have_contradictory_equalities(filter, &check.expr))
 }
 

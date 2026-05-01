@@ -1310,7 +1310,10 @@ fn try_optimize_access_subtree(
             index,
             config.retain_partial_index_filters,
         ) else {
-            if !config.enable_seqscan && order_items.is_none() {
+            if !config.enable_seqscan
+                && order_items.is_none()
+                && access_method_supports_full_index_scan(index.index_meta.am_oid)
+            {
                 let candidate = estimate_index_candidate(
                     source_id,
                     rel,
@@ -1362,6 +1365,10 @@ fn try_optimize_access_subtree(
 
 fn relation_uses_virtual_scan(relation_oid: u32) -> bool {
     relation_oid == PG_LARGEOBJECT_METADATA_RELATION_OID
+}
+
+fn access_method_supports_full_index_scan(am_oid: u32) -> bool {
+    am_oid != HASH_AM_OID
 }
 
 pub(super) fn relation_stats(
@@ -2861,6 +2868,12 @@ fn build_join_paths_internal(
     let config = config_override
         .or_else(|| root.map(|root| root.config))
         .unwrap_or_default();
+    // :HACK: Recursive CTE output order is regression-visible and PostgreSQL
+    // avoids hash-join traversal changes around WorkTableScan in these cases.
+    // Keep worktable joins on nested-loop/merge paths until recursive pathkeys
+    // and costing can model that preference directly.
+    let recursive_worktable_join =
+        path_contains_worktable_scan(&left) || path_contains_worktable_scan(&right);
 
     let whole_row_targeted = root.is_some_and(|root| {
         query_targets_whole_row_rel(root, left_relids)
@@ -2986,6 +2999,7 @@ fn build_join_paths_internal(
 
     if !lateral_orientation_locked
         && !matches!(kind, JoinType::Cross)
+        && !recursive_worktable_join
         && !small_full_join_prefers_merge(kind, &left, &right)
         && !small_window_inner_join_prefers_merge(root, kind, &left, &right)
         && let Some(hash_join) =
@@ -3041,6 +3055,7 @@ fn build_join_paths_internal(
 
     if !lateral_orientation_locked
         && matches!(kind, JoinType::Inner)
+        && !recursive_worktable_join
         && !small_window_inner_join_prefers_merge(root, kind, &right, &left)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
@@ -4793,6 +4808,12 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
     {
         return false;
     }
+    if preferred_recursive_worktable_order_preserving_join(candidate, current) {
+        return true;
+    }
+    if preferred_recursive_worktable_order_preserving_join(current, candidate) {
+        return false;
+    }
     if super::super::bestpath::preferred_function_outer_hash_join(candidate)
         && !super::super::bestpath::preferred_function_outer_hash_join(current)
     {
@@ -4853,6 +4874,61 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
         .unwrap_or(Ordering::Equal);
     startup_cmp == Ordering::Less
         || (startup_cmp == Ordering::Equal && candidate.pathkeys().len() > current.pathkeys().len())
+}
+
+// :HACK: PostgreSQL's recursive CTE regressions expose worktable traversal
+// order. Prefer order-preserving recursive joins over hash joins until pathkeys
+// and recursive worktable costing are accurate enough to choose this naturally.
+fn preferred_recursive_worktable_order_preserving_join(preferred: &Path, other: &Path) -> bool {
+    matches!(
+        preferred,
+        Path::NestedLoopJoin { .. } | Path::MergeJoin { .. }
+    ) && matches!(other, Path::HashJoin { .. })
+        && path_contains_worktable_scan(preferred)
+        && path_contains_worktable_scan(other)
+}
+
+fn path_contains_worktable_scan(path: &Path) -> bool {
+    match path {
+        Path::WorkTableScan { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => path_contains_worktable_scan(input),
+        Path::Append { children, .. }
+        | Path::BitmapOr { children, .. }
+        | Path::BitmapAnd { children, .. }
+        | Path::MergeAppend { children, .. }
+        | Path::SetOp { children, .. } => children.iter().any(path_contains_worktable_scan),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
+            path_contains_worktable_scan(left) || path_contains_worktable_scan(right)
+        }
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => path_contains_worktable_scan(anchor) || path_contains_worktable_scan(recursive),
+        Path::Result { .. }
+        | Path::SeqScan { .. }
+        | Path::IndexOnlyScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
+        | Path::Values { .. }
+        | Path::FunctionScan { .. } => false,
+    }
 }
 
 fn preferred_reassociated_lateral_values_hash_join(preferred: &Path, other: &Path) -> bool {

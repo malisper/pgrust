@@ -2,9 +2,10 @@ use super::*;
 use crate::backend::executor::expr_string::eval_like;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::include::nodes::datum::{ArrayValue, RecordValue};
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, OpExprKind, ParamKind, Var, user_attrno,
+    BoolExprType, Expr, OpExprKind, ParamKind, SubqueryComparison, Var, user_attrno,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -12,10 +13,12 @@ use std::collections::{HashMap, HashSet};
 thread_local! {
     static EXISTS_MEMBERSHIP_CACHE: RefCell<HashMap<usize, HashSet<Value>>> =
         RefCell::new(HashMap::new());
+    static EXISTS_RESULT_CACHE: RefCell<HashMap<usize, Value>> = RefCell::new(HashMap::new());
 }
 
 pub(crate) fn clear_subquery_eval_cache() {
     EXISTS_MEMBERSHIP_CACHE.with(|cache| cache.borrow_mut().clear());
+    EXISTS_RESULT_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 fn local_var(index: usize) -> Expr {
@@ -72,6 +75,48 @@ fn plan_is_proven_empty(plan: &Plan) -> bool {
         | Plan::Hash { input, .. }
         | Plan::SubqueryScan { input, .. } => plan_is_proven_empty(input),
         _ => false,
+    }
+}
+
+fn exists_plan_result_cacheable(plan: &Plan) -> bool {
+    match plan {
+        Plan::WorkTableScan { .. } | Plan::RecursiveUnion { .. } | Plan::CteScan { .. } => false,
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::TidScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. } => true,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::BitmapAnd { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().all(exists_plan_result_cacheable),
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        } => exists_plan_result_cacheable(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            exists_plan_result_cacheable(left) && exists_plan_result_cacheable(right)
+        }
     }
 }
 
@@ -579,8 +624,22 @@ pub(super) fn eval_exists_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if subplan.par_param.is_empty()
+        && let Some(value) = ctx.expr_bindings.initplan_values.get(&subplan.plan_id)
+    {
+        return Ok(value.clone());
+    }
+
     let plan = planned_subquery_plan(subplan, ctx)?.clone();
-    with_scoped_subquery_runtime(ctx, |ctx| {
+    let cache_result = subplan.par_param.is_empty() && exists_plan_result_cacheable(&plan);
+    if cache_result
+        && let Some(value) =
+            EXISTS_RESULT_CACHE.with(|cache| cache.borrow().get(&subplan.plan_id).cloned())
+    {
+        return Ok(value);
+    }
+
+    let result = with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
         if plan_is_proven_empty(&plan) {
             return Ok(Value::Bool(false));
@@ -593,7 +652,18 @@ pub(super) fn eval_exists_subquery(
         }
         let mut state = executor_start(plan);
         Ok(Value::Bool(exec_next(&mut state, ctx)?.is_some()))
-    })
+    })?;
+    if subplan.par_param.is_empty() {
+        ctx.expr_bindings
+            .initplan_values
+            .insert(subplan.plan_id, result.clone());
+    }
+    if cache_result {
+        EXISTS_RESULT_CACHE.with(|cache| {
+            cache.borrow_mut().insert(subplan.plan_id, result.clone());
+        });
+    }
+    Ok(result)
 }
 
 pub(super) fn eval_quantified_subquery(
@@ -635,7 +705,14 @@ pub(super) fn eval_quantified_subquery(
             saw_row = true;
             let values = subplan_visible_values(subplan, &mut inner_slot)?;
             let right_value = quantified_subquery_right_value(left_value, values)?;
-            match compare_subquery_values(left_value, &right_value, op, collation_oid)? {
+            match compare_quantified_subquery_values(
+                left_value,
+                &right_value,
+                op,
+                collation_oid,
+                subplan.comparison.as_ref(),
+                ctx,
+            )? {
                 Value::Bool(result) => {
                     if !is_all && result {
                         return Ok(Value::Bool(true));
@@ -656,6 +733,46 @@ pub(super) fn eval_quantified_subquery(
             Ok(Value::Bool(is_all))
         }
     })
+}
+
+fn compare_quantified_subquery_values(
+    left: &Value,
+    right: &Value,
+    op: SubqueryComparisonOp,
+    collation_oid: Option<u32>,
+    comparison: Option<&SubqueryComparison>,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    if let Some(comparison) = comparison
+        && comparison_uses_user_defined_operator(comparison, ctx)
+    {
+        return crate::backend::executor::expr_agg_support::execute_scalar_function_value_call_with_arg_types(
+            comparison.opfuncid,
+            &[left.clone(), right.clone()],
+            Some(&[comparison.left_type, comparison.right_type]),
+            ctx,
+        );
+    }
+    compare_subquery_values(
+        left,
+        right,
+        op,
+        comparison
+            .and_then(|comparison| comparison.collation_oid)
+            .or(collation_oid),
+    )
+}
+
+fn comparison_uses_user_defined_operator(
+    comparison: &SubqueryComparison,
+    ctx: &ExecutorContext,
+) -> bool {
+    comparison.opfuncid != 0
+        && ctx
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.proc_row_by_oid(comparison.opfuncid))
+            .is_some_and(|row| row.pronamespace != PG_CATALOG_NAMESPACE_OID)
 }
 
 fn subplan_visible_values(

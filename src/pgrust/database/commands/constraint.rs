@@ -347,6 +347,7 @@ fn ddl_executor_context(
         stats: std::sync::Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),
         snapshot,
+        write_xid_override: None,
         transaction_state: None,
         client_id,
         current_database_name: db.current_database_name(),
@@ -451,6 +452,7 @@ pub(super) fn validate_check_rows<C: CatalogLookup + Clone + 'static>(
         constraint_name: constraint_name.to_string(),
         expr,
         enforced: true,
+        validated: true,
     };
     let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
     let mut ctx = ddl_executor_context(
@@ -2622,6 +2624,29 @@ impl Database {
                 }
             }
             crate::backend::parser::NormalizedAlterTableConstraint::Check(action) => {
+                if relation.relkind == 'p' && action.no_inherit {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot add NO INHERIT constraint to partitioned table \"{}\"",
+                            table_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
+                if alter_stmt.only
+                    && !action.no_inherit
+                    && !direct_inheritance_children(&catalog, relation.relation_oid)?.is_empty()
+                {
+                    return Err(ExecError::DetailedError {
+                        message: "constraint must be added to child tables too".into(),
+                        detail: None,
+                        hint: (relation.relkind == 'p')
+                            .then_some("Do not specify the ONLY keyword.".into()),
+                        sqlstate: "42P16",
+                    });
+                }
                 crate::backend::parser::bind_check_constraint_expr(
                     &action.expr_sql,
                     Some(&table_name),

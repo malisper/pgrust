@@ -561,6 +561,7 @@ fn execute_statement_with_source(
         | Statement::AlterIndexSetTablespace(_)
         | Statement::AlterMoveAllTablespace(_)
         | Statement::AlterTableSetPersistence(_)
+        | Statement::AlterTableSetWithoutCluster(_)
         | Statement::AlterIndexRename(_)
         | Statement::AlterIndexAttachPartition(_)
         | Statement::AlterViewRename(_)
