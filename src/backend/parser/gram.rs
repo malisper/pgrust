@@ -242,6 +242,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_alter_table_add_unnamed_constraint_statement(&sql, options)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_table_set_without_cluster_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_cluster_on_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1025,7 +1028,7 @@ fn try_parse_alter_table_multi_action_statement(
                 only = add_column.only;
                 table_name = Some(add_column.table_name.clone());
             }
-            columns.push(add_column.column);
+            columns.push(add_column);
         }
         return Ok(Some(Statement::AlterTableAddColumns(
             AlterTableAddColumnsStatement {
@@ -1226,6 +1229,34 @@ fn try_parse_alter_table_cluster_on_statement(sql: &str) -> Result<Option<Statem
             .unwrap_or(index_name),
         mark_only: true,
     })))
+}
+
+fn try_parse_alter_table_set_without_cluster_statement(
+    sql: &str,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter table") {
+        return Ok(None);
+    }
+    let rest = consume_keyword(trimmed, "alter table").trim_start();
+    let (if_exists, only, table_name, rest) = parse_alter_table_target_sql(rest)?;
+    let rest = rest.trim_start();
+    let Some(rest) = consume_keywords(rest, &["set", "without", "cluster"]) else {
+        return Ok(None);
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER TABLE SET WITHOUT CLUSTER statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(Some(Statement::AlterTableSetWithoutCluster(
+        AlterTableSetWithoutClusterStatement {
+            if_exists,
+            only,
+            table_name,
+        },
+    )))
 }
 
 fn try_parse_alter_table_add_column_with_fdw_options(
@@ -6609,7 +6640,59 @@ fn try_parse_view_statement(sql: &str) -> Result<Option<Statement>, ParseError> 
         return build_alter_view_rename_statement(trimmed)
             .map(|stmt| Some(Statement::AlterViewRename(stmt)));
     }
+    if lowered.contains(" reset ") {
+        return build_alter_view_reset_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTableReset(stmt)));
+    }
     Ok(None)
+}
+
+fn build_alter_view_reset_statement(sql: &str) -> Result<AlterTableResetStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim(), "alter view").trim_start();
+    let if_exists = if keyword_at_start(rest, "if exists") {
+        rest = consume_keyword(rest, "if exists").trim_start();
+        true
+    } else {
+        false
+    };
+    let (parts, next) = parse_qualified_identifier_parts(rest)?;
+    let table_name = parts.join(".");
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "reset") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER VIEW RESET",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "reset").trim_start();
+    let Some(inner) = rest
+        .strip_prefix('(')
+        .and_then(|tail| tail.strip_suffix(')'))
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RESET option list",
+            actual: rest.into(),
+        });
+    };
+    let options = split_comma_separated_sql(inner)?
+        .into_iter()
+        .map(|option| {
+            let (name, tail) = parse_sql_identifier(option)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "RESET option name",
+                    actual: tail.trim().into(),
+                });
+            }
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AlterTableResetStatement {
+        if_exists,
+        only: false,
+        table_name,
+        options,
+    })
 }
 
 fn try_parse_materialized_view_access_method_statement(

@@ -544,6 +544,8 @@ pub(crate) fn execute_explain(
         verbose,
         statement,
     } = stmt;
+    let _explain_datetime_guard =
+        crate::backend::executor::push_explain_datetime_config(&ctx.datetime_config);
     let statement = *statement;
     if !analyze
         && explain_statement_has_writable_ctes(&statement)

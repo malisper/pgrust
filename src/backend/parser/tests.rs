@@ -13,25 +13,25 @@ use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
     AlterColumnIdentityAction, AlterDomainAction, AlterGenericOptionAction,
-    AlterSubscriptionAction, AlterSubscriptionStatement, AlterTableTriggerMode,
-    AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
-    AlterTypeSetOptionsStatement, CastContext, ClusterStatement, ColumnConstraint,
-    ColumnGeneratedKind, ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
-    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnSubscriptionStatement,
-    CommentOnTypeStatement, CommentOnViewStatement, CompositeTypeAttributeDef,
-    CreateAggregateStatement, CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod,
-    CreateCastStatement, CreateCollationKind, CreateCompositeTypeStatement,
-    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, CursorScrollOption,
-    DeclareCursorStatement, DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement,
-    DropSubscriptionStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind,
-    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
-    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, RelOption, SetSessionAuthorizationStatement,
-    SetTransactionScope, SqlCallArgs, SubscriptionOptionValue, TableConstraint,
-    TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec,
-    TriggerTiming, UserMappingUser, ViewCheckOption,
+    AlterSubscriptionAction, AlterSubscriptionStatement, AlterTableSetWithoutClusterStatement,
+    AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
+    AlterTriggerRenameStatement, AlterTypeSetOptionsStatement, CastContext, ClusterStatement,
+    ColumnConstraint, ColumnGeneratedKind, ColumnIdentityKind, CommentOnAggregateStatement,
+    CommentOnColumnStatement, CommentOnFunctionStatement, CommentOnOperatorStatement,
+    CommentOnSubscriptionStatement, CommentOnTypeStatement, CommentOnViewStatement,
+    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
+    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCollationKind,
+    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, CursorScrollOption, DeclareCursorStatement, DomainConstraintSpecKind,
+    DropAggregateStatement, DropCastStatement, DropSubscriptionStatement, DropTriggerStatement,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
+    GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy, PublicationObjectSpec,
+    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
+    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, RelOption,
+    SetSessionAuthorizationStatement, SetTransactionScope, SqlCallArgs, SubscriptionOptionValue,
+    TableConstraint, TransactionEndOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -4092,29 +4092,43 @@ fn parse_alter_table_multi_add_column_statement() {
             only: false,
             table_name: "mlparted".into(),
             columns: vec![
-                ColumnDef {
-                    name: "d".into(),
-                    ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
-                    collation: None,
-                    default_expr: None,
-                    explicit_null: false,
-                    generated: None,
-                    identity: None,
-                    storage: None,
-                    compression: None,
-                    constraints: vec![],
+                AlterTableAddColumnStatement {
+                    if_exists: false,
+                    missing_ok: false,
+                    only: false,
+                    table_name: "mlparted".into(),
+                    column: ColumnDef {
+                        name: "d".into(),
+                        ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
+                        collation: None,
+                        default_expr: None,
+                        explicit_null: false,
+                        generated: None,
+                        identity: None,
+                        storage: None,
+                        compression: None,
+                        constraints: vec![],
+                    },
+                    fdw_options: None,
                 },
-                ColumnDef {
-                    name: "e".into(),
-                    ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
-                    collation: None,
-                    default_expr: None,
-                    explicit_null: false,
-                    generated: None,
-                    identity: None,
-                    storage: None,
-                    compression: None,
-                    constraints: vec![],
+                AlterTableAddColumnStatement {
+                    if_exists: false,
+                    missing_ok: false,
+                    only: false,
+                    table_name: "mlparted".into(),
+                    column: ColumnDef {
+                        name: "e".into(),
+                        ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
+                        collation: None,
+                        default_expr: None,
+                        explicit_null: false,
+                        generated: None,
+                        identity: None,
+                        storage: None,
+                        compression: None,
+                        constraints: vec![],
+                    },
+                    fdw_options: None,
                 },
             ],
         })
@@ -4700,6 +4714,16 @@ fn parse_alter_table_set_statement() {
         })
     );
 
+    let stmt = parse_statement("alter table only cluster_items set without cluster").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetWithoutCluster(AlterTableSetWithoutClusterStatement {
+            if_exists: false,
+            only: true,
+            table_name: "cluster_items".into(),
+        })
+    );
+
     let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
     assert_eq!(
         stmt,
@@ -4754,6 +4778,17 @@ fn parse_alter_table_set_statement() {
                 name: "security_invoker".into(),
                 value: "true".into(),
             }],
+        })
+    );
+
+    let stmt = parse_statement("alter view rw_view1 reset (security_barrier)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableReset(AlterTableResetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "rw_view1".into(),
+            options: vec!["security_barrier".into()],
         })
     );
 

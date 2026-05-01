@@ -2732,6 +2732,7 @@ impl Database {
                     .write()
                     .alter_table_drop_column_mvcc(column.relation_oid, &column.column_name, &ctx)
                     .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
                 next_cid = next_cid.saturating_add(1);
             }

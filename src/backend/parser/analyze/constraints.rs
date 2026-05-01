@@ -98,6 +98,7 @@ pub struct BoundCheckConstraint {
     pub constraint_name: String,
     pub expr: Expr,
     pub enforced: bool,
+    pub validated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1137,7 +1138,7 @@ pub fn normalize_create_table_constraints(
                     let index = *column_lookup
                         .get(&column.to_ascii_lowercase())
                         .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
-                    super::resolve_raw_type_name(&columns[index].ty, catalog)
+                    resolve_create_table_column_type_for_foreign_key(&columns[index].ty, catalog)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let (
@@ -1285,6 +1286,7 @@ pub fn bind_relation_constraints(
                     constraint_name: row.conname,
                     expr: bind_check_constraint_expr(&expr_sql, relation_name, desc, catalog)?,
                     enforced: row.conenforced,
+                    validated: row.convalidated,
                 });
             }
             crate::include::catalog::CONSTRAINT_FOREIGN => {
@@ -2696,7 +2698,7 @@ fn resolve_pending_self_referenced_key(
             let index = *column_lookup
                 .get(&column.to_ascii_lowercase())
                 .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
-            super::resolve_raw_type_name(&column_defs[index].ty, catalog)
+            resolve_create_table_column_type_for_foreign_key(&column_defs[index].ty, catalog)
         })
         .collect::<Result<Vec<_>, _>>()?;
     if !foreign_key_types_compatible(child_types, &parent_types) {
@@ -2714,6 +2716,16 @@ fn resolve_pending_self_referenced_key(
         columns: referenced_columns,
         period: resolved_period,
     })
+}
+
+fn resolve_create_table_column_type_for_foreign_key(
+    raw: &crate::backend::parser::RawTypeName,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    match raw {
+        crate::backend::parser::RawTypeName::Serial(_) => Ok(super::raw_type_name_hint(raw)),
+        _ => super::resolve_raw_type_name(raw, catalog),
+    }
 }
 
 fn foreign_key_types_compatible(child_types: &[SqlType], parent_types: &[SqlType]) -> bool {

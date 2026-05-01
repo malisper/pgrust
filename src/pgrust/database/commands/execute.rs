@@ -2026,14 +2026,34 @@ impl Database {
             Statement::AlterMoveAllTablespace(ref alter_stmt) => {
                 self.execute_alter_move_all_tablespace_stmt(client_id, alter_stmt)
             }
-            Statement::AlterTableReset(ref alter_stmt) => self
-                .execute_alter_table_reset_stmt_with_search_path(
+            Statement::AlterTableReset(ref alter_stmt) => {
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let is_view = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .is_some_and(|relation| relation.relkind == 'v');
+                drop(catalog);
+                if is_view {
+                    self.execute_alter_view_reset_options_stmt_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        configured_search_path,
+                    )
+                } else {
+                    self.execute_alter_table_reset_stmt_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        configured_search_path,
+                    )
+                }
+            }
+            Statement::AlterTableSetPersistence(ref alter_stmt) => self
+                .execute_alter_table_set_persistence_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
                 ),
-            Statement::AlterTableSetPersistence(ref alter_stmt) => self
-                .execute_alter_table_set_persistence_stmt_with_search_path(
+            Statement::AlterTableSetWithoutCluster(ref alter_stmt) => self
+                .execute_alter_table_set_without_cluster_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
@@ -2126,27 +2146,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
-            Statement::AlterTableAddColumns(ref alter_stmt) => {
-                let mut result = Ok(StatementResult::AffectedRows(0));
-                for column in &alter_stmt.columns {
-                    result = self.execute_alter_table_add_column_stmt_with_search_path(
-                        client_id,
-                        &AlterTableAddColumnStatement {
-                            if_exists: alter_stmt.if_exists,
-                            missing_ok: false,
-                            only: alter_stmt.only,
-                            table_name: alter_stmt.table_name.clone(),
-                            column: column.clone(),
-                            fdw_options: None,
-                        },
-                        configured_search_path,
-                    );
-                    if result.is_err() {
-                        break;
-                    }
-                }
-                result
-            }
+            Statement::AlterTableAddColumns(ref alter_stmt) => self
+                .execute_alter_table_add_columns_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableDropColumn(ref drop_stmt) => self
                 .execute_alter_table_drop_column_stmt_with_search_path(
                     client_id,
