@@ -2960,6 +2960,7 @@ fn make_ordered_rel(
     let mut extra_presorted_paths = Vec::new();
     if let Some(rtindex) = ordered_single_parent_rtindex(&input_rel)
         && !pathtarget_has_unlowered_upper_expr(&input_rel.reltarget)
+        && ordered_rel_can_use_base_presorted_paths(&input_rel)
     {
         let (base_target, base_pathkeys) = root
             .simple_rel_array
@@ -3098,6 +3099,47 @@ fn ordered_append_path(path: &Path) -> bool {
     }
 }
 
+fn ordered_rel_can_use_base_presorted_paths(rel: &RelOptInfo) -> bool {
+    rel.pathlist
+        .iter()
+        .all(path_allows_base_presorted_replacement)
+}
+
+fn path_allows_base_presorted_replacement(path: &Path) -> bool {
+    match path {
+        Path::SeqScan { .. }
+        | Path::IndexOnlyScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
+        | Path::BitmapOr { .. }
+        | Path::BitmapAnd { .. }
+        | Path::BitmapHeapScan { .. }
+        | Path::Append { .. }
+        | Path::MergeAppend { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. } => path_allows_base_presorted_replacement(input),
+        Path::Unique { .. }
+        | Path::Limit { .. }
+        | Path::LockRows { .. }
+        | Path::Aggregate { .. }
+        | Path::WindowAgg { .. }
+        | Path::ProjectSet { .. }
+        | Path::SubqueryScan { .. }
+        | Path::NestedLoopJoin { .. }
+        | Path::HashJoin { .. }
+        | Path::MergeJoin { .. }
+        | Path::Result { .. }
+        | Path::Values { .. }
+        | Path::FunctionScan { .. }
+        | Path::CteScan { .. }
+        | Path::WorkTableScan { .. }
+        | Path::RecursiveUnion { .. }
+        | Path::SetOp { .. } => false,
+    }
+}
+
 fn pathtarget_has_unlowered_upper_expr(target: &PathTarget) -> bool {
     target.exprs.iter().any(expr_has_unlowered_upper_expr)
 }
@@ -3192,7 +3234,9 @@ fn expr_has_unlowered_upper_expr(expr: &Expr) -> bool {
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentUser
+        | Expr::User
         | Expr::SessionUser
+        | Expr::SystemUser
         | Expr::CurrentRole
         | Expr::CurrentCatalog
         | Expr::CurrentSchema

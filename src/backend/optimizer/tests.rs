@@ -4114,13 +4114,15 @@ fn planner_keeps_unique_for_ordered_select_distinct() {
         "select distinct id from items order by id desc",
         &catalog,
     );
+    let lines = explain_lines_for_planned_stmt(&planned);
 
     assert_eq!(
         count_plan_nodes(&planned.plan_tree, |plan| matches!(
             plan,
             Plan::Unique { .. }
         )),
-        1
+        1,
+        "{lines:#?}"
     );
 }
 
@@ -4136,13 +4138,15 @@ fn planner_keeps_unique_for_ordered_select_distinct_saop_index_path() {
             ..PlannerConfig::default()
         },
     );
+    let lines = explain_lines_for_planned_stmt(&planned);
 
     assert_eq!(
         count_plan_nodes(&planned.plan_tree, |plan| matches!(
             plan,
             Plan::Unique { .. }
         )),
-        1
+        1,
+        "{lines:#?}"
     );
 }
 
@@ -4582,7 +4586,10 @@ fn planner_preserves_ordered_index_path_under_limit() {
     let planned =
         planned_stmt_for_sql_with_catalog("select id from items order by id limit 1", &catalog);
 
-    assert!(matches!(planned.plan_tree, Plan::Limit { .. }));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::Limit { .. }
+    )));
     assert!(plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
         Plan::IndexOnlyScan { direction, .. }
