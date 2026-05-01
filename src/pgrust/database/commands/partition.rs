@@ -1292,12 +1292,14 @@ impl Database {
         )?;
         let catalog =
             self.lazy_catalog_lookup(client_id, Some((xid, next_cid)), configured_search_path);
+        let mut detached_referenced_fk_names = std::collections::BTreeSet::new();
         next_cid = self.drop_referenced_partition_foreign_key_constraints_in_transaction(
             client_id,
             xid,
             next_cid,
             child.relation_oid,
             &catalog,
+            &mut detached_referenced_fk_names,
             catalog_effects,
         )?;
         next_cid = self.drop_cloned_parent_row_triggers_from_partition_in_transaction(
@@ -1316,6 +1318,8 @@ impl Database {
             parent.relation_oid,
             child.relation_oid,
             &catalog,
+            &detached_referenced_fk_names,
+            configured_search_path,
             catalog_effects,
         )?;
         next_cid = self.detach_partitioned_index_links_from_partition_in_transaction(

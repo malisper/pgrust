@@ -170,6 +170,28 @@ fn choose_partition_clone_constraint_name(
     unreachable!("constraint name suffix space exhausted")
 }
 
+fn namespace_constraint_names(
+    catalog: &dyn CatalogLookup,
+    namespace_oid: u32,
+) -> std::collections::BTreeSet<String> {
+    catalog
+        .constraint_rows()
+        .into_iter()
+        .filter(|row| row.connamespace == namespace_oid)
+        .map(|row| row.conname.to_ascii_lowercase())
+        .collect()
+}
+
+fn referenced_partition_clone_used_names(
+    catalog: &dyn CatalogLookup,
+    parent_constraint: &PgConstraintRow,
+) -> std::collections::BTreeSet<String> {
+    // PostgreSQL only asks ChooseConstraintName for FK partition clones after
+    // the supplied name is already used on the same relation.  That chooser
+    // avoids collisions across the namespace, not just the relation.
+    namespace_constraint_names(catalog, parent_constraint.connamespace)
+}
+
 fn ddl_not_null_contains_null_error(relation_name: &str, column_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!(
@@ -2239,6 +2261,66 @@ impl Database {
         Ok(next_cid)
     }
 
+    fn drop_referenced_side_foreign_key_clone_descendants_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_constraint_oid: u32,
+        catalog: &dyn CatalogLookup,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        fn collect_descendants(
+            parent_constraint_oid: u32,
+            all_rows: &[PgConstraintRow],
+            catalog: &dyn CatalogLookup,
+            out: &mut Vec<PgConstraintRow>,
+        ) {
+            for child_row in all_rows.iter().filter(|row| {
+                row.contype == CONSTRAINT_FOREIGN
+                    && row.conparentid == parent_constraint_oid
+                    && is_referenced_side_foreign_key_clone(row, catalog)
+            }) {
+                collect_descendants(child_row.oid, all_rows, catalog, out);
+                out.push(child_row.clone());
+            }
+        }
+
+        let all_rows = catalog.constraint_rows();
+        let mut rows_to_drop = Vec::new();
+        collect_descendants(parent_constraint_oid, &all_rows, catalog, &mut rows_to_drop);
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
+        for row in rows_to_drop {
+            self.drop_foreign_key_triggers_in_transaction(
+                client_id,
+                xid,
+                next_cid,
+                &row,
+                catalog,
+                catalog_effects,
+            )?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid.saturating_add(catalog_effects.len() as u32),
+                client_id,
+                waiter: None,
+                interrupts: std::sync::Arc::clone(&interrupts),
+            };
+            let (_removed, effect) = self
+                .catalog
+                .write()
+                .drop_relation_constraint_mvcc(row.conrelid, &row.conname, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+        Ok(next_cid)
+    }
+
     pub(super) fn detach_partition_child_foreign_key_constraints_in_transaction(
         &self,
         client_id: ClientId,
@@ -2247,6 +2329,8 @@ impl Database {
         parent_oid: u32,
         child_oid: u32,
         catalog: &dyn CatalogLookup,
+        reserved_constraint_names: &std::collections::BTreeSet<String>,
+        configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
         let inherited_constraints = catalog
@@ -2263,16 +2347,24 @@ impl Database {
         if inherited_constraints.is_empty() {
             return Ok(cid);
         }
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: None,
-            interrupts: self.interrupt_state(client_id),
-        };
+        let mut detached_subtree_oids = std::collections::BTreeSet::from([child_oid]);
+        detached_subtree_oids.extend(
+            partition_descendants(catalog, child_oid)?
+                .into_iter()
+                .map(|relation| relation.relation_oid),
+        );
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
         for row in inherited_constraints {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: std::sync::Arc::clone(&interrupts),
+            };
             let effect = self
                 .catalog
                 .write()
@@ -2282,8 +2374,49 @@ impl Database {
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+
+            let latest_catalog =
+                self.lazy_catalog_lookup(client_id, Some((xid, next_cid)), configured_search_path);
+            let Some(referenced_parent) = latest_catalog.relation_by_oid(row.confrelid) else {
+                continue;
+            };
+            if referenced_parent.relkind != 'p' {
+                continue;
+            }
+            let mut detached_row = row.clone();
+            detached_row.conparentid = 0;
+            detached_row.conislocal = true;
+            detached_row.coninhcount = 0;
+            let referenced_attnums = detached_row.confkey.clone().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "referenced foreign key columns",
+                    actual: format!("missing confkey for {}", detached_row.conname),
+                })
+            })?;
+            let mut used_names =
+                referenced_partition_clone_used_names(&latest_catalog, &detached_row);
+            used_names.extend(namespace_constraint_names(
+                catalog,
+                detached_row.connamespace,
+            ));
+            used_names.extend(reserved_constraint_names.iter().cloned());
+            next_cid = self
+                .create_referenced_partition_foreign_key_constraint_descendants_in_transaction(
+                    client_id,
+                    xid,
+                    next_cid,
+                    &referenced_parent,
+                    &detached_row,
+                    &referenced_attnums,
+                    &detached_row.conname,
+                    &mut used_names,
+                    Some(&detached_subtree_oids),
+                    configured_search_path,
+                    catalog_effects,
+                )?;
         }
-        Ok(cid.saturating_add(1))
+        Ok(next_cid)
     }
 
     pub(crate) fn execute_alter_table_rename_constraint_stmt_with_search_path(
@@ -3525,11 +3658,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let mut used_names = catalog
-            .constraint_rows_for_relation(parent_constraint.conrelid)
-            .into_iter()
-            .map(|row| row.conname.to_ascii_lowercase())
-            .collect::<std::collections::BTreeSet<_>>();
+        let mut used_names = referenced_partition_clone_used_names(&catalog, parent_constraint);
         self.create_referenced_partition_foreign_key_constraint_descendants_in_transaction(
             client_id,
             xid,
@@ -3539,6 +3668,7 @@ impl Database {
             referenced_attnums,
             &parent_constraint.conname,
             &mut used_names,
+            None,
             configured_search_path,
             catalog_effects,
         )
@@ -3555,6 +3685,7 @@ impl Database {
         parent_referenced_attnums: &[i16],
         clone_name_base: &str,
         used_names: &mut std::collections::BTreeSet<String>,
+        skip_referenced_oids: Option<&std::collections::BTreeSet<u32>>,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
@@ -3563,6 +3694,10 @@ impl Database {
         for child_relation in
             sorted_partition_child_relations(&catalog, referenced_parent.relation_oid)?
         {
+            if skip_referenced_oids.is_some_and(|oids| oids.contains(&child_relation.relation_oid))
+            {
+                continue;
+            }
             next_cid = self
                 .create_referenced_partition_foreign_key_constraint_for_partition_in_transaction(
                     client_id,
@@ -3574,6 +3709,7 @@ impl Database {
                     parent_referenced_attnums,
                     clone_name_base,
                     used_names,
+                    skip_referenced_oids,
                     configured_search_path,
                     catalog_effects,
                 )?;
@@ -3593,6 +3729,7 @@ impl Database {
         parent_referenced_attnums: &[i16],
         clone_name_base: &str,
         used_names: &mut std::collections::BTreeSet<String>,
+        skip_referenced_oids: Option<&std::collections::BTreeSet<u32>>,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
@@ -3683,6 +3820,7 @@ impl Database {
             &referenced_attnums,
             clone_name_base,
             used_names,
+            skip_referenced_oids,
             configured_search_path,
             catalog_effects,
         )
@@ -3797,6 +3935,17 @@ impl Database {
                     .is_some();
                 if !target_visible_for_write {
                     continue;
+                }
+                if let Some(row) = existing.as_ref().or(already_inherited.as_ref()) {
+                    next_cid = self
+                        .drop_referenced_side_foreign_key_clone_descendants_in_transaction(
+                            client_id,
+                            xid,
+                            next_cid,
+                            row.oid,
+                            &catalog,
+                            catalog_effects,
+                        )?;
                 }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
@@ -4029,7 +4178,7 @@ impl Database {
             .or_else(|| latest_catalog.relation_by_oid(child_oid))
             .or_else(|| latest_catalog.lookup_relation_by_oid(child_oid))
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(child_oid.to_string())))?;
-        let mut used_names_by_relation =
+        let mut used_names_by_namespace =
             std::collections::BTreeMap::<u32, std::collections::BTreeSet<String>>::new();
         let mut next_cid = cid;
         for parent_constraint in parent_constraints {
@@ -4050,14 +4199,10 @@ impl Database {
                     actual: format!("missing confkey for {}", parent_constraint.conname),
                 })
             })?;
-            let used_names = used_names_by_relation
-                .entry(parent_constraint.conrelid)
+            let used_names = used_names_by_namespace
+                .entry(parent_constraint.connamespace)
                 .or_insert_with(|| {
-                    catalog
-                        .constraint_rows_for_relation(parent_constraint.conrelid)
-                        .into_iter()
-                        .map(|row| row.conname.to_ascii_lowercase())
-                        .collect()
+                    referenced_partition_clone_used_names(&catalog, &parent_constraint)
                 });
             next_cid = self
                 .create_referenced_partition_foreign_key_constraint_for_partition_in_transaction(
@@ -4070,6 +4215,7 @@ impl Database {
                     &parent_referenced_attnums,
                     &parent_constraint.conname,
                     used_names,
+                    None,
                     configured_search_path,
                     catalog_effects,
                 )?;
@@ -6281,6 +6427,7 @@ impl Database {
         cid: CommandId,
         detached_oid: u32,
         catalog: &dyn CatalogLookup,
+        dropped_constraint_names: &mut std::collections::BTreeSet<String>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
         let mut subtree =
@@ -6305,6 +6452,7 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let mut next_cid = cid;
         for row in rows {
+            dropped_constraint_names.insert(row.conname.to_ascii_lowercase());
             self.drop_foreign_key_triggers_in_transaction(
                 client_id,
                 xid,

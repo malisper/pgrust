@@ -2236,10 +2236,10 @@ fn eval_partition_tree(
         .into_iter()
         .map(|entry| {
             TupleSlot::virtual_row(vec![
-                Value::Int64(i64::from(entry.relid)),
+                Value::Int32(entry.relid as i32),
                 entry
                     .parentrelid
-                    .map(|oid| Value::Int64(i64::from(oid)))
+                    .map(|oid| Value::Int32(oid as i32))
                     .unwrap_or(Value::Null),
                 Value::Bool(entry.isleaf),
                 Value::Int32(entry.level),
@@ -2261,7 +2261,7 @@ fn eval_partition_ancestors(
     let catalog = partition_catalog(ctx)?;
     Ok(partition_ancestor_oids(catalog, relation_oid)?
         .into_iter()
-        .map(|oid| TupleSlot::virtual_row(vec![Value::Int64(i64::from(oid))]))
+        .map(|oid| TupleSlot::virtual_row(vec![Value::Int32(oid as i32)]))
         .collect())
 }
 

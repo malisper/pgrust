@@ -32,6 +32,7 @@ struct DropForeignKeyConstraintPlan {
     oid: u32,
     relation_oid: u32,
     constraint_name: String,
+    blocker_constraint_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -472,7 +473,7 @@ impl DropTableDependency {
                 ..
             } => format!(
                 "constraint {} on table {relation_display_name} depends on {referenced_kind} {referenced_name}",
-                constraint.constraint_name
+                constraint.blocker_constraint_name
             ),
             Self::Rule {
                 relation_kind,
@@ -1346,6 +1347,10 @@ fn drop_table_direct_dependencies(
                         oid: constraint.oid,
                         relation_oid: constraint.conrelid,
                         constraint_name: constraint.conname.clone(),
+                        blocker_constraint_name: drop_foreign_key_blocker_constraint_name(
+                            ctx.catalog,
+                            constraint,
+                        ),
                     },
                 });
             }
@@ -1546,6 +1551,25 @@ fn relation_in_explicit_drop_subtree(
     false
 }
 
+fn drop_foreign_key_blocker_constraint_name(
+    catalog: &dyn CatalogLookup,
+    constraint: &PgConstraintRow,
+) -> String {
+    let mut current = constraint.clone();
+    let mut name = current.conname.clone();
+    while current.conparentid != 0 {
+        let Some(parent) = catalog.constraint_row_by_oid(current.conparentid) else {
+            break;
+        };
+        if parent.conrelid != current.conrelid {
+            break;
+        }
+        name = parent.conname.clone();
+        current = parent;
+    }
+    name
+}
+
 fn collect_drop_table_restrict_blockers(
     ctx: &DropTableDependencyContext<'_>,
     relation_oid: u32,
@@ -1563,8 +1587,9 @@ fn collect_drop_table_restrict_blockers(
     let source_relkind = class.relkind;
     let source_name = drop_table_display_relation_name(ctx.catalog, relation_oid, ctx.search_path);
     let referenced_kind = drop_table_relation_kind_name(source_relkind);
+    let deps = drop_table_direct_dependencies(ctx, relation_oid);
 
-    for dep in drop_table_direct_dependencies(ctx, relation_oid) {
+    for dep in deps {
         match dep {
             DropTableDependency::Relation {
                 relation_oid: dependent_oid,
@@ -1650,8 +1675,96 @@ fn plan_drop_table_relation(
     let source_relkind = class.relkind;
     let source_name = drop_table_display_relation_name(ctx.catalog, relation_oid, ctx.search_path);
     let referenced_kind = drop_table_relation_kind_name(source_relkind);
+    let deps = drop_table_direct_dependencies(ctx, relation_oid);
 
-    for dep in drop_table_direct_dependencies(ctx, relation_oid) {
+    if !behavior.is_cascade() {
+        let mut recorded_direct_blocker = false;
+        for dep in &deps {
+            match dep {
+                DropTableDependency::ForeignKey {
+                    relation_oid: dependent_relation_oid,
+                    constraint,
+                    ..
+                } => {
+                    if relation_in_explicit_drop_subtree(
+                        ctx,
+                        *dependent_relation_oid,
+                        explicit_relation_oids,
+                    ) || plan.relation_drop_oids.contains(dependent_relation_oid)
+                        || !plan.constraint_drop_oids.insert(constraint.oid)
+                    {
+                        continue;
+                    }
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                    recorded_direct_blocker = true;
+                }
+                DropTableDependency::Rule {
+                    relation_oid: dependent_relation_oid,
+                    rule,
+                    ..
+                } => {
+                    if relation_in_explicit_drop_subtree(
+                        ctx,
+                        *dependent_relation_oid,
+                        explicit_relation_oids,
+                    ) || plan.relation_drop_oids.contains(dependent_relation_oid)
+                        || !plan.rule_drop_oids.insert(rule.rewrite_oid)
+                    {
+                        continue;
+                    }
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                    recorded_direct_blocker = true;
+                }
+                DropTableDependency::Policy {
+                    relation_oid: dependent_relation_oid,
+                    policy,
+                    ..
+                } => {
+                    if explicit_relation_oids.contains(dependent_relation_oid)
+                        || plan.relation_drop_oids.contains(dependent_relation_oid)
+                        || !plan.policy_drop_oids.insert(policy.policy_oid)
+                    {
+                        continue;
+                    }
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                    recorded_direct_blocker = true;
+                }
+                DropTableDependency::Proc { proc } => {
+                    if !plan.proc_drop_oids.insert(proc.oid) {
+                        continue;
+                    }
+                    record_drop_table_blocker(
+                        plan,
+                        source_relkind,
+                        source_name.clone(),
+                        dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                    recorded_direct_blocker = true;
+                }
+                DropTableDependency::Relation { .. } => {}
+            }
+        }
+        if recorded_direct_blocker {
+            return;
+        }
+    }
+
+    for dep in deps {
         match dep {
             DropTableDependency::Relation {
                 relation_oid: dependent_oid,
