@@ -2365,8 +2365,6 @@ pub(super) fn validate_alter_table_alter_column_type(
         new_column.collation_oid =
             resolve_collation_oid(collation, catalog).map_err(ExecError::Parse)?;
     }
-    new_column.storage.attstorage = current_column.storage.attstorage;
-    new_column.storage.attcompression = current_column.storage.attcompression;
     new_column.attstattarget = current_column.attstattarget;
     new_column.attinhcount = current_column.attinhcount;
     new_column.attislocal = current_column.attislocal;

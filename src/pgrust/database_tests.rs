@@ -30427,6 +30427,50 @@ fn create_table_like_copies_storage_and_compression_only_when_requested() {
 }
 
 #[test]
+fn alter_column_type_resets_storage_and_compression_metadata() {
+    let base = temp_dir("alter_column_type_resets_storage_compression");
+    let db = Database::open(&base, 16).unwrap();
+    let attrs_sql = "select attstorage, attcompression from pg_attribute where attrelid = (select oid from pg_class where relname = 'cmdata2') and attname = 'f1'";
+
+    db.execute(1, "create table cmdata2 (f1 int)").unwrap();
+    db.execute(1, "alter table cmdata2 alter column f1 type varchar")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, attrs_sql),
+        vec![vec![Value::Text("x".into()), Value::Text("".into())]]
+    );
+
+    db.execute(
+        1,
+        "alter table cmdata2 alter column f1 set compression pglz",
+    )
+    .unwrap();
+    db.execute(1, "alter table cmdata2 alter column f1 set storage plain")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, attrs_sql),
+        vec![vec![Value::Text("p".into()), Value::Text("p".into())]]
+    );
+
+    db.execute(
+        1,
+        "alter table cmdata2 alter column f1 type int using f1::integer",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, attrs_sql),
+        vec![vec![Value::Text("p".into()), Value::Text("".into())]]
+    );
+
+    db.execute(1, "alter table cmdata2 alter column f1 type varchar")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, attrs_sql),
+        vec![vec![Value::Text("x".into()), Value::Text("".into())]]
+    );
+}
+
+#[test]
 fn create_table_like_copies_column_comments_only_when_requested() {
     let base = temp_dir("create_table_like_comments");
     let db = Database::open(&base, 16).unwrap();
@@ -47199,6 +47243,48 @@ fn pg_column_compression_reports_large_inserted_value() {
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Text("pglz".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn pg_column_compression_reports_compressed_values_after_inheritance_append() {
+    let base = temp_dir("pg_column_compression_inheritance_append");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cmdata (f1 text compression pglz)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cmdata values (repeat('1234567890', 1000))",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table cmdata3(f1 text)")
+        .unwrap();
+    session
+        .execute(&db, "create table cminh() inherits (cmdata, cmdata3)")
+        .unwrap();
+    session
+        .execute(&db, "insert into cmdata values (repeat('123456789', 4004))")
+        .unwrap();
+
+    match session
+        .execute(&db, "select pg_column_compression(f1) from cmdata")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("pglz".into())],
+                    vec![Value::Text("pglz".into())]
+                ]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }

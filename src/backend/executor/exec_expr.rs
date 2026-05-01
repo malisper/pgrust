@@ -6365,7 +6365,8 @@ fn current_slot_raw_attr_bytes<'a>(
             let raw = tuple.deform(attr_descs)?;
             Ok(raw.get(index).copied().flatten())
         }
-        SlotKind::Virtual | SlotKind::Empty => Ok(None),
+        SlotKind::Virtual => Ok(slot.raw_attrs.get(index).and_then(|raw| raw.as_deref())),
+        SlotKind::Empty => Ok(None),
     }
 }
 

@@ -18431,7 +18431,8 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_view_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
             build_alter_table_alter_column_default(inner)?,
         )),
-        Rule::alter_table_alter_column_compression_stmt => {
+        Rule::alter_table_alter_column_compression_stmt
+        | Rule::alter_materialized_view_alter_column_compression_stmt => {
             Ok(Statement::AlterTableAlterColumnCompression(
                 build_alter_table_alter_column_compression(inner)?,
             ))
@@ -27016,20 +27017,39 @@ fn build_column_identity(pair: Pair<'_, Rule>) -> Result<ColumnIdentityDef, Pars
 fn build_column_compression(
     pair: Pair<'_, Rule>,
 ) -> Result<crate::include::access::htup::AttributeCompression, ParseError> {
-    let raw = pair.as_str().trim().to_ascii_lowercase();
-    if raw.ends_with("default") {
-        return Ok(crate::include::access::htup::AttributeCompression::Default);
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_default => {
+                return Ok(crate::include::access::htup::AttributeCompression::Default);
+            }
+            Rule::identifier => return build_attribute_compression_name(&build_identifier(part)),
+            _ => {}
+        }
     }
-    if raw.ends_with("pglz") {
-        return Ok(crate::include::access::htup::AttributeCompression::Pglz);
+    Err(ParseError::UnexpectedEof)
+}
+
+fn invalid_attribute_compression_name(name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!(
+            "invalid compression method \"{}\"",
+            name.to_ascii_lowercase()
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
     }
-    if raw.ends_with("lz4") {
-        return Ok(crate::include::access::htup::AttributeCompression::Lz4);
+}
+
+fn build_attribute_compression_name(
+    name: &str,
+) -> Result<crate::include::access::htup::AttributeCompression, ParseError> {
+    match name.to_ascii_lowercase().as_str() {
+        "default" => Ok(crate::include::access::htup::AttributeCompression::Default),
+        "pglz" => Ok(crate::include::access::htup::AttributeCompression::Pglz),
+        "lz4" => Ok(crate::include::access::htup::AttributeCompression::Lz4),
+        _ => Err(invalid_attribute_compression_name(name)),
     }
-    Err(ParseError::UnexpectedToken {
-        expected: "compression method",
-        actual: pair.as_str().into(),
-    })
 }
 
 fn build_column_storage(
@@ -27641,20 +27661,16 @@ fn build_alter_table_alter_column_compression(
                 only = parsed_only;
                 table_name = Some(parsed_table_name);
             }
+            Rule::alter_view_target => {
+                let (parsed_if_exists, parsed_table_name) = build_alter_view_target(part)?;
+                if_exists = parsed_if_exists;
+                only = false;
+                table_name = Some(parsed_table_name);
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
             Rule::identifier => {
-                compression = Some(match build_identifier(part).to_ascii_lowercase().as_str() {
-                    "default" => crate::include::access::htup::AttributeCompression::Default,
-                    "pglz" => crate::include::access::htup::AttributeCompression::Pglz,
-                    "lz4" => crate::include::access::htup::AttributeCompression::Lz4,
-                    actual => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "DEFAULT, PGLZ, or LZ4",
-                            actual: actual.to_string(),
-                        });
-                    }
-                });
+                compression = Some(build_attribute_compression_name(&build_identifier(part))?);
             }
             Rule::kw_default => {
                 compression = Some(crate::include::access::htup::AttributeCompression::Default);

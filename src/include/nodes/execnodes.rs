@@ -47,6 +47,7 @@ pub struct TupleSlot {
     pub(crate) toast: Option<ToastFetchContext>,
     pub(crate) table_oid: Option<u32>,
     pub(crate) virtual_tid: Option<ItemPointerData>,
+    pub(crate) raw_attrs: Vec<Option<Vec<u8>>>,
 }
 
 #[derive(Clone)]
@@ -189,6 +190,7 @@ impl Clone for TupleSlot {
             toast: self.toast.clone(),
             table_oid: self.table_oid,
             virtual_tid: self.tid(),
+            raw_attrs: self.raw_attrs.clone(),
         }
     }
 }
@@ -1166,6 +1168,7 @@ impl TupleSlot {
             toast: None,
             table_oid: None,
             virtual_tid: Some(tid),
+            raw_attrs: Vec::new(),
         }
     }
 
@@ -1188,6 +1191,7 @@ impl TupleSlot {
             toast: None,
             table_oid,
             virtual_tid: tid,
+            raw_attrs: Vec::new(),
         }
     }
 
@@ -1204,6 +1208,24 @@ impl TupleSlot {
         self.toast = None;
         self.table_oid = table_oid;
         self.virtual_tid = tid;
+        self.raw_attrs.clear();
+    }
+
+    pub fn store_virtual_row_with_raw_attrs(
+        &mut self,
+        values: Vec<Value>,
+        raw_attrs: Vec<Option<Vec<u8>>>,
+        tid: Option<ItemPointerData>,
+        table_oid: Option<u32>,
+    ) {
+        self.kind = SlotKind::Virtual;
+        self.tts_nvalid = values.len();
+        self.tts_values = values;
+        self.decode_offset = 0;
+        self.toast = None;
+        self.table_oid = table_oid;
+        self.virtual_tid = tid;
+        self.raw_attrs = raw_attrs;
     }
 
     pub(crate) fn empty(ncols: usize) -> Self {
@@ -1216,6 +1238,7 @@ impl TupleSlot {
             toast: None,
             table_oid: None,
             virtual_tid: None,
+            raw_attrs: Vec::new(),
         }
     }
 
@@ -1273,6 +1296,7 @@ impl TupleSlot {
             toast: self.toast,
             table_oid: self.table_oid,
             virtual_tid,
+            raw_attrs: Vec::new(),
         })
     }
 

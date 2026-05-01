@@ -473,10 +473,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     .as_ref()
                     .map(|row| row.typalign)
                     .unwrap_or(column.storage.attalign),
-                attstorage: type_row
-                    .as_ref()
-                    .map(|row| row.typstorage)
-                    .unwrap_or(column.storage.attstorage),
+                attstorage: column.storage.attstorage,
                 attcompression: column.storage.attcompression,
                 attstattarget: (column.attstattarget >= 0).then_some(column.attstattarget),
                 attinhcount: column.attinhcount,
