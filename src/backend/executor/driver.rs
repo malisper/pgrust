@@ -18,6 +18,11 @@ use crate::pgrust::database::queue_pending_notification;
 use crate::pl::plpgsql::execute_do_with_context;
 
 fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
+    if stmt.feature == "SECURITY LABEL" {
+        return ExecError::Parse(crate::backend::parser::security_label_provider_error(
+            &stmt.sql,
+        ));
+    }
     if stmt.feature == "ALTER TABLE form" {
         let lower = stmt.sql.to_ascii_lowercase();
         if lower.contains(" set with oids") {

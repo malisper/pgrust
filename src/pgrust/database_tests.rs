@@ -3340,6 +3340,40 @@ fn alter_table_cluster_on_marks_index_without_rewriting_heap() {
 }
 
 #[test]
+fn cluster_table_uses_previously_marked_index() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(1, "create table cluster_previous_items (id int4)")
+        .unwrap();
+    db.execute(1, "insert into cluster_previous_items values (3), (1), (2)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index cluster_previous_items_id_idx on cluster_previous_items(id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table cluster_previous_items cluster on cluster_previous_items_id_idx",
+    )
+    .unwrap();
+
+    db.execute(1, "cluster cluster_previous_items").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from cluster_previous_items order by ctid"
+        ),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)]
+        ]
+    );
+}
+
+#[test]
 fn cluster_temp_table_uses_named_index_order() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
