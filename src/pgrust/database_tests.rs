@@ -35313,15 +35313,25 @@ fn detached_self_referencing_partition_still_blocks_root_delete() {
         query_rows(
             &db,
             1,
-            "select conrelid::regclass::text, confrelid::regclass::text, conparentid = 0 \
+            "select conrelid::regclass::text, confrelid::regclass::text, conname, conparentid = 0 \
                from pg_constraint \
-              where conrelid = 'part2_self_fk'::regclass and contype = 'f'",
+              where conrelid = 'part2_self_fk'::regclass and contype = 'f' \
+              order by conname, confrelid::regclass::text",
         ),
-        vec![vec![
-            Value::Text("part2_self_fk".into()),
-            Value::Text("parted_self_fk".into()),
-            Value::Bool(true),
-        ]]
+        vec![
+            vec![
+                Value::Text("part2_self_fk".into()),
+                Value::Text("parted_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("part2_self_fk".into()),
+                Value::Text("part1_self_fk".into()),
+                Value::Text("parted_self_fk_id_abc_fkey_3".into()),
+                Value::Bool(false),
+            ],
+        ]
     );
     match db.execute(1, "delete from parted_self_fk where id = 2") {
         Err(ExecError::ForeignKeyViolation {
@@ -35330,7 +35340,7 @@ fn detached_self_referencing_partition_still_blocks_root_delete() {
             detail,
             ..
         }) => {
-            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey_3");
             assert!(message.contains("on table \"part2_self_fk\""));
             assert!(
                 detail

@@ -12,6 +12,9 @@ Key decisions:
   same suffixes as PostgreSQL.
 - Recreated referenced-side clones when an inherited FK becomes independent on
   detach, and skipped the detached subtree when cloning action rows.
+- CI follow-up: verified against PostgreSQL 18 that a detached self-referencing
+  partition keeps both the promoted root FK row and a referenced-side clone for
+  remaining referenced partitions; updated the unit expectation accordingly.
 - Normalized integer keys in subquery membership caches and cleared subquery
   eval caches for streaming SELECT startup so `pg_partition_tree()` regclass
   OIDs compare correctly across server protocol queries.
@@ -33,6 +36,8 @@ Tests run:
 - scripts/cargo_isolated.sh test --lib --quiet streaming_select_clears_subquery_membership_cache_between_statements
 - scripts/cargo_isolated.sh test --lib --quiet referenced_partition_foreign_key
 - scripts/cargo_isolated.sh test --lib --quiet self_referencing_partitioned_foreign_key_adds_referenced_clones
+- scripts/cargo_isolated.sh test --lib --quiet detached_self_referencing_partition_still_blocks_root_delete
+- scripts/cargo_isolated.sh test --lib --quiet self_referencing_partitioned_foreign_key
 - scripts/cargo_isolated.sh check
 - scripts/run_regression.sh --test foreign_key --port 60055 --results-dir /tmp/pgrust-task-c15-02-foreign-key
 
